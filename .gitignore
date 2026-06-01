@@ -1,0 +1,15 @@
+# 환경설정 / DB 연결 정보
+env/
+*.inc
+*.env
+
+# 백업 파일
+*_back.php
+*.bak
+
+# 로그
+*.log
+
+# OS 임시 파일
+Thumbs.db
+.DS_Store
