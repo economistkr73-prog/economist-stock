@@ -1,0 +1,263 @@
+<?php
+// classes/HolidayAPI.class — 공공데이터포털 공휴일 API + DB 캐시
+
+class HolidayAPI {
+
+    private PDO    $pdo;
+    private string $apiKey;
+    private string $endpoint = 'https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService';
+
+    public function __construct(PDO $pdo) {
+        $this->pdo    = $pdo;
+        $this->apiKey = defined('HOLIDAY_API_KEY') ? HOLIDAY_API_KEY : '';
+        $this->ensureTable();
+    }
+
+    // ── 테이블 자동 생성 ──────────────────────────────────────
+    private function ensureTable(): void {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS tbl_holiday (
+                holiday_date DATE         NOT NULL PRIMARY KEY,
+                holiday_name VARCHAR(100) NOT NULL,
+                is_holiday   TINYINT(1)   DEFAULT 1,
+                entry_type   ENUM('holiday','jeoegi','anniversary','sundry') DEFAULT 'holiday',
+                synced_at    DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_year (holiday_date)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+        $this->pdo->exec("ALTER TABLE tbl_holiday ADD COLUMN IF NOT EXISTS entry_type ENUM('holiday','jeoegi','anniversary','sundry') DEFAULT 'holiday' AFTER is_holiday");
+    }
+
+    // ── 연도 전체 동기화 (크론에서 호출) ──────────────────────
+    public function syncYear(int $year): array {
+        $result = ['success' => 0, 'fail' => 0, 'total' => 0, 'log' => []];
+
+        for ($m = 1; $m <= 12; $m++) {
+            $r = $this->syncMonth($year, $m);
+            $result['success'] += $r['success'];
+            $result['fail']    += $r['fail'];
+            $result['total']   += $r['total'];
+            if (!empty($r['error'])) {
+                $result['log'][] = sprintf('%d월: %s', $m, $r['error']);
+            }
+            usleep(200000); // 0.2초 딜레이 (API 부하 방지)
+        }
+        return $result;
+    }
+
+    // ── 월별 동기화 ───────────────────────────────────────────
+    public function syncMonth(int $year, int $month): array {
+        $result = ['success' => 0, 'fail' => 0, 'total' => 0, 'error' => ''];
+
+        // 서비스별 entry_type 매핑
+        $services = [
+            'getRestDeInfo'        => 'holiday',   // 공휴일
+            'getHoliDeInfo'        => 'holiday',   // 국경일
+            'get24DivisionsInfo'   => 'jeoegi',    // 24절기
+            'getSundryDayInfo'     => 'sundry',    // 잡절
+        ];
+
+        $allItems = [];
+        foreach ($services as $service => $entryType) {
+            $data = $this->callApi($service, $year, $month);
+            if ($data === null) {
+                $result['error'] .= "API실패({$service}) ";
+                $result['fail']++;
+                continue;
+            }
+            foreach ($data as $item) {
+                $item['_entry_type'] = $entryType;
+                $allItems[] = $item;
+            }
+        }
+
+        // 저장 (공휴일은 날짜 기준 중복 시 holiday 우선)
+        $seen = [];
+        foreach ($allItems as $item) {
+            $dateStr = $this->parseDate($item['locdate'] ?? '');
+            if (!$dateStr) continue;
+
+            $entryType = $item['_entry_type'];
+            $isHoliday = ($item['isHoliday'] ?? 'N') === 'Y' ? 1 : 0;
+            $name      = $item['dateName'] ?? '기타';
+
+            // 같은 날짜에 공휴일이 이미 있으면 절기로 덮어쓰지 않음
+            if (isset($seen[$dateStr]) && $seen[$dateStr] === 'holiday' && $entryType !== 'holiday') {
+                continue;
+            }
+            $seen[$dateStr] = $entryType;
+
+            try {
+                $this->pdo->prepare(
+                    "INSERT INTO tbl_holiday (holiday_date, holiday_name, is_holiday, entry_type)
+                     VALUES (:dt, :name, :ih, :et)
+                     ON DUPLICATE KEY UPDATE
+                       holiday_name=IF(entry_type='holiday', holiday_name, :name2),
+                       is_holiday=:ih2, entry_type=IF(entry_type='holiday' AND :et2!='holiday', entry_type, :et3),
+                       synced_at=NOW()"
+                )->execute([
+                    ':dt'    => $dateStr,
+                    ':name'  => $name,
+                    ':ih'    => $isHoliday,
+                    ':et'    => $entryType,
+                    ':name2' => $name,
+                    ':ih2'   => $isHoliday,
+                    ':et2'   => $entryType,
+                    ':et3'   => $entryType,
+                ]);
+                $result['success']++;
+            } catch (Exception $e) {
+                $result['fail']++;
+            }
+            $result['total']++;
+        }
+        return $result;
+    }
+
+    // ── 날짜가 공휴일인지 확인 ────────────────────────────────
+    public function isHoliday(string $date): bool {
+        $stmt = $this->pdo->prepare(
+            "SELECT COUNT(*) FROM tbl_holiday WHERE holiday_date=:dt AND is_holiday=1"
+        );
+        $stmt->execute([':dt' => $date]);
+        return (int)$stmt->fetchColumn() > 0;
+    }
+
+    // ── 기간 내 공휴일 목록 반환 (날짜 배열) ─────────────────
+    public function getHolidayDates(string $start, string $end): array {
+        $stmt = $this->pdo->prepare(
+            "SELECT holiday_date FROM tbl_holiday
+             WHERE holiday_date BETWEEN :s AND :e AND is_holiday=1"
+        );
+        $stmt->execute([':s' => $start, ':e' => $end]);
+        return array_column($stmt->fetchAll(PDO::FETCH_ASSOC), 'holiday_date');
+    }
+
+    // ── 기간 내 공휴일/절기를 캘린더 이벤트 형식으로 반환 ────
+    public function getAsEvents(string $start, string $end): array {
+        $stmt = $this->pdo->prepare(
+            "SELECT holiday_date, holiday_name, is_holiday, entry_type
+             FROM tbl_holiday
+             WHERE holiday_date BETWEEN :s AND :e
+             ORDER BY holiday_date ASC"
+        );
+        $stmt->execute([':s' => $start, ':e' => $end]);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        $typeMap = [
+            'holiday'     => ['color' => '#e74c3c', 'category' => '공휴일'],
+            'jeoegi'      => ['color' => '#27ae60', 'category' => '절기'],
+            'anniversary' => ['color' => '#8e44ad', 'category' => '기념일'],
+            'sundry'      => ['color' => '#7f8c8d', 'category' => '잡절'],
+        ];
+
+        return array_map(function($row) use ($typeMap) {
+            $et   = $row['entry_type'] ?? 'holiday';
+            $info = $typeMap[$et] ?? $typeMap['holiday'];
+            return [
+                'id'         => 'h_' . $row['holiday_date'],
+                'event_type' => $et,
+                'title'      => $row['holiday_name'],
+                'start_dt'   => $row['holiday_date'] . ' 00:00:00',
+                'end_dt'     => null,
+                'due_dt'     => null,
+                'is_allday'  => 1,
+                'is_done'    => 0,
+                'color'      => $info['color'],
+                'category'   => $info['category'],
+                'priority'   => 2,
+                'memo'       => '',
+                'recur_rule' => null,
+                'alert_mins' => [],
+                'is_holiday' => (int)$row['is_holiday'],
+            ];
+        }, $rows);
+    }
+
+    // ── DB에 해당 연도 데이터 있는지 확인 ────────────────────
+    public function isSynced(int $year): bool {
+        $stmt = $this->pdo->prepare(
+            "SELECT COUNT(*) FROM tbl_holiday WHERE YEAR(holiday_date)=:y"
+        );
+        $stmt->execute([':y' => $year]);
+        return (int)$stmt->fetchColumn() > 0;
+    }
+
+    // ── Private: API 호출 (curl 사용) ────────────────────────
+    private function callApi(string $service, int $year, int $month): ?array {
+        // ServiceKey는 이미 Encoding된 키 → URL에 직접 삽입 (이중인코딩 방지)
+        $params = http_build_query([
+            'solYear'   => sprintf('%04d', $year),
+            'solMonth'  => sprintf('%02d', $month),
+            '_type'     => 'json',
+            'numOfRows' => 50,
+            'pageNo'    => 1,
+        ]);
+        $url = sprintf(
+            '%s/%s?ServiceKey=%s&%s',
+            $this->endpoint,
+            $service,
+            $this->apiKey,
+            $params
+        );
+
+        if (function_exists('curl_init')) {
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT        => 10,
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_FOLLOWLOCATION => true,
+            ]);
+            $raw  = curl_exec($ch);
+            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            if ($raw === false || $code !== 200) return null;
+        } else {
+            $ctx = stream_context_create(['http' => ['timeout' => 10, 'ignore_errors' => true]]);
+            $raw = @file_get_contents($url, false, $ctx);
+            if ($raw === false) return null;
+        }
+
+        // XML 응답 처리 (JSON 실패 시)
+        $json = json_decode($raw, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            // XML 파싱 시도
+            return $this->parseXml($raw);
+        }
+
+        // JSON 응답: response.body.items.item
+        $items = $json['response']['body']['items']['item'] ?? null;
+        if (empty($items)) return [];
+        if (isset($items['locdate'])) $items = [$items]; // 단일 건
+        return $items;
+    }
+
+    // XML 응답 파싱 (JSON 변환 실패 시 fallback)
+    private function parseXml(string $raw): ?array {
+        if (empty($raw)) return [];
+        try {
+            $xml   = @simplexml_load_string($raw);
+            if (!$xml) return null;
+            $items = [];
+            foreach ($xml->body->items->item as $item) {
+                $items[] = [
+                    'locdate'   => (string)$item->locdate,
+                    'dateName'  => (string)$item->dateName,
+                    'isHoliday' => (string)$item->isHoliday,
+                ];
+            }
+            return $items;
+        } catch (Exception $e) {
+            return null;
+        }
+    }
+
+    private function parseDate($raw): string {
+        $s = (string)$raw;
+        if (strlen($s) === 8) {
+            return substr($s,0,4).'-'.substr($s,4,2).'-'.substr($s,6,2);
+        }
+        return '';
+    }
+}

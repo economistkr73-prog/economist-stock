@@ -1,0 +1,105 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## 프로젝트 개요
+
+**이코노미스트의 주식이야기** — PHP/MySQL 기반 개인 주식 분석 웹 애플리케이션.  
+로그인 인증 후 ETF/주식 분석, 일간 뉴스 수집, AI 조건 분석 기능을 제공한다.
+
+## 기술 스택
+
+- **백엔드**: PHP 8.4 (파일 단위 라우팅, 프레임워크 없음)
+- **DB**: MariaDB 10.6.17, `economist73` 스키마
+- **프론트**: Vanilla JS + ApexCharts/ECharts (`env/js/`, `style/`)
+- **배포**: 웹 루트 직접 서빙 (Apache/Nginx 기준 `/` = `D:\Claude\www`)
+
+## 부트스트랩 순서
+
+모든 페이지는 맨 위에서 아래 순서를 따른다:
+
+```php
+require_once "./env/cnt.inc";      // DB 연결(mysqli + PDO) + 클래스 오토로더 + StockSummaryCache 초기화
+require_once "./env/auth_fnc.php"; // 인증 함수
+require_login();                   // 미로그인 시 /lg.php 리다이렉트
+```
+
+## 데이터베이스 연결 이중 구조
+
+`env/cnt.inc`는 두 가지 연결 객체를 전역으로 제공한다.
+
+| 변수 | 드라이버 | 용도 |
+|------|---------|------|
+| `$connect` | mysqli | 레거시 코드 |
+| `$pdo` | PDO (utf8mb4, ERRMODE_EXCEPTION) | 신규 코드 — 반드시 이것 사용 |
+
+새 쿼리는 항상 `$pdo` + Prepared Statement로 작성한다.
+
+## 클래스 구조 (`classes/`)
+
+확장자는 `.class`이며, `cnt.inc`의 `spl_autoload_register`가 자동 로드한다 (`/classes/{ClassName}.class`).
+
+| 클래스 | 역할 |
+|--------|------|
+| `StockSummaryCache` | ETF 편입 요약 정보 전체를 최초 1회만 DB에서 읽어 메모리에 캐시 (Lazy Loading) |
+| `StockRepository` | 종목 정보 / ETF holdings 조회 PDO 쿼리 집합 |
+| `NaverFinanceAPI` | 네이버 금융 크롤링 |
+| `UIHelper` | 정렬 아이콘 등 공통 HTML 생성 |
+| `ChartHelper` | ECharts 트리맵 등 차트 HTML 렌더링 |
+| `Stock_Analysis_Repository` | 주식 그래프/분석용 쿼리 |
+| `data_processors` | 데이터 가공 로직 |
+
+## 주요 페이지별 역할
+
+| 파일 | 설명 |
+|------|------|
+| `etf_stock.php` | ETF/주식 분석 메인. `?mode=` 파라미터로 내부 라우팅 (`ef`, `si`, `eshl`, `elbs`, `slbe`, `gsnb` 등) |
+| `stock_analysis.php` | 종목 차트·그래프 |
+| `condition_analysis.php` | AI 조건 분석 |
+| `analysis_model.php` | 분석 모델 정의 |
+| `daily_news.php` | 일간 뉴스 수집 및 표시 |
+| `stock_thema_news.php` | 종목 테마 뉴스 |
+| `cron_keyword_collector.php` | 키워드 자동 수집 (크론 전용) |
+| `rss_feed.php` | RSS 피드 출력 |
+| `lg.php` / `gi.php` | 로그인 / 회원가입 |
+| `classes/data_upload.php` | 데이터 수동 입력 UI |
+
+## 인증 흐름
+
+- `require_login()` → 세션에 `$_SESSION['usr_name']` 없으면 `/lg.php?url=...` 리다이렉트
+- 로그인 성공 시 `acc_log_on()` → `tbl_users` 조회 + `password_verify()` + `tbl_users_log` 기록
+- 기본 로그인 후 랜딩: `etf_stock.php?mode=si`
+
+## `etf_stock.php` 다중 창 패턴
+
+행 클릭 시 `openCommonFrames(rowId, stockCode, params, targets, curPhp)`를 호출해 여러 named window를 열어 종목 상세를 표시한다. `urlMap`에서 target 이름(`etf_t1`, `etf_d1`, `etf_d2`, `etf_d5`)과 `mode`를 매핑한다.
+
+## 환경 설정 파일
+
+| 파일 | 내용 |
+|------|------|
+| `env/cnt.inc` | DB 자격증명 (`.gitignore`로 보호) |
+| `env/e.fnc` | 공통 유틸 함수 |
+| `env/inf.fnc` | 기타 정보 함수 |
+| `env/prj.fnc` | 프로젝트별 함수 |
+| `env/header.php` | 공통 HTML 헤더 + 상단 네비게이션 바 |
+
+`env/cnt.inc`에는 DB 비밀번호가 평문으로 있다. 절대 커밋하지 않는다 (`.gitignore` 적용됨).
+
+## CSS / JS
+
+- `style/economist.css`, `style/economist.js` — 사이트 공통 스타일·스크립트
+- `env/js/apexcharts.js`, `env/js/calender.js` — 외부 라이브러리 로컬 복사본
+
+## 서버 환경 (cafe24 웹호스팅)
+
+| 항목 | 버전 |
+|------|------|
+| PHP | 8.4 |
+| DB | MariaDB 10.6.17 |
+| 서버 IP | 183.111.100.198 (uws7-006) |
+| SSH 접속 | `economist73@183.111.100.198` (키: `~/.ssh/economist73.pem`) |
+
+## 모바일 감지
+
+`cnt.inc`에서 `$mobile` 변수(0/1)를 전역 세팅한다. User-Agent 기반이며 페이지별로 레이아웃 분기에 사용한다.

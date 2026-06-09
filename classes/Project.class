@@ -1,0 +1,205 @@
+<?php
+// classes/Project.class — 프로젝트/그룹 DB 전담
+
+class Project {
+
+    private PDO $pdo;
+
+    public function __construct(PDO $pdo) {
+        $this->pdo = $pdo;
+    }
+
+    // ── 테이블 자동 생성 (그룹/프로젝트 공용) ──────────────────
+    public function ensureTable(): void {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS tbl_project (
+                id         INT AUTO_INCREMENT PRIMARY KEY,
+                title      VARCHAR(100) NOT NULL,
+                type       ENUM('group','project') DEFAULT 'group',
+                color      CHAR(7)      DEFAULT '#3498db',
+                icon       VARCHAR(10)  DEFAULT NULL,
+                memo       TEXT,
+                start_dt   DATE         DEFAULT NULL COMMENT 'project 타입 전용',
+                end_dt     DATE         DEFAULT NULL COMMENT 'project 타입 전용',
+                is_done    TINYINT(1)   DEFAULT 0,
+                sort_order INT          DEFAULT 0,
+                parent_id  INT          DEFAULT NULL COMMENT 'project가 속한 group id',
+                created_at DATETIME     DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+        // 기존 테이블 대비 parent_id 멱등 추가
+        $this->pdo->exec("ALTER TABLE tbl_project ADD COLUMN IF NOT EXISTS parent_id INT DEFAULT NULL COMMENT 'project가 속한 group id'");
+        // 일정 → 프로젝트 연결 컬럼
+        $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS project_id INT DEFAULT NULL COMMENT '소속 프로젝트/그룹 ID'");
+        // FK: IF NOT EXISTS 미지원 → 이미 있으면 예외 무시
+        try {
+            $this->pdo->exec("ALTER TABLE tbl_schedule ADD CONSTRAINT fk_schedule_project FOREIGN KEY (project_id) REFERENCES tbl_project(id) ON DELETE SET NULL");
+        } catch (Throwable $e) { /* 이미 존재 */ }
+    }
+
+    // ── 전체 목록 ─────────────────────────────────────────────
+    public function listAll(): array {
+        $stmt = $this->pdo->query("
+            SELECT p.*,
+                   COUNT(s.id) AS item_count,
+                   COALESCE(SUM(s.is_done), 0) AS done_count
+              FROM tbl_project p
+              LEFT JOIN tbl_schedule s ON s.project_id = p.id
+             GROUP BY p.id
+             ORDER BY p.sort_order ASC, p.title ASC
+        ");
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    // ── 단건 조회 ─────────────────────────────────────────────
+    public function getById(int $id): ?array {
+        $stmt = $this->pdo->prepare("SELECT * FROM tbl_project WHERE id = :id");
+        $stmt->execute([':id' => $id]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return $row ?: null;
+    }
+
+    // ── 생성 ──────────────────────────────────────────────────
+    public function create(array $data): int {
+        $stmt = $this->pdo->prepare("
+            INSERT INTO tbl_project (title, type, color, icon, memo, start_dt, end_dt, sort_order, parent_id)
+            VALUES (:title, :type, :color, :icon, :memo, :start_dt, :end_dt, :sort_order, :parent_id)
+        ");
+        $type = $data['type'] ?? 'group';
+        // 그룹은 항상 최상위 → parent_id 무시. 프로젝트만 상위 그룹 허용
+        $parentId = ($type === 'project' && !empty($data['parent_id'])) ? (int)$data['parent_id'] : null;
+        $stmt->execute([
+            ':title'      => $data['title'],
+            ':type'       => $type,
+            ':color'      => $data['color']      ?? '#3498db',
+            ':icon'       => $data['icon']       ?? null,
+            ':memo'       => $data['memo']       ?? null,
+            ':start_dt'   => $data['start_dt']   ?? null,
+            ':end_dt'     => $data['end_dt']     ?? null,
+            ':sort_order' => $data['sort_order'] ?? 0,
+            ':parent_id'  => $parentId,
+        ]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    // ── 수정 ──────────────────────────────────────────────────
+    public function update(int $id, array $data): bool {
+        $stmt = $this->pdo->prepare("
+            UPDATE tbl_project
+               SET title      = :title,
+                   type       = :type,
+                   color      = :color,
+                   icon       = :icon,
+                   memo       = :memo,
+                   start_dt   = :start_dt,
+                   end_dt     = :end_dt,
+                   is_done    = :is_done,
+                   sort_order = :sort_order,
+                   parent_id  = :parent_id
+             WHERE id = :id
+        ");
+        $type = $data['type'] ?? 'group';
+        $parentId = ($type === 'project' && !empty($data['parent_id'])) ? (int)$data['parent_id'] : null;
+        return $stmt->execute([
+            ':title'      => $data['title'],
+            ':type'       => $type,
+            ':color'      => $data['color']      ?? '#3498db',
+            ':icon'       => $data['icon']       ?? null,
+            ':memo'       => $data['memo']       ?? null,
+            ':start_dt'   => $data['start_dt']   ?? null,
+            ':end_dt'     => $data['end_dt']     ?? null,
+            ':is_done'    => $data['is_done']    ?? 0,
+            ':sort_order' => $data['sort_order'] ?? 0,
+            ':parent_id'  => $parentId,
+            ':id'         => $id,
+        ]);
+    }
+
+    // ── 삭제 ──────────────────────────────────────────────────
+    // 삭제 시 tbl_schedule.project_id 는 NULL 로 유지 (일정은 보존)
+    // 그룹 삭제 시 하위 프로젝트는 parent_id NULL 로 풀어 단독 프로젝트로 보존
+    public function delete(int $id): bool {
+        $row = $this->getById($id);
+        if ($row && ($row['type'] ?? 'group') === 'project') {
+            // 프로젝트 삭제 → 포함된 일정 전체 삭제 (연결 테이블 먼저 정리)
+            $ids = $this->pdo->prepare("SELECT id FROM tbl_schedule WHERE project_id = :id");
+            $ids->execute([':id' => $id]);
+            $schIds = $ids->fetchAll(PDO::FETCH_COLUMN);
+            foreach ($schIds as $sid) {
+                $sid = (int)$sid;
+                $this->pdo->prepare("DELETE FROM tbl_schedule_attendee WHERE schedule_id = :s")->execute([':s' => $sid]);
+                try { $this->pdo->prepare("DELETE FROM tbl_schedule_alert WHERE schedule_id = :s")->execute([':s' => $sid]); } catch (Throwable $e) {}
+                try { $this->pdo->prepare("DELETE FROM tbl_schedule_exception WHERE parent_id = :s")->execute([':s' => $sid]); } catch (Throwable $e) {}
+            }
+            $this->pdo->prepare("DELETE FROM tbl_schedule WHERE project_id = :id")->execute([':id' => $id]);
+        } else {
+            // 그룹 삭제 → 직속 일정은 보존(연결만 해제), 하위 프로젝트는 단독으로
+            $this->pdo->prepare("UPDATE tbl_schedule SET project_id = NULL WHERE project_id = :id")
+                      ->execute([':id' => $id]);
+            $this->pdo->prepare("UPDATE tbl_project SET parent_id = NULL WHERE parent_id = :id")
+                      ->execute([':id' => $id]);
+        }
+        $stmt = $this->pdo->prepare("DELETE FROM tbl_project WHERE id = :id");
+        return $stmt->execute([':id' => $id]);
+    }
+
+    // ── 완료 토글 ─────────────────────────────────────────────
+    public function toggleDone(int $id): array {
+        $row = $this->getById($id);
+        if (!$row) return ['ok' => false];
+        $new = $row['is_done'] ? 0 : 1;
+        $this->pdo->prepare("UPDATE tbl_project SET is_done = :v WHERE id = :id")
+                  ->execute([':v' => $new, ':id' => $id]);
+        // 프로젝트 완료/해제 시 포함된 일정도 함께 완료/해제
+        $this->pdo->prepare("UPDATE tbl_schedule SET is_done = :v WHERE project_id = :id")
+                  ->execute([':v' => $new, ':id' => $id]);
+        return ['ok' => true, 'is_done' => $new];
+    }
+
+    // ── 프로젝트/그룹에 "직접" 속한 일정 목록 ────────────────
+    // 그룹이면 그룹 직속(별도) 일정만. 하위 프로젝트 소속 일정은 포함하지 않음
+    public function getItems(int $projectId): array {
+        $stmt = $this->pdo->prepare("
+            SELECT s.id, s.event_type, s.title, s.start_dt, s.end_dt, s.due_dt,
+                   s.category, s.color, s.icon, s.is_done, s.is_allday, s.recur_rule,
+                   s.address, s.provider, s.lat, s.lng, s.project_id,
+                   GROUP_CONCAT(c.name ORDER BY c.name SEPARATOR ',') AS attendee_names
+              FROM tbl_schedule s
+              LEFT JOIN tbl_schedule_attendee sa ON sa.schedule_id = s.id
+              LEFT JOIN tbl_contact c ON c.id = sa.contact_id
+             WHERE s.project_id = :pid
+             GROUP BY s.id
+             ORDER BY COALESCE(s.start_dt, s.due_dt) ASC
+        ");
+        $stmt->execute([':pid' => $projectId]);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    // ── 그룹이 포함한 프로젝트 목록 (진행률 포함) ────────────
+    public function getChildProjects(int $groupId): array {
+        $stmt = $this->pdo->prepare("
+            SELECT p.id, p.title, p.icon, p.color, p.start_dt, p.end_dt, p.is_done,
+                   COUNT(s.id) AS item_count,
+                   COALESCE(SUM(s.is_done), 0) AS done_count
+              FROM tbl_project p
+              LEFT JOIN tbl_schedule s ON s.project_id = p.id
+             WHERE p.parent_id = :gid AND p.type = 'project'
+             GROUP BY p.id
+             ORDER BY p.start_dt ASC, p.title ASC
+        ");
+        $stmt->execute([':gid' => $groupId]);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    // ── 드롭다운용 간단 목록 (id, title, type, color, icon) ───
+    public function listForSelect(): array {
+        $stmt = $this->pdo->query("
+            SELECT id, title, type, color, icon, parent_id
+              FROM tbl_project
+             WHERE is_done = 0
+             ORDER BY type ASC, sort_order ASC, title ASC
+        ");
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+}
+?>

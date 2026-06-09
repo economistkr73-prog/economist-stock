@@ -1,0 +1,505 @@
+<?php
+// 한글 깨짐 방지
+//header('Content-Type: text/plain; charset=utf-8');
+class NaverFinanceAPI {
+
+    private $pcUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+    private $mobileUserAgent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1';
+
+    private function fetch($url, $headers, $isEuckr = false) {
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curl_error = curl_error($ch);
+        curl_close($ch);
+        if ($response === false) return ["error" => "cURL 에러: " . $curl_error];
+        if ($http_code !== 200) return ["error" => "HTTP 에러: " . $http_code];
+        if ($isEuckr) $response = mb_convert_encoding($response, 'UTF-8', 'EUC-KR');
+        $data = json_decode(trim($response), true);
+        if (json_last_error() !== JSON_ERROR_NONE) return ["error" => "JSON 파싱 에러"];
+        return ["success" => $data];
+    }
+
+    public function getAllNaverEtfs() {
+        $timestamp = round(microtime(true) * 1000);
+        $url = "https://finance.naver.com/api/sise/etfItemList.nhn?_=" . $timestamp;
+        $headers = [
+            'User-Agent: ' . $this->pcUserAgent,
+            'Referer: https://finance.naver.com/sise/etf.naver',
+            'Cache-Control: no-cache',
+            'Pragma: no-cache'
+        ];
+        $result = $this->fetch($url, $headers, true);
+        if (isset($result['error'])) return $result;
+        if (isset($result['success']['result']['etfItemList'])) {
+            return ["success" => $result['success']['result']['etfItemList']];
+        }
+        return ["error" => "ETF 데이터 구조 변경됨"];
+    }
+
+    public function getAllNaverStocks($market = 'KOSPI') {
+        $market = strtoupper($market);
+        if (!in_array($market, ['KOSPI', 'KOSDAQ'])) return ["error" => "잘못된 시장(Market) 이름입니다."];
+        $all_stocks = [];
+        $page = 1;
+        $pageSize = 100;
+        $headers = ['User-Agent: ' . $this->mobileUserAgent, 'Referer: https://m.stock.naver.com/'];
+        while (true) {
+            $timestamp = round(microtime(true) * 1000);
+            $url = "https://m.stock.naver.com/api/stocks/marketValue/{$market}?page={$page}&pageSize={$pageSize}&_={$timestamp}";
+            $result = $this->fetch($url, $headers, false);
+            if (isset($result['error'])) return $result;
+            $data = $result['success'];
+            if (empty($data['stocks'])) break;
+            $all_stocks = array_merge($all_stocks, $data['stocks']);
+            $page++;
+            usleep(200000);
+        }
+        return ["success" => $all_stocks];
+    }
+
+    public function getNaverFinanceNews(string $stockCode, int $limit = 10): array {
+        $url = "https://finance.naver.com/item/news_news.naver?code=" . $stockCode;
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_REFERER, "https://finance.naver.com/item/news.naver?code=" . $stockCode);
+        curl_setopt($ch, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36");
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        $html = curl_exec($ch);
+        curl_close($ch);
+        if (!$html) return [];
+        $html = mb_convert_encoding($html, 'UTF-8', 'EUC-KR');
+        $html = preg_replace('/<meta[^>]+charset=[\'"]?(euc-kr|EUC-KR)[\'"]?[^>]*>/i', '', $html);
+        $html = '<?xml encoding="UTF-8">' . $html;
+        libxml_use_internal_errors(true);
+        $dom = new DOMDocument();
+        @$dom->loadHTML($html, LIBXML_NOERROR | LIBXML_NOWARNING);
+        libxml_clear_errors();
+        $xpath = new DOMXPath($dom);
+        $rows = $xpath->query("//table[contains(@class, 'type5')]//tr");
+        $newsList = []; $seenTitles = []; $fetched_count = 0;
+        foreach ($rows as $row) {
+            if ($fetched_count >= $limit) break;
+            $titleNode = $xpath->query(".//td[contains(@class, 'title')]/a", $row)->item(0);
+            if (!$titleNode) $titleNode = $xpath->query(".//a[contains(@class, 'tit')]", $row)->item(0);
+            $infoNode = $xpath->query(".//td[contains(@class, 'info')]", $row)->item(0);
+            $dateNode = $xpath->query(".//td[contains(@class, 'date')]", $row)->item(0);
+            if ($titleNode && $dateNode) {
+                $title = trim($titleNode->nodeValue);
+                if (in_array($title, $seenTitles)) continue;
+                $seenTitles[] = $title;
+                $newsList[] = [
+                    'title' => $title,
+                    'link'  => "https://finance.naver.com" . $titleNode->getAttribute('href'),
+                    'info'  => $infoNode ? trim($infoNode->nodeValue) : '',
+                    'date'  => trim($dateNode->nodeValue)
+                ];
+                $fetched_count++;
+            }
+        }
+        if (empty($newsList)) echo "<h3 style='color:#e1234a;'>[디버깅] 뉴스를 찾지 못했습니다.</h3>";
+        return $newsList;
+    }
+
+    public function get_market_keywords($news_titles, $limit = 8, array $extra_stopwords = []) {
+        if (empty($news_titles)) return [];
+        $text = implode(" ", $news_titles);
+        $text = preg_replace('/[^\p{Hangul}A-Za-z0-9\s]/u', ' ', $text);
+        $words = preg_split('/\s+/', $text, -1, PREG_SPLIT_NO_EMPTY);
+        $keyword_counts = [];
+        $stopwords = array_flip($extra_stopwords);
+        foreach ($words as $word) {
+            $word = preg_replace('/(은|는|이|가|을|를|과|와|의|에|에서|로|으로|까지|부터)$/u', '', $word);
+            if (mb_strlen($word) >= 2 && !isset($stopwords[$word]) && !preg_match('/^\d+$/', $word)) {
+                $keyword_counts[$word] = ($keyword_counts[$word] ?? 0) + 1;
+            }
+        }
+        arsort($keyword_counts);
+        return array_slice($keyword_counts, 0, $limit, true);
+    }
+
+    function get_analysis_report($pdo) {
+        $sql = "SELECT * FROM (
+                    SELECT stock_code, stock_name, stock_price, stock_rate, stock_rate_rt, stock_cap, stock_vol_cap
+                    FROM all_stock_info ORDER BY stock_cap DESC LIMIT 100
+                ) as top_100_stocks WHERE stock_rate >= 2 ORDER BY stock_rate DESC";
+        return $pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    function get_expected_rising_etfs($pdo, $rising_stocks, $etf_limit = 10, $min_market_cap = 1000, $min_trading_val = 0) {
+        if (empty($rising_stocks)) return [];
+        $stock_codes = array_column($rising_stocks, 'stock_code');
+        $in_clause   = "'" . implode("','", $stock_codes) . "'";
+        $limit_val   = (int)$etf_limit;
+        $cap_val     = (int)$min_market_cap;
+        $trade_val   = (int)$min_trading_val;
+        $sql = "SELECT h.etf_code, i.etf_name, e.etf_rate, e.etf_rate_prev, e.trading_value, e.market_cap,
+                    SUM(h.holdings_ratio * s.stock_rate) as expected_impact,
+                    GROUP_CONCAT(CONCAT(s.stock_name,'|',s.stock_rate,'|',s.stock_code)
+                        ORDER BY (h.holdings_ratio * s.stock_rate) DESC SEPARATOR '||') as raw_contributing_stocks
+                FROM all_etf_holdings_info h
+                JOIN all_stock_info s ON h.stock_code = s.stock_code
+                JOIN all_etf_price e ON h.etf_code = e.etf_code
+                JOIN all_etf_info i ON h.etf_code = i.etf_code
+                WHERE h.stock_code IN ($in_clause)
+                  AND e.market_cap >= {$cap_val} AND e.trading_value >= {$trade_val}
+                GROUP BY h.etf_code, i.etf_name, e.etf_rate, e.trading_value, e.market_cap
+                ORDER BY expected_impact DESC LIMIT {$limit_val}";
+        return $pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    public function get_real_time_data_from_naver($pdo) {
+        $t = (int)date('H') * 60 + (int)date('i');
+        $is_nxt_window = ($t >= 480 && $t < 530) || ($t > 930 && $t <= 1200);
+        if ($is_nxt_window) return $this->update_stock_price_from_nxt($pdo);
+
+        $api = new NaverFinanceAPI();
+        echo "데이터 수집을 시작합니다...<br>\n";
+
+        $kospi_res  = $api->getAllNaverStocks('KOSPI');
+        $kosdaq_res = $api->getAllNaverStocks('KOSDAQ');
+        $etf_res    = $api->getAllNaverEtfs();
+
+        $kospi  = $kospi_res['success']  ?? [];
+        $kosdaq = $kosdaq_res['success'] ?? [];
+        $etfs   = $etf_res['success']    ?? [];
+
+        $stock_market_data = [];
+        $etf_market_data   = [];
+        $etf_codes = array_column($etfs, 'itemcode');
+
+        foreach (array_merge($kospi, $kosdaq) as $stock) {
+            if (in_array($stock['itemCode'], $etf_codes)) continue;
+            if (mb_strpos($stock['stockName'], 'ETN') !== false) continue;
+            $trade_val_raw = (float) str_replace(',', '', $stock['accumulatedTradingValue'] ?? 0);
+            $stock_market_data[] = [
+                ':code'       => $stock['itemCode'],
+                ':name'       => $stock['stockName'],
+                ':price'      => (int)   str_replace(',', '', $stock['closePrice'] ?? 0),
+                ':high_price' => 0,
+                ':yrate'      => (int)   str_replace(',', '', $stock['compareToPreviousClosePrice'] ?? 0),
+                ':rate'       => (float) $stock['fluctuationsRatio'],
+                ':vol'        => (int)   str_replace(',', '', $stock['accumulatedTradingVolume'] ?? 0),
+                ':vol_cap'    => round($trade_val_raw / 100, 2),
+                ':cap'        => (int)   str_replace(',', '', $stock['marketValue'] ?? 0)
+            ];
+        }
+
+        foreach ($etfs as $etf) {
+            $etf_market_data[] = [
+                ':code'          => $etf['itemcode'],
+                ':price'         => (int)   $etf['nowVal'],
+                ':rate'          => (float) $etf['changeRate'],
+                ':trading_value' => (int)   round(((int)($etf['amonut'] ?? 0)) / 100),
+                ':market_cap'    => (int)   $etf['marketSum']
+            ];
+        }
+
+        if (empty($stock_market_data) && empty($etf_market_data)) {
+            echo "업데이트할 데이터가 없습니다.<br>\n";
+            return false;
+        }
+
+        // ★ stock_vol_tot 컬럼 명시 추가 (DEFAULT 없는 컬럼)
+        $sql_stock = "INSERT INTO all_stock_info
+                      (stock_code, stock_name, stock_price, stock_high_price, stock_yrate, stock_rate, stock_vol, stock_vol_cap, stock_cap, stock_vol_tot)
+                      VALUES (:code, :name, :price, :high_price, :yrate, :rate, :vol, :vol_cap, :cap, 0)
+                      ON DUPLICATE KEY UPDATE
+                      stock_rate_rt = stock_rate,
+                      stock_name    = VALUES(stock_name),
+                      stock_price   = VALUES(stock_price),
+                      stock_yrate   = VALUES(stock_yrate),
+                      stock_rate    = VALUES(stock_rate),
+                      stock_vol     = VALUES(stock_vol),
+                      stock_vol_cap = VALUES(stock_vol_cap),
+                      stock_cap     = VALUES(stock_cap)";
+        $stmt_stock = $pdo->prepare($sql_stock);
+
+        $sql_etf = "INSERT INTO all_etf_price
+                    (etf_code, etf_price, etf_rate, etf_rate_prev, trading_value, market_cap, turnover_ratio, is_locked, uDate)
+                    VALUES (:code, :price, :rate, 0, :trading_value, :market_cap, 0, 0, CURDATE())
+                    ON DUPLICATE KEY UPDATE
+                    etf_rate_prev = etf_rate,
+                    etf_price     = VALUES(etf_price),
+                    etf_rate      = VALUES(etf_rate),
+                    trading_value = VALUES(trading_value),
+                    market_cap    = VALUES(market_cap),
+                    uDate         = CURDATE()";
+        $stmt_etf = $pdo->prepare($sql_etf);
+
+        $success_stock_count = 0; $success_etf_count = 0;
+        $deleted_stock_count = 0; $deleted_etf_count = 0;
+
+        $pdo->beginTransaction();
+        try {
+            foreach ($stock_market_data as $data) { $stmt_stock->execute($data); $success_stock_count++; }
+            foreach ($etf_market_data   as $data) { $stmt_etf->execute($data);   $success_etf_count++;   }
+
+            $received_stock_codes = array_column($stock_market_data, ':code');
+            if (!empty($received_stock_codes)) {
+                $ph = implode(',', array_fill(0, count($received_stock_codes), '?'));
+                $del = $pdo->prepare("DELETE FROM all_stock_info WHERE stock_code NOT IN ($ph)");
+                $del->execute($received_stock_codes);
+                $deleted_stock_count = $del->rowCount();
+            }
+
+            $received_etf_codes = array_column($etf_market_data, ':code');
+            if (!empty($received_etf_codes)) {
+                $ph = implode(',', array_fill(0, count($received_etf_codes), '?'));
+                $del = $pdo->prepare("DELETE FROM all_etf_price WHERE etf_code NOT IN ($ph)");
+                $del->execute($received_etf_codes);
+                $deleted_etf_count = $del->rowCount();
+            }
+
+            $pdo->commit();
+            echo "✅ 주식 {$success_stock_count}개 갱신 ➔ all_stock_info<br>\n";
+            echo "✅ ETF {$success_etf_count}개 갱신 ➔ all_etf_price<br>\n";
+            echo "🧹 정리 — 주식 {$deleted_stock_count}개, ETF {$deleted_etf_count}개 삭제<br>\n";
+            data_upTime('all_data_from_naver', 'update', $pdo);
+            return true;
+
+        } catch (Exception $e) {
+            $pdo->rollBack();
+            echo "❌ DB 갱신 중 오류: " . $e->getMessage() . "<br>\n";
+            return false;
+        }
+    }
+
+    public function update_stock_price_from_nxt($pdo) {
+        echo "🌙 NXT 장외 시세 갱신을 시작합니다...<br>\n";
+        $nxt_res = $this->getAllNxtSise('ALL');
+        if (isset($nxt_res['error'])) { echo "❌ NXT 시세 수집 실패: " . $nxt_res['error'] . "<br>\n"; return false; }
+        $stocks = $nxt_res['success'] ?? [];
+        if (empty($stocks)) { echo "업데이트할 NXT 데이터가 없습니다.<br>\n"; return false; }
+
+        $sql = "UPDATE all_stock_info SET
+                    stock_rate_rt = stock_rate,
+                    stock_price   = :price,
+                    stock_yrate   = :yrate,
+                    stock_rate    = :rate,
+                    stock_vol     = :vol,
+                    stock_vol_cap = :vol_cap,
+                    stock_cap     = :cap
+                WHERE stock_code = :code";
+        $stmt = $pdo->prepare($sql);
+        $updated = 0;
+        $pdo->beginTransaction();
+        try {
+            foreach ($stocks as $s) {
+                $code = $s['stock_code'] ?? '';
+                if ($code === '') continue;
+                $stmt->execute([
+                    ':price'   => (int)   $s['price'],
+                    ':yrate'   => (int)   $s['change'],
+                    ':rate'    => (float) $s['rate'],
+                    ':vol'     => (int)   $s['volume'],
+                    ':vol_cap' => round(((float)$s['trading_val']) / 100, 2),
+                    ':cap'     => (int)   $s['market_cap'],
+                    ':code'    => $code,
+                ]);
+                $updated += $stmt->rowCount();
+            }
+            $pdo->commit();
+            echo "✅ NXT 시세로 주식 {$updated}개 갱신 완료<br>\n";
+            data_upTime('all_data_from_naver', 'update', $pdo);
+            data_upTime('all_data_from_nxt', 'update', $pdo);
+            return true;
+        } catch (Exception $e) {
+            $pdo->rollBack();
+            echo "❌ NXT 갱신 중 오류: " . $e->getMessage() . "<br>\n";
+            return false;
+        }
+    }
+
+    public function discover_new_domestic_etfs($pdo) {
+        $res = $this->getAllNaverEtfs();
+        if (isset($res['error'])) { echo "❌ 네이버 ETF 수집 실패: " . $res['error'] . "<br>\n"; return false; }
+        $etfs = $res['success'] ?? [];
+        if (empty($etfs)) { echo "수집된 ETF가 없습니다.<br>\n"; return false; }
+
+        $existing  = array_flip($pdo->query("SELECT etf_code FROM all_etf_info")->fetchAll(PDO::FETCH_COLUMN));
+        $class_map = ['1' => '국내 시장지수', '2' => '국내 업종/테마', '3' => '국내 파생'];
+
+        $sql  = "INSERT IGNORE INTO all_etf_info
+                     (etf_code, etf_name, Listing_Date, classification, return_rate,
+                      underlying_index, total_nav, volatility, holdings_count, skip_update, is_new)
+                 VALUES (:code, :name, CURDATE(), :class, 0, '', 0, 0, 0, 0, 'Y')";
+        $stmt = $pdo->prepare($sql);
+
+        $inserted = 0; $new_names = [];
+        foreach ($etfs as $e) {
+            $tab  = (string)($e['etfTabCode'] ?? '');
+            if (!isset($class_map[$tab])) continue;
+            $code = $e['itemcode'] ?? '';
+            $name = trim($e['itemname'] ?? '');
+            if ($code === '' || isset($existing[$code])) continue;
+            if (mb_strpos($name, 'ETN') !== false) continue;
+            $stmt->execute([':code' => $code, ':name' => $name, ':class' => $class_map[$tab]]);
+            if ($stmt->rowCount() > 0) { $inserted++; $new_names[] = "{$name}({$code})"; $existing[$code] = true; }
+        }
+
+        echo $inserted > 0
+            ? "✅ 신규 국내 ETF {$inserted}개 등록: " . implode(', ', $new_names) . "<br>\n"
+            : "신규 등록할 국내 ETF가 없습니다.<br>\n";
+        return $inserted;
+    }
+
+    public function getSectionNews(string $date, bool $fetchAllPages = false, int $limit = 20, ?string $since = null): array {
+        $newsList = []; $seenTitles = []; $fetched = 0;
+        $maxPage = 1; $page = 1; $stopped = false;
+
+        while ($page <= $maxPage && !$stopped) {
+            $url = "https://finance.naver.com/news/news_list.naver?mode=LSS2D&section_id=101&section_id2=258&date={$date}&page={$page}";
+            $ch = curl_init();
+            curl_setopt_array($ch, [
+                CURLOPT_URL => $url, CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_REFERER => "https://finance.naver.com/news/news_list.naver",
+                CURLOPT_USERAGENT => "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                CURLOPT_SSL_VERIFYPEER => false, CURLOPT_TIMEOUT => 10,
+            ]);
+            $html = curl_exec($ch); curl_close($ch);
+            if (!$html) break;
+
+            $html = mb_convert_encoding($html, 'UTF-8', 'EUC-KR');
+            $html = preg_replace('/<meta[^>]+charset=[\'"]?(euc-kr|EUC-KR)[\'"]?[^>]*>/i', '', $html);
+            $html = '<?xml encoding="UTF-8">' . $html;
+            libxml_use_internal_errors(true);
+            $dom = new DOMDocument();
+            @$dom->loadHTML($html, LIBXML_NOERROR | LIBXML_NOWARNING);
+            libxml_clear_errors();
+            $xpath = new DOMXPath($dom);
+
+            if ($page === 1 && $fetchAllPages) {
+                $pgRR = $xpath->query("//td[contains(@class,'pgRR')]/a")->item(0);
+                if ($pgRR && preg_match('/page=(\d+)/', $pgRR->getAttribute('href'), $m)) $maxPage = (int)$m[1];
+            }
+
+            $subjects = $xpath->query("//dt[contains(@class,'articleSubject')]|//dd[contains(@class,'articleSubject')]");
+            if ($subjects->length === 0) break;
+
+            foreach ($subjects as $subject) {
+                if (!$fetchAllPages && $fetched >= $limit) break 2;
+                $aTag = $xpath->query("./a", $subject)->item(0);
+                if (!$aTag) continue;
+                $title = trim($aTag->nodeValue);
+                if (empty($title) || isset($seenTitles[$title])) continue;
+                $seenTitles[$title] = true;
+                $href = $aTag->getAttribute('href');
+                $link = (strpos($href, 'http') === 0) ? $href : "https://finance.naver.com" . $href;
+                $summaryNode = $xpath->query("following-sibling::dd[contains(@class,'articleSummary')][1]", $subject)->item(0);
+                $press = $date_str = '';
+                if ($summaryNode) {
+                    $pn = $xpath->query(".//span[contains(@class,'press')]", $summaryNode)->item(0);
+                    $dn = $xpath->query(".//span[contains(@class,'wdate')]", $summaryNode)->item(0);
+                    $press    = $pn ? trim($pn->nodeValue) : '';
+                    $date_str = $dn ? trim($dn->nodeValue) : '';
+                }
+                if ($since !== null && !empty($date_str) && $date_str < $since) { $stopped = true; break; }
+                $newsList[] = ['title' => $title, 'link' => $link, 'press' => $press, 'date' => $date_str];
+                $fetched++;
+            }
+            $page++;
+            if ($page <= $maxPage && !$stopped) usleep(300000);
+        }
+        return $newsList;
+    }
+
+    public function getNxtSise(string $stockCode): array {
+        $url = "https://m.stock.naver.com/api/stock/{$stockCode}/nxt";
+        $headers = [
+            'User-Agent: ' . $this->mobileUserAgent,
+            'Referer: https://m.stock.naver.com/domestic/stock/' . $stockCode . '/nxt',
+            'Accept: application/json, text/plain, */*',
+        ];
+        $result = $this->fetch($url, $headers, false);
+        if (isset($result['error'])) return $result;
+        $raw = $result['success'] ?? [];
+        return [
+            'nxtPrice'       => (int)   ($raw['nxtPrice']       ?? $raw['closePrice']       ?? 0),
+            'nxtChangePrice' => (int)   ($raw['nxtChangePrice']  ?? $raw['compareToPreviousClosePrice'] ?? 0),
+            'nxtChangeRate'  => (float) ($raw['nxtChangeRate']   ?? $raw['fluctuationsRatio'] ?? 0.0),
+            'nxtVolume'      => (int)   ($raw['nxtVolume']       ?? $raw['accumulatedTradingVolume']    ?? 0),
+            'marketStatus'   => (string)($raw['marketStatus']    ?? $raw['tradeStopType']               ?? ''),
+        ];
+    }
+
+    public function getAllNxtSise(string $market = 'ALL'): array {
+        $targets = []; $market = strtoupper($market);
+        if ($market === 'KOSPI'  || $market === 'ALL') $targets[] = ['sosok' => 0, 'label' => 'KOSPI'];
+        if ($market === 'KOSDAQ' || $market === 'ALL') $targets[] = ['sosok' => 1, 'label' => 'KOSDAQ'];
+        if (empty($targets)) return ['error' => "market 파라미터는 'KOSPI', 'KOSDAQ', 'ALL' 중 하나여야 합니다."];
+
+        $all_stocks = [];
+        foreach ($targets as $target) {
+            $sosok = $target['sosok']; $marketName = $target['label']; $max_page = 1;
+            for ($page = 1; $page <= $max_page; $page++) {
+                $url = "https://finance.naver.com/sise/nxt_sise_market_sum.naver?sosok={$sosok}&page={$page}";
+                $ch = curl_init();
+                curl_setopt_array($ch, [
+                    CURLOPT_URL => $url, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 10,
+                    CURLOPT_SSL_VERIFYPEER => false, CURLOPT_USERAGENT => $this->pcUserAgent,
+                    CURLOPT_REFERER => 'https://finance.naver.com/sise/nxt_sise_market_sum.naver',
+                    CURLOPT_HTTPHEADER => ['Accept-Language: ko-KR,ko;q=0.9'],
+                ]);
+                $html = curl_exec($ch); $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE); $curlErr = curl_error($ch); curl_close($ch);
+                if (!$html || $httpCode !== 200) return ['error' => "HTTP {$httpCode} / cURL: {$curlErr}"];
+
+                $html = mb_convert_encoding($html, 'UTF-8', 'EUC-KR');
+                $html = preg_replace('/<meta[^>]+charset=[\'"]?(euc-kr|EUC-KR)[\'"]?[^>]*>/i', '', $html);
+                $html = '<?xml encoding="UTF-8">' . $html;
+                libxml_use_internal_errors(true);
+                $dom = new DOMDocument();
+                @$dom->loadHTML($html, LIBXML_NOERROR | LIBXML_NOWARNING);
+                libxml_clear_errors();
+                $xpath = new DOMXPath($dom);
+
+                if ($page === 1) {
+                    $pgRR = $xpath->query("//td[contains(@class,'pgRR')]/a")->item(0);
+                    if ($pgRR && preg_match('/page=(\d+)/', $pgRR->getAttribute('href'), $m)) $max_page = (int)$m[1];
+                }
+
+                foreach ($xpath->query("//table[contains(@class,'type_2')]//tr") as $row) {
+                    $tds = $xpath->query(".//td", $row);
+                    if ($tds->length < 10) continue;
+                    $rank = (int) trim($tds->item(0)->nodeValue);
+                    if ($rank <= 0) continue;
+                    $a_tag = $xpath->query(".//a", $tds->item(1))->item(0);
+                    if (!$a_tag) continue;
+                    $stock_name = trim($a_tag->nodeValue);
+                    preg_match('/code=(\d{6})/', $a_tag->getAttribute('href'), $cm);
+                    $stock_code  = $cm[1] ?? '';
+                    $price       = (int)   preg_replace('/[^0-9]/',   '', $tds->item(2)->nodeValue);
+                    $change_cell = $tds->item(3)->nodeValue;
+                    $change_num  = (int)   preg_replace('/[^0-9]/',   '', $change_cell);
+                    $change_img  = $xpath->query(".//img", $tds->item(3))->item(0);
+                    $change_alt  = $change_img ? $change_img->getAttribute('alt') : '';
+                    if (mb_strpos($change_alt, '하락') !== false || mb_strpos($change_cell, '하락') !== false) $change_num = -$change_num;
+                    $rate_str    = trim($tds->item(4)->nodeValue);
+                    $rate        = (float) preg_replace('/[^0-9.\-]/', '', str_replace('+', '', $rate_str));
+                    if (mb_strpos($rate_str, '-') !== false || mb_strpos($rate_str, '하락') !== false) $rate = -abs($rate);
+                    $all_stocks[] = [
+                        'rank' => $rank, 'stock_code' => $stock_code, 'stock_name' => $stock_name,
+                        'price' => $price, 'change' => $change_num, 'rate' => $rate,
+                        'volume'      => (int) preg_replace('/[^0-9]/', '', $tds->item(5)->nodeValue),
+                        'trading_val' => (int) preg_replace('/[^0-9]/', '', $tds->item(6)->nodeValue),
+                        'bid'         => (int) preg_replace('/[^0-9]/', '', $tds->item(7)->nodeValue),
+                        'ask'         => (int) preg_replace('/[^0-9]/', '', $tds->item(8)->nodeValue),
+                        'market_cap'  => (int) preg_replace('/[^0-9]/', '', $tds->item(9)->nodeValue),
+                        'market'      => $marketName,
+                    ];
+                }
+                if ($page < $max_page) usleep(300000);
+            }
+        }
+        if (empty($all_stocks)) return ['error' => '수집된 종목이 없습니다. 네이버 HTML 구조가 변경되었을 수 있습니다.'];
+        return ['success' => $all_stocks];
+    }
+
+} # end of class
+?>

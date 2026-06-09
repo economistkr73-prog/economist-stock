@@ -1,0 +1,676 @@
+﻿<?php
+// classes/Schedule.class — 스케줄러 DB 조작 전담
+
+class Schedule {
+
+    private PDO $pdo;
+    private const ALLDAY_TYPES = ['todo', 'anniversary', 'allday'];
+
+    public function __construct(PDO $pdo) {
+        $this->pdo = $pdo;
+    }
+
+    // ── 테이블 자동 생성 ──────────────────────────────────────
+    public function ensureTable(): void {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS tbl_schedule (
+                id          INT AUTO_INCREMENT PRIMARY KEY,
+                event_type  ENUM('timed','allday','anniversary','todo') DEFAULT 'timed',
+                title       VARCHAR(200) NOT NULL,
+                start_dt    DATETIME,
+                end_dt      DATETIME,
+                due_dt      DATE DEFAULT NULL,
+                category    VARCHAR(50)  DEFAULT '업무',
+                color       CHAR(7)      DEFAULT '#3498db',
+                priority    TINYINT      DEFAULT 2,
+                memo        TEXT,
+                is_done     TINYINT(1)   DEFAULT 0,
+                is_allday   TINYINT(1)   DEFAULT 0,
+                recur_rule  TEXT         DEFAULT NULL,
+                created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+        $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS event_type  ENUM('timed','allday','anniversary','todo') DEFAULT 'timed' AFTER id");
+        $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS due_dt      DATE DEFAULT NULL AFTER end_dt");
+        $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS is_allday   TINYINT(1) DEFAULT 0");
+        $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS recur_rule  TEXT DEFAULT NULL");
+        // 음력 기념일 컬럼
+        $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS is_lunar    TINYINT(1) DEFAULT 0 COMMENT '음력 기념일 여부'");
+        $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS lunar_month TINYINT  DEFAULT NULL COMMENT '음력 월'");
+        $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS lunar_day   TINYINT  DEFAULT NULL COMMENT '음력 일'");
+        // 아이콘(이모지)
+        $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS icon VARCHAR(10) DEFAULT NULL COMMENT '이모지 아이콘'");
+        $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS is_family  TINYINT(1) DEFAULT 0 COMMENT '가족 기념일 여부'");
+        // 위치/지도 (주소 → 지오코딩 좌표 + 제공자)
+        $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS address  VARCHAR(255)  DEFAULT NULL COMMENT '입력 주소 원본'");
+        $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS lat      DECIMAL(10,7) DEFAULT NULL COMMENT '위도'");
+        $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS lng      DECIMAL(10,7) DEFAULT NULL COMMENT '경도'");
+        $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS provider VARCHAR(10)   DEFAULT NULL COMMENT '지도 제공자 naver|google'");
+
+        // ── 마이그레이션: 반복을 recur_rule 단일 경로로 통일 ──
+        // 음력 기념일: is_lunar 컬럼 → recur_rule(JSON) 로 흡수
+        $this->pdo->exec("
+            UPDATE tbl_schedule
+            SET recur_rule = CONCAT(
+                '{\"type\":\"yearly\",\"calendar\":\"lunar\",\"lunar_month\":', lunar_month,
+                ',\"lunar_day\":', lunar_day, ',\"interval\":1,\"end_type\":\"none\"}')
+            WHERE event_type='anniversary' AND is_lunar=1
+              AND lunar_month IS NOT NULL AND lunar_day IS NOT NULL
+              AND (recur_rule IS NULL OR recur_rule='' OR recur_rule NOT LIKE '%lunar%')
+        ");
+        // 양력 기념일: recur_rule 없으면 yearly solar 부여
+        $this->pdo->exec("
+            UPDATE tbl_schedule
+            SET recur_rule = '{\"type\":\"yearly\",\"calendar\":\"solar\",\"interval\":1,\"end_type\":\"none\"}'
+            WHERE event_type='anniversary' AND (is_lunar IS NULL OR is_lunar=0)
+              AND (recur_rule IS NULL OR recur_rule='')
+        ");
+
+        // 알림 테이블
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS tbl_schedule_alert (
+                id          INT AUTO_INCREMENT PRIMARY KEY,
+                schedule_id INT NOT NULL,
+                alert_min   INT NOT NULL,
+                alert_dt    DATETIME NOT NULL,
+                sent_at     DATETIME NULL,
+                created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (schedule_id) REFERENCES tbl_schedule(id) ON DELETE CASCADE,
+                INDEX idx_alert (alert_dt, sent_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        // 반복 일정 예외 테이블 (이 날짜만 삭제/수정)
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS tbl_schedule_exception (
+                id          INT AUTO_INCREMENT PRIMARY KEY,
+                parent_id   INT NOT NULL COMMENT '반복 원본 tbl_schedule.id',
+                origin_dt   DATE NOT NULL COMMENT '예외 적용할 발생 날짜',
+                action      ENUM('delete','modify') DEFAULT 'delete',
+                created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (parent_id) REFERENCES tbl_schedule(id) ON DELETE CASCADE,
+                UNIQUE KEY uniq_exc (parent_id, origin_dt)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+    }
+
+    // ── 기간 내 일정 조회 ─────────────────────────────────────
+    public function listByRange(string $start, string $end, ?int $projectId = null): array {
+        // 1) 반복 없는 단일 일정
+        $projCond   = "project_id = :pid";
+        $projWhere  = $projectId !== null ? " AND {$projCond}" : "";
+        $projParams = $projectId !== null ? [':pid' => $projectId] : [];
+        $stmt = $this->pdo->prepare(
+            "SELECT * FROM tbl_schedule
+              WHERE (recur_rule IS NULL OR recur_rule = '')
+              AND DATE(COALESCE(start_dt, due_dt)) BETWEEN :s AND :e
+              {$projWhere}
+              ORDER BY FIELD(event_type,'anniversary','todo','timed'), start_dt ASC"
+        );
+        $stmt->execute(array_merge([':s' => $start, ':e' => $end], $projParams));
+        $events = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        // 2) 반복 일정 — 양력/음력 모두 recur_rule 단일 경로로 확장
+        $stmt2 = $this->pdo->prepare(
+            "SELECT * FROM tbl_schedule WHERE recur_rule IS NOT NULL AND recur_rule != ''". ($projectId !== null ? " AND {$projCond}" : "")
+        );
+        $stmt2->execute($projParams);
+        foreach ($stmt2->fetchAll(PDO::FETCH_ASSOC) as $ev) {
+            $events = array_merge($events, $this->expandRecurrence($ev, $start, $end));
+        }
+
+        foreach ($events as &$ev) {
+            if (!empty($ev['recur_rule']) && is_string($ev['recur_rule'])) {
+                $ev['recur_rule'] = json_decode($ev['recur_rule'], true);
+            }
+        }
+        unset($ev);
+
+        $ids = array_unique(array_column($events, 'id'));
+        $alertMap = $this->getAlertMinsMap($ids);
+        foreach ($events as &$ev) {
+            $ev['alert_mins'] = $alertMap[$ev['id']] ?? [];
+        }
+        unset($ev);
+
+        usort($events, function($a, $b) {
+            $o = ['allday'=>0,'anniversary'=>1,'todo'=>2,'timed'=>3];
+            $ta = $o[$a['event_type']]??3; $tb = $o[$b['event_type']]??3;
+            if ($ta !== $tb) return $ta - $tb;
+            return strcmp($a['start_dt']??'', $b['start_dt']??'');
+        });
+        return $events;
+    }
+
+    // ── 오늘 일정 (크론 전용) ─────────────────────────────────
+
+    // ── 기념일 전체 조회 (기념일 관리 페이지용) ────────────────
+    public function listAllAnniversaries(): array {
+        $stmt = $this->pdo->query(
+            "SELECT s.*,
+                    GROUP_CONCAT(DISTINCT c.id   ORDER BY c.name SEPARATOR ',') AS contact_ids,
+                    GROUP_CONCAT(DISTINCT c.name ORDER BY c.name SEPARATOR ',') AS contact_names
+             FROM tbl_schedule s
+             LEFT JOIN tbl_schedule_attendee sa ON s.id = sa.schedule_id
+             LEFT JOIN tbl_contact c ON sa.contact_id = c.id
+             WHERE s.event_type = 'anniversary'
+             GROUP BY s.id
+             ORDER BY MONTH(s.start_dt), DAY(s.start_dt)"
+        );
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($rows as &$r) {
+            if (!empty($r['recur_rule']) && is_string($r['recur_rule'])) {
+                $r['recur_rule'] = json_decode($r['recur_rule'], true);
+            }
+            if (!empty($r['contact_ids'])) {
+                $r['source']            = 'contact';
+                $r['contact_id_list']   = array_map('intval', explode(',', $r['contact_ids']));
+                $r['contact_name_list'] = explode(',', $r['contact_names']);
+            } elseif ((int)($r['is_family'] ?? 0) === 1) {
+                $r['source'] = 'scheduler_family';
+            } else {
+                $r['source'] = 'scheduler_general';
+            }
+        }
+        unset($r);
+        return $rows;
+    }
+    public function listToday(): array {
+        $today = date('Y-m-d');
+        $stmt = $this->pdo->prepare(
+            "SELECT * FROM tbl_schedule
+              WHERE (recur_rule IS NULL OR recur_rule = '')
+              AND DATE(COALESCE(start_dt, due_dt)) = :today
+              ORDER BY FIELD(event_type,'allday','anniversary','todo','timed'), start_dt ASC"
+        );
+        $stmt->execute([':today' => $today]);
+        $events = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        $stmt2 = $this->pdo->prepare("SELECT * FROM tbl_schedule WHERE recur_rule IS NOT NULL AND recur_rule != ''");
+        $stmt2->execute();
+        foreach ($stmt2->fetchAll(PDO::FETCH_ASSOC) as $ev) {
+            $events = array_merge($events, $this->expandRecurrence($ev, $today, $today));
+        }
+
+        usort($events, function($a,$b){
+            $o=['allday'=>0,'anniversary'=>1,'todo'=>2,'timed'=>3];
+            $ta=$o[$a['event_type']]??3; $tb=$o[$b['event_type']]??3;
+            if ($ta!=$tb) return $ta-$tb;
+            return strcmp($a['start_dt']??'',$b['start_dt']??'');
+        });
+        return $events;
+    }
+
+    // ── 알림 조회 (크론 전용) ─────────────────────────────────
+    public function getPendingAlerts(int $windowMinutes = 15): array {
+        $stmt = $this->pdo->prepare(
+            "SELECT sa.id as alert_id, sa.alert_min, sa.alert_dt,
+                    s.id as schedule_id, s.title, s.start_dt, s.end_dt,
+                    s.event_type, s.color, s.category
+             FROM tbl_schedule_alert sa
+             JOIN tbl_schedule s ON sa.schedule_id = s.id
+             WHERE sa.sent_at IS NULL
+             AND sa.alert_dt <= NOW()
+             AND sa.alert_dt >= DATE_SUB(NOW(), INTERVAL :win MINUTE)
+             ORDER BY sa.alert_dt ASC"
+        );
+        $stmt->execute([':win' => $windowMinutes]);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    public function markAlertSent(int $alertId): void {
+        $this->pdo->prepare("UPDATE tbl_schedule_alert SET sent_at=NOW() WHERE id=:id")
+                  ->execute([':id' => $alertId]);
+    }
+
+    // ── 일반 CRUD ─────────────────────────────────────────────
+    public function create(array $d): int {
+        $stmt = $this->pdo->prepare(
+            "INSERT INTO tbl_schedule
+               (event_type, title, start_dt, end_dt, due_dt,
+                category, color, priority, memo, is_done, is_allday, recur_rule,
+                is_lunar, lunar_month, lunar_day, icon, is_family, project_id,
+                address, lat, lng, provider)
+             VALUES
+               (:event_type, :title, :start_dt, :end_dt, :due_dt,
+                :category, :color, :priority, :memo, :is_done, :is_allday, :recur_rule,
+                :is_lunar, :lunar_month, :lunar_day, :icon, :is_family, :project_id,
+                :address, :lat, :lng, :provider)"
+        );
+        $stmt->execute($this->buildParams($d));
+        $id = (int)$this->pdo->lastInsertId();
+        $this->syncAlerts($id, $d['start_dt'] ?? null, $d['alert_mins'] ?? []);
+        return $id;
+    }
+
+    public function update(array $d): void {
+        $stmt = $this->pdo->prepare(
+            "UPDATE tbl_schedule SET
+               event_type=:event_type, title=:title,
+               start_dt=:start_dt, end_dt=:end_dt, due_dt=:due_dt,
+               category=:category, color=:color, priority=:priority,
+               memo=:memo, is_allday=:is_allday, recur_rule=:recur_rule,
+               is_lunar=:is_lunar, lunar_month=:lunar_month, lunar_day=:lunar_day,
+               icon=:icon, is_family=:is_family, project_id=:project_id,
+               address=:address, lat=:lat, lng=:lng, provider=:provider
+             WHERE id=:id"
+        );
+        $params = $this->buildParams($d);
+        unset($params[':is_done']); // UPDATE 시 완료 상태는 변경하지 않음 (toggle_done으로만 처리)
+        $params[':id'] = (int)$d['id'];
+        $stmt->execute($params);
+        $this->syncAlerts((int)$d['id'], $d['start_dt'] ?? null, $d['alert_mins'] ?? []);
+    }
+
+    public function getById(int $id): ?array {
+        $stmt = $this->pdo->prepare("SELECT * FROM tbl_schedule WHERE id=:id");
+        $stmt->execute([':id' => $id]);
+        return $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    public function toggleDone(int $id): void {
+        $this->pdo->prepare("UPDATE tbl_schedule SET is_done=1-is_done WHERE id=:id")
+                  ->execute([':id' => $id]);
+    }
+
+    public function delete(int $id): void {
+        $this->pdo->prepare("DELETE FROM tbl_schedule WHERE id=:id")
+                  ->execute([':id' => $id]);
+    }
+
+    // ── 반복 일정 범위별 삭제 ─────────────────────────────────
+    // scope: 'one' | 'future' | 'all'
+    public function deleteScoped(int $id, string $scope, string $originDt): void {
+        switch ($scope) {
+            case 'one':
+                // 이 날짜만 예외 등록 (skip)
+                $this->pdo->prepare(
+                    "INSERT INTO tbl_schedule_exception (parent_id, origin_dt, action)
+                     VALUES (:pid, :dt, 'delete')
+                     ON DUPLICATE KEY UPDATE action='delete', created_at=NOW()"
+                )->execute([':pid' => $id, ':dt' => $originDt]);
+                break;
+
+            case 'future':
+                // 이 날짜 이전으로 종료일 변경
+                $row = $this->pdo->prepare("SELECT recur_rule FROM tbl_schedule WHERE id=:id");
+                $row->execute([':id' => $id]);
+                $r = $row->fetch(PDO::FETCH_ASSOC);
+                $rule = json_decode($r['recur_rule'] ?? '{}', true);
+                $rule['end_type'] = 'date';
+                $rule['end_date'] = date('Y-m-d', strtotime($originDt . ' -1 day'));
+                $this->pdo->prepare("UPDATE tbl_schedule SET recur_rule=:rule WHERE id=:id")
+                          ->execute([':rule' => json_encode($rule, JSON_UNESCAPED_UNICODE), ':id' => $id]);
+                break;
+
+            case 'all':
+            default:
+                $this->delete($id);
+                break;
+        }
+    }
+
+    // ── 반복 일정 범위별 수정 ─────────────────────────────────
+    public function updateScoped(int $id, string $scope, string $originDt, array $d): void {
+        switch ($scope) {
+            case 'one':
+                // 원본 이 날짜를 예외(delete)로 등록
+                $this->pdo->prepare(
+                    "INSERT INTO tbl_schedule_exception (parent_id, origin_dt, action)
+                     VALUES (:pid, :dt, 'delete')
+                     ON DUPLICATE KEY UPDATE action='delete', created_at=NOW()"
+                )->execute([':pid' => $id, ':dt' => $originDt]);
+                // 수정된 내용을 단독 일정으로 생성 (반복 분리)
+                $d['recur_rule'] = null;
+                $d['_single']    = 1;   // 기념일 자동 반복 방지
+                // 단독 일정은 클릭한 그 날짜(originDt)에 고정
+                if (!empty($d['start_dt'])) {
+                    $d['start_dt'] = $originDt . substr($d['start_dt'], 10);
+                } else {
+                    $d['start_dt'] = $originDt . ' 00:00:00';
+                }
+                $this->create($d);
+                break;
+
+            case 'future':
+                // 원본 종료일을 이 날짜 전날로 변경
+                $row = $this->pdo->prepare("SELECT recur_rule FROM tbl_schedule WHERE id=:id");
+                $row->execute([':id' => $id]);
+                $r = $row->fetch(PDO::FETCH_ASSOC);
+                $rule = json_decode($r['recur_rule'] ?? '{}', true);
+                $rule['end_type'] = 'date';
+                $rule['end_date'] = date('Y-m-d', strtotime($originDt . ' -1 day'));
+                $this->pdo->prepare("UPDATE tbl_schedule SET recur_rule=:rule WHERE id=:id")
+                          ->execute([':rule' => json_encode($rule, JSON_UNESCAPED_UNICODE), ':id' => $id]);
+                // 이 날짜부터 새 반복 일정 생성
+                $this->create($d);
+                break;
+
+            case 'all':
+            default:
+                $d['id'] = $id;
+                // 반복 원본의 start_dt/end_dt는 유지 (인스턴스 날짜로 덮어쓰지 않음)
+                // 시간(HH:MM)만 폼 값에서 가져오고 날짜는 원본 기준
+                $orig = $this->pdo->prepare("SELECT start_dt, end_dt FROM tbl_schedule WHERE id=:id");
+                $orig->execute([':id' => $id]);
+                $origRow = $orig->fetch(PDO::FETCH_ASSOC);
+                if ($origRow) {
+                    // 날짜는 원본, 시간은 폼 값 유지
+                    $origDate = substr($origRow['start_dt'], 0, 10);
+                    $newTime  = isset($d['start_dt']) ? substr($d['start_dt'], 10) : substr($origRow['start_dt'], 10);
+                    $d['start_dt'] = $origDate . $newTime;
+
+                    if (!empty($origRow['end_dt']) && !empty($d['end_dt'])) {
+                        $origEndDate = substr($origRow['end_dt'], 0, 10);
+                        $newEndTime  = substr($d['end_dt'], 10);
+                        $d['end_dt'] = $origEndDate . $newEndTime;
+                    }
+                }
+                $this->update($d);
+                break;
+        }
+    }
+
+    // ── 알림 동기화 ──────────────────────────────────────────
+    public function syncAlerts(int $scheduleId, ?string $startDt, array $alertMins): void {
+        $this->pdo->prepare(
+            "DELETE FROM tbl_schedule_alert WHERE schedule_id=:id AND sent_at IS NULL"
+        )->execute([':id' => $scheduleId]);
+
+        if (empty($alertMins) || empty($startDt)) return;
+
+        $startTs = strtotime($startDt);
+        foreach ($alertMins as $min) {
+            $alertTs = $startTs - ((int)$min * 60);
+            if ($alertTs <= time()) continue;
+            $this->pdo->prepare(
+                "INSERT INTO tbl_schedule_alert (schedule_id, alert_min, alert_dt)
+                 VALUES (:sid, :min, :dt)"
+            )->execute([':sid' => $scheduleId, ':min' => (int)$min, ':dt' => date('Y-m-d H:i:s', $alertTs)]);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // Private helpers
+    // ──────────────────────────────────────────────────────────
+
+    private function buildParams(array $d): array {
+        $type      = $d['event_type'] ?? 'timed';
+        $isAllday  = in_array($type, self::ALLDAY_TYPES) ? 1 : (int)($d['is_allday'] ?? 0);
+        $isLunar   = (int)($d['is_lunar'] ?? 0);
+        $recurRule = $d['recur_rule'] ?? null;
+
+        // 기념일: 양력/음력 모두 recur_rule(yearly) 단일 경로로 통일
+        // _single=1 이면 단일 인스턴스(반복 분리) — 자동 반복 부여 안 함
+        if ($type === 'anniversary' && empty($d['_single'])) {
+            if ($isLunar) {
+                $recurRule = [
+                    'type'        => 'yearly',
+                    'calendar'    => 'lunar',
+                    'lunar_month' => (int)($d['lunar_month'] ?? 0),
+                    'lunar_day'   => (int)($d['lunar_day']   ?? 0),
+                    'interval'    => 1,
+                    'end_type'    => 'none',
+                ];
+            } else if (empty($recurRule)) {
+                $recurRule = ['type'=>'yearly', 'calendar'=>'solar', 'interval'=>1, 'end_type'=>'none'];
+            }
+        }
+        return [
+            ':event_type'  => $type,
+            ':title'       => trim($d['title']    ?? ''),
+            ':start_dt'    => $d['start_dt']      ?? null,
+            ':end_dt'      => $d['end_dt']        ?? null,
+            ':due_dt'      => $d['due_dt']        ?? null,
+            ':category'    => $d['category']      ?? '업무',
+            ':color'       => $d['color']         ?? '#3498db',
+            ':priority'    => $d['priority']      ?? 2,
+            ':memo'        => $d['memo']          ?? '',
+            ':is_allday'   => $isAllday,
+            ':recur_rule'  => $this->encodeRule($recurRule),
+            ':is_done'     => (int)($d['is_done'] ?? 0),
+            ':is_lunar'    => $isLunar,
+            ':lunar_month' => $isLunar ? (int)($d['lunar_month'] ?? 0) : null,
+            ':lunar_day'   => $isLunar ? (int)($d['lunar_day']   ?? 0) : null,
+            ':icon'        => $d['icon'] ?? null,
+            ':is_family'   => (int)($d['is_family'] ?? 0),
+            ':project_id'  => isset($d['project_id']) && $d['project_id'] !== '' ? (int)$d['project_id'] : null,
+            ':address'     => isset($d['address']) && trim((string)$d['address']) !== '' ? trim((string)$d['address']) : null,
+            ':lat'         => isset($d['lat']) && $d['lat'] !== '' && $d['lat'] !== null ? (float)$d['lat'] : null,
+            ':lng'         => isset($d['lng']) && $d['lng'] !== '' && $d['lng'] !== null ? (float)$d['lng'] : null,
+            ':provider'    => !empty($d['provider']) ? $d['provider'] : null,
+        ];
+    }
+
+    private function encodeRule($rule): ?string {
+        if (empty($rule)) return null;
+        return is_array($rule) ? json_encode($rule, JSON_UNESCAPED_UNICODE) : $rule;
+    }
+
+    private function getAlertMinsMap(array $ids): array {
+        if (empty($ids)) return [];
+        $ph   = implode(',', array_fill(0, count($ids), '?'));
+        $stmt = $this->pdo->prepare(
+            "SELECT schedule_id, GROUP_CONCAT(alert_min ORDER BY alert_min) as mins
+             FROM tbl_schedule_alert
+             WHERE schedule_id IN ({$ph}) AND sent_at IS NULL
+             GROUP BY schedule_id"
+        );
+        $stmt->execute(array_values($ids));
+        $map = [];
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $map[$row['schedule_id']] = array_map('intval', explode(',', $row['mins']));
+        }
+        return $map;
+    }
+
+    // 예외 날짜 목록 (skip할 날짜들)
+    private function getDeletedDates(int $parentId): array {
+        $stmt = $this->pdo->prepare(
+            "SELECT origin_dt FROM tbl_schedule_exception
+             WHERE parent_id=:pid AND action='delete'"
+        );
+        $stmt->execute([':pid' => $parentId]);
+        return array_column($stmt->fetchAll(PDO::FETCH_ASSOC), 'origin_dt');
+    }
+
+    // ── 반복 확장 ──────────────────────────────────────────────
+    private function expandRecurrence(array $ev, string $rangeStart, string $rangeEnd): array {
+        $rule = is_string($ev['recur_rule']) ? json_decode($ev['recur_rule'], true) : $ev['recur_rule'];
+        if (empty($rule['type'])) return [];
+
+        // 예외 날짜(삭제된 인스턴스) 미리 로드
+        $deletedDates = $this->getDeletedDates((int)$ev['id']);
+
+        // 영업일 조정이 필요한 경우 공휴일 목록 로드
+        $bizDay  = $rule['biz_day'] ?? 'none';
+        $holidays = [];
+        if ($bizDay !== 'none' && ($rule['type']==='monthly' || $rule['type']==='yearly')) {
+            try {
+                $hApi     = new HolidayAPI($this->pdo);
+                $holidays = $hApi->getHolidayDates($rangeStart, $rangeEnd);
+            } catch (Exception $e) { /* HolidayAPI 미설치 시 무시 */ }
+        }
+
+        $origDt  = new DateTime($ev['start_dt']);
+        $rangeSt = new DateTime($rangeStart . ' 00:00:00');
+        $rangeEd = new DateTime($rangeEnd   . ' 23:59:59');
+
+        $duration = null;
+        if (!empty($ev['end_dt'])) $duration = $origDt->diff(new DateTime($ev['end_dt']));
+
+        $interval  = max(1, (int)($rule['interval'] ?? 1));
+        $endType   = $rule['end_type'] ?? 'none';
+        $endDateDt = ($endType==='date' && !empty($rule['end_date'])) ? new DateTime($rule['end_date'].' 23:59:59') : null;
+        $endCount  = ($endType==='count') ? (int)($rule['end_count'] ?? 0) : null;
+
+        $instances = []; $count = 0;
+
+        $addInst = function(DateTime $cur) use (&$instances, &$count, $ev, $duration, $deletedDates, $rangeSt, $rangeEd) {
+            if (!in_array($cur->format('Y-m-d'), $deletedDates)
+                && $cur >= $rangeSt && $cur <= $rangeEd) {
+                $instances[] = $this->makeInst($ev, $cur, $duration);
+                $count++;
+            }
+        };
+
+        switch ($rule['type']) {
+            case 'daily':
+                $cur = clone $origDt;
+                while ($cur <= $rangeEd) {
+                    if ($this->hitLimit($cur,$endDateDt,$endCount,$count)) break;
+                    $addInst($cur);
+                    $cur->modify("+{$interval} days");
+                }
+                break;
+
+            case 'weekly':
+                $days = $rule['days'] ?? [(int)$origDt->format('w')]; sort($days);
+                $weekBase = clone $origDt;
+                $weekBase->setTime((int)$origDt->format('H'),(int)$origDt->format('i'),0);
+                $weekBase->modify('-'.(int)$weekBase->format('w').' days');
+                $done = false;
+                while (!$done && $weekBase <= $rangeEd) {
+                    foreach ($days as $d) {
+                        $cur = clone $weekBase; $cur->modify("+{$d} days");
+                        $cur->setTime((int)$origDt->format('H'),(int)$origDt->format('i'),0);
+                        if ($cur < $origDt) continue;
+                        if ($this->hitLimit($cur,$endDateDt,$endCount,$count)) { $done=true; break; }
+                        $addInst($cur);
+                    }
+                    $weekBase->modify("+{$interval} weeks");
+                }
+                break;
+
+            case 'monthly':
+                $mType=$rule['monthly_type']??'day'; $curY=(int)$origDt->format('Y'); $curM=(int)$origDt->format('m');
+                for ($i=0;$i<1200;$i++) {
+                    $cur=$this->resolveMonthly($mType,$curY,$curM,$origDt,$rule);
+                    if ($cur) $cur=$this->adjustBizDay($cur, $bizDay, $holidays); // 영업일 조정
+                    if ($cur && $cur>=$origDt) {
+                        if ($this->hitLimit($cur,$endDateDt,$endCount,$count)) break;
+                        $addInst($cur);
+                        if ($cur>$rangeEd) break;
+                    }
+                    $curM+=$interval; while($curM>12){$curM-=12;$curY++;}
+                    if (mktime(0,0,0,$curM,1,$curY)>$rangeEd->getTimestamp()) break;
+                }
+                break;
+
+            case 'yearly':
+                // 음력 기념일: 매년 양력 날짜를 LunarCalendar로 계산
+                if (($rule['calendar'] ?? 'solar') === 'lunar') {
+                    $lm = (int)($rule['lunar_month'] ?? 0);
+                    $ld = (int)($rule['lunar_day']   ?? 0);
+                    if ($lm && $ld) {
+                        $sy = (int)$rangeSt->format('Y');
+                        $ey = (int)$rangeEd->format('Y');
+                        for ($y=$sy; $y<=$ey; $y++) {
+                            $solar = LunarCalendar::getSolarDateInYear($lm, $ld, $y);
+                            if (!$solar) continue;
+                            $curDt = new DateTime($solar.' 00:00:00');
+                            if ($endDateDt && $curDt > $endDateDt) break; // 종료일 체크
+                            $addInst($curDt);
+                        }
+                    }
+                    break;
+                }
+                // 양력 yearly
+                $yType=$rule['yearly_type']??'day'; $curY=(int)$origDt->format('Y');
+                for ($i=0;$i<200;$i++) {
+                    $cur=$this->resolveYearly($yType,$curY,$origDt,$rule);
+                    if ($cur) $cur=$this->adjustBizDay($cur, $bizDay, $holidays); // 영업일 조정
+                    if ($cur && $cur>=$origDt) {
+                        if ($this->hitLimit($cur,$endDateDt,$endCount,$count)) break;
+                        $addInst($cur);
+                        if ($cur>$rangeEd) break;
+                    }
+                    $curY+=$interval;
+                    if (mktime(0,0,0,1,1,$curY)>$rangeEd->getTimestamp()) break;
+                }
+                break;
+        }
+        return $instances;
+    }
+
+    private function hitLimit(DateTime $cur, ?DateTime $ed, ?int $ec, int $cnt): bool {
+        if ($ed && $cur>$ed) return true;
+        if ($ec!==null && $cnt>=$ec) return true;
+        return false;
+    }
+
+    private function makeInst(array $ev, DateTime $startDt, ?DateInterval $dur): array {
+        $inst = $ev;
+        $inst['start_dt']          = $startDt->format('Y-m-d H:i:s');
+        $inst['origin_dt']         = $startDt->format('Y-m-d'); // 예외 처리용
+        $inst['is_recur_instance'] = 1;
+        if ($dur) { $e=clone $startDt; $e->add($dur); $inst['end_dt']=$e->format('Y-m-d H:i:s'); }
+        return $inst;
+    }
+
+    private function resolveMonthly(string $t, int $y, int $m, DateTime $orig, array $rule): ?DateTime {
+        $h=(int)$orig->format('H'); $i=(int)$orig->format('i');
+        if ($t==='day') {
+            $d=(int)$orig->format('j'); $max=(int)(new DateTime("{$y}-{$m}-01"))->format('t');
+            if ($d>$max) return null;
+            return new DateTime(sprintf('%04d-%02d-%02d %02d:%02d:00',$y,$m,$d,$h,$i));
+        }
+        if ($t==='lastday') {
+            $last=(int)(new DateTime(sprintf('%04d-%02d-01',$y,$m)))->format('t');
+            return new DateTime(sprintf('%04d-%02d-%02d %02d:%02d:00',$y,$m,$last,$h,$i));
+        }
+        $dt=$this->nthWeekday($y,$m,(int)($rule['nth']??1),(int)$orig->format('w'));
+        if ($dt) $dt->setTime($h,$i); return $dt;
+    }
+
+    private function resolveYearly(string $t, int $y, DateTime $orig, array $rule): ?DateTime {
+        $h=(int)$orig->format('H'); $i=(int)$orig->format('i'); $mo=(int)$orig->format('m');
+        if ($t==='day') {
+            return new DateTime(sprintf('%04d-%02d-%02d %02d:%02d:00',$y,$mo,(int)$orig->format('j'),$h,$i));
+        }
+        $dt=$this->nthWeekday($y,$mo,(int)($rule['nth']??1),(int)$orig->format('w'));
+        if ($dt) $dt->setTime($h,$i); return $dt;
+    }
+
+    private function nthWeekday(int $y, int $m, int $nth, int $wd): ?DateTime {
+        $first=new DateTime(sprintf('%04d-%02d-01',$y,$m));
+        $diff=($wd-(int)$first->format('w')+7)%7;
+        $day=1+$diff+($nth-1)*7;
+        if ($day>(int)$first->format('t')) return null;
+        return new DateTime(sprintf('%04d-%02d-%02d',$y,$m,$day));
+    }
+
+    // 영업일 조정: 토·일·공휴일이면 이전(금) 또는 다음(월)으로 이동
+    // $holidays: 공휴일 날짜 배열 ['2026-01-01', ...]
+    private function adjustBizDay(DateTime $dt, string $bizDay, array $holidays = []): DateTime {
+        if ($bizDay === 'none' || empty($bizDay)) return $dt;
+
+        $result = clone $dt;
+        $maxTry = 10; // 무한루프 방지
+
+        if ($bizDay === 'prev') {
+            $i = 0;
+            while ($i++ < $maxTry) {
+                $dow = (int)$result->format('w');
+                $ds  = $result->format('Y-m-d');
+                if ($dow !== 0 && $dow !== 6 && !in_array($ds, $holidays)) break;
+                $result->modify('-1 day');
+            }
+        } else { // next
+            $i = 0;
+            while ($i++ < $maxTry) {
+                $dow = (int)$result->format('w');
+                $ds  = $result->format('Y-m-d');
+                if ($dow !== 0 && $dow !== 6 && !in_array($ds, $holidays)) break;
+                $result->modify('+1 day');
+            }
+        }
+        return $result;
+    }
+}
+
+
+
+
+
+

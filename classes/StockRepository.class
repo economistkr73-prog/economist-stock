@@ -1,0 +1,870 @@
+<?php
+
+class StockRepository {
+
+private $pdo;
+private $stmtGetStockInfo = null; // 🚀 쿼리 캐싱 준비
+
+	public function __construct($pdo) {
+        $this->pdo = $pdo;
+    }
+
+
+    public function getStockInfo(string $code, ?string $date = null): array {
+       
+				   // 1. 기본 쿼리 (날짜 조건이 없음)
+				$sql = "SELECT stock_code,stock_name,stock_price, stock_high_price,stock_yrate,stock_rate, stock_vol, stock_vol_cap,stock_vol_tot
+						FROM all_stock_info 
+						WHERE stock_code = :code";
+				
+				$params = ['code' => $code];
+
+				// 2. 날짜가 주어졌을 때만 쿼리에 조건 추가 (없으면 이 블록은 완전히 무시됨)
+				if ($date !== null) {
+					$sql .= " AND uDate = :date";
+					$params['date'] = $date;
+				}
+						
+				$stmt = $this->pdo->prepare($sql);
+				$stmt->execute($params);
+				return $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+
+    }   
+ 
+
+# etf holdings에 있는 정보와 주식세를 조인하는 함수
+public function getEtfHoldings_WithInfo(string $etfCode, string $sortType = 'rise'): array {
+ 
+	// 1. 정렬 기준을 맵핑 (SQL 인젝션 방지를 위해 화이트리스트 적용)
+    $sortMap = [
+        'vol'   => 's.stock_vol_cap DESC',       // 거래대금 순
+        'rise'  => 's.stock_rate DESC',         // 상승률 높은 순
+        'fall'  => 's.stock_rate ASC'           // 하락률 낮은 순 (상승률 낮은 순)
+    ];
+
+    // 기본값 설정 (존재하지 않는 키가 들어오면 기본값으로)
+    $orderBy = $sortMap[$sortType] ?? $sortMap['rise'];
+
+    // 2. 쿼리에 정렬 절을 삽입 (변수 바인딩이 불가능한 부분이라 직접 치환)
+    $sql = "SELECT e.stock_name, e.hold_count, s.stock_price, s.stock_rate, s.stock_vol_cap, s.stock_cap
+            FROM all_etf_holdings_info e
+            JOIN all_stock_info s ON e.stock_code = s.stock_code
+            WHERE e.etf_code = :etf_code
+            ORDER BY {$orderBy}";
+            
+    $stmt = $this->pdo->prepare($sql);
+    $stmt->execute(['etf_code' => $etfCode]);
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+} # getEtfHoldingsWithInfo : etf holdings에 있는 정보와 주식세를 조인하는 함수
+
+
+
+###########################################################
+#  etf_stock_holdings_lisT.  편입종목 전체 가져오기
+// 🚀 두 번째 파라미터로 $limit을 추가합니다. 기본값은 0(전체)으로 설정합니다.
+###########################################################
+public function getAllStocksInEtfs(string $sortType = 'top_rank', int $limit = 100): array {
+    // 1. 정렬 맵에 'top_rank' 기준 추가
+    $sortMap = [
+        'count'    => 'ash.etf_count DESC, s.stock_rate DESC',  
+        'vol'      => 's.stock_vol_cap DESC, s.stock_rate DESC',       
+        'rise'     => 's.stock_rate DESC, ash.etf_count DESC',  
+        'fall'     => 's.stock_rate ASC, ash.etf_count DESC',   
+        'rot'      => 'stock_rot DESC, ash.etf_count DESC',
+        'owner'    => 'ash.total_etf_ownership_ratio DESC, ash.etf_count DESC',
+        'top_rank' => 'ash.top_rank_count DESC, ash.total_etf_ownership_ratio DESC' // Top5 포함 횟수 → ETF 총 보유비중 순
+    ];
+
+    $orderBy = $sortMap[$sortType] ?? $sortMap['count'];
+
+    // 2. SELECT 절에 ash.top_rank_count 추가
+    $sql = "SELECT 
+                s.stock_code,
+                s.stock_name, 
+                s.stock_price, 
+                s.stock_rate, 
+                s.stock_cap, 
+                s.stock_vol_cap,
+                IFNULL((s.stock_vol_cap / NULLIF(s.stock_cap, 0)) * 100, 0) AS stock_rot,
+                ash.top_rank_count ,
+                ash.etf_count, 
+                ash.total_etf_ownership_ratio	
+            FROM all_stock_holdings_info ash
+            JOIN all_stock_info s ON ash.stock_code = s.stock_code
+            ORDER BY {$orderBy}";
+
+    if ($limit > 0) {
+        $sql .= " LIMIT " . (int)$limit;
+    }
+
+    $stmt = $this->pdo->prepare($sql);
+    $stmt->execute(); 
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+} # 끝: getAllStocksInEtfs
+###########################################################
+
+
+###########################################################
+// 🚀 딱 1개 종목의 요약 정보만 초고속으로 가져오는 함수
+public function getOneStockSummary(string $stockCode): ?array {
+    $sql = "SELECT 
+                s.stock_code, s.stock_name, s.stock_price, s.stock_rate,                s.stock_cap,         s.stock_vol_cap,
+                ash.etf_count, ash.top_rank_count, ash.total_etf_ownership_ratio
+            FROM all_stock_info s
+            LEFT JOIN all_stock_holdings_info ash ON s.stock_code = ash.stock_code
+            WHERE s.stock_code = :stock_code";
+            
+    $stmt = $this->pdo->prepare($sql);
+    $stmt->execute(['stock_code' => $stockCode]);
+    
+    // 💡 여러 개가 아니라 딱 1줄만 가져오므로 fetch() 사용
+    $result = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    return $result ?: null; // 없으면 null 반환
+}
+
+
+###########################################################
+// 특정 종목을 편입하고 있는 모든 ETF 정보를 가져오는 함수 (초고속 최적화 + 클린 코드)
+public function getEtfsHoldingSpecificStock(string $stockCode = '', string $sortType = 'rank', string $keyword = '', int $limit = 0): array {
+    
+    // 💡 종목 코드가 비어있고, 정렬이 'rank'(기본값)인 경우 'rise'(등락률 순)로 강제 변경
+    if ($stockCode === '' && $sortType === 'rank') {
+        $sortType = 'rise';
+    }
+
+    // 1. 정렬 옵션 설정
+    $sortMap = [
+        'rank'  => 'etf_stock_rank ASC, (CASE WHEN ei.holdings_count <= 30 THEN 0 ELSE 1 END) ASC, holdings_ratio DESC', // Top5 1위 → 편입수 30개 이하 우선 → 비중 높은순
+        'ratio' => 'etf_stock_rank ASC, holdings_ratio DESC', // Top5 우선 → 비중 높은순 (편입수 무시)
+        'vol'  => 'ep.trading_value DESC, ep.etf_rate DESC',
+        'rise' => 'ep.etf_rate DESC, ep.trading_value DESC',
+        'fall' => 'ep.etf_rate ASC, ep.trading_value DESC',
+        'rot'  => 'ep.turnover_ratio DESC, ep.trading_value DESC'
+    ];
+    $orderBy = $sortMap[$sortType] ?? $sortMap['rise'];
+
+    $params = [];
+
+    // 🚀 [최적화] DRY 법칙 적용: 공통으로 가져오는 SELECT 뼈대를 분리합니다.
+
+$baseSelect = "SELECT 
+                        ei.etf_code, ei.etf_name, ei.return_rate, ei.holdings_count,
+                        ep.market_cap, ep.etf_rate, ep.etf_rate_prev, ep.trading_value, ep.turnover_ratio";
+
+    if ($stockCode === '') {
+        // [케이스 0: 종목 코드가 없을 때 -> 전체 ETF 리스트 조회]
+        $sql = $baseSelect . ", 
+                       0 AS holdings_ratio, 
+                       999 AS etf_stock_rank 
+                FROM all_etf_info ei 
+                JOIN all_etf_price ep ON ei.etf_code = ep.etf_code ";
+        
+        if ($keyword !== '') {
+            $sql .= "WHERE ei.etf_name LIKE :keyword ";
+            $params['keyword'] = '%' . $keyword . '%';
+        }
+
+    } elseif ($keyword !== '') {
+        // [케이스 1: 상단 ETF 이름 검색 시]
+        $sql = $baseSelect . ", 
+                       IFNULL(ehi.holdings_ratio, 0) AS holdings_ratio, 
+                       IFNULL(ehi.holdings_rank, 999) AS etf_stock_rank 
+                FROM all_etf_info ei 
+                JOIN all_etf_price ep ON ei.etf_code = ep.etf_code 
+                LEFT JOIN all_etf_holdings_info ehi ON ei.etf_code = ehi.etf_code AND ehi.stock_code = :stock_code 
+                WHERE ei.etf_name LIKE :keyword ";
+                
+        $params['keyword'] = '%' . $keyword . '%';
+        $params['stock_code'] = $stockCode;
+
+    } else {
+        // [케이스 2: 기존 종목 클릭 시]
+        $sql = $baseSelect . ", 
+                       ehi.holdings_ratio, 
+                       ehi.holdings_rank AS etf_stock_rank 
+                FROM all_etf_holdings_info ehi 
+                JOIN all_etf_info ei ON ehi.etf_code = ei.etf_code 
+                JOIN all_etf_price ep ON ei.etf_code = ep.etf_code 
+                WHERE ehi.stock_code = :stock_code ";
+                
+        $params['stock_code'] = $stockCode;
+    }
+
+    // 🚀 마지막에 정렬 및 Limit을 공통으로 붙여줍니다.
+    $sql .= " ORDER BY " . $orderBy;
+
+    if ($limit > 0) {
+        $sql .= " LIMIT " . (int)$limit;
+    }
+
+    $stmt = $this->pdo->prepare($sql);
+    $stmt->execute($params);
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+} # 끝: getEtfsHoldingSpecificStock
+###########################################################
+
+
+###########################################################
+// 🚀 여러 ETF의 구성 종목을 하나로 합쳐서(SUM, COUNT) 가져오는 마법의 쿼리 (디테일 업그레이드)
+###########################################################
+public function getCombinedEtfHoldings(array $etfCodes): array {
+    if (empty($etfCodes)) return [];
+
+    // 💡 1. 넘어온 ETF 개수만큼 물음표(?, ?, ?)를 만듭니다. (안전한 SQL IN 구문용)
+    $placeholders = implode(',', array_fill(0, count($etfCodes), '?'));
+    
+    // 💡 2. 내가 선택한 ETF 개수 (예: 3개면 3) -> 평균 비중을 구하기 위해 사용
+    $etfCount = count($etfCodes);
+
+    // 🚀 [추가된 로직] 주가(stock_price)와 등락률(stock_rate)을 추가하여 프론트엔드 렌더링 최적화
+    $sql = "SELECT 
+                ehi.stock_code,
+                si.stock_name,
+                si.stock_price,
+                si.stock_rate,
+                COUNT(ehi.etf_code) AS overlap_count, -- 몇 개의 ETF에 중복으로 담겨있는지 (교집합)
+                SUM(ehi.holdings_ratio) AS total_ratio, -- 단순 비중 합산
+                (SUM(ehi.holdings_ratio) / ?) AS avg_ratio -- 🚀 내 포트폴리오 기준 실제 비중 (1/N 투자 가정)
+            FROM all_etf_holdings_info ehi
+            JOIN all_stock_info si ON ehi.stock_code = si.stock_code
+            WHERE ehi.etf_code IN ($placeholders)
+            GROUP BY 
+                ehi.stock_code, 
+                si.stock_name,
+                si.stock_price, 
+                si.stock_rate
+            ORDER BY overlap_count DESC, avg_ratio DESC"; // 중복이 많고 비중이 높은 순서대로 정렬
+
+    $stmt = $this->pdo->prepare($sql);
+    
+    // 💡 3. 파라미터 바인딩: 첫 번째 ? 에는 $etfCount를 넣고, 나머지 ? 에는 ETF 코드들을 차례대로 넣습니다.
+    $params = array_merge([$etfCount], $etfCodes);
+    $stmt->execute($params);
+    
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+} # 끝: getCombinedEtfHoldings
+###########################################################
+
+
+
+
+###########################################################
+// 🚀 1. 선택한 ETF들의 이름만 쏙쏙 가져오는 함수 (테이블 헤더용)
+###########################################################
+    public function getEtfNamesByCodes(array $etfCodes): array {
+        if (empty($etfCodes)) return [];
+        $placeholders = implode(',', array_fill(0, count($etfCodes), '?'));
+        $sql = "SELECT etf_code, etf_name FROM all_etf_info WHERE etf_code IN ($placeholders)";
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($etfCodes);
+        
+        $names = [];
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $names[$row['etf_code']] = $row['etf_name'];
+        }
+        return $names;
+###########################################################
+    }
+###########################################################
+
+########################################################### 
+// 🚀 2. 선택한 ETF들에 들어있는 모든 종목의 원본 비중 데이터를 가져오는 함수 (초정밀 최적화)
+###########################################################
+public function getRawHoldingsForEtfs(array $etfCodes): array {
+    if (empty($etfCodes)) return [];
+    
+    // 안전한 파라미터 바인딩을 위한 물음표(?) 배열 생성
+    $placeholders = implode(',', array_fill(0, count($etfCodes), '?'));
+    
+    // 💡 최적화: 현재가(stock_price) 추가 및 안전한 IFNULL 처리
+    // 💡 최적화: ETF 코드별로 묶고, 비중(holdings_ratio)이 높은 상위 종목부터 정렬 (ORDER BY)
+    $sql = "SELECT 
+                ehi.etf_code, 
+                ehi.stock_code, 
+                IFNULL(si.stock_name, '미등록종목') AS stock_name, 
+                ehi.holdings_ratio,
+                IFNULL(si.stock_price, 0) AS stock_price,
+                IFNULL(si.stock_rate, 0) AS stock_rate
+            FROM all_etf_holdings_info ehi 
+            LEFT JOIN all_stock_info si ON ehi.stock_code = si.stock_code 
+            WHERE ehi.etf_code IN ($placeholders)
+            ORDER BY ehi.etf_code ASC, ehi.holdings_ratio DESC";
+            
+    $stmt = $this->pdo->prepare($sql);
+    $stmt->execute($etfCodes);
+    
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+###########################################################
+} # 끝: getRawHoldingsForEtfs
+###########################################################
+
+###########################################################
+// 🚀 매일 주식/ETF 시세 업데이트 직후 1회 실행하여 요약 테이블을 무중단 갱신하는 함수
+###########################################################
+public function refreshAllStockHoldingsInfo(): bool {
+    try {
+        // 💡 INSERT ... ON DUPLICATE KEY UPDATE 구문
+        // 기존 데이터가 있으면 새 값으로 덮어쓰고, 없으면 새로 삽입(Insert)하여 서비스 중단을 막습니다.
+        $sql = "
+            INSERT INTO all_stock_holdings_info (stock_code, etf_count, top_rank_count, total_etf_ownership_ratio)
+            SELECT 
+                e.stock_code,
+                COUNT(e.etf_code) AS etf_count,
+                IFNULL(top_etfs.top_rank_count, 0) AS top_rank_count,
+                
+                -- ETF 시총(market_cap)과 종목 시총(stock_cap)이 변동되므로 이 비율도 매일 갱신됩니다.
+                IFNULL(SUM(ep.market_cap * e.holdings_ratio) / NULLIF(s.stock_cap, 0), 0) AS total_etf_ownership_ratio
+                
+            FROM all_etf_holdings_info e
+            LEFT JOIN all_stock_info s ON e.stock_code = s.stock_code
+            LEFT JOIN all_etf_price ep ON e.etf_code = ep.etf_code
+            
+            -- 구버전 MySQL 호환 변수(@rn)를 이용한 상위 5위 비중 카운트
+            LEFT JOIN (
+                SELECT stock_code, COUNT(etf_code) AS top_rank_count
+                FROM (
+                    SELECT 
+                        stock_code, etf_code,
+                        @rn := IF(@prev_etf = etf_code, @rn + 1, 1) AS rnk,
+                        @prev_etf := etf_code
+                    FROM all_etf_holdings_info
+                    CROSS JOIN (SELECT @rn := 0, @prev_etf := '') AS vars
+                    ORDER BY etf_code, holdings_ratio DESC
+                ) AS ranked_holdings
+                WHERE rnk <= 5
+                GROUP BY stock_code
+            ) top_etfs ON e.stock_code = top_etfs.stock_code
+            GROUP BY e.stock_code, s.stock_cap, top_etfs.top_rank_count
+            
+            -- 🚀 핵심: 키(stock_code)가 이미 존재하면 아래 값들만 최신화 업데이트!
+            ON DUPLICATE KEY UPDATE 
+                etf_count = VALUES(etf_count),
+                top_rank_count = VALUES(top_rank_count),
+                total_etf_ownership_ratio = VALUES(total_etf_ownership_ratio)
+        ";
+
+        // 데이터량이 많고 집계 연산이 있으므로 쿼리 실행 시간을 넉넉히 줍니다 (옵션)
+        $this->pdo->setAttribute(PDO::ATTR_TIMEOUT, 300);
+        
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute();
+        
+        return true;
+        
+    } catch (PDOException $e) {
+        // 에러 발생 시 로그 기록 (실제 운영 환경에 맞게 수정하세요)
+        error_log("요약 테이블 업데이트 실패: " . $e->getMessage());
+        return false;
+    }
+}
+###########################################################
+
+
+###########################################################
+// 연관 종목(교집합) 가져오기 - 30종목 미만 집중투자 ETF 필터링 적용
+public function getRelatedStocksByStock(string $stockCode, string $sortType = 'top_rank'): array {
+    // 💡 정렬 기준 맵핑
+    $sortMap = [
+        'top_rank' => 'top_rank_count DESC, shared_etf_count DESC',
+        'shared'   => 'shared_etf_count DESC, top_rank_count DESC',
+        'rise'     => 's.stock_rate DESC, shared_etf_count DESC',
+        'fall'     => 's.stock_rate ASC, shared_etf_count DESC',
+        'rot'      => 'stock_rot DESC, shared_etf_count DESC'
+    ];
+
+    $orderBy = $sortMap[$sortType] ?? $sortMap['top_rank'];
+
+    $sql = "SELECT 
+                h2.stock_code,
+                IFNULL(s.stock_name, h2.stock_name) AS stock_name, 
+                
+                -- 검색 종목과 '함께' 포함된 ETF 갯수
+                COUNT(h2.etf_code) AS shared_etf_count, 
+                
+                IFNULL(ash.etf_count, 0) AS etf_count,
+                IFNULL(ash.top_rank_count, 0) AS top_rank_count,
+                IFNULL(ash.total_etf_ownership_ratio, 0) AS total_etf_ownership_ratio,
+                
+                IFNULL(s.stock_price, 0) AS stock_price,
+                IFNULL(s.stock_rate, 0) AS stock_rate,
+                IFNULL(s.stock_vol_cap, 0) AS stock_vol_cap,
+                IFNULL(s.stock_cap, 0) AS stock_cap,
+                IFNULL((s.stock_vol_cap / NULLIF(s.stock_cap, 0)) * 100, 0) AS stock_rot
+                
+            FROM all_etf_holdings_info h1
+            JOIN all_etf_holdings_info h2 ON h1.etf_code = h2.etf_code
+            
+            -- 🚀 핵심 1: ETF의 전체 종목 수(holdings_count)를 알기 위해 all_etf_info 테이블을 조인합니다!
+            JOIN all_etf_info ei ON h1.etf_code = ei.etf_code
+            
+            LEFT JOIN all_stock_info s ON h2.stock_code = s.stock_code
+            LEFT JOIN all_stock_holdings_info ash ON h2.stock_code = ash.stock_code
+            
+            WHERE h1.stock_code = :stock_code1
+              AND h2.stock_code != :stock_code2 
+              
+              -- 🚀 핵심 2: ETF 편입 종목 수가 30개 미만(집중 투자)인 곳에서만 찾습니다!
+              AND ei.holdings_count <= 30
+              
+            GROUP BY 
+                h2.stock_code, 
+                h2.stock_name, 
+                s.stock_price,
+                s.stock_rate, 
+                s.stock_vol_cap, 
+                s.stock_cap,
+                ash.etf_count,
+                ash.top_rank_count,
+                ash.total_etf_ownership_ratio
+                
+            ORDER BY {$orderBy}";
+
+    $stmt = $this->pdo->prepare($sql);
+    
+    $stmt->execute([
+        'stock_code1' => $stockCode,
+        'stock_code2' => $stockCode
+    ]);
+    
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+} # 끝: getRelatedStocksByStock
+###########################################################
+
+###########################################################
+// 특정 ETF에 편입된 모든 종목의 상세 정보를 가져오는 함수 (초고속 최적화 버전)
+public function getStocksInSpecificEtf(string $etfCode, string $sortType = 'ratio'): array {
+    // 💡 정렬 기준 맵핑
+    $sortMap = [
+        'count' => 'h.stock_name ASC',  // 기본값: 종목명 가나다순
+        'rise'  => 's.stock_rate DESC', // 등락률 높은 순
+        'fall'  => 's.stock_rate ASC',  // 등락률 낮은 순
+        'rot'   => 'stock_rot DESC',    // 회전율 높은 순
+        'ratio' => 'h.holdings_ratio DESC' // 편입비중 높은 순
+    ];
+
+    $orderBy = $sortMap[$sortType] ?? $sortMap['ratio'];
+
+    // 🚀 최적화 1: 서브쿼리 대신 미리 만들어둔 ash(all_stock_holdings_info) 요약 테이블을 조인합니다.
+    // 🚀 최적화 2: 수식에서 /100 과 *100 을 상쇄하여 심플하게 만들었습니다.
+    $sql = "SELECT 
+                h.stock_code,
+                h.stock_name,
+                h.holdings_ratio,
+				ash.top_rank_count,
+				ash.etf_count,
+				ep.market_cap as market_cap,
+                IFNULL(s.stock_rate, 0) AS stock_rate,
+                IFNULL(s.stock_vol_cap, 0) AS stock_vol_cap,
+                IFNULL(s.stock_cap, 0) AS stock_cap,
+                
+                -- 회전율 실시간 계산 (거래대금 / 시가총액) * 100
+                IFNULL((s.stock_vol_cap / NULLIF(s.stock_cap, 0)) * 100, 0) AS stock_rot,
+                
+                -- 💡 무거운 서브쿼리 제거: 요약 테이블에서 바로 가져옴! (만약 없으면 1 반환)
+                IFNULL(ash.etf_count, 1) AS etf_count,
+                
+                -- 💡 수학적 최적화: / 100 과 * 100 을 제거하여 연산 속도 향상
+                IFNULL(
+                    (ep.market_cap * h.holdings_ratio) / NULLIF(s.stock_cap, 0), 
+                0) AS etf_ownership_ratio,
+
+			       IFNULL(ep.market_cap * h.holdings_ratio/100,0) AS etf_ownership_cap
+
+                
+            FROM all_etf_holdings_info h
+            LEFT JOIN all_stock_info s ON h.stock_code = s.stock_code
+            LEFT JOIN all_etf_price ep ON h.etf_code = ep.etf_code
+            LEFT JOIN all_stock_holdings_info ash ON h.stock_code = ash.stock_code -- 🚀 요약 테이블 조인 추가
+            WHERE h.etf_code = :etf_code
+            ORDER BY {$orderBy}";
+            
+    $stmt = $this->pdo->prepare($sql);
+    $stmt->execute(['etf_code' => $etfCode]);
+    
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+} # 끝: getStocksInSpecificEtf
+###########################################################
+
+
+
+
+// 🚀 최근 본 종목 저장 및 20개 제한 관리 함수
+    public function saveRecentStock(string $stockCode, string $stockName): void {
+        if (empty($stockCode) || empty($stockName)) return;
+
+        try {
+            // 💡 1. UPSERT (이미 있으면 시간만 업데이트, 없으면 신규 삽입)
+// 💡 1. UPSERT (파라미터 충돌 방지를 위해 :name1, :name2로 분리)
+            $sqlInsert = "INSERT INTO etf_recent_view_stocks (stock_code, stock_name) 
+                          VALUES (:code, :name1)
+                          ON DUPLICATE KEY UPDATE 
+                              stock_name = :name2,
+                              created_at = CURRENT_TIMESTAMP";
+            
+            $stmt = $this->pdo->prepare($sqlInsert);
+            
+            // 배열에도 똑같이 변수를 3개로 맞춰서 던져줍니다!
+            $stmt->execute([
+                ':code'  => $stockCode,
+                ':name1' => $stockName,
+                ':name2' => $stockName
+            ]);
+
+            // 💡 2. 20개 넘어가면 가장 오래된 것 삭제하기
+            // 🚀 [수정 완료] 서브쿼리 안의 테이블명을 'etf_recent_view_stocks'로 일치시켰습니다!
+            $sqlDelete = "DELETE FROM etf_recent_view_stocks 
+                          WHERE stock_code NOT IN (
+                              SELECT stock_code FROM (
+                                  SELECT stock_code 
+                                  FROM etf_recent_view_stocks 
+                                  ORDER BY created_at DESC 
+                                  LIMIT 20
+                              ) AS tmp
+                          )";
+            
+            $this->pdo->exec($sqlDelete);
+
+        } catch (PDOException $e) {
+            // 💡 실제로 에러가 났을 때 화면이나 로그에서 바로 원인을 찾을 수 있도록 처리
+            error_log("saveRecentStock Error: " . $e->getMessage());
+            // 개발 중이시라면 아래 주석을 풀어서 화면에 에러를 바로 띄워보셔도 좋습니다.
+            // echo "DB 에러 발생: " . $e->getMessage();
+        }
+    }
+##########################################
+
+
+// 🚀 최근 본 종목 리스트 불러오기 (최대 10개)
+    public function getRecentStocks(int $limit = 10): array {
+        $sql = "SELECT stock_code, stock_name 
+                FROM etf_recent_view_stocks 
+                ORDER BY created_at DESC 
+                LIMIT :limit";
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+        $stmt->execute();
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+################################
+
+
+
+###########################################################
+// 🚀 1. 선택한 여러 종목을 모두 품고 있는 공통 ETF 리스트 가져오기 (초고속 교집합 쿼리)
+###########################################################
+public function getEtfsByMultiStocks(array $stockCodes): array {
+    // 💡 디테일 방어: 프론트엔드에서 중복된 종목이 넘어와도 에러가 나지 않도록 중복 제거
+    $stockCodes = array_values(array_unique($stockCodes));
+    
+    if (empty($stockCodes)) return [];
+    
+    $placeholders = implode(',', array_fill(0, count($stockCodes), '?'));
+    $stockCount = count($stockCodes);
+
+    // 🚀 최적화: 무거운 서브쿼리를 제거하고 aei.holdings_count 를 직접 호출합니다.
+    // 💡 디테일: MySQL 엄격 모드(Strict Mode) 에러 방지를 위해 SELECT 하는 컬럼들을 GROUP BY에 명시합니다.
+    $sql = "SELECT 
+                aei.etf_code,
+                aei.etf_name,
+                ap.etf_rate,
+                ap.trading_value,
+                ap.turnover_ratio,
+                aei.return_rate,
+                ap.market_cap,
+                SUM(ehi.holdings_ratio) AS holdings_ratio,
+                aei.holdings_count  -- 🚀 서브쿼리가 사라졌습니다!
+            FROM all_etf_holdings_info ehi
+            JOIN all_etf_info aei ON ehi.etf_code = aei.etf_code
+            JOIN all_etf_price ap ON aei.etf_code = ap.etf_code 
+            WHERE ehi.stock_code IN ($placeholders)
+            GROUP BY 
+                aei.etf_code,
+                aei.etf_name,
+                ap.etf_rate,
+                ap.trading_value,
+                ap.turnover_ratio,
+                aei.return_rate,
+                ap.market_cap,
+                aei.holdings_count
+            HAVING COUNT(DISTINCT ehi.stock_code) = ?
+            ORDER BY (CASE WHEN aei.holdings_count <= 30 THEN 0 ELSE 1 END) ASC, holdings_ratio DESC";
+
+    $stmt = $this->pdo->prepare($sql);
+    
+    // 파라미터 바인딩 ([코드1, 코드2, ..., 전체코드개수])
+    $params = array_merge($stockCodes, [$stockCount]);
+    $stmt->execute($params);
+    
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+
+###########################################################
+// 🚀 2. 타이틀 표시용: 종목코드 배열을 받아 종목명들을 콤마로 연결해주는 함수
+###########################################################
+public function getStockNamesByCodes(array $stockCodes): string {
+    // 💡 디테일 방어: 중복 코드가 들어오면 이름이 여러 번 출력되는 것을 방지
+    $stockCodes = array_values(array_unique($stockCodes));
+    
+    if (empty($stockCodes)) return '';
+    
+    $placeholders = implode(',', array_fill(0, count($stockCodes), '?'));
+    $sql = "SELECT stock_name FROM all_stock_info WHERE stock_code IN ($placeholders)";
+    
+    $stmt = $this->pdo->prepare($sql);
+    $stmt->execute($stockCodes);
+    
+    $names = $stmt->fetchAll(PDO::FETCH_COLUMN);
+    return implode(', ', $names);
+}
+###########################################################
+
+
+###########################################################
+// 테마 및 소속 종목 리스트를 가져오며, 특정 종목 우선 정렬 및 평균 수익률 계산 (초고속 최적화)
+public function getThemaListWithStocks(string $target_stock_code = ''): array {
+    
+    // 🚀 최적화 1: 무거운 서브쿼리를 제거하고, 미리 만들어둔 ash(all_stock_holdings_info) 요약 테이블을 조인!
+    $sql = "
+        SELECT DISTINCT
+            tn.thema_no,
+            tn.thema_name,
+            ds.stock_code,
+            si.stock_name,
+            si.stock_rate,
+            IFNULL(ash.etf_count, 0) AS etf_count
+        FROM tbl_thema_name tn
+        JOIN tbl_daily_thema_stock ds ON tn.thema_no = ds.thema_no
+        JOIN all_stock_info si ON ds.stock_code = si.stock_code
+        LEFT JOIN all_stock_holdings_info ash ON ds.stock_code = ash.stock_code
+    ";
+
+    $stmt = $this->pdo->query($sql);
+    $raw_data = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $theme_list = [];
+
+    // 1. 테마별로 데이터 그룹화 및 합계 계산
+    foreach ($raw_data as $row) {
+        $theme_name = $row['thema_name'];
+        $stock_code = $row['stock_code'];
+        
+        if (!isset($theme_list[$theme_name])) {
+            $theme_list[$theme_name] = [
+                'thema_no'   => $row['thema_no'],
+                'stocks'     => [],
+                'total_rate' => 0,
+                'avg_rate'   => 0,
+                'has_target' => false // 검색된 종목이 이 테마에 있는지 여부
+            ];
+        }
+        
+        // 💡 2. PHP 배열 키를 종목코드로 지정하여 중복 완벽 차단 (기존 로직 훌륭함)
+        if (!isset($theme_list[$theme_name]['stocks'][$stock_code])) {
+            
+            $rate = (float)$row['stock_rate'];
+            
+            $theme_list[$theme_name]['stocks'][$stock_code] = [
+                'stock_name'  => $row['stock_name'],
+                'stock_code'  => $stock_code,
+                'stock_rate'  => $rate,
+                'etf_count'   => (int)$row['etf_count'] // 실시간 요약 테이블의 값 매핑
+            ];
+            
+            // 테마 총 수익률 누적
+            $theme_list[$theme_name]['total_rate'] += $rate;
+            
+            // 검색된 타겟 종목 코드가 일치하면 플래그 켜기
+            if ($target_stock_code !== '' && $stock_code === $target_stock_code) {
+                $theme_list[$theme_name]['has_target'] = true;
+            }
+        }
+    }
+
+    // 2. 테마별 평균 수익률 계산
+    foreach ($theme_list as &$t_data) {
+        $count = count($t_data['stocks']);
+        $t_data['avg_rate'] = $count > 0 ? round($t_data['total_rate'] / $count, 2) : 0;
+        
+        // 💡 UI 출력 시 인덱스 오류 방지를 위해 연관 배열을 일반 배열로 재정렬
+        $t_data['stocks'] = array_values($t_data['stocks']);
+    }
+    unset($t_data); // 참조 해제
+
+    // 3. 다중 정렬 (1순위: 타겟 종목 포함 테마, 2순위: 테마 평균 수익률 내림차순)
+    uasort($theme_list, function($a, $b) {
+        // 1순위: 타겟 종목이 있는 테마가 무조건 위로
+        if ($a['has_target'] !== $b['has_target']) {
+            return $a['has_target'] ? -1 : 1; 
+        }
+        
+        // 🚀 최적화 2: PHP 우주선 연산자(<=>)를 활용하여 코드를 한 줄로 압축!
+        // $b가 앞쪽에 오면 내림차순 정렬이 됩니다.
+        return $b['avg_rate'] <=> $a['avg_rate'];
+    });
+
+    return $theme_list;
+###########################################################
+} // 끝: getThemaListWithStocks 함수
+###########################################################
+
+
+// 💡 1-2. 클래스 맨 아래에 삭제 전용 메서드 추가
+    public function deleteThema(int $thema_no): bool {
+        try {
+            // 두 테이블을 동시에 지워야 하므로 트랜잭션(Transaction) 사용
+            $this->pdo->beginTransaction();
+
+            // 1) 테마 소속 종목들 먼저 삭제 (tbl_daily_thema_stock)
+            $sql1 = "DELETE FROM tbl_daily_thema_stock WHERE thema_no = :thema_no";
+            $stmt1 = $this->pdo->prepare($sql1);
+            $stmt1->execute([':thema_no' => $thema_no]);
+
+            // 2) 테마 이름 삭제 (tbl_thema_name)
+            $sql2 = "DELETE FROM tbl_thema_name WHERE thema_no = :thema_no";
+            $stmt2 = $this->pdo->prepare($sql2);
+            $stmt2->execute([':thema_no' => $thema_no]);
+
+            $this->pdo->commit();
+            return true;
+        } catch (Exception $e) {
+            $this->pdo->rollBack();
+            return false;
+        }
+    }
+    // 끝: deleteThema 함수
+
+
+
+######################################################################
+// 🚀 ETF 1개의 편입종목을 지우고 새로 업데이트하는 함수
+    public function updateEtfHoldings(string $etfCode): int {
+        $holdings = $this->fetchAllNaverEtfHoldings($etfCode);
+        $holdingsCount = count($holdings);
+
+        try {
+            $this->pdo->beginTransaction();
+
+            // 1. 기존 종목 무조건 삭제
+            $stmtDelete = $this->pdo->prepare("DELETE FROM all_etf_holdings_info WHERE etf_code = :etf_code");
+            $stmtDelete->execute([':etf_code' => $etfCode]);
+
+            // 💡 2. 가져온 종목이 0개일 때 (스킵 처리 & 카운트 0)
+            if ($holdingsCount === 0) {
+                // skip_update = 1(제외)로 바꾸고, holdings_count = 0으로 갱신
+                $stmtSkip = $this->pdo->prepare("UPDATE all_etf_info SET skip_update = 1, holdings_count = 0 WHERE etf_code = :etf_code");
+                $stmtSkip->execute([':etf_code' => $etfCode]);
+                
+                $this->pdo->commit();
+                return 0; 
+            }
+
+            // 3. 정상적으로 데이터가 있을 경우 (비중 내림차순 정렬)
+            usort($holdings, function($a, $b) {
+                return $b['ratio'] <=> $a['ratio'];
+            });
+
+            // 4. 종목들 INSERT
+            $sqlInsert = "INSERT INTO all_etf_holdings_info 
+                            (etf_code, stock_code, stock_name, holdings_ratio, uDate, holdings_rank) 
+                          VALUES 
+                            (:etf_code, :stock_code, :stock_name, :holdings_ratio, CURDATE(), :holdings_rank)";
+            $stmtInsert = $this->pdo->prepare($sqlInsert);
+
+            $rank = 1;
+            foreach ($holdings as $h) {
+                $stmtInsert->execute([
+                    ':etf_code'       => $etfCode,
+                    ':stock_code'     => $h['stock_code'],
+                    ':stock_name'     => $h['stock_name'],
+                    ':holdings_ratio' => $h['ratio'],
+                    ':holdings_rank'  => $rank
+                ]);
+                $rank++;
+            }
+
+
+            // (혹시 예전에 0종목이었다가 다시 부활했을 수 있으므로 skip_update = 0 으로 원복도 같이 해줍니다)
+            $stmtUpdateInfo = $this->pdo->prepare("UPDATE all_etf_info SET skip_update = 0, holdings_count = :count WHERE etf_code = :etf_code");
+            $stmtUpdateInfo->execute([':count' => $holdingsCount, ':etf_code' => $etfCode]);
+
+            $this->pdo->commit();
+
+			 return $holdingsCount;
+
+        } catch (Exception $e) {
+            $this->pdo->rollBack();
+            throw $e; 
+        }
+    }
+
+
+######################################################################
+// 🚀 1. 네이버(WiseReport)에서 전체 구성종목 가져오기 (JSON 스캔 방식)
+    public function fetchAllNaverEtfHoldings(string $etfCode): array {
+        $url = "https://navercomp.wisereport.co.kr/v2/ETF/index.aspx?cmp_cd={$etfCode}&target=cu_more";
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        // 네이버 차단 우회를 위한 Referer 필수
+        curl_setopt($ch, CURLOPT_REFERER, "https://finance.naver.com/");
+        curl_setopt($ch, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+        
+        $html = curl_exec($ch);
+        curl_close($ch);
+
+        if (empty($html)) return [];
+
+        $holdings = [];
+
+        // 💡 핵심: 자바스크립트 변수(var CU_data = {...})에서 JSON 텍스트만 추출
+        if (preg_match('/var\s+CU_data\s*=\s*(\{.*?\});/is', $html, $matches)) {
+            $jsonData = json_decode($matches[1], true);
+
+            if (isset($jsonData['grid_data']) && is_array($jsonData['grid_data'])) {
+                foreach ($jsonData['grid_data'] as $item) {
+                    $stockName = $item['STK_NM_KOR'] ?? '';
+                    $ratio     = $item['ETF_WEIGHT'] ?? 0;
+
+                    // '원화현금' 같은 불필요한 항목이나 비중이 없는 항목 제외
+                    if (!empty($stockName) && $ratio !== null && strpos($stockName, '원화현금') === false) {
+                        
+                        // JSON에 종목코드가 없으므로, 보유하신 DB에서 이름을 기반으로 코드를 찾습니다.
+                        $stockCode = $this->getStockCodeByName($stockName);
+
+                        if (!empty($stockCode)) {
+                            $holdings[] = [
+                                'stock_code' => $stockCode,
+                                'stock_name' => $stockName,
+                                'ratio'      => (float)$ratio
+                            ];
+                        }
+                    }
+                }
+            }
+        }
+
+        return $holdings;
+    }
+
+    // 🚀 2. 종목명으로 종목코드 6자리를 DB에서 찾아주는 보조 함수
+    private function getStockCodeByName(string $stockName): string {
+        try {
+            // all_stock_info 테이블에 stock_name이 일치하는 종목코드 가져오기
+            $sql = "SELECT stock_code FROM all_stock_info WHERE stock_name = :stock_name LIMIT 1";
+            $stmt = $this->pdo->prepare($sql);
+            $stmt->execute([':stock_name' => $stockName]);
+            $result = $stmt->fetchColumn();
+            
+            return $result ? (string)$result : '';
+        } catch (PDOException $e) {
+            return '';
+        }
+    }
+
+
+
+
+} # end of class

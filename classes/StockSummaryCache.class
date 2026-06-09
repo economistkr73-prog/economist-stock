@@ -1,0 +1,41 @@
+<?php
+
+###########################################################
+// 🚀 주식별 ETF 편입 요약 정보를 메모리에 올려두고 쓰는 캐시 클래스
+class StockSummaryCache {
+    private static $cache = null;
+    private static $pdo = null;
+
+    // 1. PDO 객체 주입 (사이트 초기 로딩 시 1번만 실행)
+    public static function init($pdo) {
+        self::$pdo = $pdo;
+    }
+
+    // 2. 종목코드를 넣으면 3가지 정보를 배열로 반환
+    public static function getInfo(string $stockCode): array {
+        
+        // 💡 핵심(Lazy Loading): 처음 호출될 때 단 1번만 DB 전체 데이터를 읽어서 메모리에 저장합니다.
+        if (self::$cache === null) {
+            $sql = "SELECT stock_code, etf_count, top_rank_count, total_etf_ownership_ratio 
+                    FROM all_stock_holdings_info";
+            $stmt = self::$pdo->query($sql);
+            
+            self::$cache = [];
+            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                self::$cache[$row['stock_code']] = $row;
+            }
+        }
+
+        // 메모리 배열에서 키(종목코드)로 즉시 찾아서 반환 (DB 접근 안 함!)
+        return self::$cache[$stockCode] ?? [
+            'etf_count' => 0,
+            'top_rank_count' => 0,
+            'total_etf_ownership_ratio' => 0.0
+        ];
+    }
+
+
+
+
+} # 끝 : StockSummaryCache class
+###########################################################

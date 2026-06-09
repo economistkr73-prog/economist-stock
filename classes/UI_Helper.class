@@ -1,0 +1,121 @@
+<?php
+// 파일 위치: ./classes/UI_Helper.php
+
+class UIHelper {
+    
+    /**
+     * 정렬 아이콘(↕, ▼, ▲)을 생성하여 반환합니다.
+     *
+     * @param string $current_sort 현재 선택된 전체 정렬 기준 (예: 'ratio', 'rise', 'fall')
+     * @param string $target_sort  이 열이 나타내는 기준값 (예: 'ratio', 'rate', 'rot')
+     * @return string HTML 형태의 아이콘 태그
+     */
+    public static function getSortIcon(string $current_sort, string $target_sort): string {
+        // 아이콘 디자인 정의
+        $icon_active_down = "<span style='color:#e1234a; margin-left:4px; font-size:12px;'>▼</span>";
+        $icon_active_up   = "<span style='color:#e1234a; margin-left:4px; font-size:12px;'>▲</span>";
+        $icon_inactive    = "<span style='color:gray; margin-left:4px; font-size:12px; transition: color 0.2s;'>↕</span>";
+
+        // 특별 케이스: 등락률 (rise / fall 토글)
+        if ($target_sort === 'rate') {
+            if ($current_sort === 'rise') return $icon_active_down;
+            if ($current_sort === 'fall') return $icon_active_up;
+            return $icon_inactive;
+        }
+
+        // 일반 케이스: 현재 정렬 기준과 대상 기준이 일치하면 내림차순(▼) 표시
+        if ($current_sort === $target_sort) {
+            return $icon_active_down;
+        }
+
+        // 선택되지 않은 항목은 기본(↕) 아이콘 표시
+        return $icon_inactive;
+    }
+
+
+###########################################################
+// 🚀 다목적 ETF 뱃지 생성기 (자동 등급/색상 변환 적용)
+###########################################################
+public static function get_etf_badge_html(int $top_rank_count, int $etf_count  = 0, string $display_type = 'default'): string {
+    
+    // 💡 1. 티어(Tier) 색상 및 아이콘 정의 [배경색, 글자색, 테두리색, 아이콘]
+    $tiers = [
+        100 => ["#ff0000", "#ffffff", "#ff0000", "💎 "], // Tier 4: 압도적 1위
+        50  => ["#2563eb", "#ffffff", "#2563eb", ""],    // Tier 3: 최상위
+        20  => ["#60a5fa", "#ffffff", "#3b82f6", ""],    // Tier 2: 상위
+        1   => ["#ebf8ff", "#3182ce", "#bee3f8", ""]     // Tier 1: 기본
+    ];
+
+    // 기본값 설정 (0건일 경우 눈에 띄지 않는 회색 처리)
+    $style = ["#f3f4f6", "#6b7280", "#e5e7eb", ""]; 
+    
+    // 💡 2. 로직: 배열을 순회하며 조건에 맞는 첫 번째 스타일을 매핑
+    foreach ($tiers as $threshold => $tier_style) {
+        if ($top_rank_count >= $threshold) {
+            $style = $tier_style;
+            break;
+        }
+    }
+
+    // 🚀 프로의 팁: 배열 구조 분해 할당 (코드가 엄청나게 깔끔해집니다!)
+    [$bg_col, $txt_col, $brd_col, $icon] = $style;
+
+    $html = '';
+
+    switch ($display_type) {
+        
+        // ----------------------------------------------------
+        // [타입 1] 'split' : 각각 다른 색상의 독립된 뱃지 2개
+        // ----------------------------------------------------
+        case 'split':
+            // 🔥 ETF 뱃지에 동적 티어 색상 적용!
+            $html .= "<span style='display:inline-block; padding:3px 8px; font-size:12px; background-color:{$bg_col}; color:{$txt_col}; border:1px solid {$brd_col}; border-radius:4px; margin-right:4px;'>";
+            $html .= "{$icon}ETF <strong>{$etf_count}</strong>";
+            $html .= "</span>";
+            
+            if ($top_rank_count > 0) {
+                $html .= "<span style='display:inline-block; padding:3px 8px; font-size:12px; color:#fff; background-color:#e24a4a; border:1px solid #e24a4a; border-radius:4px;'>";
+                $html .= "Top5 <strong>{$top_rank_count}</strong>";
+                $html .= "</span>";
+            }
+            break;
+
+        // ----------------------------------------------------
+        // [타입 2] 'mini' : 좁은 모바일 화면이나 테이블용 (축약형)
+        // ----------------------------------------------------
+        case 'mini':
+            $top_html = $top_rank_count > 0 ? " <span style='color:#e24a4a; font-weight:bold;'>({$top_rank_count})</span>" : "";
+            
+            // 🔥 미니 버전에도 뱃지 전체에 동적 티어 색상 적용!
+            $html .= "<span style='display:inline-block; font-size:11px; background-color:{$bg_col}; color:{$txt_col}; border:1px solid {$brd_col}; padding:2px 5px; border-radius:3px;'>";
+            $html .= "{$icon}E:{$etf_count}{$top_html}";
+            $html .= "</span>";
+            break;
+
+        // ----------------------------------------------------
+        // [타입 3] 'default' : 깔끔하게 텍스트로 이어 붙인 기본형
+        // ----------------------------------------------------
+        default:
+			if($top_rank_count>0){
+            $html .= "<span style='font-size:13px; color:#333;'>";
+            // 🔥 텍스트 중간에 들어가는 '숫자' 부분만 티어 뱃지로 예쁘게 감싸줍니다!
+            $html .= "<span style='display:inline-block; padding:2px 6px; border-radius:4px; background-color:{$bg_col}; color:{$txt_col}; border:1px solid {$brd_col}; font-size:12px; margin:0 2px;'>";
+            $html .= "{$icon}<strong style='font-weight:bold;'>{$top_rank_count}</strong>";
+            $html .= "</span>";}
+			else            if($etf_count) $html .="<span style='color: #c0c0c0; padding: 2px 8px; border-radius: 4px; font-size: 10px;'>$etf_count</span>";
+
+            
+
+            break;
+    }
+
+    return $html;
+}
+###########################################################
+
+
+
+
+} # end of class
+###################### 
+?>

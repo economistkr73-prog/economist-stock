@@ -1,0 +1,112 @@
+a:link  { color: darkslateblue; text-decoration: none;                    }
+
+a:Visited{ color:gray;   text-decoration: none;    }
+
+a:Active {	color: red;	text-decoration:underline}
+
+a:Hover {  color:red; text-decoration:underline}
+
+.form { background-color:FFFFFF; font-family:±¼¸²,Seoul,arial,helvetica; color:black; border:1x solid #393939; font-size:9pt;  height: 20px; line-height :160%; padding-left : 2px;}
+
+.form_b { background-color:FFFFFF; font-family:±¼¸²,Seoul,arial,helvetica; color:black; border:1x solid #393939; font-size:10.5pt; line-height :160%; height: 25px; padding-left : 2px;}
+
+.form_c { font-family:±¼¸²,Seoul,arial,helvetica; color:#417295; font-family:±¼¸²,Dotum,Dotumche,verdana; font-size:12px; background:#E6F1F8; border:1px solid #B8CFDD; padding-left : 2px;  height: 20px; line-height :160% }
+.form_f { font-family:±¼¸²,Seoul,arial,helvetica; color:#417295; font-family:±¼¸²,Dotum,Dotumche,verdana; font-size:12px;  border:1px solid #B8CFDD; padding-left : 2px;  height: 20px; line-height :160% }
+.form_cb { font-family:±¼¸²,Seoul,arial,helvetica; color:#417295; font-family:±¼¸²,Dotum,Dotumche,verdana; font-size:12px; font-weight:bold; background:#E6F1F8; border:1px solid #B8CFDD; padding-left : 2px;  height: 20px; line-height :160% }
+.form_nc { font-family:±¼¸²,Seoul,arial,helvetica; color:#417295; font-family:±¼¸²,Dotum,Dotumche,verdana; font-size:12px; border:1px solid; padding-left : 2px;  line-height :200%; border-bottom-color:silver; border-top-color:white; border-left-color:white; border-right-color:white; height:24px;}
+
+.form_nc2 { font-family:±¼¸²,Seoul,arial,helvetica; color:#417295; font-family:±¼¸²,Dotum,Dotumche,verdana; font-size:12px; background:#FFEFFF; border:1px solid; padding-left : 2px;  line-height :200%; border-bottom-color:orange; border-top-color:orange; border-left-color:white; border-right-color:white; }
+
+.form_nc_tt5 { background-color:#EFEFDE; font-family:±¼¸²,Seoul,arial,helvetica; color:#417295; font-family:±¼¸²,Dotum,Dotumche,verdana; font-size:12px; border:1px solid; padding-left : 2px;  line-height :200%; border-bottom-color:silver; border-top-color:#EFEFDE; border-left-color:#EFEFDE; border-right-color:#EFEFDE; height:24px;}
+
+.form_nd { font-family:±¼¸²,Seoul,arial,helvetica; color:#417295; font-family:±¼¸²,Dotum,Dotumche,verdana; font-size:12px; background:#E6F1F8; border:1px solid #E6F1F8; padding-left : 2px;  line-height :200%; border-bottom-color:silver; height:24px;}
+
+
+.form_d { font-family:±¼¸²,Seoul,arial,helvetica; color:black; font-family:±¼¸²,Dotum,Dotumche,verdana; font-size:12px; border:0px solid #B8CFDD; padding-left : 2px;  height: 20px; line-height :160% }
+
+.form2 { background-color:yellow; font-family:±¼¸²,Seoul,arial,helvetica; color:red; border:1x solid #417295; padding-top : 4px; padding-left : 2px;	padding-right : 2px; font-size:9pt; }
+
+P{ line-height :170%;  margin-top:3px;margin-bottom:3px;} # P ÀÇ ¶óÀÎ°£°Ý
+
+.memo { background-color:FFFFFF; font-family:±¼¸²,arial,helvetica; color:black; border:1x solid #393939; font-size:9pt; padding-left : 8px;	padding-bottom : 8px;	padding-right : 8px;}
+
+.h1 {
+	font-size : 15pt; 	font-family : ±¼¸²; 	line-height :140%; 	color: #004080; padding-left : 15px; padding-bottom : 10;
+	padding-right : 15; 	white-space : nowrap; 	font-style : normal; 	background : transparent; 	font-weight : bold; }
+
+.h2 {
+	font-size : 13pt; 	font-family : ±¼¸²; 	line-height :140%; 	color: #004080; padding-left : 15px; padding-bottom : 10;
+	padding-right : 15; 	white-space : nowrap; 	font-style : normal; 	background : transparent; 	font-weight : bold; }
+
+.n1 {
+	font-size : 10.5pt;	font-family : µ¸¿ò,±¼¸²;	line-height :170%;	color: Black;	padding-left : 10px;	padding-bottom : 10;	padding-right : 10;
+    }
+
+.n1s {  font-size : 9pt; font-family : µ¸¿ò,±¼¸²; padding-left : 8px;	padding-bottom : 10px;	padding-right : 8px;  line-height :160%; color:Black; }
+
+.nss { font-size : 4pt; font-family : ±¼¸²; padding-left : 10px;  line-height :130%; color:#999999; }
+
+.n1bt{ 	background-color:FFFFFF; 	font-family:µ¸¿ò,±¼¸²,Seoul,arial,helvetica; 	color:black; 	border:1x solid #393939; 	font-size:10pt;
+        text-align : justify; 	font-weight:bold; 	padding-bottom : 2;  	padding-top : 2; padding-left : 10px; }
+
+
+.s1t{ 	background-color:FFFFFF; 	font-family:µ¸¿ò,±¼¸²,Seoul,arial,helvetica; 	color:black;
+           border:1x solid silver; 	font-size:10pt; 	padding-bottom : 2;  	padding-top : 2; padding-left : 10px;   padding-right : 10px;  }
+
+
+
+.n2b {	font-size :9pt;	font-family : ±¼¸²;		font-weight:bold; line-height : 140%;	color: #3366CC;  padding-bottom : 3;  	padding-top : 2;       }
+
+.n3 {	font-size :10pt;	font-family : ±¼¸²;	line-height : 140%;	color: maroon;  padding-bottom : 3;  	padding-top : 2;        }
+
+.n3b {	font-size :9pt;	font-family : ±¼¸²;		font-weight:bold; line-height : 140%;	color:maroon;  padding-bottom : 3;  	padding-top : 2;       }
+.n3s {	font-size :9pt;	font-family : ±¼¸²;	line-height : 140%;	color:maroon;  padding-bottom : 3;  	padding-top : 2;       }
+
+.n4b {	font-size :9pt;	font-family : ±¼¸²;	line-height : 140%;	font-weight:bold; color:blue;  padding-bottom : 2px;  	padding-top : 2px;  	padding-right : 5px;  padding-left : 5px;     }
+.n4s {	font-size :9pt;	font-family : ±¼¸²;	line-height : 140%;	color:blue;  padding-bottom : 2px;  	padding-top : 2px;  	padding-right : 5px;  padding-left : 5px;   }
+
+.n5s { font-size : 9pt; font-family : ±¼¸²; padding-left : 15px;  padding-right : 15px; line-height :130%; color:Black; }
+
+.nby {	font-size :9pt;	font-family : ±¼¸²;	line-height : 140%;	color:blue;  padding-bottom : 2px;  	padding-top : 2px;  	padding-right : 5px;  padding-left : 5px; background-color:yellow;    }
+
+.nbw {	font-size :9pt;	font-family : ±¼¸²;	line-height : 140%;	color:white;  padding-bottom : 2px;  	padding-top : 2px;  	padding-right : 5px;  padding-left : 5px; background-color:white;    }
+
+
+
+.tt4 {
+	background-color:#E5EBF1;  border-right-width:0.75pt; border-bottom-width:0.75pt; border-right-color:silver; border-bottom-color:silver; border-top-style:none; border-right-style:solid; border-bottom-style:solid; border-left-style:none;
+}
+
+.tt5 {
+	background-color:#EFEFDE;  border-right-width:0.75pt; border-bottom-width:0.75pt; border-right-color:silver; border-bottom-color:silver; border-top-style:none; border-right-style:solid; border-bottom-style:solid; border-left-style:none;
+}
+
+.tt6 {
+	background-color:mistyrose;  border-right-width:0.75pt; border-bottom-width:0.75pt; border-right-color:silver; border-bottom-color:silver; border-top-style:none; border-right-style:solid; border-bottom-style:solid; border-left-style:none;
+}
+
+.tt7 {
+	background-color:lavenderblush;  border-right-width:0.75pt; border-bottom-width:0.75pt; border-right-color:silver; border-bottom-color:silver; border-top-style:none; border-right-style:solid; border-bottom-style:solid; border-left-style:none;
+}
+
+.tt8 {
+	background-color:seashell;  border-right-width:0.75pt; border-bottom-width:0.75pt; border-right-color:silver; border-bottom-color:silver; border-top-style:none; border-right-style:solid; border-bottom-style:solid; border-left-style:none;
+}
+
+
+
+
+
+.n1t{ 	background-color:#F1FFFF; 	font-family:µ¸¿ò,±¼¸²,Seoul,arial,helvetica; 	color:black; 
+        border:1x dashed #FF81FF; 	font-size:10pt; 	padding-bottom : 10;  	padding-top : 10; padding-left : 15px;   padding-right : 15px;  }
+
+
+.n2s { background : gray; font-size : 9pt; font-family : µ¸¿ò,±¼¸²; padding-left : 25px;	padding-bottom : 10px;	padding-top : 10px; padding-right : 25px;  line-height :220%; color:white; border:1x dashed blue;}
+
+.n2t{ 	font-family:µ¸¿ò,±¼¸²,Seoul,arial,helvetica; 	color:#3366CC;
+        border:1x solid orange; 	font-size:10pt; 	padding-bottom : 5;  	padding-top : 5; padding-left : 25px;   padding-right : 20px;  
+		background-color:#FFEFFF;  border-right-style:none; border-left-style:none;
+		}
+
+.n2u {	font-size:9.5pt;	color: brown;	font-family:±¼¸²; line-height : 200%; padding-bottom : 4;  padding-right: 4; padding-left: 4;
+        font-weight:bold;   border-bottom-style:dashed; border-bottom-width:0.25pt; }

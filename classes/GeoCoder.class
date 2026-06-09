@@ -1,0 +1,116 @@
+<?php
+// classes/GeoCoder.class — 주소 → 좌표 지오코딩 전담 (서버사이드)
+//
+// 비밀키(시크릿)를 클라이언트에 노출하지 않기 위해 지오코딩은 모두 서버에서 수행한다.
+//   - provider 'naver'  → 네이버 클라우드 플랫폼 Geocoding API (국내 주소)
+//   - provider 'google' → 구글 Maps Platform Geocoding API (해외 주소)
+//
+// 키는 env/maps.inc 의 define() 상수에서 읽는다. 키가 없으면 ok=false + 안내 메시지.
+// NaverFinanceAPI 와 동일하게 외부 API 호출 전담 서비스 클래스 (DB 미사용).
+
+class GeoCoder {
+
+    // ── 진입점: provider 로 분기 ──────────────────────────────
+    // 반환: ['ok'=>bool, 'lat'=>float, 'lng'=>float, 'provider'=>str, 'address'=>str, 'msg'=>str]
+    public static function geocode(string $provider, string $address): array {
+        $address = trim($address);
+        if ($address === '') {
+            return ['ok' => false, 'msg' => '주소를 입력하세요.'];
+        }
+        return $provider === 'google'
+            ? self::geocodeGoogle($address)
+            : self::geocodeNaver($address);
+    }
+
+    // ── 네이버 클라우드 플랫폼 Geocoding ──────────────────────
+    private static function geocodeNaver(string $address): array {
+        $keyId  = defined('NAVER_MAPS_KEY_ID')     ? NAVER_MAPS_KEY_ID     : '';
+        $secret = defined('NAVER_MAPS_KEY_SECRET') ? NAVER_MAPS_KEY_SECRET : '';
+        if ($keyId === '' || $secret === '') {
+            return ['ok' => false, 'msg' => '네이버 지도 API 키가 설정되지 않았습니다. (env/maps.inc)'];
+        }
+
+        $url = 'https://maps.apigw.ntruss.com/map-geocode/v2/geocode?query=' . rawurlencode($address);
+        [$body, $err] = self::httpGet($url, [
+            'X-NCP-APIGW-API-KEY-ID: ' . $keyId,
+            'X-NCP-APIGW-API-KEY: '    . $secret,
+            'Accept: application/json',
+        ]);
+        if ($err !== '') {
+            return ['ok' => false, 'msg' => '네이버 지오코딩 호출 실패: ' . $err];
+        }
+
+        $json = json_decode($body, true);
+        if (($json['status'] ?? '') !== 'OK' || empty($json['addresses'])) {
+            return ['ok' => false, 'msg' => "주소를 찾을 수 없습니다: {$address}"];
+        }
+        $first = $json['addresses'][0];
+        return [
+            'ok'       => true,
+            'provider' => 'naver',
+            'address'  => $address,
+            'lat'      => (float)$first['y'],   // 네이버: y=위도, x=경도
+            'lng'      => (float)$first['x'],
+            'msg'      => '',
+        ];
+    }
+
+    // ── 구글 Maps Platform Geocoding ─────────────────────────
+    private static function geocodeGoogle(string $address): array {
+        $key = defined('GOOGLE_MAPS_SERVER_KEY') ? GOOGLE_MAPS_SERVER_KEY : '';
+        if ($key === '') {
+            return ['ok' => false, 'msg' => '구글 지도 API 키가 설정되지 않았습니다. (env/maps.inc)'];
+        }
+
+        $url = 'https://maps.googleapis.com/maps/api/geocode/json'
+             . '?address=' . rawurlencode($address)
+             . '&key='     . rawurlencode($key);
+        [$body, $err] = self::httpGet($url, ['Accept: application/json']);
+        if ($err !== '') {
+            return ['ok' => false, 'msg' => '구글 지오코딩 호출 실패: ' . $err];
+        }
+
+        $json   = json_decode($body, true);
+        $status = $json['status'] ?? '';
+        if ($status !== 'OK' || empty($json['results'])) {
+            // ZERO_RESULTS / REQUEST_DENIED / OVER_QUERY_LIMIT 등
+            $detail = $status === 'ZERO_RESULTS' ? "주소를 찾을 수 없습니다: {$address}"
+                    : ($json['error_message'] ?? "구글 지오코딩 실패 ({$status})");
+            return ['ok' => false, 'msg' => $detail];
+        }
+        $loc = $json['results'][0]['geometry']['location'];
+        return [
+            'ok'       => true,
+            'provider' => 'google',
+            'address'  => $address,
+            'lat'      => (float)$loc['lat'],
+            'lng'      => (float)$loc['lng'],
+            'msg'      => '',
+        ];
+    }
+
+    // ── 공통 HTTP GET (cURL) ─────────────────────────────────
+    // 반환: [응답본문(string), 오류메시지(string)] — 오류 없으면 두번째 ''
+    private static function httpGet(string $url, array $headers): array {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER     => $headers,
+            CURLOPT_TIMEOUT        => 7,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_SSL_VERIFYPEER => true,
+        ]);
+        $body = curl_exec($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $cerr = curl_error($ch);
+        curl_close($ch);
+
+        if ($body === false) {
+            return ['', $cerr ?: 'cURL 오류'];
+        }
+        if ($code >= 400) {
+            return ['', "HTTP {$code}"];
+        }
+        return [$body, ''];
+    }
+}

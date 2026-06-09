@@ -1,0 +1,192 @@
+﻿<?php
+// classes/LunarCalendar.class — 음력 ↔ 양력 변환
+// 검증 기준: 설날(음력 1/1)·추석(음력 8/15) 양력 날짜로 역산
+// 2020~2035 데이터
+
+class LunarCalendar {
+
+    /**
+     * 음력 연도 데이터
+     * start     : 음력 1월 1일의 양력 날짜
+     * months    : 1~12월 일수 배열
+     * leap      : 윤달 번호 (0=없음)
+     * leap_days : 윤달 일수
+     *
+     * 검증 방법: 설날(1/1)·추석(8/15) 양력 날짜로 year total 및 월합산 교차검증
+     */
+    private static array $data = [
+        // 2020 경자 | 설날 1/25 | 추석 10/1 | 윤4월(29일) | 384일
+        // m1-m8(포함윤4) 합=236 → +14 = 250 ✓
+        2020 => ['start'=>'2020-01-25','months'=>[30,29,30,29,30,30,29,30,29,30,29,30],'leap'=>4,'leap_days'=>29],
+
+        // 2021 신축 | 설날 2/12 | 추석 9/21 | 무윤 | 354일
+        // m1-m7 합=207 → +14 = 221 ✓
+        2021 => ['start'=>'2021-02-12','months'=>[29,30,29,30,29,30,30,29,30,29,30,29],'leap'=>0],
+
+        // 2022 임인 | 설날 2/1 | 추석 9/10 | 무윤 | 355일
+        // m1-m7 합=207 → +14 = 221 ✓
+        2022 => ['start'=>'2022-02-01','months'=>[30,29,30,29,30,30,29,30,30,29,30,29],'leap'=>0],
+
+        // 2023 계묘 | 설날 1/22 | 추석 9/29 | 윤2월(29일) | 384일
+        // m1-m8(포함윤2) 합=236 → +14 = 250 ✓
+        2023 => ['start'=>'2023-01-22','months'=>[29,30,30,29,30,29,30,30,29,30,29,30],'leap'=>2,'leap_days'=>29],
+
+        // 2024 갑진 | 설날 2/10 | 추석 9/17 | 무윤 | 354일
+        // m1-m7 합=206 → +14 = 220 ✓
+        2024 => ['start'=>'2024-02-10','months'=>[29,30,29,29,30,30,29,30,29,30,30,29],'leap'=>0],
+
+        // 2025 을사 | 설날 1/29 | 추석 10/6 | 윤6월(29일) | 384일
+        // m1-m8(포함윤6) 합=236 → +14 = 250 ✓
+        2025 => ['start'=>'2025-01-29','months'=>[30,29,30,29,30,29,30,30,29,30,29,30],'leap'=>6,'leap_days'=>29],
+
+        // 2026 병오 | 설날 2/17 | 무윤 | 355일
+        // 사용자 검증: 음력4/28=6/13 ✓, 음력6/2=7/15 ✓, 음력7/23=9/4 ✓, 음력8/20=9/30 ✓, 추석8/15=9/25 ✓
+        2026 => ['start'=>'2026-02-17','months'=>[30,29,30,29,29,30,29,30,30,29,30,30],'leap'=>0],
+
+        // 2027 정미 | 설날 2/7 | 무윤 | 354일
+        2027 => ['start'=>'2027-02-07','months'=>[29,30,29,30,30,29,30,29,30,29,30,29],'leap'=>0],
+
+        // 2028 무신 | 설날 1/27 | 윤5월(29일) | 384일
+        2028 => ['start'=>'2028-01-27','months'=>[30,29,30,29,30,29,30,30,29,30,29,30],'leap'=>5,'leap_days'=>29],
+
+        // 2029 기유 | 설날 2/14 | 무윤 | 354일
+        2029 => ['start'=>'2029-02-14','months'=>[29,30,30,29,30,29,30,29,30,29,30,29],'leap'=>0],
+
+        // 2030 경술 | 설날 2/3 | 무윤 | 354일
+        2030 => ['start'=>'2030-02-03','months'=>[30,29,30,29,30,29,30,29,30,29,30,29],'leap'=>0],
+
+        // 2031 신해 | 설날 1/23 | 윤3월(29일) | 384일
+        2031 => ['start'=>'2031-01-23','months'=>[29,30,29,30,30,29,30,29,30,30,29,30],'leap'=>3,'leap_days'=>29],
+
+        // 2032 임자 | 설날 2/11 | 무윤 | 355일
+        2032 => ['start'=>'2032-02-11','months'=>[30,29,30,30,29,30,29,30,29,30,29,30],'leap'=>0],
+
+        // 2033 계축 | 설날 1/31 | 윤11월(30일) | 384일
+        2033 => ['start'=>'2033-01-31','months'=>[29,30,29,30,29,30,30,29,30,29,30,29],'leap'=>11,'leap_days'=>30],
+
+        // 2034 갑인 | 설날 2/19 | 무윤 | 354일
+        2034 => ['start'=>'2034-02-19','months'=>[29,30,29,30,29,30,29,30,30,29,30,29],'leap'=>0],
+
+        // 2035 을묘 | 설날 2/8 | 무윤 | 355일
+        2035 => ['start'=>'2035-02-08','months'=>[30,29,30,29,30,29,30,29,30,29,30,30],'leap'=>0],
+    ];
+
+    /**
+     * 음력 날짜 → 양력 날짜 변환
+     */
+    private static function pdo(): ?PDO { global $pdo; return ($pdo instanceof PDO) ? $pdo : null; }
+
+    // 음력 날짜 → 양력 (DB 우선, 없으면 내장표 폴백)
+    public static function lunarToSolar(int $lunarYear, int $lunarMonth, int $lunarDay, bool $isLeap = false): ?string {
+        $db = self::pdo();
+        if ($db) {
+            $st = $db->prepare("SELECT solar_date FROM tbl_lunar_solar WHERE lun_year=? AND lun_month=? AND lun_day=? AND is_leap=? LIMIT 1");
+            $st->execute([$lunarYear, $lunarMonth, $lunarDay, $isLeap ? 1 : 0]);
+            $r = $st->fetchColumn();
+            if ($r) return $r;
+        }
+        return self::lunarToSolarTable($lunarYear, $lunarMonth, $lunarDay, $isLeap);
+    }
+
+    private static function lunarToSolarTable(int $lunarYear, int $lunarMonth, int $lunarDay, bool $isLeap = false): ?string {
+        if (!isset(self::$data[$lunarYear])) return null;
+        $info = self::$data[$lunarYear];
+
+        $base   = new DateTime($info['start']);
+        $offset = 0;
+
+        for ($m = 1; $m < $lunarMonth; $m++) {
+            $offset += $info['months'][$m - 1];
+            if ($info['leap'] > 0 && $info['leap'] === $m && !$isLeap) {
+                $offset += $info['leap_days'] ?? 29;
+            }
+        }
+        if ($isLeap) {
+            if ($info['leap'] !== $lunarMonth) return null;
+            $offset += $info['months'][$lunarMonth - 1];
+        }
+
+        $offset += ($lunarDay - 1);
+        $base->modify("+{$offset} days");
+        return $base->format('Y-m-d');
+    }
+
+    /**
+     * 특정 양력 연도에 음력 기념일이 언제인지 반환
+     */
+    public static function getSolarDateInYear(int $lunarMonth, int $lunarDay, int $solarYear): ?string {
+        $db = self::pdo();
+        if ($db) {
+            $st = $db->prepare("SELECT solar_date FROM tbl_lunar_solar WHERE lun_month=? AND lun_day=? AND is_leap=0 AND YEAR(solar_date)=? ORDER BY solar_date LIMIT 1");
+            $st->execute([$lunarMonth, $lunarDay, $solarYear]);
+            $r = $st->fetchColumn();
+            if ($r) return $r;
+        }
+        return self::getSolarDateInYearTable($lunarMonth, $lunarDay, $solarYear);
+    }
+
+    private static function getSolarDateInYearTable(int $lunarMonth, int $lunarDay, int $solarYear): ?string {
+        foreach ([$solarYear - 1, $solarYear] as $lunarYear) {
+            if (!isset(self::$data[$lunarYear])) continue;
+            $date = self::lunarToSolarTable($lunarYear, $lunarMonth, $lunarDay);
+            if ($date && (int)substr($date, 0, 4) === $solarYear) return $date;
+        }
+        return null;
+    }
+
+    /**
+     * 양력 → 음력 변환 (표시용)
+     */
+    public static function solarToLunar(string $solarDate): ?array {
+        $db = self::pdo();
+        if ($db) {
+            $st = $db->prepare("SELECT lun_year,lun_month,lun_day,is_leap FROM tbl_lunar_solar WHERE solar_date=? LIMIT 1");
+            $st->execute([substr($solarDate, 0, 10)]);
+            $r = $st->fetch(PDO::FETCH_ASSOC);
+            if ($r) return ['year'=>(int)$r['lun_year'],'month'=>(int)$r['lun_month'],'day'=>(int)$r['lun_day'],'leap'=>(bool)$r['is_leap']];
+        }
+        return self::solarToLunarTable($solarDate);
+    }
+
+    private static function solarToLunarTable(string $solarDate): ?array {
+        $target = new DateTime($solarDate);
+
+        foreach (self::$data as $lunarYear => $info) {
+            $base = new DateTime($info['start']);
+            if ($target < $base) break;
+
+            $totalDays = array_sum($info['months']) + ($info['leap'] > 0 ? ($info['leap_days'] ?? 29) : 0);
+            $nextYear  = clone $base;
+            $nextYear->modify("+{$totalDays} days");
+            if ($target >= $nextYear) continue;
+
+            $diff = (int)$base->diff($target)->days;
+            $acc  = 0;
+            for ($m = 1; $m <= 12; $m++) {
+                $mDays = $info['months'][$m - 1];
+                if ($diff < $acc + $mDays) {
+                    return ['year'=>$lunarYear,'month'=>$m,'day'=>$diff-$acc+1,'leap'=>false];
+                }
+                $acc += $mDays;
+                if ($info['leap'] === $m) {
+                    $ld = $info['leap_days'] ?? 29;
+                    if ($diff < $acc + $ld) {
+                        return ['year'=>$lunarYear,'month'=>$m,'day'=>$diff-$acc+1,'leap'=>true];
+                    }
+                    $acc += $ld;
+                }
+            }
+        }
+        return null;
+    }
+
+    public static function hasSupportedYear(int $year): bool {
+        $db = self::pdo();
+        if ($db) {
+            $st = $db->prepare("SELECT 1 FROM tbl_lunar_solar WHERE lun_year=? LIMIT 1");
+            $st->execute([$year]);
+            if ($st->fetchColumn()) return true;
+        }
+        return isset(self::$data[$year]) || isset(self::$data[$year - 1]);
+    }
+}
