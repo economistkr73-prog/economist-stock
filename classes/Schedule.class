@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 // classes/Schedule.class — 스케줄러 DB 조작 전담
 
 class Schedule {
@@ -45,7 +45,8 @@ class Schedule {
         $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS address  VARCHAR(255)  DEFAULT NULL COMMENT '입력 주소 원본'");
         $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS lat      DECIMAL(10,7) DEFAULT NULL COMMENT '위도'");
         $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS lng      DECIMAL(10,7) DEFAULT NULL COMMENT '경도'");
-        $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS provider VARCHAR(10)   DEFAULT NULL COMMENT '지도 제공자 naver|google'");
+        $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS provider   VARCHAR(10)  DEFAULT NULL COMMENT '지도 제공자 naver|google'");
+        $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS place_name VARCHAR(100) DEFAULT NULL COMMENT '장소명/상호'");
 
         // ── 마이그레이션: 반복을 recur_rule 단일 경로로 통일 ──
         // 음력 기념일: is_lunar 컬럼 → recur_rule(JSON) 로 흡수
@@ -230,12 +231,12 @@ class Schedule {
                (event_type, title, start_dt, end_dt, due_dt,
                 category, color, priority, memo, is_done, is_allday, recur_rule,
                 is_lunar, lunar_month, lunar_day, icon, is_family, project_id,
-                address, lat, lng, provider)
+                address, lat, lng, provider, place_name)
              VALUES
                (:event_type, :title, :start_dt, :end_dt, :due_dt,
                 :category, :color, :priority, :memo, :is_done, :is_allday, :recur_rule,
                 :is_lunar, :lunar_month, :lunar_day, :icon, :is_family, :project_id,
-                :address, :lat, :lng, :provider)"
+                :address, :lat, :lng, :provider, :place_name)"
         );
         $stmt->execute($this->buildParams($d));
         $id = (int)$this->pdo->lastInsertId();
@@ -252,7 +253,7 @@ class Schedule {
                memo=:memo, is_allday=:is_allday, recur_rule=:recur_rule,
                is_lunar=:is_lunar, lunar_month=:lunar_month, lunar_day=:lunar_day,
                icon=:icon, is_family=:is_family, project_id=:project_id,
-               address=:address, lat=:lat, lng=:lng, provider=:provider
+               address=:address, lat=:lat, lng=:lng, provider=:provider, place_name=:place_name
              WHERE id=:id"
         );
         $params = $this->buildParams($d);
@@ -439,6 +440,7 @@ class Schedule {
             ':lat'         => isset($d['lat']) && $d['lat'] !== '' && $d['lat'] !== null ? (float)$d['lat'] : null,
             ':lng'         => isset($d['lng']) && $d['lng'] !== '' && $d['lng'] !== null ? (float)$d['lng'] : null,
             ':provider'    => !empty($d['provider']) ? $d['provider'] : null,
+            ':place_name'  => isset($d['place_name']) && trim((string)$d['place_name']) !== '' ? trim((string)$d['place_name']) : null,
         ];
     }
 
@@ -546,8 +548,8 @@ class Schedule {
                 $mType=$rule['monthly_type']??'day'; $curY=(int)$origDt->format('Y'); $curM=(int)$origDt->format('m');
                 for ($i=0;$i<1200;$i++) {
                     $cur=$this->resolveMonthly($mType,$curY,$curM,$origDt,$rule);
-                    if ($cur) $cur=$this->adjustBizDay($cur, $bizDay, $holidays); // 영업일 조정
                     if ($cur && $cur>=$origDt) {
+                        $cur=$this->adjustBizDay($cur, $bizDay, $holidays); // origDt 비교 후 영업일 조정
                         if ($this->hitLimit($cur,$endDateDt,$endCount,$count)) break;
                         $addInst($cur);
                         if ($cur>$rangeEd) break;
@@ -579,8 +581,8 @@ class Schedule {
                 $yType=$rule['yearly_type']??'day'; $curY=(int)$origDt->format('Y');
                 for ($i=0;$i<200;$i++) {
                     $cur=$this->resolveYearly($yType,$curY,$origDt,$rule);
-                    if ($cur) $cur=$this->adjustBizDay($cur, $bizDay, $holidays); // 영업일 조정
                     if ($cur && $cur>=$origDt) {
+                        $cur=$this->adjustBizDay($cur, $bizDay, $holidays); // origDt 비교 후 영업일 조정
                         if ($this->hitLimit($cur,$endDateDt,$endCount,$count)) break;
                         $addInst($cur);
                         if ($cur>$rangeEd) break;
@@ -627,6 +629,10 @@ class Schedule {
         $h=(int)$orig->format('H'); $i=(int)$orig->format('i'); $mo=(int)$orig->format('m');
         if ($t==='day') {
             return new DateTime(sprintf('%04d-%02d-%02d %02d:%02d:00',$y,$mo,(int)$orig->format('j'),$h,$i));
+        }
+        if ($t==='lastday') {
+            $lastDay=(int)(new DateTime(sprintf('%04d-%02d-01',$y,$mo)))->format('t');
+            return new DateTime(sprintf('%04d-%02d-%02d %02d:%02d:00',$y,$mo,$lastDay,$h,$i));
         }
         $dt=$this->nthWeekday($y,$mo,(int)($rule['nth']??1),(int)$orig->format('w'));
         if ($dt) $dt->setTime($h,$i); return $dt;

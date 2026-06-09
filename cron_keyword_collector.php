@@ -255,7 +255,7 @@ if ($mode === 'stock_etf_news' || $mode === '') {
                  . "일시: {$today_date} " . date('H:i') . "\n"
                  . "기사 {$cnt_new}건 → 키워드 " . count($keywords) . "개\n\n"
                  . $kw_str . "\n\n"
-                 . "http://economist.kr/analysis_model.php?mode=news&date={$today_date}";
+                 . "http://economist.kr/analysis_model.php?mode=daily&date={$today_date}";
             KakaoNotify::send($msg);
         }
 

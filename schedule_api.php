@@ -1,11 +1,14 @@
 <?php
+ob_start(); // included 파일 stray output 방지
 require_once "./env/cnt.inc";
 require_once "./env/auth_fnc.php";
 require_login();
 
 // 지도/지오코딩 키 (없으면 GeoCoder 가 안내 메시지 반환)
-if (file_exists("./env/maps.inc")) require_once "./env/maps.inc";
+if (file_exists("./env/maps.inc"))  require_once "./env/maps.inc";
+if (file_exists("./env/kakao.inc")) require_once "./env/kakao.inc";
 
+ob_clean(); // stray output 제거 후 JSON 헤더 출력
 header('Content-Type: application/json; charset=utf-8');
 
 $module = $_GET['module'] ?? $_POST['module'] ?? 'calendar';
@@ -82,6 +85,23 @@ function api_calendar(string $action, PDO $pdo): void {
 
         case 'create':
             $d  = json_decode(file_get_contents('php://input'), true);
+            // 중복 체크: force=true 이면 건너뜀 (사용자가 확인 후 재요청)
+            if (empty($d['force'])) {
+                $title   = trim($d['title'] ?? '');
+                $startDt = $d['start_dt'] ?? null;
+                if ($title !== '' && $startDt !== null) {
+                    $dateOnly = substr($startDt, 0, 10);
+                    $chk = $pdo->prepare(
+                        "SELECT id FROM tbl_schedule WHERE title=:t AND start_dt LIKE :d LIMIT 1"
+                    );
+                    $chk->execute([':t' => $title, ':d' => $dateOnly . '%']);
+                    if ($chk->fetch()) {
+                        echo json_encode(['ok' => false, 'dup' => true,
+                            'msg' => '같은 날짜에 동일 제목의 일정이 이미 있습니다.']);
+                        break;
+                    }
+                }
+            }
             $id = $sch->create($d);
             // 李몄꽍???곌껐
             if (isset($d['attendees']) && is_array($d['attendees'])) {
@@ -375,6 +395,46 @@ function api_geo(string $action): void {
             $address  = $_GET['address']  ?? $_POST['address']  ?? '';
             $provider = $provider === 'google' ? 'google' : 'naver';
             echo json_encode(GeoCoder::geocode($provider, $address), JSON_UNESCAPED_UNICODE);
+            break;
+
+        case 'place_search':
+            $q = trim($_GET['q'] ?? '');
+            if ($q === '') { echo json_encode(['ok'=>false,'msg'=>'검색어를 입력하세요.']); break; }
+            if (!defined('KAKAO_REST_API_KEY') || KAKAO_REST_API_KEY === '') {
+                echo json_encode(['ok'=>false,'msg'=>'카카오 REST API 키 미설정']); break;
+            }
+            $url = 'https://dapi.kakao.com/v2/local/search/keyword.json?'
+                 . http_build_query(['query' => $q, 'size' => 8]);
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT        => 5,
+                CURLOPT_HTTPHEADER     => ['Authorization: KakaoAK ' . KAKAO_REST_API_KEY],
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_SSL_VERIFYHOST => 0,
+                CURLOPT_USERAGENT      => 'Mozilla/5.0',
+            ]);
+            $body     = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $errNo    = curl_errno($ch);
+            $errMsg   = curl_error($ch);
+            curl_close($ch);
+            if ($errNo) {
+                echo json_encode(['ok'=>false,'msg'=>"curl오류({$errNo}): {$errMsg}"]); break;
+            }
+            if ($httpCode !== 200) {
+                echo json_encode(['ok'=>false,'msg'=>"HTTP {$httpCode}",'body'=>substr($body,0,200)]); break;
+            }
+            $data = json_decode($body, true);
+            $places = array_map(fn($d) => [
+                'name'    => $d['place_name'],
+                'address' => $d['road_address_name'] ?: $d['address_name'],
+                'lat'     => $d['y'],
+                'lng'     => $d['x'],
+                'phone'   => $d['phone'] ?? '',
+                'category'=> $d['category_name'] ?? '',
+            ], $data['documents'] ?? []);
+            echo json_encode(['ok' => true, 'places' => $places], JSON_UNESCAPED_UNICODE);
             break;
 
         default:

@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 // classes/Project.class — 프로젝트/그룹 DB 전담
 
 class Project {
@@ -202,4 +202,3 @@ class Project {
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
 }
-?>

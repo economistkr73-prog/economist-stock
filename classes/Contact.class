@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 // classes/Contact.class — 주소록 + 일정 참석자 연결 DB 전담
 
 class Contact {

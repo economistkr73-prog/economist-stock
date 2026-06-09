@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 require_once "./env/cnt.inc";
 require_once "./env/auth_fnc.php";
 require_login();
@@ -713,17 +713,20 @@ body.is-mobile.nav-open .nav-menu, body.w-narrow.nav-open .nav-menu { display: f
         <!-- 위치/지도 -->
         <div class="form-row" id="row-location">
             <label style="min-width:auto;">위치 (선택)
-                <div style="display:flex;gap:8px;align-items:center;margin-top:5px;">
-                    <div class="view-tabs" style="flex-shrink:0;">
-                        <button type="button" id="loc-btn-naver"  class="loc-region-btn active" onclick="setLocRegion('naver')">국내</button>
-                        <button type="button" id="loc-btn-google" class="loc-region-btn"        onclick="setLocRegion('google')">해외</button>
+                <div style="display:flex;gap:5px;align-items:center;margin-top:5px;">
+                    <div style="display:flex;border:1px solid #bdc3c7;border-radius:6px;overflow:hidden;flex-shrink:0;height:34px;">
+                        <button type="button" id="loc-btn-naver"  class="loc-region-btn active" onclick="setLocRegion('naver')"  style="padding:0 10px;font-size:12px;height:34px;font-weight:600;">국내</button>
+                        <button type="button" id="loc-btn-google" class="loc-region-btn"        onclick="setLocRegion('google')" style="padding:0 10px;font-size:12px;height:34px;font-weight:600;">해외</button>
                     </div>
-                    <input type="text" id="f-address" placeholder="주소 입력 (예: 서울특별시 중구 세종대로 110)"
-                           style="flex:1;border:1px solid #dde;border-radius:6px;padding:7px 10px;font-size:13px;"
-                           onkeydown="if(event.key==='Enter'){event.preventDefault();doGeocode();}">
-                    <button type="button" class="btn btn-outline" id="btn-geocode" onclick="doGeocode()" style="flex-shrink:0;">좌표 확인</button>
+                    <input type="text" id="f-address" placeholder="주소 입력 후 엔터"
+                           style="flex:2;min-width:0;border:1px solid #dde;border-radius:6px;padding:0 10px;font-size:13px;height:34px;box-sizing:border-box;"
+                           onkeydown="if(event.key==='Enter'){event.preventDefault();openMapPicker(this.value.trim());}"
+                           oninput="setLocBtn('default'); document.getElementById('f-place-name').value=''">
+                    <input type="text" id="f-place-name" placeholder="상호명"
+                           style="flex:1;min-width:0;border:1px solid #dde;border-radius:6px;padding:0 8px;font-size:13px;height:34px;box-sizing:border-box;">
+                    <button type="button" class="btn btn-outline" id="btn-map-pick" onclick="openMapPicker(document.getElementById('f-address').value.trim())" style="flex-shrink:0;font-size:12px;padding:0 12px;height:34px;">주소확인</button>
                 </div>
-                <div id="loc-status" style="font-size:12px;margin-top:4px;min-height:16px;"></div>
+                <div id="loc-status" style="font-size:12px;margin-top:4px;min-height:0;display:none;"></div>
                 <input type="hidden" id="f-lat">
                 <input type="hidden" id="f-lng">
                 <input type="hidden" id="f-provider" value="naver">
@@ -850,6 +853,7 @@ body.is-mobile.nav-open .nav-menu, body.w-narrow.nav-open .nav-menu { display: f
                     <div id="r-yearly-row" class="r-sub-row" style="display:none;">
                         <label><input type="radio" name="ryt" value="day" checked onchange="updateRPreview()"> <span id="r-y-day-lbl"></span></label>
                         <label><input type="radio" name="ryt" value="weekday" onchange="updateRPreview()"> <span id="r-y-wd-lbl"></span></label>
+                        <label><input type="radio" name="ryt" value="lastday" onchange="updateRPreview()"> <span id="r-y-month-lbl"></span> 말일</label>
                     </div>
                     <!-- 영업일 조정 (매월/매년 공통) -->
                     <div id="r-biz-row" style="display:none;margin-top:10px;padding:8px 10px;background:#f0f4f8;border-radius:6px;border-left:3px solid #3498db;">
@@ -966,8 +970,8 @@ function evLabel(ev) {
 // 클릭 시 상세 모달 대신 외부 지도(네이버/구글)를 바로 새 탭으로 연다.
 function mapMark(ev) {
     if (!(ev.address && String(ev.address).trim())) return '';
-    const tag = ev.provider === 'google' ? 'o' : 'kr';
-    return ` <span class="chip-map-mark" onclick="openMapFromChip(event, ${ev.id})" title="지도 바로 열기">📍(${tag})</span>`;
+    const label = ev.place_name ? ' ' + esc(ev.place_name) : '';
+    return ` <span class="chip-map-mark" onclick="openMapFromChip(event, ${ev.id})" title="지도 바로 열기">📍${label}</span>`;
 }
 
 // 칩의 위치 마커 클릭 → 제공자에 맞는 외부 지도 새 탭
@@ -1099,9 +1103,9 @@ async function api(action, payload={}, method='GET', module='calendar') {
     try {
         if (method==='GET') {
             const q=new URLSearchParams(Object.assign({module,action},payload)).toString();
-            return (await fetch(`${base}?${q}`,{cache:'no-store'})).json();
+            return await (await fetch(`${base}?${q}`,{cache:'no-store'})).json();
         }
-        return (await fetch(`${base}?module=${encodeURIComponent(module)}&action=${encodeURIComponent(action)}`,{
+        return await (await fetch(`${base}?module=${encodeURIComponent(module)}&action=${encodeURIComponent(action)}`,{
             method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)
         })).json();
     } catch(e) { console.error('API error',module,action,e); return {ok:false,data:[]}; }
@@ -1207,10 +1211,9 @@ function renderMonth() {
                 cell.appendChild(bar);
             });
 
-        // 모바일: 모든 일정을 점으로 표시(개수 시각화) / 데스크톱: 칩 3개 + 더보기
+        // 모바일: 점 표시 / 데스크톱: 칩 전부 렌더 후 applyMonthChipLimit()가 높이 기반으로 동적 제한
         const mob=isMobileView();
-        const evsToShow = mob ? regularEvs : regularEvs.slice(0,3);
-        evsToShow.forEach(ev=>{
+        const makeChip = (ev) => {
             const chip=document.createElement('div');
             const isDone=ev.is_done=='1';
             chip.className='event-chip'+(isDone?' done':'');
@@ -1220,16 +1223,10 @@ function renderMonth() {
                 chip.style.color = contrastColor(bg);
             }
             chip.innerHTML=projNumBadge(ev)+esc((isDone?'✓ ':'')+fmtTimeRange(ev)+evLabel(ev))+mapMark(ev);
-            // 모바일: 칩(점) 탭 → 그날 상세 / 데스크톱: 바로 상세 모달
             chip.onclick=e=>{e.stopPropagation(); if(isMobileView()){showDayDetail(ds);} else {openView(ev);}};
-            cell.appendChild(chip);
-        });
-        if (!mob && regularEvs.length>3) {
-            const more=document.createElement('div'); more.className='more-link';
-            more.textContent=`+${regularEvs.length-3}개 더보기`;
-            more.onclick=e=>{e.stopPropagation();switchView('day');S.day=date;loadEvents();};
-            cell.appendChild(more);
-        }
+            return chip;
+        };
+        regularEvs.forEach(ev => cell.appendChild(makeChip(ev)));
         // 셀 탭: 모바일=그날 상세 패널 / 데스크톱=일정 추가
         cell.addEventListener('click',()=>{ if(isMobileView()){showDayDetail(ds);} else {openNew(ds+'T09:00');} });
         grid.appendChild(cell);
@@ -1239,7 +1236,53 @@ function renderMonth() {
         const inMonth = _selDay && _selDay.startsWith(`${S.year}-${pad(S.month)}`);
         const def = inMonth ? _selDay : (sameMonth(TODAY,S.year,S.month) ? ymd(TODAY) : ymd(first));
         showDayDetail(def);
+    } else {
+        requestAnimationFrame(() => applyMonthChipLimit());
     }
+}
+function applyMonthChipLimit() {
+    if (S.view !== 'month' || isMobileView()) return;
+    const grid = document.getElementById('cal-grid');
+    if (!grid) return;
+    // 기존 더보기 버튼 제거 + 숨겨진 칩 전부 다시 보이기 (재측정용)
+    grid.querySelectorAll('.more-link').forEach(e => e.remove());
+    grid.querySelectorAll('.event-chip').forEach(c => c.style.display = '');
+    const cells = [...grid.querySelectorAll('.cal-cell')];
+    if (!cells.length) return;
+    // 모든 행은 grid-auto-rows:1fr → 동일 높이
+    const cellH = cells[0].getBoundingClientRect().height;
+    if (cellH <= 0) return;
+    // 칩 높이 측정 (첫 번째 칩 기준, margin-bottom 2px 포함)
+    let chipH = 20;
+    for (const cell of cells) {
+        const chip = cell.querySelector('.event-chip');
+        if (chip) { const h = chip.getBoundingClientRect().height; if (h > 0) { chipH = h + 2; break; } }
+    }
+    cells.forEach(cell => {
+        const chips = [...cell.querySelectorAll('.event-chip')];
+        if (!chips.length) return;
+        // 이 셀에서 칩에 쓸 수 있는 높이
+        const headerH = (cell.querySelector('.cell-header')?.getBoundingClientRect().height ?? 22) + 3;
+        const barsH = [...cell.querySelectorAll('.proj-bar')]
+                        .reduce((s, b) => s + b.getBoundingClientRect().height + 2, 0);
+        const available = cellH - headerH - barsH - 8; // 8 = 셀 상하 패딩
+        // 전부 들어가면 더보기 불필요
+        if (chips.length * chipH <= available) return;
+        // 더보기 버튼 한 줄 남기고 최대 표시 수 계산
+        const maxVisible = Math.max(1, Math.floor((available - chipH) / chipH));
+        if (maxVisible >= chips.length) return;
+        chips.slice(maxVisible).forEach(c => c.style.display = 'none');
+        const more = document.createElement('div');
+        more.className = 'more-link';
+        more.textContent = `+${chips.length - maxVisible}개 더보기`;
+        const hiddenChips = chips.slice(maxVisible);
+        more.onclick = e => {
+            e.stopPropagation();
+            more.remove();
+            hiddenChips.forEach(c => c.style.display = '');
+        };
+        cell.appendChild(more);
+    });
 }
 function sameMonth(d,y,m){ return d.getFullYear()===y && (d.getMonth()+1)===m; }
 
@@ -1649,10 +1692,11 @@ async function saveEvent() {
         project_id: document.getElementById('f-project-id').value
                     || document.getElementById('f-group-id').value || null,
         // 위치/지도
-        address:  document.getElementById('f-address').value.trim() || null,
-        lat:      document.getElementById('f-lat').value || null,
-        lng:      document.getElementById('f-lng').value || null,
-        provider: document.getElementById('f-address').value.trim() ? document.getElementById('f-provider').value : null,
+        address:    document.getElementById('f-address').value.trim() || null,
+        lat:        document.getElementById('f-lat').value || null,
+        lng:        document.getElementById('f-lng').value || null,
+        provider:   document.getElementById('f-address').value.trim() ? document.getElementById('f-provider').value : null,
+        place_name: document.getElementById('f-place-name').value.trim() || null,
     };
 
     if (ETYPE==='timed') {
@@ -1703,7 +1747,11 @@ async function saveEvent() {
         if (upRes && !upRes.ok) { alert('저장 실패: ' + (upRes.msg||'')); return; }
         if (upRes?.shifted?.length) showToast(`겹치는 일정 ${upRes.shifted.length}건 시간이 자동 조정됐습니다.`);
     } else {
-        const crRes = await api('create', payload, 'POST');
+        let crRes = await api('create', payload, 'POST');
+        if (crRes?.dup) {
+            if (!confirm('같은 날짜에 동일 제목의 일정이 이미 있습니다.\n그래도 등록하시겠습니까?')) return;
+            crRes = await api('create', {...payload, force: true}, 'POST');
+        }
         if (crRes && !crRes.ok) { alert('저장 실패: ' + (crRes.msg||'')); return; }
         if (crRes?.shifted?.length) showToast(`겹치는 일정 ${crRes.shifted.length}건 시간이 자동 조정됐습니다.`);
     }
@@ -1906,8 +1954,14 @@ async function confirmScope(scope) {
 }
 // 현재 뷰의 기준 날짜(앵커) 반환
 function currentAnchor() {
-    if (S.view==='month') return new Date(S.year, S.month-1, 1);
-    if (S.view==='week')  return new Date(S.weekStart);
+    if (S.view==='month') {
+        const todayHere = TODAY.getFullYear()===S.year && TODAY.getMonth()+1===S.month;
+        return todayHere ? new Date(TODAY) : new Date(S.year, S.month-1, 1);
+    }
+    if (S.view==='week') {
+        const todayInWeek = TODAY >= S.weekStart && TODAY <= addDays(S.weekStart, 6);
+        return todayInWeek ? new Date(TODAY) : new Date(S.weekStart);
+    }
     if (S.view==='day')   return new Date(S.day);
     return new Date(S.year, 0, 1); // 목록 = 연 기준
 }
@@ -1942,9 +1996,9 @@ function switchView(v) {
     applyAnchor(currentAnchor());
     S.view=v;
     ['month','week','day','list'].forEach(n=>{
-        document.getElementById(`view-${n}`).style.display=n===v?(n==='month'?'flex':'block'):'none';
+        document.getElementById(`view-${n}`).style.display=n===v?(n==='list'?'block':'flex'):'none';
     });
-    document.querySelectorAll('.view-tabs button').forEach(b=>b.classList.toggle('active',b.dataset.view===v));
+    document.querySelectorAll('.sch-toolbar .view-tabs button').forEach(b=>b.classList.toggle('active',b.dataset.view===v));
     // 하단 상세 패널은 월간뷰에서만
     const mdd=document.getElementById('m-day-detail'); if(mdd) mdd.style.display = (v==='month'?'':'none');
     savePos();
@@ -2252,7 +2306,7 @@ function recurSummaryLine(rule, startDt) {
         }
         case 'yearly': {
             const yt=rule.yearly_type||'day';
-            const s=yt==='day'?`${m}월 ${d}일`:`${m}월 ${nth}번째 ${DAY_KR[dow]}요일`;
+            const s=yt==='day'?`${m}월 ${d}일`:yt==='lastday'?`${m}월 말일`:`${m}월 ${nth}번째 ${DAY_KR[dow]}요일`;
             return iv===1?`매년 ${s}`:`${iv}년마다 ${s}`;
         }
     }
@@ -2365,8 +2419,9 @@ function onRTypeChange(forceType=null) {
         const d   = dt.getDate(), m = dt.getMonth()+1, dow = dt.getDay(), nth = getNth(d);
         document.getElementById('r-m-day-lbl').textContent = `${d}일`;
         document.getElementById('r-m-wd-lbl').textContent  = `${nth}번째 ${DAY_KR[dow]}요일`;
-        document.getElementById('r-y-day-lbl').textContent = `${m}월 ${d}일`;
-        document.getElementById('r-y-wd-lbl').textContent  = `${m}월 ${nth}번째 ${DAY_KR[dow]}요일`;
+        document.getElementById('r-y-day-lbl').textContent   = `${m}월 ${d}일`;
+        document.getElementById('r-y-wd-lbl').textContent    = `${m}월 ${nth}번째 ${DAY_KR[dow]}요일`;
+        document.getElementById('r-y-month-lbl').textContent = `${m}월`;
     }
     updateRPreview();
 }
@@ -2401,7 +2456,7 @@ function updateRPreview() {
         freqText=iv===1?`매월 ${s}`:`${iv}개월마다 ${s}`;
     } else if (type==='yearly') {
         const yt=document.querySelector('input[name="ryt"]:checked')?.value||'day';
-        const s=yt==='day'?`${m}월 ${d}일`:`${m}월 ${nth}번째 ${DAY_KR[dow]}요일`;
+        const s=yt==='day'?`${m}월 ${d}일`:yt==='lastday'?`${m}월 말일`:`${m}월 ${nth}번째 ${DAY_KR[dow]}요일`;
         freqText=iv===1?`매년 ${s}`:`${iv}년마다 ${s}`;
     }
 
@@ -2500,7 +2555,7 @@ document.getElementById('btn-new').onclick    = ()=>openNew(ymdhm(new Date()));
 document.getElementById('btn-cancel').onclick = closeModal;
 document.getElementById('btn-save').onclick   = saveEvent;
 document.getElementById('btn-delete').onclick = deleteEvent;
-document.querySelectorAll('.view-tabs button').forEach(b=>{b.onclick=()=>switchView(b.dataset.view);});
+document.querySelectorAll('.sch-toolbar .view-tabs button').forEach(b=>{b.onclick=()=>switchView(b.dataset.view);});
 document.querySelectorAll('.color-swatch').forEach(el=>{el.onclick=()=>setColor(el.dataset.color);});
 document.getElementById('modal-overlay').addEventListener('click',function(e){
     if(e.target===this && !document.body.classList.contains('is-mobile') && !document.body.classList.contains('w-narrow')) closeModal();
@@ -2515,9 +2570,9 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeModal();closeV
     restorePos();  // localStorage에서 위치/뷰 복원 (없으면 오늘 기준 그대로)
     // 저장된 뷰로 화면 전환 (탭 활성화 + display)
     ['month','week','day','list'].forEach(n=>{
-        document.getElementById(`view-${n}`).style.display = n===S.view ? (n==='month'?'flex':'block') : 'none';
+        document.getElementById(`view-${n}`).style.display = n===S.view ? (n==='list'?'block':'flex') : 'none';
     });
-    document.querySelectorAll('.view-tabs button').forEach(b=>b.classList.toggle('active', b.dataset.view===S.view));
+    document.querySelectorAll('.sch-toolbar .view-tabs button').forEach(b=>b.classList.toggle('active', b.dataset.view===S.view));
     const mdd0=document.getElementById('m-day-detail'); if(mdd0) mdd0.style.display = (S.view==='month'?'':'none');
     requestAnimationFrame(() => loadEvents()); // 레이아웃 확정 후 렌더
 })();
@@ -3017,12 +3072,16 @@ function setLocRegion(region) {   // 'naver'(국내) | 'google'(해외)
     document.getElementById('f-provider').value = region;
     document.getElementById('loc-btn-naver').classList.toggle('active', region === 'naver');
     document.getElementById('loc-btn-google').classList.toggle('active', region === 'google');
+    // 주소확인 버튼: 국내(Naver)만 표시
+    const mapBtn = document.getElementById('btn-map-pick');
+    if (mapBtn) mapBtn.style.display = region === 'naver' ? '' : 'none';
     // 지역을 바꾸면 기존 좌표는 무효 (제공자-좌표 일치 보장)
     const lat = document.getElementById('f-lat').value;
     if (lat) {
         document.getElementById('f-lat').value = '';
         document.getElementById('f-lng').value = '';
-        setLocStatus('지역이 변경됐습니다. "좌표 확인"을 다시 눌러주세요.', 'warn');
+        setLocBtn('default');
+        setLocStatus('지역이 변경됐습니다. 주소확인을 다시 눌러주세요.', 'warn');
     } else {
         setLocStatus('', '');
     }
@@ -3032,6 +3091,45 @@ function setLocStatus(msg, kind) {
     const el = document.getElementById('loc-status');
     el.textContent = msg;
     el.className = kind || '';
+    el.style.display = (msg && (kind === 'err' || kind === 'warn')) ? '' : 'none';
+}
+
+function setLocBtn(state) {
+    const btn = document.getElementById('btn-map-pick');
+    if (!btn) return;
+    if (state === 'ok') {
+        btn.textContent = '확인완료';
+        btn.style.background = '#e74c3c';
+        btn.style.color = '#fff';
+        btn.style.borderColor = '#e74c3c';
+    } else {
+        btn.textContent = '주소확인';
+        btn.style.background = '';
+        btn.style.color = '';
+        btn.style.borderColor = '';
+    }
+}
+
+// ── Daum 주소 검색 팝업 (국내 전용) ─────────────────────────
+function openAddrSearch() {
+    const load = cb => {
+        if (window.daum?.Postcode) { cb(); return; }
+        const s = document.createElement('script');
+        s.src = 'https://t1.daumcdn.net/mapjsapi/bundle/postcode/prod/postcode.v2.js';
+        s.onload = cb;
+        document.head.appendChild(s);
+    };
+    load(() => new daum.Postcode({
+        oncomplete(data) {
+            const addr = data.roadAddress || data.jibunAddress;
+            document.getElementById('f-address').value = addr;
+            document.getElementById('f-address').dataset.geocoded = '';
+            document.getElementById('f-lat').value = '';
+            document.getElementById('f-lng').value = '';
+            setLocStatus('주소 선택됨 — 좌표 확인 중…', '');
+            doGeocode(); // 주소 선택 즉시 자동 좌표 확인
+        }
+    }).open());
 }
 
 // ── 주소 → 좌표 (서버 지오코딩 호출) ─────────────────────────
@@ -3050,13 +3148,15 @@ async function doGeocode() {
     if (res && res.ok) {
         document.getElementById('f-lat').value = res.lat;
         document.getElementById('f-lng').value = res.lng;
-        document.getElementById('f-provider').value = res.provider;  // 좌표를 찾은 제공자로 확정
+        document.getElementById('f-provider').value = res.provider;
         document.getElementById('f-address').dataset.geocoded = address;
-        setLocStatus(`✔ 좌표 확인됨 (${(+res.lat).toFixed(5)}, ${(+res.lng).toFixed(5)})`, 'ok');
+        setLocBtn('ok');
+        setLocStatus('', '');
         return true;
     }
     document.getElementById('f-lat').value = '';
     document.getElementById('f-lng').value = '';
+    setLocBtn('default');
     setLocStatus('✕ ' + (res?.msg || '주소를 찾을 수 없습니다.'), 'err');
     return false;
 }
@@ -3088,7 +3188,9 @@ function resetLocationForm() {
     document.getElementById('f-address').dataset.geocoded = '';
     document.getElementById('f-lat').value = '';
     document.getElementById('f-lng').value = '';
+    document.getElementById('f-place-name').value = '';
     setLocRegion('naver');
+    setLocBtn('default');
     setLocStatus('', '');
 }
 
@@ -3100,8 +3202,9 @@ function fillLocationForm(ev) {
     document.getElementById('f-address').dataset.geocoded = (ev.lat && ev.lng) ? (ev.address || '') : '';
     document.getElementById('f-lat').value = ev.lat || '';
     document.getElementById('f-lng').value = ev.lng || '';
-    if (ev.address && ev.lat && ev.lng) setLocStatus('✔ 저장된 좌표', 'ok');
-    else setLocStatus('', '');
+    document.getElementById('f-place-name').value = ev.place_name || '';
+    setLocBtn(ev.address && ev.lat && ev.lng ? 'ok' : 'default');
+    setLocStatus('', '');
 }
 
 // ── 외부 지도 링크 ───────────────────────────────────────────
@@ -3122,7 +3225,7 @@ function loadNaverSDK() {
         if (window.naver && window.naver.maps) return resolve();
         if (!MAP_CFG.naverClientId) return reject('no-key');
         const s = document.createElement('script');
-        s.src = 'https://oapi.map.naver.com/openapi/v3/maps.js?ncpKeyId=' + encodeURIComponent(MAP_CFG.naverClientId);
+        s.src = 'https://oapi.map.naver.com/openapi/v3/maps.js?ncpKeyId=' + encodeURIComponent(MAP_CFG.naverClientId) + '&submodules=geocoder';
         s.onload = () => resolve();
         s.onerror = () => reject('load-fail');
         document.head.appendChild(s);
@@ -3151,7 +3254,8 @@ function renderViewLocation(ev) {
     if (!hasAddr && !hasCoord) { wrap.style.display = 'none'; return; }
 
     wrap.style.display = '';
-    document.getElementById('view-address').textContent = '📍 ' + (ev.address || `${ev.lat}, ${ev.lng}`);
+    const addrLine = (ev.place_name ? ev.place_name + '  ' : '') + (ev.address || `${ev.lat}, ${ev.lng}`);
+    document.getElementById('view-address').textContent = '📍 ' + addrLine;
 
     const provider = ev.provider === 'google' ? 'google' : 'naver';
     const mapEl    = document.getElementById('view-map');
@@ -3201,17 +3305,200 @@ function showMapFallback(mapEl, fbEl, name) {
 
 // 좁은 폭(태블릿/가로모드 등) 폴백: body.w-narrow 토글
 (function(){
+    let _chipLimitTimer = null;
     const apply = () => {
         const now = window.innerWidth <= 820;
         const was = document.body.classList.contains('w-narrow');
         document.body.classList.toggle('w-narrow', now);
-        // 폭 기준 모바일 여부가 바뀌면 월간뷰를 다시 그려 칩↔점 전환
-        if (was!==now && S.view==='month' && typeof renderMonth==='function') renderMonth();
+        if (was!==now && S.view==='month' && typeof renderMonth==='function') {
+            renderMonth(); // 모바일↔데스크톱 전환: 전체 재렌더
+        } else if (!now && S.view==='month') {
+            // 데스크톱에서 창 폭 변경 시 칩 limit만 재계산 (debounce)
+            clearTimeout(_chipLimitTimer);
+            _chipLimitTimer = setTimeout(applyMonthChipLimit, 150);
+        }
     };
     apply();
     window.addEventListener('resize', apply);
 })();
+
+// ══════════════════════════════════════════════════════════════
+//  지도 주소 선택 (Naver Maps 클릭/검색 → 주소 역지오코딩)
+// ══════════════════════════════════════════════════════════════
+let _mpMap = null, _mpMarker = null, _mpPicked = null;
+
+function openMapPicker(query) {
+    if (!MAP_CFG.naverClientId) { alert('네이버 지도 키가 설정되지 않았습니다.'); return; }
+    document.getElementById('map-picker-overlay').style.display = 'flex';
+    document.getElementById('mp-selected-addr').textContent = '지도를 클릭하거나 검색으로 위치를 선택하세요.';
+    document.getElementById('mp-btn-select').disabled = true;
+    document.getElementById('mp-status').textContent = '지도 불러오는 중…';
+    _mpPicked = null;
+    if (query) {
+        document.getElementById('mp-search').value = query;
+    }
+    loadNaverSDK().then(() => {
+        document.getElementById('mp-status').textContent = '';
+        if (!_mpMap) {
+            // 최초 생성
+            const initPos = new naver.maps.LatLng(37.5665, 126.9780);
+            _mpMap = new naver.maps.Map('mp-map', { center: initPos, zoom: 13 });
+            _mpMarker = new naver.maps.Marker({ map: _mpMap, position: initPos, visible: false });
+            naver.maps.Event.addListener(_mpMap, 'click', e => mpPickCoord(e.coord));
+        } else {
+            naver.maps.Event.trigger(_mpMap, 'resize');
+        }
+        // 검색어가 넘어온 경우 자동 검색 (이미 좌표가 있어도 검색 우선)
+        if (query) {
+            mpSearch();
+        } else {
+            // 기존 좌표가 있으면 그 위치로 이동
+            const lat = document.getElementById('f-lat').value;
+            const lng = document.getElementById('f-lng').value;
+            if (lat && lng) {
+                const pos = new naver.maps.LatLng(+lat, +lng);
+                _mpMap.setCenter(pos); _mpMap.setZoom(16);
+                _mpMarker.setPosition(pos); _mpMarker.setVisible(true);
+            }
+        }
+    }).catch(() => {
+        document.getElementById('mp-status').textContent = '지도를 불러오지 못했습니다. (네이버 키/도메인 확인)';
+    });
+}
+
+function closeMapPicker() {
+    document.getElementById('map-picker-overlay').style.display = 'none';
+}
+
+function mpPickCoord(coord) {
+    _mpMarker.setPosition(coord); _mpMarker.setVisible(true);
+    document.getElementById('mp-selected-addr').textContent = '주소 변환 중…';
+    document.getElementById('mp-status').textContent = '';
+    document.getElementById('mp-btn-select').disabled = true;
+    // orders를 문자열로 지정 (OrderType 상수 의존 없이 안정적)
+    naver.maps.Service.reverseGeocode({ coords: coord, orders: 'roadaddr,addr' }, (status, res) => {
+        let addr = '';
+        if (status === naver.maps.Service.Status.OK) {
+            addr = res.v2?.address?.roadAddress || res.v2?.address?.jibunAddress || '';
+        }
+        _mpPicked = { lat: coord.lat(), lng: coord.lng(), address: addr, name: '' };
+        // 주소 조회 실패해도 좌표로 선택 가능하게 허용
+        document.getElementById('mp-selected-addr').textContent =
+            addr || `${coord.lat().toFixed(6)}, ${coord.lng().toFixed(6)} (주소 미확인)`;
+        document.getElementById('mp-btn-select').disabled = false;
+    });
+}
+
+// 검색: 상호명/키워드(Kakao) 우선, 없으면 주소 지오코딩(Naver) 폴백
+async function mpSearch() {
+    const q = document.getElementById('mp-search').value.trim();
+    if (!q) return;
+    mpHideResults();
+    document.getElementById('mp-status').textContent = '검색 중…';
+
+    // 1. 상호명/키워드 검색 (Kakao)
+    const placeRes = await api('place_search', { q }, 'GET', 'geo');
+    if (placeRes?.ok && placeRes.places?.length) {
+        document.getElementById('mp-status').textContent = `${placeRes.places.length}건 검색됨`;
+        mpShowResults(placeRes.places);
+        return;
+    }
+
+    // 2. 주소 지오코딩 폴백 (Naver)
+    const geoRes = await api('geocode', { provider: 'naver', address: q }, 'GET', 'geo');
+    if (!geoRes?.ok) {
+        document.getElementById('mp-status').textContent = '검색 결과가 없습니다.';
+        return;
+    }
+    document.getElementById('mp-status').textContent = '';
+    const coord = new naver.maps.LatLng(+geoRes.lat, +geoRes.lng);
+    _mpMap.setCenter(coord); _mpMap.setZoom(16);
+    mpPickCoord(coord);
+}
+
+let _mpPlaces = [];
+function mpShowResults(places) {
+    _mpPlaces = places;
+    let list = document.getElementById('mp-results');
+    if (!list) {
+        list = document.createElement('div');
+        list.id = 'mp-results';
+        list.style.cssText = [
+            'position:absolute;top:calc(100% + 2px);left:0;right:0',
+            'background:#fff;border:1px solid #c8d6e5;border-radius:8px',
+            'box-shadow:0 4px 16px rgba(0,0,0,.15);z-index:100',
+            'max-height:220px;overflow-y:auto'
+        ].join(';');
+        const wrap = document.getElementById('mp-search').closest('div');
+        wrap.style.position = 'relative';
+        wrap.appendChild(list);
+    }
+    list.innerHTML = places.map((p, i) => `
+        <div data-idx="${i}" class="mp-place-item"
+             style="padding:8px 12px;cursor:pointer;border-bottom:1px solid #f0f0f0;">
+            <div style="font-weight:600;font-size:13px;">${esc(p.name)}</div>
+            <div style="font-size:11px;color:#888;">${esc(p.address)}${p.phone ? ' · ' + esc(p.phone) : ''}</div>
+        </div>`).join('');
+    list.querySelectorAll('.mp-place-item').forEach(el => {
+        el.addEventListener('mouseover', () => el.style.background = '#f5f9ff');
+        el.addEventListener('mouseout',  () => el.style.background = '');
+        el.addEventListener('click', () => mpSelectPlace(+el.dataset.idx));
+    });
+    list.style.display = '';
+}
+
+function mpHideResults() {
+    const el = document.getElementById('mp-results');
+    if (el) el.style.display = 'none';
+}
+
+function mpSelectPlace(i) {
+    const p = _mpPlaces[i];
+    const coord = new naver.maps.LatLng(+p.lat, +p.lng);
+    _mpMap.setCenter(coord); _mpMap.setZoom(17);
+    mpHideResults();
+    _mpPicked = { lat: +p.lat, lng: +p.lng, address: p.address, name: p.name || '' };
+    _mpMarker.setPosition(coord); _mpMarker.setVisible(true);
+    document.getElementById('mp-selected-addr').textContent = p.name + '  ' + p.address;
+    document.getElementById('mp-btn-select').disabled = false;
+    document.getElementById('mp-status').textContent = '';
+}
+
+function confirmMapPick() {
+    if (!_mpPicked) return;
+    document.getElementById('f-address').value = _mpPicked.address;
+    document.getElementById('f-address').dataset.geocoded = _mpPicked.address;
+    document.getElementById('f-lat').value = _mpPicked.lat;
+    document.getElementById('f-lng').value = _mpPicked.lng;
+    document.getElementById('f-place-name').value = _mpPicked.name || '';
+    setLocRegion('naver');
+    setLocBtn('ok');
+    setLocStatus('', '');
+    closeMapPicker();
+}
 </script>
+
+<!-- 지도 주소 선택 모달 -->
+<div id="map-picker-overlay"
+     style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:6000;align-items:center;justify-content:center;"
+     onclick="if(event.target===this)closeMapPicker()">
+    <div style="background:#fff;border-radius:12px;width:min(700px,96vw);height:min(580px,90vh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.3);">
+        <div style="display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid #eee;flex-shrink:0;">
+            <strong style="white-space:nowrap;font-size:14px;">📍 위치 선택</strong>
+            <input type="text" id="mp-search" placeholder="장소·주소 검색 후 Enter"
+                   style="flex:1;border:1px solid #dde;border-radius:6px;padding:7px 10px;font-size:13px;"
+                   onkeydown="if(event.key==='Enter'){mpSearch();}">
+            <button type="button" class="btn btn-primary" onclick="mpSearch()" style="flex-shrink:0;">검색</button>
+            <button type="button" class="btn btn-outline" onclick="closeMapPicker()" style="flex-shrink:0;padding:6px 10px;">✕</button>
+        </div>
+        <div id="mp-status" style="font-size:12px;padding:3px 16px;min-height:18px;color:#888;flex-shrink:0;"></div>
+        <div id="mp-map" style="flex:1;min-height:0;"></div>
+        <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-top:1px solid #eee;flex-shrink:0;">
+            <div id="mp-selected-addr" style="flex:1;font-size:13px;color:#555;">지도를 클릭하거나 검색으로 위치를 선택하세요.</div>
+            <button type="button" class="btn btn-primary" id="mp-btn-select" onclick="confirmMapPick()" style="flex-shrink:0;" disabled>이 위치 선택</button>
+        </div>
+    </div>
+</div>
 </body>
 </html>
 <?php
