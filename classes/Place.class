@@ -1,0 +1,513 @@
+<?php
+/**
+ * Place.class — 전국 여행지 DB (DB 전담)
+ *
+ * 설계 (PROJECT_BRIEF.md / travel_db_schema.sql):
+ *   - place      : 지도 마커 1개 = 장소 1건 (여행지/축제/맛집). dedup_key 로 중복 제거
+ *   - place_ref  : 한 장소를 다룬 출처자료 N건 (기사·유튜브·블로그…). url_hash 로 중복 제거
+ *   - "장소의 종류(category)" 와 "정보의 출처(source_type)" 는 다른 축 → 테이블 분리
+ *   - 자주 거르는 값만 정규 컬럼, 나머지는 attributes(JSON) 한 칸
+ *   - 스크래핑 대비: geocode_status(pending/ok/failed) 로 좌표화 추적, 지도엔 'ok' 만
+ *
+ * 주의: 기존 Travel.class / tbl_travel*(구글드라이브 사진일기) 와는 완전히 별개 기능.
+ * 의존: env/cnt.inc 의 $pdo (지오코딩은 GeoCoder.class 가 별도 담당)
+ */
+class Place
+{
+    private PDO $pdo;
+
+    public function __construct(PDO $pdo)
+    {
+        $this->pdo = $pdo;
+    }
+
+    // ======================================================
+    // 0. 테이블 보장 (Travel/Schedule ensureTable 패턴)
+    // ======================================================
+    public function ensureTable(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS place (
+                id             BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                name           VARCHAR(255)    NOT NULL,
+                category       ENUM('travel','event','restaurant','etc')
+                                               NOT NULL DEFAULT 'travel',
+                address        VARCHAR(500)    NULL,
+                region_lv1     VARCHAR(40)     NULL,
+                region_lv2     VARCHAR(40)     NULL,
+                region_lv3     VARCHAR(40)     NULL,
+                lat            DECIMAL(10,7)   NULL,
+                lng            DECIMAL(10,7)   NULL,
+                geocode_status ENUM('pending','ok','failed')
+                                               NOT NULL DEFAULT 'pending',
+                period_start   DATE            NULL,
+                period_end     DATE            NULL,
+                phone          VARCHAR(40)     NULL,
+                attributes     JSON            NULL,
+                dedup_key      VARCHAR(120)    NULL,
+                is_active      TINYINT(1)      NOT NULL DEFAULT 1,
+                created_at     DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at     DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                               ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY idx_geo      (lat, lng),
+                KEY idx_region   (region_lv1, region_lv2),
+                KEY idx_category (category),
+                KEY idx_period   (period_start, period_end),
+                UNIQUE KEY uq_dedup (dedup_key)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        ");
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS place_ref (
+                id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                place_id      BIGINT UNSIGNED NOT NULL,
+                source_type   ENUM('article','youtube','blog','official','manual')
+                                              NOT NULL,
+                title         VARCHAR(500)    NULL,
+                url           VARCHAR(1000)   NULL,
+                url_hash      CHAR(40)        GENERATED ALWAYS AS (SHA1(url)) STORED,
+                summary       TEXT            NULL,
+                published_at  DATE            NULL,
+                extra         JSON            NULL,
+                created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                CONSTRAINT fk_ref_place FOREIGN KEY (place_id)
+                    REFERENCES place(id) ON DELETE CASCADE,
+                KEY idx_place  (place_id),
+                KEY idx_source (source_type),
+                UNIQUE KEY uq_url (url_hash)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        ");
+
+        // 한시적 공개 공유 링크 (페이지 전체를 토큰으로 읽기전용 공개). travel.php 패턴 재사용
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS tbl_place_share (
+                id          INT AUTO_INCREMENT PRIMARY KEY,
+                token       VARCHAR(64)  NOT NULL,
+                expires_at  DATETIME     NOT NULL,
+                revoked     TINYINT(1)   NOT NULL DEFAULT 0,
+                created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_place_share_token (token)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+    }
+
+    // ======================================================
+    // 1. 적재 (ingest) — 스크래퍼/수동입력 공통
+    // ======================================================
+
+    /**
+     * 장소 중복 판정 키: 정규화한 이름 + 시군구(region_lv2).
+     * 같은 가게가 표기만 살짝 달라도(공백/대소문자) 한 마커로 묶이도록.
+     */
+    public static function makeDedupKey(string $name, ?string $region_lv2): string
+    {
+        $norm = preg_replace('/\s+/u', '', mb_strtolower(trim($name)));
+        return md5($norm . '|' . trim((string)$region_lv2));
+    }
+
+    /**
+     * 장소 upsert — dedup_key 기준. 있으면 갱신, 없으면 생성하고 place.id 반환.
+     * $p: name, category, address, region_lv1~3, lat, lng, geocode_status,
+     *     period_start, period_end, phone, attributes(array|null), dedup_key(선택)
+     */
+    public function upsertPlace(array $p): int
+    {
+        $name = trim((string)($p['name'] ?? ''));
+        if ($name === '') {
+            throw new InvalidArgumentException('place name 은 필수입니다.');
+        }
+        $dedup = $p['dedup_key'] ?? self::makeDedupKey($name, $p['region_lv2'] ?? null);
+
+        // 좌표가 들어오면 자동으로 ok, 아니면 pending (명시값 우선)
+        $status = $p['geocode_status']
+            ?? ((isset($p['lat'], $p['lng']) && $p['lat'] !== null && $p['lng'] !== null) ? 'ok' : 'pending');
+
+        $attr = isset($p['attributes']) && $p['attributes'] !== null
+            ? json_encode($p['attributes'], JSON_UNESCAPED_UNICODE)
+            : null;
+
+        // category 는 명시적으로 들어왔을 때만 갱신(미지정 재적재가 기존 분류를 'travel' 로 덮는 것 방지).
+        // INSERT 에는 항상 값이 필요하므로 기본 'travel' 을 넣되, UPDATE 절에서만 조건부 반영.
+        $catProvided = array_key_exists('category', $p) && $p['category'] !== null && $p['category'] !== '';
+        $catUpdate   = $catProvided ? 'category = VALUES(category),' : '';
+
+        $sql = "INSERT INTO place
+                  (name, category, address, region_lv1, region_lv2, region_lv3,
+                   lat, lng, geocode_status, period_start, period_end,
+                   phone, attributes, dedup_key)
+                VALUES
+                  (:name, :category, :address, :r1, :r2, :r3,
+                   :lat, :lng, :status, :pstart, :pend,
+                   :phone, :attr, :dedup)
+                ON DUPLICATE KEY UPDATE
+                   id             = LAST_INSERT_ID(id),  -- UPDATE 시에도 lastInsertId()가 올바른 id 반환
+                   name           = VALUES(name),
+                   {$catUpdate}
+                   address        = COALESCE(VALUES(address), address),
+                   region_lv1     = COALESCE(VALUES(region_lv1), region_lv1),
+                   region_lv2     = COALESCE(VALUES(region_lv2), region_lv2),
+                   region_lv3     = COALESCE(VALUES(region_lv3), region_lv3),
+                   lat            = COALESCE(VALUES(lat), lat),
+                   lng            = COALESCE(VALUES(lng), lng),
+                   -- 들어온 행이 실제로 좌표 정보를 가질 때만 status 갱신
+                   -- (좌표 없는 재적재가 기존 'ok' 를 'pending' 으로 덮어 마커가 사라지는 것 방지)
+                   geocode_status = IF(VALUES(lat) IS NOT NULL, VALUES(geocode_status), geocode_status),
+                   period_start   = COALESCE(VALUES(period_start), period_start),
+                   period_end     = COALESCE(VALUES(period_end), period_end),
+                   phone          = COALESCE(VALUES(phone), phone),
+                   attributes     = COALESCE(VALUES(attributes), attributes),
+                   updated_at     = CURRENT_TIMESTAMP";
+        $st = $this->pdo->prepare($sql);
+        $st->execute([
+            ':name'     => $name,
+            ':category' => $p['category'] ?? 'travel',
+            ':address'  => $p['address'] ?? null,
+            ':r1'       => $p['region_lv1'] ?? null,
+            ':r2'       => $p['region_lv2'] ?? null,
+            ':r3'       => $p['region_lv3'] ?? null,
+            ':lat'      => $p['lat'] ?? null,
+            ':lng'      => $p['lng'] ?? null,
+            ':status'   => $status,
+            ':pstart'   => $p['period_start'] ?? null,
+            ':pend'     => $p['period_end'] ?? null,
+            ':phone'    => $p['phone'] ?? null,
+            ':attr'     => $attr,
+            ':dedup'    => $dedup,
+        ]);
+
+        // id = LAST_INSERT_ID(id) 트릭 덕에 INSERT/UPDATE 양쪽 모두 올바른 id 반환.
+        // (만일을 위한 안전망: 그래도 0 이면 dedup_key 로 재조회)
+        $id = (int)$this->pdo->lastInsertId();
+        if ($id === 0) {
+            $q = $this->pdo->prepare("SELECT id FROM place WHERE dedup_key = ?");
+            $q->execute([$dedup]);
+            $id = (int)$q->fetchColumn();
+        }
+        return $id;
+    }
+
+    /**
+     * 출처자료 추가 — url_hash 기준 INSERT IGNORE (같은 링크 중복 무시).
+     * $ref: source_type, title, url, summary, published_at, extra(array|null)
+     * 반환: 새로 들어갔으면 true, 중복이라 무시됐으면 false
+     */
+    public function addRef(int $placeId, array $ref): bool
+    {
+        $extra = isset($ref['extra']) && $ref['extra'] !== null
+            ? json_encode($ref['extra'], JSON_UNESCAPED_UNICODE)
+            : null;
+
+        $st = $this->pdo->prepare(
+            "INSERT IGNORE INTO place_ref
+               (place_id, source_type, title, url, summary, published_at, extra)
+             VALUES (:pid, :stype, :title, :url, :summary, :pub, :extra)"
+        );
+        $st->execute([
+            ':pid'     => $placeId,
+            ':stype'   => $ref['source_type'] ?? 'manual',
+            ':title'   => $ref['title'] ?? null,
+            ':url'     => $ref['url'] ?? null,
+            ':summary' => $ref['summary'] ?? null,
+            ':pub'     => $ref['published_at'] ?? null,
+            ':extra'   => $extra,
+        ]);
+        return $st->rowCount() > 0;
+    }
+
+    /**
+     * 표준 입력 포맷 한 건을 통째로 적재 (스크래퍼 ↔ 적재 공통 진입점).
+     * $item: { name, category, address, phone, region_*, lat, lng, attributes{},
+     *          ref: { source_type, title, url, summary, published_at, extra{} } }
+     * 반환: ['place_id'=>int, 'ref_added'=>bool]
+     */
+    public function ingest(array $item): array
+    {
+        // 두 형식 모두 지원:
+        //   중첩 { place:{...}, ref:{...} }  (크롤러 파서 출력, 브리프 §6)
+        //   평면 { name,..., ref:{...} }     (seed/수동입력, 브리프 §7)
+        $placeData = $item['place'] ?? $item;
+        $ref       = $item['ref']   ?? null;
+
+        $placeId  = $this->upsertPlace($placeData);
+        $refAdded = false;
+        if (!empty($ref) && is_array($ref)) {
+            $refAdded = $this->addRef($placeId, $ref);
+        }
+        return ['place_id' => $placeId, 'ref_added' => $refAdded];
+    }
+
+    // ======================================================
+    // 2. 지도 검색 — 반경 내 장소 → GeoJSON
+    // ======================================================
+
+    /**
+     * 좌표 반경 검색. 1차 위경도 박스(인덱스) → 2차 Haversine 거리필터 → GeoJSON.
+     * @return array GeoJSON FeatureCollection (그대로 json_encode 하면 됨)
+     */
+    public function searchNearby(
+        float $lat, float $lng, float $radiusKm = 5.0,
+        ?string $category = null, ?string $keyword = null, int $limit = 300
+    ): array {
+        // 반경에 비례한 박스 (위도 1°≈111km, 경도 1°≈111*cos(위도)km)
+        $latDelta = $radiusKm / 111.0;
+        $cos      = max(cos(deg2rad($lat)), 0.01); // 극지 방어
+        $lngDelta = $radiusKm / (111.0 * $cos);
+
+        $sql = "SELECT p.id, p.name, p.category, p.lat, p.lng, p.phone,
+                       p.address, p.region_lv1, p.region_lv2,
+                       p.period_start, p.period_end, p.attributes,
+                       (6371 * ACOS(LEAST(1.0,
+                          COS(RADIANS(:lat_c)) * COS(RADIANS(p.lat)) *
+                          COS(RADIANS(p.lng) - RADIANS(:lng_c)) +
+                          SIN(RADIANS(:lat_s)) * SIN(RADIANS(p.lat))
+                       ))) AS dist_km,
+                       (SELECT COUNT(*) FROM place_ref r WHERE r.place_id = p.id) AS ref_count
+                FROM place p
+                WHERE p.is_active = 1
+                  AND p.geocode_status = 'ok'
+                  AND p.lat BETWEEN :lat_min AND :lat_max
+                  AND p.lng BETWEEN :lng_min AND :lng_max";
+        $args = [
+            ':lat_c'   => $lat, ':lng_c' => $lng, ':lat_s' => $lat,
+            ':lat_min' => $lat - $latDelta, ':lat_max' => $lat + $latDelta,
+            ':lng_min' => $lng - $lngDelta, ':lng_max' => $lng + $lngDelta,
+        ];
+        if ($category !== null && $category !== '') {
+            $sql .= " AND p.category = :category";
+            $args[':category'] = $category;
+        }
+        if ($keyword !== null && $keyword !== '') {
+            $sql .= " AND p.name LIKE :kw";
+            $args[':kw'] = '%' . $keyword . '%';
+        }
+        $sql .= " HAVING dist_km <= :radius
+                  ORDER BY dist_km
+                  LIMIT {$limit}";
+        $args[':radius'] = $radiusKm;
+
+        $st = $this->pdo->prepare($sql);
+        $st->execute($args);
+
+        $features = [];
+        while ($row = $st->fetch(PDO::FETCH_ASSOC)) {
+            $features[] = [
+                'type' => 'Feature',
+                'geometry' => [
+                    'type' => 'Point',
+                    'coordinates' => [(float)$row['lng'], (float)$row['lat']], // GeoJSON = [경도, 위도]
+                ],
+                'properties' => [
+                    'id'           => (int)$row['id'],
+                    'name'         => $row['name'],
+                    'category'     => $row['category'],
+                    'phone'        => $row['phone'],
+                    'address'      => $row['address'],
+                    'region_lv1'   => $row['region_lv1'],
+                    'region_lv2'   => $row['region_lv2'],
+                    'period_start' => $row['period_start'],
+                    'period_end'   => $row['period_end'],
+                    'attributes'   => $row['attributes'] ? json_decode($row['attributes'], true) : null,
+                    'ref_count'    => (int)$row['ref_count'],
+                    'dist_km'      => round((float)$row['dist_km'], 3),
+                ],
+            ];
+        }
+        return ['type' => 'FeatureCollection', 'features' => $features];
+    }
+
+    /**
+     * 마커 클릭 시: 그 장소의 출처자료 링크 목록 (최신순).
+     */
+    public function getRefs(int $placeId): array
+    {
+        $st = $this->pdo->prepare(
+            "SELECT id, source_type, title, url, summary, published_at, extra
+               FROM place_ref
+              WHERE place_id = ?
+              ORDER BY published_at DESC, id DESC"
+        );
+        $st->execute([$placeId]);
+        $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($rows as &$r) {
+            $r['extra'] = $r['extra'] ? json_decode($r['extra'], true) : null;
+        }
+        return $rows;
+    }
+
+    /**
+     * 장소명으로 좌표 1건 찾기 (주소 지오코딩이 실패하는 POI 이름 검색 폴백용).
+     * 정확히 일치하는 이름을 우선, 없으면 부분일치. ok 상태만 대상.
+     * @return array|null ['name','lat','lng'] 또는 null
+     */
+    public function findByName(string $kw): ?array
+    {
+        $kw = trim($kw);
+        if ($kw === '') return null;
+        $st = $this->pdo->prepare(
+            "SELECT name, lat, lng
+               FROM place
+              WHERE geocode_status = 'ok' AND name LIKE :kw
+              ORDER BY (name = :exact) DESC, id
+              LIMIT 1"
+        );
+        $st->execute([':kw' => '%' . $kw . '%', ':exact' => $kw]);
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        return $row ?: null;
+    }
+
+    // ======================================================
+    // 3. 지오코딩 배치 지원 (GeoCoder.class 가 실제 API 호출)
+    // ======================================================
+
+    /** 좌표화 안 된(pending) + 주소 있는 행 N개 — 배치 지오코딩 대상 */
+    public function pendingForGeocode(int $limit = 50): array
+    {
+        $st = $this->pdo->prepare(
+            "SELECT id, name, address, region_lv1, region_lv2
+               FROM place
+              WHERE geocode_status = 'pending'
+                AND address IS NOT NULL AND address <> ''
+              ORDER BY id
+              LIMIT {$limit}"
+        );
+        $st->execute();
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 주소가 없는 pending (장소명만 있는 건) — 이름+지역으로 카카오 키워드 좌표화용 */
+    public function pendingByName(int $limit = 50): array
+    {
+        $st = $this->pdo->prepare(
+            "SELECT id, name, region_lv1, region_lv2
+               FROM place
+              WHERE geocode_status = 'pending'
+                AND (address IS NULL OR address = '')
+                AND name IS NOT NULL AND name <> ''
+              ORDER BY id
+              LIMIT {$limit}"
+        );
+        $st->execute();
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 지오코딩 결과 반영. 성공이면 lat/lng+ok, 실패면 failed */
+    public function setGeocode(int $id, ?float $lat, ?float $lng, string $status): void
+    {
+        $st = $this->pdo->prepare(
+            "UPDATE place SET lat = :lat, lng = :lng, geocode_status = :st WHERE id = :id"
+        );
+        $st->execute([
+            ':lat' => $status === 'ok' ? $lat : null,
+            ':lng' => $status === 'ok' ? $lng : null,
+            ':st'  => $status,
+            ':id'  => $id,
+        ]);
+    }
+
+    // ======================================================
+    // 한시적 공개 공유 링크 (로그인 없이 지도 열람) — travel.php 패턴 재사용
+    // ======================================================
+
+    /** 공유 링크 발급. 기존 활성 링크는 무효화하고 새 토큰 1개만 유지. @return [token, expires_at] */
+    public function createShare(int $ttlSeconds): array
+    {
+        $this->revokeShares();                                // 활성 링크는 1개만
+        $ttl   = max(60, min($ttlSeconds, 30 * 24 * 3600));   // 1분~30일 클램프
+        $token = bin2hex(random_bytes(16));                   // 추측 불가 32자리
+        $this->pdo->prepare(
+            "INSERT INTO tbl_place_share (token, expires_at)
+             VALUES (?, DATE_ADD(NOW(), INTERVAL ? SECOND))"
+        )->execute([$token, $ttl]);
+        $row = $this->getShareByToken($token);
+        return ['token' => $token, 'expires_at' => $row['expires_at'] ?? null];
+    }
+
+    /** 토큰으로 유효한(미만료·미취소) 공유 조회 — 게스트 접근 검증용 */
+    public function getValidShare(string $token): ?array
+    {
+        if ($token === '') return null;
+        $st = $this->pdo->prepare(
+            "SELECT * FROM tbl_place_share
+              WHERE token = ? AND revoked = 0 AND expires_at > NOW() LIMIT 1"
+        );
+        $st->execute([$token]);
+        return $st->fetch() ?: null;
+    }
+
+    /** 현재 활성 공유 1건 (소유자 화면의 기존 링크 표시용) */
+    public function getActiveShare(): ?array
+    {
+        $st = $this->pdo->query(
+            "SELECT * FROM tbl_place_share
+              WHERE revoked = 0 AND expires_at > NOW()
+              ORDER BY id DESC LIMIT 1"
+        );
+        return $st->fetch() ?: null;
+    }
+
+    /** 모든 활성 공유 즉시 차단 ('공유 중단') */
+    public function revokeShares(): void
+    {
+        $this->pdo->exec("UPDATE tbl_place_share SET revoked = 1 WHERE revoked = 0");
+    }
+
+    private function getShareByToken(string $token): ?array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM tbl_place_share WHERE token = ? LIMIT 1");
+        $st->execute([$token]);
+        return $st->fetch() ?: null;
+    }
+
+    /**
+     * 좌표 없는(failed/pending) 장소 목록 — 지도에 안 뜨는 미좌표 건을 패널에서 열람.
+     * 대표 출처(최신 ref 1건) 링크/제목과 출처 수를 함께 반환. 활성(is_active) 건만.
+     * @return array 각 행: id,name,category,region_lv1,region_lv2,geocode_status,ref_cnt,top_url,top_title
+     */
+    public function listUngeocoded(string $status = 'failed', int $limit = 3000): array
+    {
+        $status = in_array($status, ['failed', 'pending'], true) ? $status : 'failed';
+        $limit  = max(1, min(5000, $limit));
+        $sql =
+            "SELECT p.id, p.name, p.category, p.region_lv1, p.region_lv2, p.geocode_status,
+                    (SELECT COUNT(*) FROM place_ref r WHERE r.place_id = p.id) AS ref_cnt,
+                    (SELECT r.url   FROM place_ref r WHERE r.place_id = p.id
+                       ORDER BY r.published_at DESC, r.id DESC LIMIT 1) AS top_url,
+                    (SELECT r.title FROM place_ref r WHERE r.place_id = p.id
+                       ORDER BY r.published_at DESC, r.id DESC LIMIT 1) AS top_title
+               FROM place p
+              WHERE p.geocode_status = :st
+                AND (p.is_active = 1 OR p.is_active IS NULL)
+              ORDER BY (p.region_lv1 IS NULL OR p.region_lv1 = ''), p.region_lv1, p.name, p.id
+              LIMIT {$limit}";
+        $st = $this->pdo->prepare($sql);
+        $st->execute([':st' => $status]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * 미좌표 패널 수정용: 이름/분류 변경 + (좌표 지정 시) lat/lng + geocode_status='ok'.
+     * null 인 항목은 미변경. 좌표는 lat/lng 둘 다 와야 적용(ok 로 마킹 → 지도에 표시됨).
+     * @return bool 1건 이상 SET 되어 실행했으면 true
+     */
+    public function adminUpdate(int $id, ?string $name, ?string $category, ?float $lat, ?float $lng): bool
+    {
+        if ($id <= 0) return false;
+        $sets = []; $params = [':id' => $id];
+        if ($name !== null && $name !== '') {
+            $sets[] = 'name = :name';     $params[':name'] = mb_substr($name, 0, 255);
+        }
+        $allowed = ['travel', 'event', 'restaurant', 'etc'];
+        if ($category !== null && in_array($category, $allowed, true)) {
+            $sets[] = 'category = :cat';  $params[':cat'] = $category;
+        }
+        if ($lat !== null && $lng !== null) {
+            $sets[] = 'lat = :lat'; $sets[] = 'lng = :lng'; $sets[] = "geocode_status = 'ok'";
+            $params[':lat'] = $lat; $params[':lng'] = $lng;
+        }
+        if (!$sets) return false;
+        $sets[] = 'updated_at = NOW()';
+        $st = $this->pdo->prepare('UPDATE place SET ' . implode(', ', $sets) . ' WHERE id = :id');
+        return $st->execute($params);
+    }
+}

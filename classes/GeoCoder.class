@@ -89,6 +89,87 @@ class GeoCoder {
         ];
     }
 
+    // ── 역지오코딩: 좌표 → 주소 (카카오 coord2address, 여행 사진 위치 표시용) ─
+    // 네이버 Reverse Geocoding 은 별도 구독 필요(미신청 시 401)이라 이미 쓰는 카카오 키 재활용.
+    // 반환: ['ok'=>bool, 'address'=>str, 'msg'=>str]
+    public static function reverseGeocode(float $lat, float $lng): array {
+        $key = defined('KAKAO_REST_API_KEY') ? KAKAO_REST_API_KEY : '';
+        if ($key === '') {
+            return ['ok' => false, 'msg' => '카카오 REST 키 미설정 (env/kakao.inc)'];
+        }
+        // 카카오: x=경도(lng), y=위도(lat), WGS84
+        $url = 'https://dapi.kakao.com/v2/local/geo/coord2address.json'
+             . '?x=' . $lng . '&y=' . $lat;
+        [$body, $err] = self::httpGet($url, ['Authorization: KakaoAK ' . $key]);
+        if ($err !== '') return ['ok' => false, 'msg' => '역지오코딩 호출 실패: ' . $err];
+
+        $json = json_decode($body, true);
+        $doc  = $json['documents'][0] ?? null;
+        if (!$doc) return ['ok' => false, 'msg' => '주소를 찾을 수 없습니다.'];
+        // 도로명 우선, 없으면 지번
+        $addr = $doc['road_address']['address_name'] ?? '';
+        if ($addr === '' || $addr === null) $addr = $doc['address']['address_name'] ?? '';
+        if ($addr === '' || $addr === null) return ['ok' => false, 'msg' => '주소를 찾을 수 없습니다.'];
+        return ['ok' => true, 'address' => $addr, 'msg' => ''];
+    }
+
+    // ── 키워드 장소검색: 장소명/POI → 후보 목록 (카카오 keyword.json, 지도앱식 검색) ─
+    // 네이버 forward 지오코딩은 '정식 주소'만 잘 되므로, 장소명 검색/자동완성은 카카오 키워드검색 사용.
+    // 반환: ['ok'=>bool, 'items'=>[{name, address, lat, lng, category}], 'msg'=>str]
+    public static function searchKeyword(string $query, int $size = 7): array {
+        $query = trim($query);
+        if ($query === '') return ['ok' => true, 'items' => []];
+        $key = defined('KAKAO_REST_API_KEY') ? KAKAO_REST_API_KEY : '';
+        if ($key === '') return ['ok' => false, 'items' => [], 'msg' => '카카오 REST 키 미설정 (env/kakao.inc)'];
+
+        $size = max(1, min(15, $size));
+        $url  = 'https://dapi.kakao.com/v2/local/search/keyword.json'
+              . '?query=' . rawurlencode($query) . '&size=' . $size;
+        [$body, $err] = self::httpGet($url, ['Authorization: KakaoAK ' . $key]);
+        if ($err !== '') return ['ok' => false, 'items' => [], 'msg' => '장소검색 호출 실패: ' . $err];
+
+        $json  = json_decode($body, true);
+        $docs  = $json['documents'] ?? [];
+        $items = [];
+        foreach ($docs as $d) {
+            $lat = isset($d['y']) ? (float)$d['y'] : null; // 카카오: y=위도, x=경도 (WGS84)
+            $lng = isset($d['x']) ? (float)$d['x'] : null;
+            if ($lat === null || $lng === null) continue;
+            $addr = $d['road_address_name'] ?? '';
+            if ($addr === '' || $addr === null) $addr = $d['address_name'] ?? '';
+            $items[] = [
+                'name'     => $d['place_name'] ?? '',
+                'address'  => $addr,
+                'lat'      => $lat,
+                'lng'      => $lng,
+                'category' => $d['category_group_name'] ?? '',
+            ];
+        }
+        return ['ok' => true, 'items' => $items, 'msg' => ''];
+    }
+
+    // ── 네이버 정적지도: 좌표 → PNG 바이너리 (인증헤더 필요 → 서버 프록시) ─
+    // 반환: ['ok'=>bool, 'body'=>binary, 'msg'=>str]
+    public static function staticMap(float $lat, float $lng, int $w = 360, int $h = 170, int $level = 16): array {
+        $keyId  = defined('NAVER_MAPS_KEY_ID')     ? NAVER_MAPS_KEY_ID     : '';
+        $secret = defined('NAVER_MAPS_KEY_SECRET') ? NAVER_MAPS_KEY_SECRET : '';
+        if ($keyId === '' || $secret === '') {
+            return ['ok' => false, 'msg' => '네이버 지도 API 키 미설정'];
+        }
+        $marker = 'type:d|size:mid|pos:' . $lng . ' ' . $lat;
+        $url = 'https://maps.apigw.ntruss.com/map-static/v2/raster'
+             . '?w=' . $w . '&h=' . $h
+             . '&center=' . $lng . ',' . $lat
+             . '&level=' . $level . '&scale=2&format=png'
+             . '&markers=' . rawurlencode($marker);
+        [$body, $err] = self::httpGet($url, [
+            'X-NCP-APIGW-API-KEY-ID: ' . $keyId,
+            'X-NCP-APIGW-API-KEY: '    . $secret,
+        ]);
+        if ($err !== '') return ['ok' => false, 'msg' => $err];
+        return ['ok' => true, 'body' => $body, 'msg' => ''];
+    }
+
     // ── 공통 HTTP GET (cURL) ─────────────────────────────────
     // 반환: [응답본문(string), 오류메시지(string)] — 오류 없으면 두번째 ''
     private static function httpGet(string $url, array $headers): array {
