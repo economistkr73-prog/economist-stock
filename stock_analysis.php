@@ -269,7 +269,9 @@ echo <<<'PAGE'
       <div class="col-body" id="stockList"><div class="list-msg">불러오는 중…</div></div>
     </section>
     <section class="col">
-      <div class="col-head"><h2>전일 신호</h2><span class="sub" id="psSub"></span></div>
+      <div class="col-head">
+        <span class="seg" id="psSeg"><button id="segPrev" type="button" class="on">전일신호</button><button id="segToday" type="button">오늘신호</button></span>
+        <span class="sub" id="psSub"></span></div>
       <div class="col-body" id="psList"><div class="list-msg">불러오는 중…</div></div>
     </section>
 
@@ -467,15 +469,18 @@ function sigBadge(code){
   return `<span class="${cls}" title="${tip}">${emo}${pctH}${stkH}</span>`;
 }
 
-/* ---- 전일 신호 패널: 최근 3분석일 날짜그룹(종목=최근일 1회, ×N=등장일수) ---- */
+/* ---- 신호 패널: 전일(최근 3분석일)/오늘 토글 ---- */
+let PS_SCOPE='prev';   // 'prev'=전일신호(최근 3일) / 'today'=오늘 장종료후 분석 신호
 async function loadPrevSignals(){
   const el=$('psList');
+  const today=PS_SCOPE==='today';
+  el.innerHTML='<div class="list-msg">불러오는 중…</div>';
   let res={};
-  try{ res=await fetch(API+'?action=prevsignals').then(r=>r.json()); }catch(e){ res={}; }
+  try{ res=await fetch(API+'?action=prevsignals&scope='+PS_SCOPE).then(r=>r.json()); }catch(e){ res={}; }
   const dates=(res&&res.dates)||[];
   const groups=(res&&res.groups)||{};
-  const labels=['전일','전전일','3일전'];
-  el.innerHTML=''; $('psSub').textContent=dates.length?'최근 3일':'';
+  const labels=today?['오늘']:['전일','전전일','3일전'];
+  el.innerHTML=''; $('psSub').textContent=today?(dates.length?'장종료 후 분석':''):(dates.length?'최근 3일':'');
   let any=false;
   dates.forEach((d,gi)=>{
     const arr=groups[d]||[];
@@ -517,8 +522,20 @@ async function loadPrevSignals(){
       el.appendChild(r);
     });
   });
-  if(!any) el.innerHTML='<div class="list-msg">최근 신호 없음<br/>(분석 이력 부족)</div>';
+  if(!any) el.innerHTML=today
+    ? '<div class="list-msg">오늘 분석한 신호 없음<br/>(장종료 후 분석 전이거나 신호 미발생)</div>'
+    : '<div class="list-msg">최근 신호 없음<br/>(분석 이력 부족)</div>';
 }
+/* 전일 ↔ 오늘 신호 토글 */
+function setPsScope(scope){
+  if(PS_SCOPE===scope) return;
+  PS_SCOPE=scope;
+  $('segPrev').classList.toggle('on', scope==='prev');
+  $('segToday').classList.toggle('on', scope==='today');
+  loadPrevSignals();
+}
+$('segPrev').onclick=()=>setPsScope('prev');
+$('segToday').onclick=()=>setPsScope('today');
 
 async function loadPage(cursor, startRank){
   if(loadingList) return;

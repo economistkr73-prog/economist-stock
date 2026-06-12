@@ -187,13 +187,16 @@ function api_stock(string $action, PDO $pdo): void
             return;
         }
 
-        // ── 전일 신호: 오늘 이전 최근 3분석일을 날짜별 그룹으로 ──
-        //   종목은 가장 최근 신호일 그룹에만 1회 표시, count=최근3일중 신호난 일수
+        // ── 전일/오늘 신호: 신호일을 날짜별 그룹으로 ──
+        //   scope=today → 오늘(CURDATE) 신호만 / 그 외 → 오늘 이전 최근 3분석일
+        //   종목은 가장 최근 신호일 그룹에만 1회 표시, count=조회기간중 신호난 일수
         //   반환: { dates:[d1,d2,d3], groups:{ d1:[{...,count}], d2:[...], d3:[...] } }
         case 'prevsignals': {
+            $scope = (($_GET['scope'] ?? '') === 'today') ? 'today' : 'prev';
+            $dateCond = $scope === 'today' ? 'signal_date = CURDATE()' : 'signal_date < CURDATE()';
             try {
                 $dates = $pdo->query(
-                    "SELECT DISTINCT signal_date FROM rise_pick WHERE signal_date < CURDATE()
+                    "SELECT DISTINCT signal_date FROM rise_pick WHERE {$dateCond}
                      ORDER BY signal_date DESC LIMIT 3")->fetchAll(PDO::FETCH_COLUMN);
                 if (!$dates) { echo json_encode(['dates' => [], 'groups' => new stdClass()]); return; }
 
