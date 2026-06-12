@@ -191,21 +191,21 @@ function etf_iFrame() {
     <div class='dashboard-container'>
         <table class='dashboard-table'>
             <tr valign='top'>
-                <td width='920px' height='30%'>
+                <td width='900px' height='30%'>
                     <div class='card'><iframe src='" . CUR_PHP . "?mode=eshl' name='etf_t1' scrolling='no'></iframe></div>
                 </td>
-                <td rowspan='2' width='900px'>
+                <td rowspan='2' width='700px'>
                     <div class='card'>
                         <iframe name='etf_d2' scrolling='no' style='width:100%; height:100%; overflow:auto;'></iframe>
                     </div>
                 </td>
-                <td rowspan='2' width='880px'>
+                <td rowspan='2' width='850px'>
                     <div class='card'><iframe src='analysis_model.php?mode=ar' name='etf_d3'></iframe></div>
                 </td>
-                <td rowspan='2' width='750px'>
-                    <div class='card'><iframe src='analysis_model.php?mode=daily' name='etf_d4'></iframe></div>
+                <td rowspan='2' width='720px'>
+                    <div class='card'><iframe src='analysis_model.php?mode=daily&embed=1' name='etf_d4'></iframe></div>
                 </td>
-                <td rowspan='2'>
+                <td rowspan='2' width='230px'>
                     <div class='card'><iframe src='' name='etf_d5'></iframe></div>
                 </td>
             </tr>
@@ -1117,72 +1117,125 @@ $recent_stocks = $etfRepo->getRecentStocks(7);
             $text_color = $is_active ? "#ffffff" : "#6c757d";
             $border     = $is_active ? "1px solid #e1234a" : "1px solid #e9ecef";
 
-            $html .= "  <button type='button' data-code='{$rs_code}' onclick='toggleRecentStock(this)' 
-                            style='background-color: {$bg_color}; color: {$text_color}; border: {$border}; padding: 5px 12px; border-radius: 20px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s; box-shadow: 0 1px 2px rgba(0,0,0,0.05); outline: none;' 
+            $html .= "  <button type='button' data-code='{$rs_code}' data-name='{$rs_name}' onclick='toggleRecentStock(this)'
+                            style='background-color: {$bg_color}; color: {$text_color}; border: {$border}; padding: 5px 12px; border-radius: 20px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s; box-shadow: 0 1px 2px rgba(0,0,0,0.05); outline: none;'
                             onmouseover=\"this.style.filter='brightness(0.95)'\" onmouseout=\"this.style.filter='brightness(1)'\">";
             $html .= "    {$rs_name}";
             $html .= "  </button>";
         }
         
-        // 🚀 1) 조건부 활성화될 '합쳐서 보기' 버튼 배치 (처음 개수에 따라 투명도/숨김 제어)
-        $btn_display = (count($active_codes) >= 2) ? "inline-block" : "none";
-        
-        $html .= "<button type='button' id='btn-combine-stocks' onclick='openMultiStockEtf()' 
-                        style='display: {$btn_display}; background: #0052a4; color: #fff; border: none; padding: 6px 14px; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 13px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); transition: all 0.2s;'>";
-        $html .= "    📊 선택 종목 ETF 합쳐서 보기";
-        $html .= "  </button>";
-        
         $html .= "</div>";
 
-        // 🚀 2) 고도화된 스위치 및 다중 전송 자바스크립트
+        // 🚀 종목 칩 클릭 = 즉시 관련 ETF 갱신 (별도 버튼 없음)
+        //    0개 선택 → 전체 ETF / 1개 → 단일 종목 ETF / 2~4개 → 공통 편입 ETF / 최대 4개
         // PHP의 현재 활성화 상태 배열을 자바스크립트 초기 배열로 실시간 이식합니다.
         $js_array = json_encode(array_values($active_codes));
-        
+        $name_map = [];
+        foreach ($recent_stocks as $rs) { $name_map[$rs['stock_code']] = $rs['stock_name']; }
+
         $html .= "
         <script>
         let selectedRecentStocks = {$js_array};
+        const stockNameMap = " . json_encode($name_map, JSON_UNESCAPED_UNICODE) . ";
+
+        // 선택된 종목 수에 따라 하단 ETF 표를 즉시 갱신
+        function reloadStocksEtf() {
+            let base = '" . CUR_PHP . "?mode={$current_mode}&sort={$current_sort}&top_rank={$top_rank_num}';
+            if (selectedRecentStocks.length === 0) {
+                // 0개: 전체 ETF
+                location.href = base;
+            } else if (selectedRecentStocks.length === 1) {
+                // 1개: 단일 종목 관련 ETF
+                let code = selectedRecentStocks[0];
+                let name = stockNameMap[code] || '';
+                location.href = base + '&stock_code=' + encodeURIComponent(code) + '&stock_name=' + encodeURIComponent(name);
+            } else {
+                // 2~4개: 공통 편입 ETF
+                location.href = base + '&multi_stock_codes=' + selectedRecentStocks.join(',');
+            }
+        }
 
         function toggleRecentStock(btn) {
             let code = btn.getAttribute('data-code');
             let index = selectedRecentStocks.indexOf(code);
 
             if (index > -1) {
-                // 선택 해제 (회색으로)
+                // 선택 해제
                 selectedRecentStocks.splice(index, 1);
-                btn.style.backgroundColor = '#f1f3f5';
-                btn.style.color = '#6c757d';
-                btn.style.border = '1px solid #e9ecef';
             } else {
-                // 선택 추가 (빨간색으로)
+                // 최대 4개 제한
+                if (selectedRecentStocks.length >= 4) {
+                    alert('종목은 최대 4개까지 선택할 수 있습니다.');
+                    return;
+                }
                 selectedRecentStocks.push(code);
-                btn.style.backgroundColor = '#e1234a';
-                btn.style.color = '#ffffff';
-                btn.style.border = '1px solid #e1234a';
             }
-            
-            // 💡 실시간 개수 감지 -> 2개 이상이면 버튼 등장, 미달이면 숨김
-            let combineBtn = document.getElementById('btn-combine-stocks');
-            if (selectedRecentStocks.length >= 2) {
-                combineBtn.style.display = 'inline-block';
-            } else {
-                combineBtn.style.display = 'none';
-            }
-        }
-
-        // 💡 버튼 클릭 시 활성화된 모든 코드를 주소창에 매달아 하단 표를 갱신시킵니다.
-        function openMultiStockEtf() {
-            if (selectedRecentStocks.length < 2) {
-                alert('종목을 2개 이상 선택해주세요.');
-                return;
-            }
-            let codes = selectedRecentStocks.join(',');
-            location.href = '" . CUR_PHP . "?mode={$current_mode}&multi_stock_codes=' + codes + '&stock_code={$stock_code}&stock_name=' + encodeURIComponent('{$stock_name}');
+            reloadStocksEtf();
         }
         </script>
         ";
     }
  
 
+
+    // 🚀 최근 본 ETF 태그 리스트 (종목 '최근 조회' 바로 아래 줄 / 최신 5개, etf_name 유니크)
+    //    - 한 줄 가로 스크롤(줄바꿈 금지) + 칩별 말줄임(…), 전체 이름은 hover 툴팁
+    //    - ETF명 클릭은 다른 프레임(etf_d2)을 여는 동작이라 현재 프레임이 갱신 안 됨
+    //      → 클릭 시 JS(pushRecentEtf)로 칩을 즉시 추가/이동(낙관적 업데이트)
+    $recent_etfs = $etfRepo->getRecentEtfs(4);
+    $etf_list_disp = empty($recent_etfs) ? 'none' : 'flex';
+    $html .= "<style>
+        #recent-etf-list { margin-bottom:20px; display:{$etf_list_disp}; flex-wrap:nowrap; gap:8px; align-items:center; }
+        #recent-etf-label { flex:0 0 auto; font-size:13px; color:#888; font-weight:bold; margin-right:4px; }
+        .recent-etf-chip { flex:0 1 auto; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+                           background-color:#eef4fb; color:#0052a4; border:1px solid #d6e4f5; padding:5px 12px; border-radius:20px;
+                           font-size:13px; font-weight:600; cursor:pointer; transition:all 0.2s; box-shadow:0 1px 2px rgba(0,0,0,0.05); outline:none; }
+        .recent-etf-chip:hover { filter:brightness(0.96); }
+    </style>";
+    $html .= "<div id='recent-etf-list'>";
+    $html .= "  <span id='recent-etf-label'>📦 최근 ETF:</span>";
+    foreach ($recent_etfs as $re) {
+        $re_code = htmlspecialchars($re['etf_code']);
+        $re_name = htmlspecialchars($re['etf_name']);                 // 풀네임(툴팁·dedup용)
+        $re_short = preg_replace('/^\S+\s+/u', '', $re['etf_name']);  // 운용사(앞 토큰) 제거 → 실질이름만 표시
+        if ($re_short === '' || $re_short === null) $re_short = $re['etf_name'];   // 공백 없으면 원본 유지
+        $re_short = htmlspecialchars($re_short);
+        $re_name_js = str_replace(["\\", "'"], ["\\\\", "\\'"], $re['etf_name']);   // JS 문자열 안전
+        $html .= "  <button type='button' class='recent-etf-chip' data-ecode='{$re_code}' data-ename='{$re_name}' title='{$re_name}'
+                        onclick=\"openRecentEtf('{$re_code}','{$re_name_js}')\">{$re_short}</button>";
+    }
+    $html .= "</div>";
+
+    // 최근 ETF 칩 공통 동작(열기 + 클릭 시 즉시 추가/이동)
+    $stock_code_js = str_replace(["\\", "'"], ["\\\\", "\\'"], $stock_code);
+    $html .= "
+    <script>
+    function openRecentEtf(code, name) {
+        window.open('" . CUR_PHP . "?mode=ehbe&etf_code=' + encodeURIComponent(code) + '&etf_name=' + encodeURIComponent(name) + '&stock_code=' + encodeURIComponent('{$stock_code_js}'), 'etf_d2');
+    }
+    // 테이블/칩에서 ETF를 열 때 호출 → 현재 프레임의 '최근 ETF' 줄을 새로고침 없이 갱신
+    function pushRecentEtf(code, name) {
+        var wrap = document.getElementById('recent-etf-list');
+        if (!wrap) return;
+        wrap.style.display = 'flex';
+        // 같은 이름 기존 칩 제거(유니크 = etf_name 기준)
+        wrap.querySelectorAll('.recent-etf-chip').forEach(function(b){ if (b.getAttribute('data-ename') === name) b.remove(); });
+        // 새 칩 생성 후 라벨 바로 뒤(맨 앞)에 삽입
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'recent-etf-chip';
+        b.setAttribute('data-ecode', code);
+        b.setAttribute('data-ename', name);
+        b.title = name;                                   // 툴팁=풀네임
+        b.textContent = name.replace(/^\S+\s+/, '') || name;   // 운용사 제거 → 실질이름만 표시
+        b.onclick = function(){ openRecentEtf(code, name); };
+        var label = document.getElementById('recent-etf-label');
+        wrap.insertBefore(b, label ? label.nextSibling : wrap.firstChild);
+        // 최신 4개만 유지
+        var chips = wrap.querySelectorAll('.recent-etf-chip');
+        for (var i = 4; i < chips.length; i++) chips[i].remove();
+    }
+    </script>";
 
     $html .= "<div style='overflow-x: auto; overflow-y: auto; max-height: 90%; border-bottom: 1px solid #e3e6f0;'>";
     $html .= "<table class='title-board-table' style='width: 100%; border-collapse: separate; border-spacing: 0; text-align: center; font-size: 14px;'>";
@@ -1292,11 +1345,12 @@ $recent_stocks = $etfRepo->getRecentStocks(7);
 
             $row_id = "stock_row_" . $etf['etf_code'];
             $encoded_etf_name = urlencode($etf['etf_name']);
+            $etf_name_js = str_replace(["\\", "'"], ["\\\\", "\\'"], $etf['etf_name']);   // pushRecentEtf용 JS 문자열 안전
 
             // 💡 클릭 이벤트(js_click)도 반드시 루프 안에서 매번 만들어져야 합니다.
             // 멀티 선택 상태면 multi_stock_codes 를 함께 넘겨 etf_d2에서 선택 종목 표시
             $multi_param = $multi_stock_str ? "&multi_stock_codes=" . urlencode($multi_stock_str) : "";
-            $js_click = "var rows=document.querySelectorAll('.title-board-table tbody tr'); rows.forEach(function(r){r.classList.remove('row-highlight');}); document.getElementById('{$row_id}').classList.add('row-highlight'); window.open('" . CUR_PHP . "?mode=ehbe&etf_code={$etf['etf_code']}&etf_name={$encoded_etf_name}&stock_code={$stock_code}{$multi_param}', 'etf_d2');";
+            $js_click = "var rows=document.querySelectorAll('.title-board-table tbody tr'); rows.forEach(function(r){r.classList.remove('row-highlight');}); document.getElementById('{$row_id}').classList.add('row-highlight'); window.open('" . CUR_PHP . "?mode=ehbe&etf_code={$etf['etf_code']}&etf_name={$encoded_etf_name}&stock_code={$stock_code}{$multi_param}', 'etf_d2'); if(typeof pushRecentEtf==='function') pushRecentEtf('{$etf['etf_code']}','{$etf_name_js}');";
 
             // 집중형 행: 배경 + 좌우 테두리(첫/마지막 td에 적용 — border-collapse 대응)
             $few_bg_only = $is_few ? "background:#fffbef;" : "";
@@ -1312,7 +1366,8 @@ $recent_stocks = $etfRepo->getRecentStocks(7);
             // 기존 데이터 출력
             $html .= "   <td style='padding: 12px; text-align: left; font-weight: bold;'>";
             $html .= "     <a href='javascript:void(0);' onclick=\"{$js_click}\" style='color: #333; text-decoration: none; cursor: pointer;'>{$etf['etf_name']}</a>";
-
+            // ETF명 아래 회색 ETF 코드
+            $html .= "     <div style='color:#999; font-size:11px; font-weight:normal; margin-top:2px;'>{$etf['etf_code']}</div>";
             $html .= "   </td>";
 
             $html .= "    <td style='padding: 12px; color: {$rate_color}; font-weight: bold;'>{$rate_sign}{$etf['etf_rate']}% <br>{$delta_html}</td>";
@@ -1838,7 +1893,10 @@ $arrow_rot   = UIHelper::getSortIcon($current_sort, 'rot');  // 회전율
     if ($etf_code) {
 
         $etfRepo = new StockRepository($pdo);
-        
+
+        // 🚀 최근 본 ETF 기록 (종목 최근조회와 동일 패턴 / etf_code UNIQUE)
+        $etfRepo->saveRecentEtf($etf_code, $etf_name);
+
         // 데이터 가져오기
         $related_stocks = $etfRepo->getStocksInSpecificEtf($etf_code, $current_sort);
         $stock_count = count($related_stocks);
@@ -1895,8 +1953,7 @@ $html .= "</div>";
     $html .= "      <th style='padding: 10px 12px; line-height: 1.4;'>ETF보유<br><span style='font-size: 12px; font-weight: normal; color: #718096;'>금액(억), 비중</span></th>";
     
     $html .= "      <th style='padding: 14px 12px;'><a href='" . CUR_PHP . "?mode={$current_mode}&etf_code={$etf_code}&etf_name={$encoded_etf_name}&sort=ratio' style='color: #4a5568; text-decoration: none;'>편입비중<span style='color:#e1234a;'>{$arrow_ratio}</span></a></th>";
-    $html .= "      <th style='padding: 14px 12px;'>ETF 편입수</th>";
-    
+
     $html .= "      <th style='padding: 14px 12px;'><a href='" . CUR_PHP . "?mode={$current_mode}&etf_code={$etf_code}&etf_name={$encoded_etf_name}&sort=rot' style='color: #4a5568; text-decoration: none;'>회전율<span style='color:#e1234a;'>{$arrow_rot}</span></a></th>";
     $html .= "      <th style='padding: 14px 12px; text-align: right;'>거래대금</th>";
     $html .= "    </tr>";
@@ -1930,22 +1987,21 @@ $html .= "</div>";
 
                 $js_click = "var rows=document.querySelectorAll('.title-board-table tbody tr'); rows.forEach(function(r){r.classList.remove('row-highlight');}); document.getElementById('{$row_id}').classList.add('row-highlight'); openCommonFrames('{$row_id}', '{$row['stock_code']}', '{$params}', ['etf_t1','etf_d1','etf_d2', 'etf_d5'], '" . CUR_PHP . "');";
 
-                $html .= "    <td style='padding: 14px 12px; text-align: left;'>";
-                $html .= "      <a href='javascript:void(0);' 
-                                   onclick=\"{$js_click}\" 
-                                   style='color: #2d3748; font-weight: 600; text-decoration: none; cursor: pointer;' 
-                                   onmouseover=\"this.style.textDecoration='underline'; this.style.color='#0052a4';\" 
+                $html .= "    <td style='padding: 14px 12px; text-align: left; white-space: nowrap;'>";
+                $html .= "      <a href='javascript:void(0);'
+                                   onclick=\"{$js_click}\"
+                                   style='color: #2d3748; font-weight: 600; text-decoration: none; cursor: pointer;'
+                                   onmouseover=\"this.style.textDecoration='underline'; this.style.color='#0052a4';\"
                                    onmouseout=\"this.style.textDecoration='none'; this.style.color='#2d3748';\">";
-             
+
                 $html .= "       {$row['stock_name']}";
 
-                if ($is_target) {
-                    $html .= " <span style='background: #e1234a; color: #fff; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 12px;'>$tt</span>";
-                }
+                // ETF 편입수 배지 (기존 컬럼 → 종목명 옆으로 이동)
+                $html .= " {$etf_badge}";
 
-                // 멀티 선택 종목 표시 배지
-                if ($is_selected) {
-                    $html .= " <span style='background: #f97316; color: #fff; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 12px;'>✔ 선택</span>";
+                // 강조 종목(원점 타겟 또는 멀티선택)은 편입비중 순위를 빨간 원형 배지로 표시
+                if ($is_target || $is_selected) {
+                    $html .= " <span style='display:inline-flex; align-items:center; justify-content:center; min-width:20px; height:20px; padding:0 5px; box-sizing:border-box; background:#e1234a; color:#fff; border-radius:10px; font-weight:bold; font-size:11px; margin-left:6px; vertical-align:middle;'>{$tt}</span>";
                 }
 
                 $html .= "      </a>";
@@ -1956,11 +2012,7 @@ $html .= "</div>";
 				$html .= "<td style='line-height: 1.4;'>".number_format($row['etf_ownership_cap'])."<br><span style='font-size: 12px; color: #718096;'>" . number_format($row['etf_ownership_ratio'], 2) . "%</span></td>";
 
                 $html .= "    <td style='padding: 14px 12px; color: #4e73df; font-weight: bold;'>" . number_format($row['holdings_ratio'], 2) . "</td>";
-                
-                $html .= "    <td style='padding: 14px 12px; color: #4a5568;'>".$etf_badge."</td>";
-                
 
-                
                 $html .= "    <td style='padding: 14px 12px; color: #dd6b20; font-weight: 600;'>" . number_format($row['stock_rot'], 2) . "%</td>";
                 
                 $html .= "    <td style='padding: 14px 12px; text-align: right; color: #2d3748; font-weight: 500;'>" . number_format($row['stock_vol_cap']) . "</td>";
@@ -1968,7 +2020,7 @@ $html .= "</div>";
                 $html .= "  </tr>";
             }
         } else {
-            $html .= "  <tr><td colspan='7' style='padding: 40px 20px; color: #a0aec0; text-align: center;'>편입된 종목 정보가 없습니다.</td></tr>";
+            $html .= "  <tr><td colspan='6' style='padding: 40px 20px; color: #a0aec0; text-align: center;'>편입된 종목 정보가 없습니다.</td></tr>";
         }
 
         $html .= "  </tbody>";
@@ -2632,17 +2684,40 @@ function etf_mobile($pdo) {
         .list-title { font-size:16px; font-weight:800; color:#1e293b; margin:6px 2px 10px; padding-left:10px; border-left:4px solid #0052a4; }
         .etf-list .empty, .loading { color:#aaa; font-size:14px; text-align:center; padding:24px; }
         .card { background:#fff; border:1px solid #e8edf2; border-radius:10px; margin-bottom:8px; overflow:hidden; }
-        .card-main { display:grid; grid-template-columns:1fr auto; grid-template-areas:'name rate' 'sub rate'; gap:2px 10px; padding:12px 14px; cursor:pointer; align-items:center; }
-        .c-name { grid-area:name; font-size:15px; font-weight:700; color:#1e293b; }
-        .c-sub { grid-area:sub; font-size:12px; color:#94a3b8; }
-        .c-rate { grid-area:rate; font-size:15px; text-align:right; white-space:nowrap; }
-        .c-rate .chev { color:#94a3b8; margin-left:6px; font-size:12px; }
+        .card-main { display:flex; align-items:baseline; flex-wrap:wrap; gap:5px 13px; padding:13px 14px; cursor:pointer; }
+        .c-name { font-size:16px; font-weight:800; color:#1e293b; display:inline-flex; align-items:center; gap:6px; }
+        .rk { padding:1px 7px; border-radius:4px; font-size:11px; font-weight:700; flex-shrink:0; }
+        .rk-top { background:#e1234a; color:#fff; }
+        .rk-low { background:#eef0f2; color:#9aa3ad; }
+        .c-metrics { display:flex; align-items:baseline; gap:13px; margin-left:auto; }
+        .m-item { font-size:16px; font-weight:800; color:#1e293b; line-height:1.05; white-space:nowrap; }
+        .m-item small { font-size:11px; font-weight:700; color:#0052a4; margin-right:2px; vertical-align:1px; }
+        .m-rate { font-size:16px; font-weight:800; line-height:1.05; white-space:nowrap; min-width:62px; text-align:right; }
+        .m-rate .chev { color:#b8c2cc; margin-left:4px; font-size:12px; }
+        .c-sub { flex-basis:100%; font-size:12px; color:#94a3b8; margin-top:2px; }
         .card-detail { border-top:1px solid #eef1f4; background:#fafbfc; padding:8px 12px 12px; }
         .d-head { font-size:12px; color:#64748b; font-weight:700; padding:6px 2px; }
-        .d-row { display:grid; grid-template-columns:1fr auto auto; gap:10px; align-items:center; padding:8px 4px; border-bottom:1px solid #f0f2f5; font-size:14px; }
+        .d-rank { margin-left:5px; color:#e1234a; font-size:16px; font-weight:800; vertical-align:-1px; }
+        .d-row { display:grid; grid-template-columns:1fr auto auto; gap:10px; align-items:center; padding:8px 4px; border-bottom:1px solid #f0f2f5; font-size:14px; border-radius:6px; }
+        .d-row.hl { background:#fff7e6; border-bottom-color:#ffe2b0; box-shadow:inset 3px 0 0 #f59e0b; padding-left:8px; }
+        .d-row.hl .d-name { color:#b45309; font-weight:800; }
         .d-name { font-weight:600; color:#334155; }
         .d-ratio { color:#0052a4; font-weight:600; font-size:13px; min-width:54px; text-align:right; }
         .d-rate { min-width:66px; text-align:right; }
+
+        /* 폴더블/와이드(≥561px): 폭 여유 → ETF명·비중·편입·등락률 4개를 크게 (여행Story 3단 반응형과 동일 경계) */
+        @media (min-width:561px) {
+            .m-wrap { max-width:720px; }
+            .card-main { gap:6px 18px; padding:15px 18px; }
+            .c-metrics { gap:18px; }
+            .c-name { font-size:22px; }
+            .m-item { font-size:22px; }
+            .m-rate { min-width:80px; }
+            .m-item small { font-size:12px; vertical-align:2px; }
+            .m-rate { font-size:22px; }
+            .m-rate .chev { font-size:14px; }
+            .c-sub { font-size:13px; margin-top:4px; }
+        }
     </style>
 
     <div class="m-wrap">
@@ -2665,11 +2740,18 @@ function etf_mobile($pdo) {
 
     <script>
     const API='etf_stock.php?mode=m_api';
-    let stock=null, activeRecent=new Set(), curEtfs=[], etfFilter='';
+    let stock=null, activeRecent=new Set(), curEtfs=[], etfFilter='', nameByCode={};
 
     function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
     function fmtRate(v){ v=parseFloat(v)||0; const c=v>0?'#e1234a':v<0?'#0052a4':'#666'; return `<span style="color:${c};font-weight:700">${(v>0?'+':'')+v.toFixed(2)}%</span>`; }
     function num(v){ return (Math.round(parseFloat(v)||0)).toLocaleString(); }
+    function rankBadge(r){ r=parseInt(r)||0; if(r<=0) return ''; return `<span class="rk ${r<6?'rk-top':'rk-low'}">${r}위</span>`; }
+    function circledNum(n){ n=parseInt(n)||0;
+        if(n>=1&&n<=20) return String.fromCodePoint(0x2460+n-1);   // ①~⑳
+        if(n>=21&&n<=35) return String.fromCodePoint(0x3251+n-21); // ㉑~㉟
+        if(n>=36&&n<=50) return String.fromCodePoint(0x32B1+n-36); // ㊱~㊿
+        return n+'위';
+    }
     async function api(p){ return (await fetch(API+'&'+p)).json(); }
 
     // ── 종목 검색 자동완성 ──
@@ -2684,7 +2766,7 @@ function etf_mobile($pdo) {
         box.style.display='block';
     }
     function pickStock(code,name){
-        stock={code,name}; activeRecent=new Set([code]);
+        stock={code,name}; activeRecent=new Set([code]); nameByCode[code]=name;
         si.value=''; document.getElementById('sugList').style.display='none';
         loadRelated(); loadRecent();
     }
@@ -2713,11 +2795,16 @@ function etf_mobile($pdo) {
         box.innerHTML=list.map(etfCard).join('');
     }
     function etfCard(e){
+        const hc=parseInt(e.holdings_count)||0;
         return `<div class="card">
             <div class="card-main" onclick="toggleEtf(this,'${e.etf_code}')">
-                <div class="c-name">${esc(e.etf_name)}</div>
+                <div class="c-name">${rankBadge(e.etf_stock_rank)}<span>${esc(e.etf_name)}</span></div>
+                <div class="c-metrics">
+                    <span class="m-item"><small>비중</small>${(parseFloat(e.holdings_ratio)||0).toFixed(2)}%</span>
+                    ${hc?`<span class="m-item"><small>편입</small>${hc}개</span>`:''}
+                    <span class="m-rate">${fmtRate(e.etf_rate)}<span class="chev">▾</span></span>
+                </div>
                 <div class="c-sub">대금 ${num(e.trading_value)}억 · 회전 ${(parseFloat(e.turnover_ratio)||0).toFixed(1)}</div>
-                <div class="c-rate">${fmtRate(e.etf_rate)}<span class="chev">▾</span></div>
             </div>
             <div class="card-detail" style="display:none"></div>
         </div>`;
@@ -2727,8 +2814,12 @@ function etf_mobile($pdo) {
         if(d.style.display!=='none'){ d.style.display='none'; chev.textContent='▾'; return; }
         chev.textContent='▴'; d.style.display='block'; d.innerHTML='<div class="loading">불러오는 중…</div>';
         const r=await api('action=stocks&etf_code='+etfCode+'&sort=ratio'); const rows=r.data||[];
-        d.innerHTML='<div class="d-head">구성 종목 (비중순)</div>'+rows.slice(0,30).map(s=>`
-            <div class="d-row"><span class="d-name">${esc(s.stock_name)}</span><span class="d-ratio">${(parseFloat(s.holdings_ratio)||0).toFixed(2)}%</span><span class="d-rate">${fmtRate(s.stock_rate)}</span></div>`).join('');
+        // 선택(넘어온) 종목 = 코드 또는 종목명 매칭
+        const aNames=new Set([...activeRecent].map(c=>nameByCode[c]).filter(Boolean));
+        const isPicked=s=> activeRecent.has(s.stock_code) || aNames.has(s.stock_name);
+        // 비중순 리스트의 위치(1-based) = 편입비중 순위 → 선택 종목명 옆에 배지
+        d.innerHTML='<div class="d-head">구성 종목 (비중순)</div>'+rows.slice(0,30).map((s,i)=>`
+            <div class="d-row${isPicked(s)?' hl':''}"><span class="d-name">${esc(s.stock_name)}${isPicked(s)?`<span class="d-rank">${circledNum(i+1)}</span>`:''}</span><span class="d-ratio">${(parseFloat(s.holdings_ratio)||0).toFixed(2)}%</span><span class="d-rate">${fmtRate(s.stock_rate)}</span></div>`).join('');
     }
 
     // ── ETF명 검색 = 현재 목록 클라이언트 필터 ──
@@ -2739,12 +2830,14 @@ function etf_mobile($pdo) {
     // ── 최근조회 칩 ──
     async function loadRecent(){
         const r=await api('action=recent'); const box=document.getElementById('recentChips'); const rows=r.data||[];
+        rows.forEach(s=>{ nameByCode[s.stock_code]=s.stock_name; });
         box.innerHTML=rows.length? rows.map(s=>`<button class="chip${activeRecent.has(s.stock_code)?' on':''}" onclick="toggleRecent('${s.stock_code}','${esc(s.stock_name)}')">${esc(s.stock_name)}</button>`).join('')
                                  : '<span class="empty-s">최근 조회한 종목이 없습니다</span>';
         const b=document.getElementById('combineBtn');
         if(activeRecent.size>=2){ b.style.display='block'; b.textContent=`＋ ${activeRecent.size}개 종목 공통 ETF 보기`; } else b.style.display='none';
     }
     function toggleRecent(code,name){
+        nameByCode[code]=name;
         if(activeRecent.has(code)) activeRecent.delete(code); else activeRecent.add(code);
         if(activeRecent.size===1){ const c=[...activeRecent][0]; stock={code:c, name:(c===code?name:(stock?stock.name:name))}; if(c===code) stock={code,name}; loadRelated(); }
         else if(activeRecent.size===0){ stock=null; curEtfs=[]; renderEtfs(); setTitle('종목을 선택하세요'); }
@@ -2756,7 +2849,7 @@ function etf_mobile($pdo) {
     (function(){
         const q=new URLSearchParams(location.search);
         const code=q.get('stock_code'), name=q.get('stock_name');
-        if(code&&name){ stock={code,name}; activeRecent=new Set([code]); loadRelated(); }
+        if(code&&name){ stock={code,name}; activeRecent=new Set([code]); nameByCode[code]=name; loadRelated(); }
         loadRecent();
     })();
     </script>
