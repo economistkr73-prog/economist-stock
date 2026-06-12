@@ -80,6 +80,28 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .pl-ac-addr { font-size: 11.5px; color: #8a97a3; margin-top: 1px; }
 .pl-ac-empty { padding: 12px; font-size: 12.5px; color: #aaa; text-align: center; }
 
+/* 상단 태그 칩 바 (가로 스크롤) */
+#pl-tagbar { display: flex; align-items: center; gap: 6px; padding: 7px 12px; background: #fff; border-top: 1px solid #f0f2f5; box-shadow: 0 1px 3px rgba(0,0,0,.05); flex-shrink: 0; }
+.tb-chips { display: flex; gap: 6px; overflow-x: auto; flex: 1; scrollbar-width: thin; }
+.tb-chips::-webkit-scrollbar { height: 5px; }
+.tb-chips::-webkit-scrollbar-thumb { background: #d8dde3; border-radius: 3px; }
+.tb-chip { flex-shrink: 0; white-space: nowrap; font-size: 12.5px; font-weight: 600; padding: 6px 12px; border-radius: 16px; background: #f4f6f8; border: 1px solid #e2e7ec; color: #5a6b7b; cursor: pointer; transition: .12s; }
+.tb-chip:hover { background: #eaf3fb; border-color: #cfe4f7; color: #2471a3; }
+.tb-chip.active { background: #3498db; border-color: #2980b9; color: #fff; }
+.tb-chip .tb-cnt { font-size: 10.5px; opacity: .6; margin-left: 4px; font-weight: 500; }
+.tb-chip.active .tb-cnt { opacity: .9; }
+.tb-more { flex-shrink: 0; font-size: 12px; font-weight: 600; padding: 6px 11px; border-radius: 14px; background: #fff; border: 1px dashed #cdd6de; color: #7b8794; cursor: pointer; white-space: nowrap; }
+.tb-more:hover { background: #f4f6f8; }
+/* 월(방문시기) 바 */
+#pl-monthbar { display: flex; align-items: center; gap: 6px; padding: 6px 12px; background: #fff; border-top: 1px solid #f5f6f8; flex-shrink: 0; }
+.mb-lbl { font-size: 11.5px; color: #aab3bc; flex-shrink: 0; margin-right: 2px; }
+.mb-chips { display: flex; gap: 5px; overflow-x: auto; flex: 1; scrollbar-width: thin; }
+.mb-chips::-webkit-scrollbar { height: 5px; }
+.mb-chips::-webkit-scrollbar-thumb { background: #d8dde3; border-radius: 3px; }
+.mb-chip { flex-shrink: 0; min-width: 34px; text-align: center; font-size: 12px; font-weight: 600; padding: 5px 10px; border-radius: 14px; background: #fff; border: 1px solid #ecdcc6; color: #b9712a; cursor: pointer; transition: .12s; }
+.mb-chip:hover { background: #fdf3e7; }
+.mb-chip.active { background: #e67e22; border-color: #d35400; color: #fff; }
+
 /* 본문: 지도 + 우측 패널 */
 #pl-main { flex: 1; min-height: 0; position: relative; overflow: hidden; }
 /* 네이버 SDK가 #map 의 position 을 relative 로 바꿔도 부모를 꽉 채우도록 명시적 width/height 사용
@@ -171,8 +193,11 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .ng-empty { color: #aaa; font-size: 13px; text-align: center; padding: 30px 12px; }
 .ng-row { display: flex; align-items: center; gap: 6px; }
 .ng-row .ng-nm { flex: 1; min-width: 0; }
-.ng-edit { flex-shrink: 0; background: #eef2f6; border: 1px solid #dde3e9; color: #5b6b7b; font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 6px; cursor: pointer; }
+.ng-acts { flex-shrink: 0; display: flex; gap: 5px; }
+.ng-edit { background: #eef2f6; border: 1px solid #dde3e9; color: #5b6b7b; font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 6px; cursor: pointer; }
 .ng-edit:hover { background: #e1e8ef; }
+.ng-del { background: #fdecea; border: 1px solid #f5c6c0; color: #c0392b; font-size: 12px; padding: 3px 8px; border-radius: 6px; cursor: pointer; line-height: 1; }
+.ng-del:hover { background: #f9d9d4; }
 @media (max-width: 640px) { #pl-nogeo { width: 100%; max-width: 100%; } }
 
 /* 수정 모달 (미좌표 장소 이름/분류/좌표 지정) */
@@ -196,7 +221,61 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .pem-empty { padding: 12px; font-size: 12.5px; color: #aaa; text-align: center; }
 .pem-picked { margin-top: 10px; font-size: 12.5px; color: #1e8449; line-height: 1.5; }
 .pem-picked span { color: #8a97a3; }
+/* 검색 결과 행: 본문(클릭=기본좌표) + ➕(추가 장소로) */
+.pem-res-main { cursor: pointer; }
+.pem-res-row { display: flex; align-items: flex-start; gap: 8px; }
+.pem-res-row .pem-res-main { flex: 1; min-width: 0; }
+.pem-add { flex-shrink: 0; align-self: center; background: #eafaf1; border: 1px solid #abebc6; color: #1e8449; font-size: 14px; font-weight: 700; width: 26px; height: 26px; border-radius: 6px; cursor: pointer; line-height: 1; }
+.pem-add:hover { background: #d4f4e0; }
+/* 멀티 등록 — 추가 장소 영역 */
+.pem-extra-wrap { margin-top: 14px; padding-top: 12px; border-top: 1px dashed #e3e8ee; }
+.pem-extra-hd { font-size: 12px; font-weight: 700; color: #5a6b7b; }
+.pem-extra-cnt { color: #1e8449; }
+.pem-extra { margin-top: 7px; display: flex; flex-direction: column; gap: 8px; }
+.pem-erow { background: #f6fbf8; border: 1px solid #cdeede; border-radius: 9px; padding: 8px 9px; }
+.pem-erow-top { display: flex; align-items: center; gap: 6px; }
+.pem-einp { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid #cdd6df; border-radius: 6px; font-size: 13px; color: #2c3e50; }
+.pem-esel { flex: 0 0 auto; padding: 6px 6px; border: 1px solid #cdd6df; border-radius: 6px; font-size: 12.5px; color: #2c3e50; background: #fff; }
+.pem-edel { flex: 0 0 auto; background: none; border: none; color: #b3c5b8; font-size: 18px; line-height: 1; cursor: pointer; padding: 0 4px; }
+.pem-edel:hover { color: #c0392b; }
+.pem-eloc { margin-top: 6px; font-size: 11.5px; color: #1e8449; display: flex; align-items: center; gap: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pem-extra-hint { margin-top: 7px; font-size: 11px; color: #95a5a6; line-height: 1.45; }
+/* 태그 입력 */
+.pem-sub { font-size: 10.5px; font-weight: 500; color: #aab3bc; margin-left: 4px; }
+.pem-months { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+.pem-mon { font-size: 11.5px; padding: 4px 0; width: calc((100% - 44px) / 12); min-width: 26px; text-align: center; background: #f4f6f8; border: 1px solid #dde3e9; border-radius: 5px; color: #7b8794; cursor: pointer; }
+.pem-mon:hover { background: #eaeef2; }
+.pem-mon.active { background: #e67e22; border-color: #d35400; color: #fff; font-weight: 700; }
+.pem-tag-row { display: flex; gap: 6px; }
+.pem-tag-kind { flex-shrink: 0; font-size: 12.5px; padding: 0 8px; border: 1px solid #d8dde3; border-radius: 7px; background: #fff; color: #5a6b7b; }
+.pem-tag-row .pem-inp { flex: 1; }
+.pem-tag-sug { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 7px; }
+.pem-sug-lbl { font-size: 11px; color: #aab3bc; margin-right: 2px; }
+.pem-sug-chip { font-size: 11.5px; padding: 3px 9px; background: #f4f6f8; border: 1px dashed #cdd6de; border-radius: 12px; color: #5d6d7e; cursor: pointer; }
+.pem-sug-chip:hover { background: #eaf3fb; border-color: #b6d7f2; color: #2471a3; }
+.pem-sug-more { font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 12px; background: #fff; border: 1px dashed #cdd6de; color: #7b8794; cursor: pointer; }
+.pem-sug-more:hover { background: #f4f6f8; }
+.pem-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.pem-tag { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 3px 6px 3px 10px; border-radius: 13px; border: 1px solid; }
+.pem-tag.k-theme { background: #eaf3fb; border-color: #b6d7f2; color: #2471a3; }
+.pem-tag.k-type  { background: #e8f8f3; border-color: #a8e6d2; color: #138d75; }
+.pem-tag.k-facet { background: #f2f4f6; border-color: #d6dce2; color: #5d6d7e; }
+.pem-tag button { background: none; border: none; font-size: 14px; line-height: 1; cursor: pointer; color: inherit; opacity: .55; padding: 0 1px; }
+.pem-tag button:hover { opacity: 1; color: #c0392b; }
 .pem-hint { margin-top: 10px; font-size: 11.5px; color: #95a5a6; line-height: 1.5; }
+/* 태그 관리 */
+.tm-hint { font-size: 12px; color: #7b8794; line-height: 1.6; margin-bottom: 12px; }
+.tm-body { display: flex; flex-direction: column; }
+.tm-empty { padding: 18px; text-align: center; color: #aab3bc; font-size: 13px; }
+.tm-row { display: flex; align-items: center; gap: 7px; padding: 8px 2px; border-bottom: 1px solid #f1f3f5; }
+.tm-name { font-size: 13.5px; font-weight: 600; color: #2c3e50; }
+.tm-cnt { font-size: 11px; color: #fff; background: #aab3bc; border-radius: 9px; padding: 1px 7px; }
+.tm-sp { flex: 1; }
+.tm-to { width: 118px; font-size: 12.5px; padding: 5px 8px; border: 1px solid #d8dde3; border-radius: 6px; }
+.tm-merge { background: #eaf3fb; border: 1px solid #b6d7f2; color: #2471a3; font-size: 11.5px; font-weight: 600; padding: 5px 9px; border-radius: 6px; cursor: pointer; }
+.tm-merge:hover { background: #d8ebfa; }
+.tm-del { background: #fdecea; border: 1px solid #f5c6c0; color: #c0392b; font-size: 12px; padding: 5px 8px; border-radius: 6px; cursor: pointer; line-height: 1; }
+.tm-del:hover { background: #f9d9d4; }
 .pem-foot { padding: 12px 18px; border-top: 1px solid #eee; display: flex; justify-content: flex-end; gap: 8px; }
 </style>
 </head>
@@ -234,6 +313,7 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
     <button class="btn btn-outline" onclick="plSearchHere()">이 지역 검색</button>
 <?php if (!$isGuest): ?>
     <button class="btn btn-outline" onclick="plNoGeoToggle()" title="좌표를 못 찾아 지도에 표시되지 않는 장소 목록">📍 미좌표</button>
+    <button class="btn btn-outline" onclick="plTagMgrOpen()" title="태그 정리·병합">🏷 태그 관리</button>
     <div class="pl-share-wrap">
         <button class="btn btn-share" onclick="plShareToggle()">🔗 공유</button>
         <div id="pl-share">
@@ -260,6 +340,15 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
         </div>
     </div>
 <?php endif; ?>
+</div>
+
+<div id="pl-tagbar">
+    <div id="tbChips" class="tb-chips"></div>
+    <button id="tbMore" class="tb-more" onclick="plTagBarToggleMore()" style="display:none"></button>
+</div>
+<div id="pl-monthbar">
+    <span class="mb-lbl">🌸 방문하기 좋은 달</span>
+    <div id="mbChips" class="mb-chips"></div>
 </div>
 
 <div id="pl-main">
@@ -306,16 +395,44 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
                 <option value="restaurant">맛집</option>
                 <option value="etc">기타</option>
             </select>
+            <label class="pem-lbl">방문시기 <span class="pem-sub">해당 월을 클릭</span></label>
+            <div class="pem-months" id="pemMonths"></div>
+            <label class="pem-lbl">태그 <span class="pem-sub">벚꽃·캠핑장·야경 등 — 검색에 쓰입니다</span></label>
+            <input type="text" id="pemTagInput" class="pem-inp" list="pemTagList" autocomplete="off"
+                   placeholder="태그 입력 후 Enter (쉼표로 여러 개)"
+                   onkeydown="if(event.key==='Enter'){event.preventDefault();plEditTagAdd();}">
+            <datalist id="pemTagList"></datalist>
+            <div id="pemTags" class="pem-tags"></div>
+            <div id="pemTagSuggest" class="pem-tag-sug"></div>
             <label class="pem-lbl">좌표 지정 (카카오 장소 검색 → 선택)</label>
             <input type="text" id="pemSearch" class="pem-inp" placeholder="장소·주소 검색 (예: 정동진 해안)"
                    oninput="plEditSearchDebounced()" onkeydown="if(event.key==='Enter'){event.preventDefault();plEditSearch();}">
             <div id="pemResults" class="pem-results"></div>
             <div id="pemPicked" class="pem-picked"></div>
+            <div class="pem-extra-wrap">
+                <div class="pem-extra-hd">➕ 이 기사에 나온 다른 장소 <span class="pem-extra-cnt" id="pemExtraCnt"></span></div>
+                <div id="pemExtra" class="pem-extra"></div>
+                <div class="pem-extra-hint">검색 결과의 <b>➕</b> 버튼을 누르면 같은 기사를 공유하는 별도 장소로 추가됩니다. 각 장소의 <b>제목·분류</b>를 따로 지정할 수 있고, 저장 시 각각 지도 마커가 생깁니다.</div>
+            </div>
             <div class="pem-hint">좌표를 선택하지 않고 저장하면 이름·분류만 바뀌고 지도엔 계속 안 뜹니다. 좌표를 선택해 저장하면 지도에 마커가 생깁니다.</div>
         </div>
         <div class="pem-foot">
             <button class="btn btn-ghost" onclick="plEditClose()">취소</button>
             <button class="btn btn-primary" id="pemSave" onclick="plEditSave()">저장</button>
+        </div>
+    </div>
+</div>
+
+<div id="pl-tagmgr" class="pl-modal">
+    <div class="pem-box">
+        <div class="pem-head"><span>🏷 태그 관리</span><button class="pem-x" onclick="plTagMgrClose()">×</button></div>
+        <div class="pem-body">
+            <div class="tm-hint">비슷한 태그를 <b>한 태그로 병합</b>하거나 이름을 바꿔 정리하세요. 옆 칸에 합칠/바꿀 이름을 적고 <b>병합</b>을 누르면, 그 태그를 가진 모든 장소가 새 이름으로 합쳐집니다. (월 태그는 제외)</div>
+            <datalist id="tmList"></datalist>
+            <div id="tmBody" class="tm-body"></div>
+        </div>
+        <div class="pem-foot">
+            <button class="btn btn-ghost" onclick="plTagMgrClose()">닫기</button>
         </div>
     </div>
 </div>
@@ -376,6 +493,7 @@ function plInit() {
             zoom: 12
         });
         plReady = true;
+        plTagBarInit();   // 상단 태그 칩 바 로드
 
         // 생성 직후 컨테이너 크기 보정 (회색 타일 방지) — 레이아웃 확정 타이밍을 놓치지 않게 다단 + 옵저버
         [60, 250, 600].forEach(function (ms) { setTimeout(plBumpResize, ms); });
@@ -391,6 +509,102 @@ function plInit() {
     });
 }
 plInit();
+
+// ── 상단 태그 칩 바 + 월 바 (태그 1 + 월 1 을 동시에 AND 선택) ──
+var plTagBarAll = [], plTagBarExpanded = false, plSelTag = null, plSelMonth = null;
+var PL_TAGBAR_TOP = 14;
+function plTagBarInit() {
+    fetch(plApiUrl({ module: 'place', action: 'tag_list' }))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            plTagBarAll = ((d && d.items) || []).filter(function (t) { return t.kind !== 'month'; }); // 월 제외
+            plTagBarRender();
+        })
+        .catch(function () {});
+    plMonthBarRender();   // 월 바(1~12)는 정적이라 바로 렌더
+}
+function plMonthBarRender() {
+    var box = document.getElementById('mbChips');
+    if (!box) return;
+    var html = '';
+    for (var i = 1; i <= 12; i++) {
+        var on = (plSelMonth === (i + '월')) ? ' active' : '';
+        html += '<button class="mb-chip' + on + '" onclick="plMonthClick(' + i + ')">' + i + '월</button>';
+    }
+    box.innerHTML = html;
+}
+function plMonthClick(i) {
+    var tag = i + '월';
+    plSelMonth = (plSelMonth === tag) ? null : tag;   // 재클릭=해제, 태그 선택과 독립
+    plMonthBarRender();
+    plRunTagSearch();
+}
+function plTagBarRender() {
+    var box = document.getElementById('tbChips');
+    var more = document.getElementById('tbMore');
+    var list = plTagBarExpanded ? plTagBarAll : plTagBarAll.slice(0, PL_TAGBAR_TOP);
+    box.innerHTML = list.map(function (t) {
+        var tg = t.tag.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        var on = (plSelTag === t.tag) ? ' active' : '';
+        return '<button class="tb-chip' + on + '" onclick="plTagBarClick(\'' + tg + '\')">' +
+            plEsc(t.tag) + '<span class="tb-cnt">' + t.cnt + '</span></button>';
+    }).join('');
+    var hidden = plTagBarAll.length - PL_TAGBAR_TOP;
+    if (hidden > 0) {
+        more.style.display = '';
+        more.textContent = plTagBarExpanded ? '접기' : ('+' + hidden + ' 더보기');
+    } else {
+        more.style.display = 'none';
+    }
+}
+function plTagBarToggleMore() { plTagBarExpanded = !plTagBarExpanded; plTagBarRender(); }
+function plTagBarClick(tag) {
+    plSelTag = (plSelTag === tag) ? null : tag;       // 재클릭=해제, 월 선택과 독립
+    plTagBarRender();
+    plRunTagSearch();
+}
+function plClearTagSel() { plSelTag = null; plSelMonth = null; plTagBarRender(); plMonthBarRender(); }
+// 현재 선택된 태그 + 월을 AND 로 검색 (둘 다 없으면 해제)
+function plRunTagSearch() {
+    var tags = [];
+    if (plSelTag) tags.push(plSelTag);
+    if (plSelMonth) tags.push(plSelMonth);
+    if (!tags.length) { plTagClear(); return; }
+    plTagSearch(tags);
+}
+function plTagClear() {
+    plClearMarkers(); plFeatures = []; plActive = -1;
+    plToggleList(false);
+    plHint('태그 해제');
+}
+function plTagSearch(tags) {
+    if (!plReady) return;
+    var label = tags.join(' · ');
+    plHint('“' + label + '” 불러오는 중…');
+    fetch(plApiUrl({ module: 'place', action: 'tag_search', tags: tags.join(',') }))
+        .then(function (r) { return r.json(); })
+        .then(function (geo) {
+            var feats = (geo && geo.features) || [];
+            plClearMarkers(); plActive = -1; plFeatures = feats;
+            feats.forEach(plAddMarker);
+            plRenderList(feats);
+            document.getElementById('plListTitle').textContent = '🏷 ' + label + ' ' + feats.length + '곳';
+            plToggleList(feats.length > 0);
+            if (feats.length) plFitToFeatures(feats);
+            plHint(feats.length ? ('🏷 ' + label + ' ' + feats.length + '곳')
+                                : ('“' + label + '” 해당 장소가 없습니다'));
+        })
+        .catch(function () { plHint('태그 검색 실패'); });
+}
+function plFitToFeatures(feats) {
+    if (!feats.length) return;
+    var c0 = feats[0].geometry.coordinates;
+    var b = new naver.maps.LatLngBounds(
+        new naver.maps.LatLng(c0[1], c0[0]), new naver.maps.LatLng(c0[1], c0[0]));
+    feats.forEach(function (f) { var co = f.geometry.coordinates; b.extend(new naver.maps.LatLng(co[1], co[0])); });
+    try { plMap.fitBounds(b, { top: 70, right: 50, bottom: 50, left: 50 }); }
+    catch (e) { plMap.fitBounds(b); }
+}
 
 function plClearMarkers() {
     plMarkers.forEach(function (m) { m.setMap(null); });
@@ -439,6 +653,7 @@ function plNextRadius(cur) {
 // 좌표 기준 검색 → GeoJSON → 마커 렌더
 //  expandFrom 가 숫자면: 결과 0곳일 때 다음 반경으로 자동 확장(데이터 나올 때까지, 최대 50km)
 function plSearch(lat, lng, expandFrom) {
+    if (plSelTag || plSelMonth) plClearTagSel();   // 지역 검색 시 태그·월 선택 해제
     var rad = (expandFrom != null) ? expandFrom : parseFloat(document.getElementById('radius').value);
     fetch(plApiUrl({
         module: 'place', action: 'search',
@@ -641,12 +856,30 @@ function plNoGeoRender(items) {
         return '<div class="ng-li" id="ng-li-' + it.id + '">' +
             '<div class="ng-row">' +
                 '<div class="ng-nm"><span class="ng-cat ' + c + '">' + (CAT_KO[c] || '기타') + '</span>' + plEsc(it.name) + '</div>' +
-                '<button class="ng-edit" onclick="plEditOpen(' + it.id + ')">✏️ 수정</button>' +
+                '<div class="ng-acts">' +
+                    '<button class="ng-edit" onclick="plEditOpen(' + it.id + ')">✏️ 수정</button>' +
+                    '<button class="ng-del" onclick="plNoGeoDelete(' + it.id + ')" title="이 장소 삭제">🗑</button>' +
+                '</div>' +
             '</div>' +
             (reg ? '<div class="ng-reg">' + plEsc(reg) + '</div>' : '') +
             '<div style="margin-top:3px">' + link + '</div>' +
         '</div>';
     }).join('');
+}
+
+// 미좌표 장소 삭제 (place_ref CASCADE) — 되돌릴 수 없음
+function plNoGeoDelete(id) {
+    var it = null;
+    for (var i = 0; i < plNoGeoItems.length; i++) { if (plNoGeoItems[i].id == id) { it = plNoGeoItems[i]; break; } }
+    var nm = it ? it.name : '이 장소';
+    if (!confirm('“' + nm + '” 장소와 연결된 출처를 삭제합니다.\n되돌릴 수 없습니다. 삭제할까요?')) return;
+    fetch(plApiUrl({ module: 'place', action: 'place_delete', id: id }))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            if (!d || !d.ok) { alert((d && d.msg) || '삭제 실패'); return; }
+            plNoGeoLoad(); // 목록 갱신(카운트 포함)
+        })
+        .catch(function () { alert('삭제 실패'); });
 }
 
 // 기사 원문 → JS 팝업창
@@ -656,18 +889,34 @@ function plOpenArticle(url) {
 }
 
 // ── 미좌표 장소 수정 모달 (이름/분류 변경 + 카카오로 좌표 직접 지정) ──
-var plEditId = 0, plEditResults = [], plEditSel = null, plEditTimer = null;
+var plEditId = 0, plEditResults = [], plEditSel = null, plEditTimer = null, plEditExtras = [], plEditTags = [], plTagListLoaded = false;
+
+// 분류 옵션(수정 모달 select 와 동일). 추가 장소 행의 <select> 생성에 재사용
+var PL_CAT_OPTS = [['travel', '여행지'], ['event', '축제'], ['restaurant', '맛집'], ['etc', '기타']];
+function plCatSelectHtml(sel, onchange) {
+    var opts = PL_CAT_OPTS.map(function (o) {
+        return '<option value="' + o[0] + '"' + (o[0] === sel ? ' selected' : '') + '>' + o[1] + '</option>';
+    }).join('');
+    return '<select class="pem-esel" onchange="' + onchange + '">' + opts + '</select>';
+}
 
 function plEditOpen(id) {
     var it = null;
     for (var i = 0; i < plNoGeoItems.length; i++) { if (plNoGeoItems[i].id == id) { it = plNoGeoItems[i]; break; } }
     if (!it) return;
-    plEditId = id; plEditSel = null; plEditResults = [];
+    plEditId = id; plEditSel = null; plEditResults = []; plEditExtras = [];
     document.getElementById('pemName').value = it.name || '';
     document.getElementById('pemCat').value  = it.category || 'travel';
     document.getElementById('pemSearch').value = it.name || '';
     document.getElementById('pemPicked').innerHTML = '';
     document.getElementById('pemResults').innerHTML = '';
+    plEditRenderExtras();
+    plEditTags = [];                      // 태그: 초기화 후 비동기 로드
+    plSuggestExpanded = false;            // 추천칩 펼침 상태 초기화
+    document.getElementById('pemTagInput').value = '';
+    plEditRenderMonths(); plEditRenderTagChips(); plEditRenderSuggest();
+    plLoadTagDatalist();                  // 자동완성 후보(최초 1회)
+    plEditTagsLoad(id);                   // 이 장소의 기존 태그
     document.getElementById('pl-edit').classList.add('open');
     plEditSearch(); // 장소명으로 즉시 후보 검색
     setTimeout(function () { document.getElementById('pemSearch').focus(); }, 50);
@@ -689,10 +938,13 @@ function plEditSearch() {
             plEditResults = items;
             if (!items.length) { box.innerHTML = '<div class="pem-empty">검색 결과 없음</div>'; return; }
             box.innerHTML = items.map(function (it, i) {
-                return '<div class="pem-res" id="pem-res-' + i + '" onclick="plEditPick(' + i + ')">' +
-                    '<b>' + plEsc(it.name) + '</b>' +
-                    (it.category ? '<span class="pem-rcat">' + plEsc(it.category) + '</span>' : '') +
-                    '<div class="pem-raddr">' + plEsc(it.address || '') + '</div>' +
+                return '<div class="pem-res pem-res-row" id="pem-res-' + i + '">' +
+                    '<div class="pem-res-main" onclick="plEditPick(' + i + ')">' +
+                        '<b>' + plEsc(it.name) + '</b>' +
+                        (it.category ? '<span class="pem-rcat">' + plEsc(it.category) + '</span>' : '') +
+                        '<div class="pem-raddr">' + plEsc(it.address || '') + '</div>' +
+                    '</div>' +
+                    '<button class="pem-add" title="이 장소를 추가 장소로 등록" onclick="plEditAddExtra(' + i + ')">＋</button>' +
                 '</div>';
             }).join('');
         })
@@ -707,23 +959,215 @@ function plEditPick(i) {
     document.getElementById('pemPicked').innerHTML =
         '✅ 지정 좌표: <b>' + plEsc(it.name) + '</b> <span>' + plEsc(it.address || '') + '</span>';
 }
+// 멀티 등록 — 검색 결과를 '추가 장소'로 담아둔다(같은 기사를 공유하는 별도 place)
+// 각 추가 장소는 제목(name)·분류(cat)·좌표(lat/lng) 를 독립 보유한다.
+function plEditAddExtra(i) {
+    var it = plEditResults[i]; if (!it) return;
+    for (var k = 0; k < plEditExtras.length; k++) {            // 같은 좌표 중복 방지
+        if (plEditExtras[k].lat == it.lat && plEditExtras[k].lng == it.lng) return;
+    }
+    var defCat = document.getElementById('pemCat').value || 'travel';   // 추가 시점의 상단 분류를 기본값으로
+    plEditExtras.push({ name: it.name, cat: defCat, lat: it.lat, lng: it.lng, addr: it.address || '' });
+    plEditRenderExtras();
+}
+function plEditRemoveExtra(k) { plEditExtras.splice(k, 1); plEditRenderExtras(); }
+function plEditSetExtraName(k, v) { if (plEditExtras[k]) plEditExtras[k].name = v; }   // 입력 중엔 재렌더 안 함(포커스 유지)
+function plEditSetExtraCat(k, v) { if (plEditExtras[k]) plEditExtras[k].cat = v; }
+function plEditRenderExtras() {
+    var box = document.getElementById('pemExtra');
+    document.getElementById('pemExtraCnt').textContent = plEditExtras.length ? '(' + plEditExtras.length + '곳)' : '';
+    box.innerHTML = plEditExtras.map(function (ex, k) {
+        var loc = plEsc(ex.addr || ex.name);
+        return '<div class="pem-erow">' +
+            '<div class="pem-erow-top">' +
+                '<input class="pem-einp" type="text" value="' + plEsc(ex.name) + '" placeholder="제목" ' +
+                    'oninput="plEditSetExtraName(' + k + ', this.value)">' +
+                plCatSelectHtml(ex.cat, 'plEditSetExtraCat(' + k + ', this.value)') +
+                '<button class="pem-edel" onclick="plEditRemoveExtra(' + k + ')" title="제거">×</button>' +
+            '</div>' +
+            '<div class="pem-eloc" title="' + loc + '">📍 ' + loc + '</div>' +
+        '</div>';
+    }).join('');
+}
+// ── 태그 (방문시기·테마·부분류) ──
+var PL_MONTHS = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8월', '9월', '10월', '11월', '12월'];
+var PL_TKIND_KO = { theme: '테마', type: '부분류', facet: '편의' };
+function plTagHas(kind, tag) {
+    for (var i = 0; i < plEditTags.length; i++) if (plEditTags[i].kind === kind && plEditTags[i].tag === tag) return i;
+    return -1;
+}
+function plNormTag(s) { return String(s).trim().replace(/\s+/g, ' ').slice(0, 40); }   // 정규화: 공백 정리
+function plLoadTagDatalist() {
+    if (plTagListLoaded) return;
+    plTagListLoaded = true;
+    fetch(plApiUrl({ module: 'place', action: 'tag_list' }))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            var tags = ((d && d.items) || []).filter(function (t) { return t.kind !== 'month'; }); // 월은 버튼으로
+            // datalist 자동완성
+            document.getElementById('pemTagList').innerHTML =
+                tags.map(function (t) { return '<option value="' + plEsc(t.tag) + '">'; }).join('');
+            // 추천 태그(많이 쓴 순 전체) — 클릭해서 재사용 → 동의어 난립 방지
+            plTagSuggestAll = tags.map(function (t) { return t.tag; });
+            plEditRenderSuggest();
+        })
+        .catch(function () { plTagListLoaded = false; });
+}
+var plTagSuggestAll = [], plSuggestExpanded = false;
+var PL_SUGGEST_TOP = 12;
+function plSuggestToggle() { plSuggestExpanded = !plSuggestExpanded; plEditRenderSuggest(); }
+function plEditRenderSuggest() {
+    var box = document.getElementById('pemTagSuggest');
+    if (!box) return;
+    var avail = plTagSuggestAll.filter(function (tg) { return plTagHas('theme', tg) < 0; }); // 이미 단 건 숨김
+    if (!avail.length) { box.innerHTML = ''; return; }
+    var shown = plSuggestExpanded ? avail : avail.slice(0, PL_SUGGEST_TOP);
+    var html = '<span class="pem-sug-lbl">자주 쓰는 태그:</span>' + shown.map(function (tg) {
+        return '<button type="button" class="pem-sug-chip" onclick="plEditAddSuggested(\'' +
+            tg.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + '\')">' + plEsc(tg) + '</button>';
+    }).join('');
+    var hidden = avail.length - PL_SUGGEST_TOP;
+    if (hidden > 0) {
+        html += '<button type="button" class="pem-sug-more" onclick="plSuggestToggle()">' +
+            (plSuggestExpanded ? '접기' : ('+' + hidden + ' 전체')) + '</button>';
+    }
+    box.innerHTML = html;
+}
+function plEditAddSuggested(tg) {
+    tg = plNormTag(tg);
+    if (tg && plTagHas('theme', tg) < 0) plEditTags.push({ kind: 'theme', tag: tg });
+    plEditRenderSuggest(); plEditRenderTagChips();
+}
+function plEditTagsLoad(id) {
+    fetch(plApiUrl({ module: 'place', action: 'place_tags', id: id }))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            if (id !== plEditId) return;                  // 그새 다른 항목 열렸으면 무시
+            plEditTags = (d && d.items) || [];
+            plEditRenderMonths(); plEditRenderTagChips(); plEditRenderSuggest();
+        })
+        .catch(function () {});
+}
+function plEditRenderMonths() {
+    document.getElementById('pemMonths').innerHTML = PL_MONTHS.map(function (m, i) {
+        var on = plTagHas('month', m) >= 0;
+        return '<button type="button" class="pem-mon' + (on ? ' active' : '') + '" onclick="plEditMonthToggle(' + i + ')">' + (i + 1) + '</button>';
+    }).join('');
+}
+function plEditMonthToggle(i) {
+    var m = PL_MONTHS[i], at = plTagHas('month', m);
+    if (at >= 0) plEditTags.splice(at, 1); else plEditTags.push({ kind: 'month', tag: m });
+    plEditRenderMonths();
+}
+function plEditTagAdd() {
+    var inp = document.getElementById('pemTagInput');
+    if (!inp.value.trim()) return;
+    inp.value.split(',').forEach(function (s) {              // 쉼표로 여러 개 허용
+        var tag = plNormTag(s);
+        if (tag && plTagHas('theme', tag) < 0) plEditTags.push({ kind: 'theme', tag: tag });
+    });
+    inp.value = '';
+    plEditRenderSuggest(); plEditRenderTagChips();
+}
+function plEditTagRemove(i) { plEditTags.splice(i, 1); plEditRenderMonths(); plEditRenderSuggest(); plEditRenderTagChips(); }
+function plEditRenderTagChips() {
+    document.getElementById('pemTags').innerHTML = plEditTags.map(function (t, i) {
+        if (t.kind === 'month') return '';                  // 월은 위 버튼으로 표시
+        return '<span class="pem-tag k-' + t.kind + '">' + plEsc(t.tag) +
+            '<button onclick="plEditTagRemove(' + i + ')" title="제거">×</button></span>';
+    }).join('');
+}
+
 function plEditSave() {
     if (!plEditId) return;
     var name = document.getElementById('pemName').value.trim();
     var cat  = document.getElementById('pemCat').value;
     if (!name) { alert('이름을 입력하세요'); return; }
-    var params = { module: 'place', action: 'place_update', id: plEditId, name: name, category: cat };
-    if (plEditSel) { params.lat = plEditSel.lat; params.lng = plEditSel.lng; }
     var btn = document.getElementById('pemSave'); btn.disabled = true; btn.textContent = '저장 중…';
-    fetch(plApiUrl(params))
+    var primary = { module: 'place', action: 'place_update', id: plEditId, name: name, category: cat };
+    if (plEditSel) { primary.lat = plEditSel.lat; primary.lng = plEditSel.lng; }
+    fetch(plApiUrl(primary))
         .then(function (r) { return r.json(); })
         .then(function (d) {
+            if (!d || !d.ok) throw new Error((d && d.msg) || '기본 장소 저장 실패');
+            // 추가 장소들 — 원본(plEditId)의 기사를 공유하는 새 place 로 등록(각자 제목·분류 사용)
+            var extraJobs = plEditExtras.map(function (ex) {
+                return fetch(plApiUrl({ module: 'place', action: 'place_add', src_id: plEditId,
+                                        name: (ex.name || '').trim() || ex.name, category: ex.cat || cat,
+                                        lat: ex.lat, lng: ex.lng }))
+                    .then(function (r) { return r.json(); });
+            });
+            // 태그(기본 장소) 저장
+            var tagJob = fetch(plApiUrl({ module: 'place', action: 'tag_set', id: plEditId,
+                                          tags: JSON.stringify(plEditTags) })).then(function (r) { return r.json(); });
+            return Promise.all([Promise.all(extraJobs), tagJob]);
+        })
+        .then(function (res) {
             btn.disabled = false; btn.textContent = '저장';
-            if (!d || !d.ok) { alert((d && d.msg) || '저장 실패'); return; }
+            var added = (res[0] || []).filter(function (x) { return x && x.ok; }).length;
             plEditClose();
             plNoGeoLoad(); // 좌표 지정됐으면 목록에서 빠짐
+            if (added) plHint(added + '곳을 추가 등록했습니다');
         })
-        .catch(function () { btn.disabled = false; btn.textContent = '저장'; alert('저장 실패'); });
+        .catch(function (e) { btn.disabled = false; btn.textContent = '저장'; alert((e && e.message) || '저장 실패'); });
+}
+
+// ── 태그 관리(병합/이름변경/삭제) 모달 ──
+function plTagMgrOpen() { document.getElementById('pl-tagmgr').classList.add('open'); plTagMgrLoad(); }
+function plTagMgrClose() {
+    document.getElementById('pl-tagmgr').classList.remove('open');
+    plTagListLoaded = false;        // 다음 수정 모달에서 추천/자동완성 갱신되도록
+}
+function plTagMgrLoad() {
+    var body = document.getElementById('tmBody');
+    body.innerHTML = '<div class="tm-empty">불러오는 중…</div>';
+    fetch(plApiUrl({ module: 'place', action: 'tag_list' }))
+        .then(function (r) { return r.json(); })
+        .then(function (d) { plTagMgrRender((d && d.items) || []); })
+        .catch(function () { body.innerHTML = '<div class="tm-empty">불러오기 실패</div>'; });
+}
+function plTagMgrRender(items) {
+    var tags = items.filter(function (t) { return t.kind !== 'month'; });   // 월 태그 제외
+    document.getElementById('tmList').innerHTML =
+        tags.map(function (t) { return '<option value="' + plEsc(t.tag) + '">'; }).join('');
+    var body = document.getElementById('tmBody');
+    if (!tags.length) { body.innerHTML = '<div class="tm-empty">아직 태그가 없습니다</div>'; return; }
+    body.innerHTML = tags.map(function (t) {
+        var tgJs = t.tag.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        return '<div class="tm-row">' +
+            '<span class="tm-name">' + plEsc(t.tag) + '</span><span class="tm-cnt">' + t.cnt + '</span>' +
+            '<span class="tm-sp"></span>' +
+            '<input class="tm-to" list="tmList" placeholder="합칠/바꿀 이름" ' +
+                'onkeydown="if(event.key===\'Enter\')plTagRename(this.parentNode.querySelector(\'.tm-merge\'),\'' + tgJs + '\')">' +
+            '<button class="tm-merge" onclick="plTagRename(this,\'' + tgJs + '\')">병합·변경</button>' +
+            '<button class="tm-del" onclick="plTagDelete(this,\'' + tgJs + '\')" title="이 태그 삭제">🗑</button>' +
+        '</div>';
+    }).join('');
+}
+function plTagRename(btn, from) {
+    var inp = btn.closest('.tm-row').querySelector('.tm-to');
+    var to = plNormTag(inp.value);
+    if (!to) { inp.focus(); return; }
+    if (to === from) { inp.value = ''; return; }
+    btn.disabled = true;
+    fetch(plApiUrl({ module: 'place', action: 'tag_rename', from: from, to: to }))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            if (!d || !d.ok) { alert((d && d.msg) || '실패'); btn.disabled = false; return; }
+            plTagMgrRender(d.items || []);
+        })
+        .catch(function () { alert('실패'); btn.disabled = false; });
+}
+function plTagDelete(btn, tag) {
+    if (!confirm('“' + tag + '” 태그를 모든 장소에서 삭제할까요?')) return;
+    btn.disabled = true;
+    fetch(plApiUrl({ module: 'place', action: 'tag_delete', tag: tag }))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            if (!d || !d.ok) { alert((d && d.msg) || '실패'); btn.disabled = false; return; }
+            plTagMgrRender(d.items || []);
+        })
+        .catch(function () { alert('실패'); btn.disabled = false; });
 }
 
 // 주소 → 좌표 (서버 GeoCoder) → 지도 이동 후 검색

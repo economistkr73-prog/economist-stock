@@ -47,8 +47,8 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
 {
     $place = new Place($pdo);
 
-    // 게스트(공유 링크)는 읽기전용 — 검색/출처/지오코딩/자동완성만 허용
-    if ($isGuest && !in_array($action, ['search', 'refs', 'geocode', 'suggest'], true)) {
+    // 게스트(공유 링크)는 읽기전용 — 검색/출처/지오코딩/자동완성/태그검색만 허용
+    if ($isGuest && !in_array($action, ['search', 'refs', 'geocode', 'suggest', 'tag_list', 'tag_search'], true)) {
         http_response_code(403);
         echo json_encode(['ok' => false, 'msg' => 'forbidden']);
         return;
@@ -123,6 +123,92 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
                 $lat, $lng
             );
             echo json_encode(['ok' => $ok, 'geocoded' => $hasCoord], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+
+        // ── 멀티 등록: 같은 기사를 공유하는 새 장소 추가 (소유자 전용) ──
+        //  한 기사가 여러 장소를 다룰 때, 원본(src_id)의 출처자료를 복제 연결한 새 place 생성
+        case 'place_add': {
+            $srcId    = (int)($_GET['src_id'] ?? $_POST['src_id'] ?? 0);
+            $name     = trim((string)($_GET['name']     ?? $_POST['name']     ?? ''));
+            $category = trim((string)($_GET['category'] ?? $_POST['category'] ?? 'travel'));
+            $hasCoord = (isset($_GET['lat']) || isset($_POST['lat'])) && (isset($_GET['lng']) || isset($_POST['lng']));
+            if ($name === '' || !$hasCoord) {
+                http_response_code(400);
+                echo json_encode(['ok' => false, 'msg' => '이름과 좌표가 필요합니다.']);
+                return;
+            }
+            $lat   = (float)($_GET['lat'] ?? $_POST['lat']);
+            $lng   = (float)($_GET['lng'] ?? $_POST['lng']);
+            $newId = $place->addLinkedPlace($srcId, $name, $category, $lat, $lng);
+            echo json_encode(['ok' => $newId > 0, 'id' => $newId], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+
+        // ── 장소 삭제 (소유자 전용) — place_ref 는 FK CASCADE 로 함께 삭제 ──
+        case 'place_delete': {
+            $id = (int)($_GET['id'] ?? $_POST['id'] ?? 0);
+            if ($id <= 0) {
+                http_response_code(400);
+                echo json_encode(['ok' => false, 'msg' => 'id 가 필요합니다.']);
+                return;
+            }
+            $n = $place->deletePlace($id);
+            echo json_encode(['ok' => $n > 0, 'deleted' => $n], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+
+        // ── 태그 조회/저장/자동완성 (소유자 전용) ──────────
+        case 'place_tags': {            // 한 장소의 태그 {kind,tag}[]
+            $id = (int)($_GET['id'] ?? $_POST['id'] ?? 0);
+            echo json_encode(['ok' => true, 'items' => $place->getTags($id)], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+        case 'tag_set': {               // 장소 태그 전체 교체. tags = JSON [{kind,tag}]
+            $id = (int)($_GET['id'] ?? $_POST['id'] ?? 0);
+            if ($id <= 0) {
+                http_response_code(400);
+                echo json_encode(['ok' => false, 'msg' => 'id 가 필요합니다.']);
+                return;
+            }
+            $raw  = (string)($_POST['tags'] ?? $_GET['tags'] ?? '[]');
+            $tags = json_decode($raw, true);
+            if (!is_array($tags)) $tags = [];
+            $place->setTags($id, $tags);
+            echo json_encode(['ok' => true, 'items' => $place->getTags($id)], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+        case 'tag_list': {              // 태그 목록(자동완성·상단 칩바). {tag,kind,cnt} 빈도순
+            echo json_encode(['ok' => true, 'items' => $place->listTags(500)], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+        case 'tag_search': {            // 태그(들) AND 검색 → GeoJSON. tags=콤마구분, 또는 단일 tag
+            $raw  = (string)($_GET['tags'] ?? $_POST['tags'] ?? $_GET['tag'] ?? $_POST['tag'] ?? '');
+            $tags = array_filter(array_map('trim', explode(',', $raw)), fn($t) => $t !== '');
+            echo json_encode($place->searchByTags($tags), JSON_UNESCAPED_UNICODE);
+            break;
+        }
+        case 'tag_rename': {            // 태그 이름변경=병합. from → to
+            $from = trim((string)($_POST['from'] ?? $_GET['from'] ?? ''));
+            $to   = trim((string)($_POST['to']   ?? $_GET['to']   ?? ''));
+            if ($from === '' || $to === '') {
+                http_response_code(400);
+                echo json_encode(['ok' => false, 'msg' => 'from/to 가 필요합니다.']);
+                return;
+            }
+            $n = $place->renameTag($from, $to);
+            echo json_encode(['ok' => true, 'moved' => $n, 'items' => $place->listTags(500)], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+        case 'tag_delete': {            // 태그 완전 삭제
+            $tag = trim((string)($_POST['tag'] ?? $_GET['tag'] ?? ''));
+            if ($tag === '') {
+                http_response_code(400);
+                echo json_encode(['ok' => false, 'msg' => 'tag 가 필요합니다.']);
+                return;
+            }
+            $n = $place->deleteTag($tag);
+            echo json_encode(['ok' => true, 'deleted' => $n, 'items' => $place->listTags(500)], JSON_UNESCAPED_UNICODE);
             break;
         }
 

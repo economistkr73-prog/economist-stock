@@ -75,10 +75,24 @@ class Place
                     REFERENCES place(id) ON DELETE CASCADE,
                 KEY idx_place  (place_id),
                 KEY idx_source (source_type),
-                UNIQUE KEY uq_url (url_hash)
+                UNIQUE KEY uq_place_url (place_id, url_hash)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         ");
 
+        // 장소 태그 (M:N) — 부분류(type)/테마(theme,벚꽃)/월(month,1월)/편의(facet,주차).
+        // category 는 마커색용 단일 주분류, 그 외 다중 라벨·검색은 모두 여기로.
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS place_tag (
+                place_id BIGINT UNSIGNED NOT NULL,
+                kind     ENUM('type','theme','month','facet') NOT NULL DEFAULT 'theme',
+                tag      VARCHAR(40)     NOT NULL,
+                PRIMARY KEY (place_id, kind, tag),
+                KEY idx_tag      (tag),
+                KEY idx_kind_tag (kind, tag),
+                CONSTRAINT fk_ptag_place FOREIGN KEY (place_id)
+                    REFERENCES place(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        ");
         // 한시적 공개 공유 링크 (페이지 전체를 토큰으로 읽기전용 공개). travel.php 패턴 재사용
         $this->pdo->exec("
             CREATE TABLE IF NOT EXISTS tbl_place_share (
@@ -316,6 +330,63 @@ class Place
         return ['type' => 'FeatureCollection', 'features' => $features];
     }
 
+    /** 단일 태그 검색(편의 래퍼) */
+    public function searchByTag(string $tag, int $limit = 1500): array
+    {
+        return $this->searchByTags([$tag], $limit);
+    }
+
+    /**
+     * 여러 태그 AND 검색 → GeoJSON. 주어진 태그를 '모두' 가진 ok 장소만(반경 무관).
+     * searchNearby 와 동일한 properties.
+     */
+    public function searchByTags(array $tags, int $limit = 1500): array
+    {
+        $tags = array_values(array_unique(array_filter(array_map('trim', $tags), fn($t) => $t !== '')));
+        if (!$tags) return ['type' => 'FeatureCollection', 'features' => []];
+        $ph = []; $args = [];
+        foreach ($tags as $i => $t) { $ph[] = ":t{$i}"; $args[":t{$i}"] = $t; }
+        $inList = implode(',', $ph);
+        $need = count($tags);
+        $sql = "SELECT p.id, p.name, p.category, p.lat, p.lng, p.phone,
+                       p.address, p.region_lv1, p.region_lv2,
+                       p.period_start, p.period_end, p.attributes,
+                       (SELECT COUNT(*) FROM place_ref r WHERE r.place_id = p.id) AS ref_count
+                  FROM place p
+                 WHERE p.is_active = 1 AND p.geocode_status = 'ok'
+                   AND p.id IN (
+                       SELECT pt.place_id FROM place_tag pt
+                        WHERE pt.tag IN ({$inList})
+                        GROUP BY pt.place_id
+                       HAVING COUNT(DISTINCT pt.tag) = {$need}
+                   )
+                 ORDER BY p.region_lv1, p.region_lv2, p.name
+                 LIMIT {$limit}";
+        $st = $this->pdo->prepare($sql);
+        $st->execute($args);
+        $features = [];
+        while ($row = $st->fetch(PDO::FETCH_ASSOC)) {
+            $features[] = [
+                'type' => 'Feature',
+                'geometry' => ['type' => 'Point', 'coordinates' => [(float)$row['lng'], (float)$row['lat']]],
+                'properties' => [
+                    'id'           => (int)$row['id'],
+                    'name'         => $row['name'],
+                    'category'     => $row['category'],
+                    'phone'        => $row['phone'],
+                    'address'      => $row['address'],
+                    'region_lv1'   => $row['region_lv1'],
+                    'region_lv2'   => $row['region_lv2'],
+                    'period_start' => $row['period_start'],
+                    'period_end'   => $row['period_end'],
+                    'attributes'   => $row['attributes'] ? json_decode($row['attributes'], true) : null,
+                    'ref_count'    => (int)$row['ref_count'],
+                    'dist_km'      => null,
+                ],
+            ];
+        }
+        return ['type' => 'FeatureCollection', 'features' => $features];
+    }
     /**
      * 마커 클릭 시: 그 장소의 출처자료 링크 목록 (최신순).
      */
@@ -509,5 +580,178 @@ class Place
         $sets[] = 'updated_at = NOW()';
         $st = $this->pdo->prepare('UPDATE place SET ' . implode(', ', $sets) . ' WHERE id = :id');
         return $st->execute($params);
+    }
+
+    /**
+     * 한 출처(기사)가 여러 장소를 다룰 때 — 원본 장소의 출처자료(place_ref)를 새 장소로 복제.
+     * url_hash 는 (place_id, url_hash) 복합 UNIQUE 라 장소가 다르면 같은 URL 도 INSERT 된다
+     * (같은 장소로의 재복제는 IGNORE 로 무시).
+     * @return int 복제된 ref 건수
+     */
+    public function copyRefs(int $fromId, int $toId): int
+    {
+        if ($fromId <= 0 || $toId <= 0 || $fromId === $toId) return 0;
+        $st = $this->pdo->prepare(
+            "INSERT IGNORE INTO place_ref
+               (place_id, source_type, title, url, summary, published_at, extra)
+             SELECT :to, source_type, title, url, summary, published_at, extra
+               FROM place_ref WHERE place_id = :from"
+        );
+        $st->execute([':to' => $toId, ':from' => $fromId]);
+        return $st->rowCount();
+    }
+
+    /**
+     * 멀티 등록 — 원본 장소($srcId)와 같은 기사를 공유하는 새 장소를 좌표와 함께 생성.
+     * 새 place(좌표=ok) upsert 후 $srcId 의 출처자료를 복제 연결한다.
+     * @return int 새(또는 dedup 으로 합쳐진) place id
+     */
+    public function addLinkedPlace(int $srcId, string $name, string $category, float $lat, float $lng): int
+    {
+        $name = trim($name);
+        if ($name === '') throw new InvalidArgumentException('place name 은 필수입니다.');
+        $allowed = ['travel', 'event', 'restaurant', 'etc'];
+        if (!in_array($category, $allowed, true)) $category = 'travel';
+        $newId = $this->upsertPlace([
+            'name'           => $name,
+            'category'       => $category,
+            'lat'            => $lat,
+            'lng'            => $lng,
+            'geocode_status' => 'ok',
+        ]);
+        if ($newId > 0 && $newId !== $srcId) {
+            $this->copyRefs($srcId, $newId);
+        }
+        return $newId;
+    }
+
+    /**
+     * 장소 삭제 (소유자 전용). place_ref 는 FK ON DELETE CASCADE 로 함께 삭제된다.
+     * @return int 삭제된 place 행 수(0 또는 1)
+     */
+    public function deletePlace(int $id): int
+    {
+        if ($id <= 0) return 0;
+        $st = $this->pdo->prepare("DELETE FROM place WHERE id = ?");
+        $st->execute([$id]);
+        return $st->rowCount();
+    }
+
+    // ======================================================
+    //  태그 (place_tag) — 다중 라벨·검색용
+    // ======================================================
+    private const TAG_KINDS = ['type', 'theme', 'month', 'facet'];
+
+    /** 한 장소의 태그 목록 [{kind, tag}] (월=숫자순, 그 외 종류·이름순) */
+    public function getTags(int $placeId): array
+    {
+        if ($placeId <= 0) return [];
+        $st = $this->pdo->prepare(
+            "SELECT kind, tag FROM place_tag WHERE place_id = ?
+              ORDER BY FIELD(kind,'type','theme','facet','month'),
+                       CAST(REGEXP_REPLACE(tag,'[^0-9]','') AS UNSIGNED), tag"
+        );
+        $st->execute([$placeId]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * 장소 태그 전체 교체 (소유자 편집). 잘못된 kind/빈 tag 는 건너뛰고,
+     * 같은 (kind,tag) 중복은 PK 로 무시. 최대 50개.
+     * @param array $tags [{kind, tag}, ...]
+     */
+    public function setTags(int $placeId, array $tags): void
+    {
+        if ($placeId <= 0) return;
+        $clean = [];
+        foreach ($tags as $t) {
+            $kind = (string)($t['kind'] ?? 'theme');
+            $tag  = trim((string)($t['tag'] ?? ''));
+            if ($tag === '' || !in_array($kind, self::TAG_KINDS, true)) continue;
+            $clean[$kind . "\0" . mb_substr($tag, 0, 40)] = ['kind' => $kind, 'tag' => mb_substr($tag, 0, 40)];
+            if (count($clean) >= 50) break;
+        }
+        $this->pdo->beginTransaction();
+        try {
+            $this->pdo->prepare("DELETE FROM place_tag WHERE place_id = ?")->execute([$placeId]);
+            if ($clean) {
+                $ins = $this->pdo->prepare(
+                    "INSERT IGNORE INTO place_tag (place_id, kind, tag) VALUES (?, ?, ?)"
+                );
+                foreach ($clean as $row) $ins->execute([$placeId, $row['kind'], $row['tag']]);
+            }
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+    }
+
+    /** 자동완성용 기존 태그 목록 [{tag, kind, cnt}] (사용빈도순) */
+    public function listTags(int $limit = 500): array
+    {
+        $limit = max(1, min(2000, $limit));
+        $st = $this->pdo->query(
+            "SELECT tag, kind, COUNT(*) cnt FROM place_tag
+              GROUP BY tag, kind ORDER BY cnt DESC, tag LIMIT {$limit}"
+        );
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * 태그 이름변경 = 병합. $from 을 가진 모든 장소의 태그를 $to 로 이관한다.
+     * $to 가 이미 있는 장소는 INSERT IGNORE 로 자연 병합(중복 제거), kind 는 보존.
+     * @return int 이관(삭제)된 원본 행 수
+     */
+    public function renameTag(string $from, string $to): int
+    {
+        $from = trim($from);
+        $to   = trim(mb_substr($to, 0, 40));
+        if ($from === '' || $to === '' || $from === $to) return 0;
+        $this->pdo->beginTransaction();
+        try {
+            $this->pdo->prepare(
+                "INSERT IGNORE INTO place_tag (place_id, kind, tag)
+                 SELECT place_id, kind, :to FROM place_tag WHERE tag = :from"
+            )->execute([':to' => $to, ':from' => $from]);
+            $del = $this->pdo->prepare("DELETE FROM place_tag WHERE tag = :from");
+            $del->execute([':from' => $from]);
+            $n = $del->rowCount();
+            $this->pdo->commit();
+            return $n;
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+    }
+
+    /** 태그 완전 삭제(모든 장소에서 제거). @return int 삭제된 행 수 */
+    public function deleteTag(string $tag): int
+    {
+        $tag = trim($tag);
+        if ($tag === '') return 0;
+        $st = $this->pdo->prepare("DELETE FROM place_tag WHERE tag = ?");
+        $st->execute([$tag]);
+        return $st->rowCount();
+    }
+
+    /**
+     * 태그 추가(기존 유지) — 자동 태깅 백필용. INSERT IGNORE 라 중복/수동태그 안 건드림.
+     * @param array $tags [{kind, tag}, ...]
+     * @return int 실제로 새로 추가된 행 수
+     */
+    public function addTags(int $placeId, array $tags): int
+    {
+        if ($placeId <= 0 || !$tags) return 0;
+        $ins = $this->pdo->prepare("INSERT IGNORE INTO place_tag (place_id, kind, tag) VALUES (?,?,?)");
+        $n = 0;
+        foreach ($tags as $t) {
+            $kind = (string)($t['kind'] ?? 'theme');
+            $tag  = trim((string)($t['tag'] ?? ''));
+            if ($tag === '' || !in_array($kind, self::TAG_KINDS, true)) continue;
+            $ins->execute([$placeId, $kind, mb_substr($tag, 0, 40)]);
+            $n += $ins->rowCount();
+        }
+        return $n;
     }
 }
