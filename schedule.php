@@ -1,6 +1,7 @@
 <?php
 require_once "./env/cnt.inc";
 require_once "./env/auth_fnc.php";
+require_once "./env/nav.inc";
 require_login();
 
 // 지도/지오코딩 키 (없으면 지도 임베드 자동 비활성화 → 주소+외부링크만)
@@ -32,28 +33,8 @@ if (isset($routes[$mode]) && function_exists($routes[$mode])) {
 // 공통 헬퍼: 네비게이션 바 출력
 // ##########################################################
 function sch_nav(string $active_mode): void {
-    global $current_user, $expire_date;
-    $menus = [
-        ['href' => '/etf_stock.php?mode=ef',          'label' => '주식ETF분석'],
-        ['href' => '/condition_analysis.php?mode=cf', 'label' => '조건검색분석'],
-        ['href' => '/stock_analysis.php?mode=si',     'label' => '주식그래프'],
-        ['href' => '/classes/data_upload.php',        'label' => '데이터 입력'],
-        ['href' => '/schedule.php?mode=calendar',     'label' => '스케줄러'],
-        ['href' => '/contacts.php',                   'label' => '주소록'],
-        ['href' => '/anniversary.php',                'label' => '기념일'],
-    ];
-    echo "<div class='top-nav-bar'>";
-    echo "<button class='nav-burger' onclick='document.body.classList.toggle(\"nav-open\")' aria-label='메뉴'>☰</button>";
-    echo "<div class='nav-menu'>";
-    foreach ($menus as $m) {
-        $active = (strpos($m['href'], "mode={$active_mode}") !== false) ? " class='active'" : '';
-        echo "<a href='{$m['href']}'{$active}>{$m['label']}</a>";
-    }
-    echo "</div><div class='nav-user-info'>";
-    echo "<span>환영합니다, <span class='user-name'>" . htmlspecialchars($current_user) . "</span>님</span>";
-    echo "<span style='font-size:12px;opacity:.7'>(자동연장: {$expire_date})</span>";
-    echo "<a href='logout.php' class='btn-logout'>로그아웃</a>";
-    echo "</div></div>";
+    // 공통 네비게이션(env/nav.inc)으로 통합. 스케줄러는 항상 'schedule' 활성.
+    render_nav('schedule');
 }
 
 // ##########################################################
@@ -64,14 +45,6 @@ function sch_common_css(): void { ?>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { overflow-x: hidden; }
 body { font-family: 'Pretendard', 'Malgun Gothic', sans-serif; background: #f0f2f5; color: #2c3e50; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
-.nav-burger { display: none; background: none; border: none; color: #fff; font-size: 22px; cursor: pointer; padding: 4px 8px; line-height: 1; }
-.top-nav-bar { background: #2c3e50; color: #fff; height: 60px; display: flex; justify-content: space-between; align-items: center; padding: 0 20px; box-shadow: 0 2px 8px rgba(0,0,0,.15); flex-shrink: 0; z-index: 1000; }
-.nav-menu { display: flex; gap: 10px; }
-.nav-menu a { color: #ecf0f1; text-decoration: none; font-size: 16px; font-weight: 600; padding: 10px 16px; border-radius: 6px; }
-.nav-menu a:hover, .nav-menu a.active { background: #34495e; color: #f1c40f; }
-.nav-user-info { display: flex; align-items: center; gap: 15px; font-size: 14px; color: #bdc3c7; }
-.nav-user-info .user-name { color: #f1c40f; font-weight: bold; }
-.btn-logout { background: #e74c3c; color: #fff; text-decoration: none; padding: 6px 14px; border-radius: 4px; font-size: 13px; font-weight: bold; }
 .btn { border: none; cursor: pointer; border-radius: 6px; font-size: var(--fs-sm); font-weight: 600; padding: 7px 14px; transition: .15s; }
 .btn-primary { background: #3498db; color: #fff; }
 .btn-primary:hover { background: #2980b9; }
@@ -97,6 +70,7 @@ function sch_calendar(PDO $pdo): void {
 <title>업무 스케줄러 — 이코노미스트</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <?php sch_common_css(); ?>
+<?php nav_css(); ?>
 <style>
 /* ── 반응형 폰트 변수 (화면 크기에 비례해 자동 조절) ─────────
    clamp(최소, 뷰포트비율, 최대)
@@ -142,11 +116,9 @@ function sch_calendar(PDO $pdo): void {
 .proj-bar-track { flex: 1; height: 6px; background: #eef1f4; border-radius: 3px; overflow: hidden; }
 .proj-bar-fill { height: 100%; border-radius: 3px; transition: width .2s; }
 .proj-card-pct { font-size: 10px; color: #95a5a6; flex-shrink: 0; white-space: nowrap; }
-/* 일정 모달: 프로젝트 고정 표시 칸 */
-.fixed-proj { display: flex; align-items: center; gap: 6px; padding: 7px 9px; background: #f4f8fb; border: 1px solid #d6e4f0; border-radius: 6px; font-size: var(--fs-sm); }
-.fixed-proj .proj-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-.fixed-proj #f-project-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: #2c3e50; }
-.fixed-proj #f-project-clear { background: none; border: none; cursor: pointer; color: #c0392b; font-size: 16px; line-height: 1; padding: 0 2px; }
+.proj-card-dots { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+.proj-dot-task { width: 11px; height: 11px; border-radius: 50%; background: #e74c3c; }
+.proj-dot-task.done { background: #c4ccd4; }
 /* 그룹 상세: 포함 프로젝트 행 */
 .pdp-proj-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid #e8edf2; border-radius: 7px; margin-bottom: 6px; cursor: pointer; transition: background .1s; }
 .pdp-proj-row:hover { background: #f6f9fc; border-color: #cfe0ef; }
@@ -329,8 +301,9 @@ function sch_calendar(PDO $pdo): void {
 .view-map-fallback { font-size: 13px; color: #555; background: #f8f9fa; border-radius: 6px; padding: 10px; }
 .chip-map-mark { cursor: pointer; }
 .chip-map-mark:hover { text-decoration: underline; }
+.chip-log-mark { font-size: .7em; opacity: .85; white-space: nowrap; }
 .pdp-dday { display:inline-block; background:#fdecea; color:#c0392b; font-size:11px; font-weight:700; padding:1px 8px; border-radius:10px; margin-left:6px; }
-.proj-bar { font-size: var(--fs-xs); line-height: 16px; height: 16px; color:#fff; padding: 0 4px; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; font-weight: 600; }
+.proj-bar, .travel-bar { font-size: var(--fs-xs); line-height: 16px; height: 16px; color:#fff; padding: 0 4px; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; font-weight: 600; }
 /* ── 모바일 일정 입력 모달 → 풀스크린 ── */
 :is(body.is-mobile, body.w-narrow) #modal-overlay {
     align-items: stretch;
@@ -365,25 +338,8 @@ function sch_calendar(PDO $pdo): void {
 }
 /* ── 모바일 월간 캘린더 ──
    UA 기반 body.is-mobile(실기기) + 좁은 폭(max-width:820px) 양쪽에서 적용.
-   두 셀렉터가 같은 규칙을 공유하도록 :is()로 묶음 */
-/* 모바일 헤더: 햄버거 메뉴 */
-:is(body.is-mobile, body.w-narrow) .top-nav-bar { height: 48px; padding: 0 8px; }
-:is(body.is-mobile, body.w-narrow) .nav-burger { display: block; }
-:is(body.is-mobile, body.w-narrow) .nav-menu {
-    position: absolute; top: 48px; left: 0; right: 0; flex-direction: column;
-    background: #2c3e50; gap: 0; display: none; z-index: 1001;
-    box-shadow: 0 6px 16px rgba(0,0,0,.25); max-height: 70vh; overflow-y: auto;
-}
-body.is-mobile.nav-open .nav-menu, body.w-narrow.nav-open .nav-menu { display: flex; }
-:is(body.is-mobile, body.w-narrow) .nav-menu a { padding: 13px 18px; border-bottom: 1px solid rgba(255,255,255,.08); border-radius: 0; font-size: 16px; }
-/* 모바일 메뉴에서 일부 항목 숨김 */
-:is(body.is-mobile, body.w-narrow) .nav-menu a[href*="condition_analysis"],
-:is(body.is-mobile, body.w-narrow) .nav-menu a[href*="stock_analysis"],
-:is(body.is-mobile, body.w-narrow) .nav-menu a[href*="data_upload"] { display: none; }
-/* 환영문구·자동연장 숨기고 로그아웃만 */
-:is(body.is-mobile, body.w-narrow) .nav-user-info { gap: 8px; }
-:is(body.is-mobile, body.w-narrow) .nav-user-info > span { display: none; }
-
+   두 셀렉터가 같은 규칙을 공유하도록 :is()로 묶음.
+   ※ 헤더(네비게이션) 모바일 규칙은 env/nav.inc 의 nav_css() 로 통합됨 */
 :is(body.is-mobile, body.w-narrow) #proj-panel,
 :is(body.is-mobile, body.w-narrow) #proj-panel-tab { display: none !important; }
 :is(body.is-mobile, body.w-narrow) #scheduler { padding: 8px; gap: 8px; }
@@ -404,7 +360,8 @@ body.is-mobile.nav-open .nav-menu, body.w-narrow.nav-open .nav-menu { display: f
 :is(body.is-mobile, body.w-narrow) .holiday-badge,
 :is(body.is-mobile, body.w-narrow) .jeoegi-badge { font-size: 9px; }
 :is(body.is-mobile, body.w-narrow) .more-link { font-size: 10px; }
-:is(body.is-mobile, body.w-narrow) .proj-bar { font-size: 9px; height: 13px; line-height: 13px; }
+:is(body.is-mobile, body.w-narrow) .proj-bar,
+:is(body.is-mobile, body.w-narrow) .travel-bar { font-size: 9px; height: 13px; line-height: 13px; }
 /* 선택된 날짜 강조 */
 :is(body.is-mobile, body.w-narrow) .cal-cell.sel-day { box-shadow: inset 0 0 0 2px #3498db; }
 /* 모바일: 달력은 컴팩트(내용만), 아래 상세 패널이 남은 공간 채움 */
@@ -441,10 +398,6 @@ body.is-mobile.nav-open .nav-menu, body.w-narrow.nav-open .nav-menu { display: f
 </head>
 <body class="<?= $mobile ? 'is-mobile' : '' ?>">
 <?php sch_nav('calendar'); ?>
-<script>
-(function(){ if (matchMedia('(max-width:768px)').matches || document.body.classList.contains('is-mobile')) {
-    document.querySelectorAll('.nav-menu a[href*="etf_stock.php"]').forEach(a=>a.href='/etf_stock.php?mode=m'); } })();
-</script>
 
 <div id="scheduler">
     <div class="sch-toolbar">
@@ -653,12 +606,9 @@ body.is-mobile.nav-open .nav-menu, body.w-narrow.nav-open .nav-menu { display: f
                 </select>
             </label>
             <label id="row-project" style="display:none;">프로젝트
-                <div id="f-project-fixed" class="fixed-proj">
-                    <span class="proj-dot" id="f-project-dot"></span>
-                    <span id="f-project-name"></span>
-                    <button type="button" id="f-project-clear" title="프로젝트 해제" onclick="clearProjectField()">×</button>
-                </div>
-                <input type="hidden" id="f-project-id">
+                <select id="f-project-id">
+                    <option value="">연결 안 함</option>
+                </select>
             </label>
         </div>
 
@@ -775,6 +725,22 @@ body.is-mobile.nav-open .nav-menu, body.w-narrow.nav-open .nav-menu { display: f
                 <div id="view-map"></div>
                 <div id="view-map-fallback" class="view-map-fallback" style="display:none;"></div>
                 <div id="view-map-links" class="view-map-links"></div>
+            </div>
+            <!-- 활동 메모(타임스탬프 로그) -->
+            <div id="view-log" style="margin-top:12px;border-top:1px solid #f0f0f0;padding-top:10px;">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                    <span style="font-size:13px;font-weight:600;color:#444;">📝 메모</span>
+                    <button id="view-log-toggle" class="btn btn-outline" style="padding:3px 9px;font-size:13px;line-height:1;" onclick="toggleLogInput()" title="메모 추가">✏️</button>
+                </div>
+                <div id="view-log-list" style="display:flex;flex-direction:column;gap:4px;"></div>
+                <div id="view-log-input" style="display:none;margin-top:8px;">
+                    <textarea id="view-log-text" rows="2" placeholder="메모 입력 후 등록 (시각 자동 기록)"
+                        style="width:100%;box-sizing:border-box;border:1px solid #ddd;border-radius:6px;padding:8px;font-size:13px;resize:vertical;"></textarea>
+                    <div style="display:flex;justify-content:flex-end;gap:6px;margin-top:6px;">
+                        <button class="btn btn-outline" style="padding:4px 11px;font-size:12px;" onclick="toggleLogInput(false)">취소</button>
+                        <button class="btn btn-primary" style="padding:4px 11px;font-size:12px;" onclick="addLog()">등록</button>
+                    </div>
+                </div>
             </div>
         </div>
         <!-- 하단: 닫기 -->
@@ -925,6 +891,7 @@ window.MAP_CFG = {
 
 <script>
 let _projects = [];   // 프로젝트 목록 캐시
+let _travels  = [];   // 여행 목록 캐시 (캘린더 막대 읽기전용)
 
 // HTML 이스케이프 (XSS 방지)
 function esc(s) { const d=document.createElement('span'); d.textContent=s; return d.innerHTML; }
@@ -972,6 +939,13 @@ function mapMark(ev) {
     if (!(ev.address && String(ev.address).trim())) return '';
     const label = ev.place_name ? ' ' + esc(ev.place_name) : '';
     return ` <span class="chip-map-mark" onclick="openMapFromChip(event, ${ev.id})" title="지도 바로 열기">📍${label}</span>`;
+}
+
+// 활동 메모 배지: 메모가 1개 이상이면 제목 옆에 📝N (esc 밖에서 raw HTML로 붙임)
+function logMark(ev) {
+    const n = +(ev.log_count || 0);
+    if (!n) return '';
+    return ` <span class="chip-log-mark" title="메모 ${n}개">📝(<b>${n}</b>)</span>`;
 }
 
 // 칩의 위치 마커 클릭 → 제공자에 맞는 외부 지도 새 탭
@@ -1047,7 +1021,7 @@ function showDayDetail(ds){
             return `<div class="mdd-item${isDone?' done':''}" data-idx="${i}">
                 <span class="mdd-bar" style="background:${bg}"></span>
                 <span class="mdd-time">${esc(tr||'-')}</span>
-                <span class="mdd-title">${esc((ev.icon?ev.icon+' ':'')+ (ev.title||'(제목없음)'))}${mapMark(ev)}</span>
+                <span class="mdd-title">${esc((ev.icon?ev.icon+' ':'')+ (ev.title||'(제목없음)'))}${mapMark(ev)}${logMark(ev)}</span>
             </div>`;
         }).join('');
     }
@@ -1196,18 +1170,16 @@ function renderMonth() {
         }
         cell.appendChild(header);
 
-        // 프로젝트 기간 막대: 이 날짜가 프로젝트 기간(start~end)에 포함되면 표시
-        _projects.filter(p=>p.type==='project'&&p.start_dt&&p.end_dt&&ds>=p.start_dt&&ds<=p.end_dt&&!p.is_done)
-            .forEach(p=>{
-                const isStart=ds===p.start_dt, isEnd=ds===p.end_dt;
-                const bar=document.createElement('div'); bar.className='proj-bar';
-                bar.style.background=p.color||'#3498db';
+        // 여행 기간 막대: 이 날짜가 여행 기간(start~end)에 포함되면 표시 (읽기전용 → 클릭 시 갤러리)
+        _travels.filter(t=>t.start_dt&&t.end_dt&&ds>=t.start_dt&&ds<=t.end_dt)
+            .forEach(t=>{
+                const isStart=ds===t.start_dt, isEnd=ds===t.end_dt;
+                const bar=document.createElement('div'); bar.className='travel-bar';
+                bar.style.background=t.color||'#e67e22';
                 bar.style.borderRadius=`${isStart?'4px':'0'} ${isEnd?'4px':'0'} ${isEnd?'4px':'0'} ${isStart?'4px':'0'}`;
-                bar.textContent=isStart?((p.icon||'')+p.title):'';   // 시작일에만 제목
-                bar.title=p.title+' — 클릭하면 이 프로젝트로 일정 추가';
-                bar.style.cursor='pointer';
-                // 프로젝트 색상 칸 클릭 → 이 날짜로 일정 추가 (프로젝트 자동 고정)
-                bar.onclick=e=>{e.stopPropagation(); if(isMobileView()){showDayDetail(ds);} else {openNew(ds+'T09:00');}};
+                bar.textContent=isStart?((t.icon||'🧳')+t.title):'';   // 시작일에만 제목
+                bar.title=t.title+' — 클릭하면 여행 갤러리 열기';
+                bar.onclick=e=>{e.stopPropagation(); window.location.href='/travel.php?mode=view&id='+t.id;};
                 cell.appendChild(bar);
             });
 
@@ -1222,7 +1194,7 @@ function renderMonth() {
                 chip.style.background = bg;
                 chip.style.color = contrastColor(bg);
             }
-            chip.innerHTML=projNumBadge(ev)+esc((isDone?'✓ ':'')+fmtTimeRange(ev)+evLabel(ev))+mapMark(ev);
+            chip.innerHTML=projNumBadge(ev)+esc((isDone?'✓ ':'')+fmtTimeRange(ev)+evLabel(ev))+mapMark(ev)+logMark(ev);
             chip.onclick=e=>{e.stopPropagation(); if(isMobileView()){showDayDetail(ds);} else {openView(ev);}};
             return chip;
         };
@@ -1324,7 +1296,7 @@ function renderWeek() {
                 const sty = bg2 ? `background:${bg2};color:${contrastColor(bg2)}` : '';
                 const ico=isHol?'':(icon2[ev.event_type]||'');
                 const cat=(!isHol&&ev.event_type==='anniversary'&&ev.category)?'['+ev.category+'] ':'';
-                return `<div class="${cls}" style="${sty}" data-id="${ev.id}">${isHol?'':projNumBadge(ev)}${esc((done?'✓ ':'')+ico+cat+evLabel(ev))}${mapMark(ev)}</div>`;
+                return `<div class="${cls}" style="${sty}" data-id="${ev.id}">${isHol?'':projNumBadge(ev)}${esc((done?'✓ ':'')+ico+cat+evLabel(ev))}${mapMark(ev)}${logMark(ev)}</div>`;
             }).join('')+'</div>';
         });
         return r+'</div>';
@@ -1381,7 +1353,7 @@ function renderWeek() {
             const cls='week-event'+(done?' done':'');
             const wBg=done?'':evBgColor(ev);
             const bg=done?'':`background:${wBg};color:${contrastColor(wBg)};`;
-            const txt=projNumBadge(ev)+esc((done?'✓ ':'')+fmtTimeRange(ev)+evLabel(ev))+mapMark(ev);
+            const txt=projNumBadge(ev)+esc((done?'✓ ':'')+fmtTimeRange(ev)+evLabel(ev))+mapMark(ev)+logMark(ev);
             h+=`<div class="${cls}" style="pointer-events:all;position:absolute;${bg}top:${topPx}px;height:${hPx}px;left:2px;right:2px;" data-id="${ev.id}">${txt}</div>`;
         });
         h+='</div>';
@@ -1487,7 +1459,7 @@ function renderList() {
     const c=document.getElementById('view-list');
     if (!S.events.length){c.innerHTML='<p style="padding:20px;color:#999">올해 일정이 없습니다.</p>';return;}
     const rows=S.events.map(ev=>`<tr class="${ev.is_done=='1'?'done':''}" style="cursor:pointer" data-id="${ev.id}">
-        <td><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${ev.color};margin-right:6px"></span>${projNumBadge(ev)}${esc(evLabel(ev))}${mapMark(ev)}</td>
+        <td><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${ev.color};margin-right:6px"></span>${projNumBadge(ev)}${esc(evLabel(ev))}${mapMark(ev)}${logMark(ev)}</td>
         <td>${ev.start_dt.slice(0,16).replace('T',' ')}</td>
         <td>${ev.category}</td>
         <td><span class="priority-badge ${priorityClass(ev.priority)}">${priorityLabel(ev.priority)}</span></td>
@@ -1555,7 +1527,7 @@ function openNew(dt='', type='timed') {
     // 그룹/프로젝트: 그룹 드롭다운 + 날짜에 맞는 프로젝트 고정 표시
     fillGroupSelect();
     document.getElementById('f-group-id').value = '';
-    applyProjectByDate();
+    populateProjectSelect('');
 
     document.getElementById('btn-delete').style.display='none';
     document.getElementById('modal-overlay').classList.add('open');
@@ -1603,6 +1575,7 @@ function openEdit(ev) {
             document.getElementById('f-anniv-date').value = origDate;
         }
     } else if (type==='todo') {
+        document.getElementById('f-start').value = '';  // recurBaseVal()이 f-due-dt를 읽도록 초기화
         document.getElementById('f-due-dt').value=ev.due_dt||ev.start_dt?.slice(0,10)||'';
     }
 
@@ -1611,16 +1584,17 @@ function openEdit(ev) {
     // 그룹/프로젝트 복원 — ev.project_id 는 그룹 또는 프로젝트 행을 가리킴
     fillGroupSelect();
     document.getElementById('f-group-id').value = '';
-    setProjectField(null);
+    let projForceId = '';
     if (ev.project_id) {
         const owner = _projects.find(x => x.id == ev.project_id);
         if (owner && owner.type === 'project') {
             if (owner.parent_id) document.getElementById('f-group-id').value = owner.parent_id;
-            setProjectField(owner.id);            // 저장된 프로젝트는 날짜 무관 고정 표시
+            projForceId = owner.id;               // 저장된 프로젝트를 드롭다운에서 선택
         } else if (owner) {
             document.getElementById('f-group-id').value = ev.project_id;
         }
     }
+    populateProjectSelect(projForceId);
     if (type === 'anniversary') {
         // 분류·카테고리 복원
         setAnnivClass(ev.is_family == '1' ? 1 : 0);
@@ -1739,9 +1713,12 @@ async function saveEvent() {
 
     if (S.editId) {
         payload.id = S.editId;
-        // 반복 인스턴스 수정 → 범위 선택
+        // 반복 인스턴스 수정
         if (S.editEv && S.editEv.is_recur_instance == '1') {
-            openScopeModal('edit', payload); return;
+            // todo는 항상 전체 시리즈 업데이트 (날짜 변경 = 반복 기준일 변경)
+            if (ETYPE !== 'todo') {
+                openScopeModal('edit', payload); return;
+            }
         }
         const upRes = await api('update', payload, 'POST');
         if (upRes && !upRes.ok) { alert('저장 실패: ' + (upRes.msg||'')); return; }
@@ -1853,7 +1830,73 @@ function openView(ev) {
     // 헤더 색상 띠
     document.getElementById('view-header').style.borderLeft = `4px solid ${ev.color||'#3498db'}`;
 
+    // 활동 메모 로드 (입력창은 접은 상태로 초기화)
+    toggleLogInput(false);
+    loadLogs();
+
     document.getElementById('view-overlay').classList.add('open');
+}
+
+// ── 활동 메모(타임스탬프 로그) ──────────────────────────────
+// VIEW_EV의 발생일(occ_date): 반복 인스턴스는 origin_dt, 단일은 자기 날짜
+function viewOccDate(ev) {
+    if (!ev) return '';
+    if (ev.origin_dt) return ev.origin_dt;
+    const base = ev.start_dt || ev.due_dt || '';
+    return base ? base.substr(0, 10) : '';
+}
+
+async function loadLogs() {
+    const listEl = document.getElementById('view-log-list');
+    if (!VIEW_EV || !VIEW_EV.id) { listEl.innerHTML = ''; return; }
+    const res = await api('log_list', { schedule_id: VIEW_EV.id, occ_date: viewOccDate(VIEW_EV) });
+    renderLogs(res.ok ? (res.data || []) : []);
+}
+
+function renderLogs(logs) {
+    const listEl = document.getElementById('view-log-list');
+    if (!logs.length) {
+        listEl.innerHTML = `<div style="font-size:12px;color:#aaa;">아직 메모가 없습니다.</div>`;
+        return;
+    }
+    listEl.innerHTML = logs.map(l => `
+        <div style="display:flex;align-items:flex-start;gap:6px;font-size:13px;color:#444;">
+            <span style="color:#3498db;font-weight:600;flex-shrink:0;">[${esc(l.t)}]</span>
+            <span style="white-space:pre-wrap;word-break:break-word;flex:1;">${esc(l.note)}</span>
+            <button onclick="delLog(${+l.id})" title="삭제"
+                style="border:0;background:none;color:#ccc;cursor:pointer;font-size:13px;line-height:1;flex-shrink:0;padding:0 2px;">×</button>
+        </div>`).join('');
+}
+
+function toggleLogInput(show) {
+    const box = document.getElementById('view-log-input');
+    const open = (show === undefined) ? (box.style.display === 'none') : show;
+    box.style.display = open ? 'block' : 'none';
+    if (open) {
+        const ta = document.getElementById('view-log-text');
+        ta.value = '';
+        setTimeout(() => ta.focus(), 0);
+    }
+}
+
+async function addLog() {
+    const ta = document.getElementById('view-log-text');
+    const note = ta.value.trim();
+    if (!note) { ta.focus(); return; }
+    if (!VIEW_EV || !VIEW_EV.id) return;
+    const now = new Date();
+    const time = pad(now.getHours()) + ':' + pad(now.getMinutes());
+    const res = await api('log_add', {
+        schedule_id: VIEW_EV.id, occ_date: viewOccDate(VIEW_EV), note, time
+    }, 'POST');
+    if (res.ok) { toggleLogInput(false); loadLogs(); loadEvents(); }
+    else alert(res.msg || '메모 저장에 실패했습니다.');
+}
+
+async function delLog(id) {
+    if (!confirm('이 메모를 삭제할까요?')) return;
+    const res = await api('log_delete', { id }, 'GET');
+    if (res.ok) { loadLogs(); loadEvents(); }
 }
 
 function closeViewModal() {
@@ -2567,6 +2610,7 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeModal();closeV
 (function init(){
     loadContactsForAttendee();  // 참석자용 주소록 미리 로드
     loadProjPanel();         // 프로젝트 패널 로드
+    loadTravelBars();        // 여행 기간 막대 로드 (읽기전용)
     restorePos();  // localStorage에서 위치/뷰 복원 (없으면 오늘 기준 그대로)
     // 저장된 뷰로 화면 전환 (탭 활성화 + display)
     ['month','week','day','list'].forEach(n=>{
@@ -2607,6 +2651,18 @@ async function loadProjPanel() {
     if (S.events && S.events.length !== undefined && S.view === 'month') render();
 }
 
+// 여행 막대 로드 (읽기전용 — tbl_travel 단방향 조회, 캘린더에 기간 막대만 표시)
+async function loadTravelBars() {
+    try {
+        const res  = await fetch('schedule_api.php?module=travel&action=list');
+        const json = await res.json();
+        if (!json.ok) return;
+        _travels = json.data || [];
+        // 캘린더가 이미 그려져 있으면 막대 반영 위해 재렌더
+        if (S.events && S.events.length !== undefined && S.view === 'month') render();
+    } catch (e) { /* 여행 미설정 시 조용히 무시 */ }
+}
+
 // 사이드패널 렌더
 function renderProjPanel() {
     const list = document.getElementById('proj-list');
@@ -2624,12 +2680,24 @@ function renderProjPanel() {
         </div>`;
     };
 
-    // ── 프로젝트 카드 (이름·기간·진행률) ──
+    // ── 프로젝트 카드 (이름·기간·시간경과율·업무 건수 원) ──
     const projCard = p => {
         const total = +p.item_count || 0, done = +p.done_count || 0;
-        const pct = total ? Math.round(done / total * 100) : 0;
         const period = (p.start_dt || p.end_dt)
             ? `${(p.start_dt||'').slice(5)} ~ ${(p.end_dt||'').slice(5)}` : '기간 미설정';
+        // 시간 경과율: 시작일~종료일 중 오늘이 얼마나 지났는지 (업무 완료율 아님)
+        let tpct = 0;
+        if (p.start_dt && p.end_dt) {
+            const s = new Date(p.start_dt + 'T00:00:00'), e = new Date(p.end_dt + 'T00:00:00');
+            const span = e - s;
+            tpct = span > 0 ? Math.round((TODAY - s) / span * 100) : (TODAY >= e ? 100 : 0);
+            tpct = Math.max(0, Math.min(100, tpct));
+        }
+        // 업무 건수: 완료=회색원 / 미완료=빨간원 (건수만큼 표시)
+        const dots = total
+            ? `<div class="proj-card-dots">${Array.from({length: total}, (_, i) =>
+                  `<span class="proj-dot-task${i < done ? ' done' : ''}"></span>`).join('')}</div>`
+            : '';
         const dimmed = p.is_done ? ' style="opacity:.55;"' : '';
         return `<div class="proj-card"${dimmed} onclick="openProjDetail(event,${p.id})" oncontextmenu="openProjDetail(event,${p.id});return false;">
             <div class="proj-card-top">
@@ -2638,9 +2706,10 @@ function renderProjPanel() {
             </div>
             <div class="proj-card-period">📅 ${period}</div>
             <div class="proj-card-prog">
-                <div class="proj-bar-track"><div class="proj-bar-fill" style="width:${pct}%;background:${p.color||'#3498db'}"></div></div>
-                <span class="proj-card-pct">${pct}% (${done}/${total})</span>
+                <div class="proj-bar-track"><div class="proj-bar-fill" style="width:${tpct}%;background:${p.color||'#3498db'}"></div></div>
+                <span class="proj-card-pct">${tpct}%</span>
             </div>
+            ${dots}
         </div>`;
     };
 
@@ -2682,32 +2751,38 @@ function curEventDate() {
     return sv ? sv.slice(0, 10) : '';
 }
 
-// 프로젝트 칸 고정 표시 (특정 프로젝트로). projId 없으면 숨김
-function setProjectField(projId) {
-    const row = document.getElementById('row-project');
-    const hid = document.getElementById('f-project-id');
-    const p = projId ? _projects.find(x => x.id == projId && x.type === 'project') : null;
-    if (!p) {
-        hid.value = '';
-        row.style.display = 'none';
-        return;
+// 프로젝트 드롭다운 채우기: 현재 일정 날짜에 걸친 프로젝트들을 옵션으로 나열.
+// forceId가 주어지면 그 값을 선택(편집 시 저장된 프로젝트), undefined면 기존 선택 유지.
+// 날짜에 걸친 프로젝트가 하나도 없고 선택된 것도 없으면 줄 자체를 숨긴다.
+function populateProjectSelect(forceId) {
+    const sel  = document.getElementById('f-project-id');
+    const row  = document.getElementById('row-project');
+    const date = curEventDate();
+    const want = (forceId !== undefined) ? String(forceId || '') : sel.value;
+
+    // 날짜에 걸친 진행중 프로젝트
+    const covering = _projects.filter(p => p.type === 'project' && !p.is_done
+        && p.start_dt && p.end_dt && date && date >= p.start_dt && date <= p.end_dt);
+
+    // 선택값이 목록에 없으면(날짜 밖이지만 연결돼 있던 프로젝트) 보존용으로 추가
+    let list = covering.slice();
+    if (want && !list.some(p => String(p.id) === want)) {
+        const extra = _projects.find(p => String(p.id) === want && p.type === 'project');
+        if (extra) list = [extra, ...list];
     }
-    hid.value = p.id;
-    document.getElementById('f-project-dot').style.background = p.color || '#3498db';
-    document.getElementById('f-project-name').textContent = (p.icon || '') + p.title;
+
+    if (!list.length) { sel.innerHTML = '<option value="">연결 안 함</option>'; sel.value = ''; row.style.display = 'none'; return; }
+
+    const md = s => s ? s.slice(5, 10).replace('-', '/') : '';
+    sel.innerHTML = '<option value="">연결 안 함</option>' + list.map(p =>
+        `<option value="${p.id}">${esc((p.icon || '') + p.title)} (${md(p.start_dt)}~${md(p.end_dt)})</option>`
+    ).join('');
+    sel.value = want && list.some(p => String(p.id) === want) ? want : '';
     row.style.display = '';
 }
 
-// 일정 날짜가 포함된 프로젝트를 찾아 고정 표시 (없으면 숨김)
-function applyProjectByDate() {
-    const date = curEventDate();
-    const hit = _projects.find(p => p.type === 'project' && !p.is_done
-        && p.start_dt && p.end_dt && date && date >= p.start_dt && date <= p.end_dt);
-    setProjectField(hit ? hit.id : null);
-}
-
-// 프로젝트 수동 해제
-function clearProjectField() { setProjectField(null); }
+// 일정 날짜 변경 시: 옵션을 새 날짜 기준으로 갱신(기존 선택은 유지)
+function applyProjectByDate() { populateProjectSelect(undefined); }
 
 // 그룹/프로젝트 칸 동기화 (그룹 드롭다운 + 날짜기반 프로젝트)
 function fillProjSelect() {
