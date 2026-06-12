@@ -1,0 +1,602 @@
+<?php
+// RiseAnalyzer.class — 상승종목 신호 분석/누적/채점 엔진 (가격·거래량 ONLY) v2
+//   universe: market_sum(고가필드) 전종목 스캔 → 종가율>=3% OR 고가전일대비>=7% (적응형, 상한 200)
+//   신호 분류:
+//     · 핵심신호(core)  = 종가 60일 신고가 돌파 + 거래량 60일평균 2배+
+//     · 장중신호(intra) = (고가 60일돌파 OR 고가전일대비+7%)이나 종가 미돌파 + 거래량 2배+
+//   예측확률: 그날 후보들 160일 과거의 in-sample 백테스트(신호종류×거래량 등급별)
+//   채점: 신호 3거래일 뒤 재조회 → 3일내 +3%터치 / 종가상승 / MFE / MAE
+//   누적: graded 결과를 rise_pattern_stats(cell_key=종류:등급)로 집계 = 실제 적중률(칼리브레이션)
+class RiseAnalyzer {
+
+    const MIN_RATE      = 3.0;   // 후보 최소 종가 등락률(%)
+    const MIN_HIGH_RATE = 7.0;   // 후보 보완: 당일 고가 전일대비(%)
+    const MAX_CAND      = 200;   // 후보 상한
+    const VOL_SURGE     = 2.0;   // 대량거래 기준(60일평균 배수)
+
+    const RETEST_WINDOW = 25;     // forward trading bars examined for retest
+    const RETEST_TOL_UP = 0.015;  // low within this band above level = retest touch
+    const RETEST_TOL_DN = 0.010;  // close below level by this = broke as resistance
+
+    private $pdo;
+    public function __construct($pdo) { $this->pdo = $pdo; }
+
+    // ── 테이블 보장 ──────────────────────────────────────────────
+    public function ensureTables(): void {
+        $this->pdo->exec("CREATE TABLE IF NOT EXISTS rise_run (
+            run_date DATE NOT NULL, run_dt DATETIME NOT NULL,
+            universe_n INT DEFAULT 0, signal_n INT DEFAULT 0, graded_n INT DEFAULT 0,
+            note VARCHAR(255) DEFAULT '', PRIMARY KEY (run_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+        $this->pdo->exec("CREATE TABLE IF NOT EXISTS rise_pick (
+            signal_date DATE NOT NULL, stock_code CHAR(6) NOT NULL,
+            stock_name VARCHAR(40) DEFAULT '', rank_no INT DEFAULT 0,
+            today_rate FLOAT DEFAULT 0, high_rate FLOAT DEFAULT NULL, close_price INT DEFAULT 0,
+            sig_open INT DEFAULT 0, sig_high INT DEFAULT 0, sig_low INT DEFAULT 0,
+            signal_type VARCHAR(8) DEFAULT 'core',
+            brk_period INT DEFAULT 0, brk_mag FLOAT DEFAULT NULL, prior_high INT DEFAULT 0,
+            vol_ratio60 FLOAT DEFAULT NULL, vol_tier VARCHAR(8) DEFAULT '',
+            new_vol60 TINYINT DEFAULT 0, is_signal TINYINT DEFAULT 0, cell_key VARCHAR(24) DEFAULT '',
+            pred_hit3 FLOAT DEFAULT NULL, pred_up3 FLOAT DEFAULT NULL,
+            graded TINYINT DEFAULT 0, fwd_high3 FLOAT DEFAULT NULL, fwd_low3 FLOAT DEFAULT NULL,
+            fwd_close3 FLOAT DEFAULT NULL,
+            nx_open FLOAT DEFAULT NULL, nx_high FLOAT DEFAULT NULL, nx_low FLOAT DEFAULT NULL, nx_close FLOAT DEFAULT NULL,
+            fwd_path TEXT DEFAULT NULL,
+            hit3_3pct TINYINT DEFAULT NULL, up3_close TINYINT DEFAULT NULL,
+            graded_at DATETIME DEFAULT NULL,
+            retest_graded TINYINT DEFAULT 0, retest_done TINYINT DEFAULT NULL, retest_day INT DEFAULT NULL,
+            retest_result VARCHAR(16) DEFAULT NULL, fwd_ret_post FLOAT DEFAULT NULL,
+            retest_done_c TINYINT DEFAULT NULL, retest_day_c INT DEFAULT NULL, retest_result_c VARCHAR(16) DEFAULT NULL, fwd_ret_post_c FLOAT DEFAULT NULL,
+            fwd_max25 FLOAT DEFAULT NULL, fwd_min25 FLOAT DEFAULT NULL, path25 TEXT DEFAULT NULL,
+            retest_at DATETIME DEFAULT NULL,
+            PRIMARY KEY (signal_date, stock_code), KEY idx_grade (graded, signal_date), KEY idx_retest (retest_graded, signal_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        // 기존 테이블(v1) 보강
+        foreach ([
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS signal_type VARCHAR(8) DEFAULT 'core'",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS high_rate FLOAT DEFAULT NULL",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS nx_open FLOAT DEFAULT NULL",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS nx_high FLOAT DEFAULT NULL",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS nx_low FLOAT DEFAULT NULL",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS nx_close FLOAT DEFAULT NULL",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS sig_open INT DEFAULT 0",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS sig_high INT DEFAULT 0",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS sig_low INT DEFAULT 0",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS fwd_path TEXT DEFAULT NULL",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS retest_graded TINYINT DEFAULT 0",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS retest_done TINYINT DEFAULT NULL",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS retest_day INT DEFAULT NULL",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS retest_result VARCHAR(16) DEFAULT NULL",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS fwd_ret_post FLOAT DEFAULT NULL",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS fwd_max25 FLOAT DEFAULT NULL",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS fwd_min25 FLOAT DEFAULT NULL",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS path25 TEXT DEFAULT NULL",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS retest_at DATETIME DEFAULT NULL",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS retest_done_c TINYINT DEFAULT NULL",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS retest_day_c INT DEFAULT NULL",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS retest_result_c VARCHAR(16) DEFAULT NULL",
+            "ALTER TABLE rise_pick ADD COLUMN IF NOT EXISTS fwd_ret_post_c FLOAT DEFAULT NULL",
+            "ALTER TABLE rise_pick ADD KEY IF NOT EXISTS idx_retest (retest_graded, signal_date)",
+        ] as $sql) { try { $this->pdo->exec($sql); } catch (Throwable $e) {} }
+
+        $this->pdo->exec("CREATE TABLE IF NOT EXISTS rise_pattern_stats (
+            cell_key VARCHAR(24) NOT NULL, n_samples INT DEFAULT 0, n_hit3 INT DEFAULT 0, n_up3 INT DEFAULT 0,
+            hit3_rate FLOAT DEFAULT NULL, up3_rate FLOAT DEFAULT NULL, ci_low FLOAT DEFAULT NULL, ci_high FLOAT DEFAULT NULL,
+            avg_mfe FLOAT DEFAULT NULL, avg_mae FLOAT DEFAULT NULL, updated_at DATETIME DEFAULT NULL,
+            PRIMARY KEY (cell_key)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    }
+
+    // ── 유틸 ─────────────────────────────────────────────────────
+    private static function mean(array $a): float { return count($a) ? array_sum($a)/count($a) : 0.0; }
+    private static function volTier(float $r): string {
+        if ($r >= 5) return '5+'; if ($r >= 3) return '3-5'; if ($r >= 2) return '2-3'; if ($r >= 1) return '1-2'; return '0-1';
+    }
+    private static function wilson(int $h, int $n): array {
+        if ($n <= 0) return [null, null];
+        $z = 1.96; $p = $h/$n; $z2 = $z*$z; $d = 1 + $z2/$n;
+        $c = ($p + $z2/(2*$n))/$d; $w = $z*sqrt(($p*(1-$p)+$z2/(4*$n))/$n)/$d;
+        return [max(0,$c-$w), min(1,$c+$w)];
+    }
+    private function fetchDaily(string $code): array {
+        $api = new NaverFinanceAPI();
+        $res = $api->getDailyOhlc($code, 250);
+        return (isset($res['success']) && is_array($res['success'])) ? $res['success'] : [];
+    }
+    // 거래일 확인: 벤치마크(삼성전자)의 최신 일봉 날짜가 오늘이면 정상 거래일.
+    //   휴장일/주말엔 최신봉이 전일 → false. 장 마감 직후 네이버가 오늘봉 미게시여도 false(저녁 재시도 유도).
+    public function isTradingDayToday(): bool {
+        $d = $this->fetchDaily('005930');
+        if (!$d) return false;
+        $last = end($d);
+        return isset($last['t']) && $last['t'] === date('Y-m-d');
+    }
+    private static function breakoutPeriod(array $d, int $i): int {
+        $c = $d[$i]['c'];
+        foreach ([252,120,60,20] as $L) {
+            if ($i < $L) continue;
+            $ph = -INF; for ($k=$i-$L;$k<$i;$k++) if ($d[$k]['h']>$ph) $ph=$d[$k]['h'];
+            if ($c > $ph) return $L;
+        }
+        return 0;
+    }
+
+    // retest classification — pure post-process over forward OHLCV vs level L (= prior_high)
+    //   returns [done, day, result, retPost, fwdMax%, fwdMin%]; result: runaway|support|resistance
+    private static function classifyRetest(array $path, float $level, float $sigClose): array {
+        $n = count($path);
+        if ($n < 1 || $level <= 0 || $sigClose <= 0) return [null, null, null, null, null, null];
+        $bandUp = $level * (1 + self::RETEST_TOL_UP);
+        $brkDn  = $level * (1 - self::RETEST_TOL_DN);
+        $mx = -INF; $mn = INF;
+        foreach ($path as $b) { if ($b['h'] > $mx) $mx = $b['h']; if ($b['l'] < $mn) $mn = $b['l']; }
+        $fwdMax = ($mx - $sigClose) / $sigClose * 100;
+        $fwdMin = ($mn - $sigClose) / $sigClose * 100;
+        $touch = -1;                                           // first pullback into band above the level
+        for ($k = 0; $k < $n; $k++) { if ($path[$k]['l'] <= $bandUp) { $touch = $k; break; } }
+        if ($touch < 0) return [0, null, 'runaway', null, $fwdMax, $fwdMin];   // never came back
+        $broke = false;                                        // after retest, did a close lose the level?
+        for ($k = $touch; $k < $n; $k++) { if ($path[$k]['c'] <= $brkDn) { $broke = true; break; } }
+        $result = $broke ? 'resistance' : 'support';
+        $cRetest = $path[$touch]['c']; $cEnd = $path[$n - 1]['c'];
+        $retPost = $cRetest > 0 ? ($cEnd - $cRetest) / $cRetest * 100 : null;
+        return [1, $touch + 1, $result, $retPost, $fwdMax, $fwdMin];
+    }
+
+    // ── universe: market_sum 고가필드 전종목 스캔 ────────────────
+    private function curlGet(string $url, string $cookie, bool $euckr = false): string {
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 15,
+            CURLOPT_SSL_VERIFYPEER => false, CURLOPT_USERAGENT => 'Mozilla/5.0',
+            CURLOPT_COOKIEJAR => $cookie, CURLOPT_COOKIEFILE => $cookie,
+        ]);
+        $res = curl_exec($ch); $code = curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
+        if ($res === false || $code !== 200) return '';
+        if ($euckr) $res = mb_convert_encoding($res, 'UTF-8', 'EUC-KR');
+        return $res;
+    }
+    private function parseMarketPage(string $html): array {
+        preg_match_all(
+            '#<a href="/item/main\.naver\?code=(\d{6})" class="tltle">([^<]+)</a>(.*?)(?=<a href="/item/main\.naver\?code=\d{6}" class="tltle">|</table>)#s',
+            $html, $rows, PREG_SET_ORDER);
+        $out = [];
+        foreach ($rows as $r) {
+            $code = $r[1]; $name = html_entity_decode($r[2]); $blk = $r[3];
+            if (!preg_match('/([+\-]?\d+\.\d+)%/', $blk, $pm)) continue;
+            $rate = (float)$pm[1];
+            if (strpos($blk, 'nv01') !== false && $rate > 0) $rate = -$rate;   // 하락 보정
+            preg_match_all('#<td class="number">([\d,]+)</td>#', $blk, $nm);
+            $n = array_map(fn($x) => (int)str_replace(',', '', $x), $nm[1]);
+            if (count($n) < 6) continue;
+            $price = $n[0]; $vol = $n[2]; $high = $n[4]; $low = $n[5];   // 현재가,액면가,거래량,시가,고가,저가,(시총)
+            $prev = ($rate > -100) ? $price / (1 + $rate/100) : 0;
+            $highRate = $prev > 0 ? ($high - $prev)/$prev*100 : null;
+            $out[] = ['code'=>$code,'name'=>$name,'price'=>$price,'rate'=>$rate,
+                      'high'=>$high,'low'=>$low,'vol'=>$vol,'high_rate'=>$highRate];
+        }
+        return $out;
+    }
+    private function scanMarketWithHigh(bool $echo = false): array {
+        $cookie = sys_get_temp_dir() . '/rise_ck_' . getmypid() . '.txt';
+        // 필드 선택(거래량+시가+고가+저가+시총) → 쿠키
+        $this->curlGet("https://finance.naver.com/sise/field_submit.naver?menu=market_sum"
+            . "&returnUrl=https%3A%2F%2Ffinance.naver.com%2Fsise%2Fsise_market_sum.naver%3Fsosok%3D0"
+            . "&fieldIds=quant&fieldIds=open_val&fieldIds=high_val&fieldIds=low_val&fieldIds=market_sum", $cookie);
+        $all = [];
+        foreach ([0, 1] as $sosok) {              // 0=KOSPI, 1=KOSDAQ
+            for ($page = 1; $page <= 45; $page++) {
+                $html = $this->curlGet("https://finance.naver.com/sise/sise_market_sum.naver?sosok={$sosok}&page={$page}", $cookie, true);
+                if ($html === '') break;
+                $rows = $this->parseMarketPage($html);
+                if (!$rows) break;
+                foreach ($rows as $r) $all[] = $r;
+                usleep(70000);
+            }
+            if ($echo) { $m = $sosok ? 'KOSDAQ' : 'KOSPI'; echo "· {$m} 스캔 누적 " . count($all) . "종목<br>\n"; @ob_flush(); @flush(); }
+        }
+        @unlink($cookie);
+        return $all;
+    }
+
+    // ── 메인 실행 ────────────────────────────────────────────────
+    public function runDaily(bool $echo = true): array {
+        @set_time_limit(0);
+        $this->ensureTables();
+        $today = date('Y-m-d');
+
+        // 거래일 가드: 최신 일봉이 오늘이 아니면(휴장일/장 마감 전) 저장하지 않고 스킵
+        if (!$this->isTradingDayToday()) {
+            if ($echo) { echo "· 휴장일 또는 장 마감 전(최신 일봉이 오늘이 아님) — 저장 스킵<br>\n"; @ob_flush(); @flush(); }
+            return ['date'=>$today, 'skipped'=>true,
+                    'reason'=>'휴장일 또는 장 마감 전(최신 일봉이 오늘이 아님)',
+                    'scanned'=>0, 'universe'=>0, 'breakouts'=>0, 'signals'=>0, 'graded'=>0, 'retested'=>0];
+        }
+
+        // 1) 전종목 스캔 → 후보 선정
+        $scan = $this->scanMarketWithHigh($echo);
+        $cand = [];
+        foreach ($scan as $s) {
+            $hr = $s['high_rate'];
+            if ($s['rate'] >= self::MIN_RATE || ($hr !== null && $hr >= self::MIN_HIGH_RATE)) $cand[] = $s;
+        }
+        usort($cand, fn($a, $b) => (max($b['rate'], $b['high_rate'] ?? 0) <=> max($a['rate'], $a['high_rate'] ?? 0)));
+        $cand = array_slice($cand, 0, self::MAX_CAND);
+        if ($echo) { echo "· 후보 " . count($cand) . "종목 (전종목 " . count($scan) . ")<br>\n"; @ob_flush(); @flush(); }
+
+        // 2) 후보별 일봉 → in-sample 관측 + 오늘 신호 판정
+        $obs = [];      // obs[type][tier] = [['hit3'=>,'up3'=>], ...]
+        $signals = [];
+        foreach ($cand as $rk => $s) {
+            $code = $s['code'];
+            $d = $this->fetchDaily($code);
+            $n = count($d);
+            if ($n < 70) { usleep(100000); continue; }
+
+            // in-sample: i=60..n-4, 돌파일을 종류별로 누적
+            for ($i = 60; $i < $n - 3; $i++) {
+                $ph = -INF; $vs = 0.0;
+                for ($k = $i-60; $k < $i; $k++) { if ($d[$k]['h'] > $ph) $ph = $d[$k]['h']; $vs += $d[$k]['v']; }
+                $vr = $vs > 0 ? $d[$i]['v'] / ($vs/60) : 0;
+                $c = $d[$i]['c'];
+                $type = null;
+                if ($c > $ph) $type = 'core';                 // 종가 60일 신고가 돌파
+                elseif ($d[$i]['h'] > $ph) $type = 'intra';   // 장중 고가만 돌파(종가 밀림)
+                if ($type === null) continue;
+                $mh = max($d[$i+1]['h'], $d[$i+2]['h'], $d[$i+3]['h']);
+                $mc = max($d[$i+1]['c'], $d[$i+2]['c'], $d[$i+3]['c']);
+                $obs[$type][self::volTier($vr)][] = ['hit3' => ($mh >= $c*1.03 ? 1 : 0), 'up3' => ($mc > $c ? 1 : 0)];
+            }
+
+            // 오늘(마지막 봉) 신호
+            $i = $n - 1;
+            $ph = -INF; $vs = 0.0; $vmax = 0.0;
+            for ($k = $i-60; $k < $i; $k++) { if ($d[$k]['h'] > $ph) $ph = $d[$k]['h']; $vs += $d[$k]['v']; if ($d[$k]['v'] > $vmax) $vmax = $d[$k]['v']; }
+            $vr = $vs > 0 ? $d[$i]['v'] / ($vs/60) : 0;
+            $closeBrk = $d[$i]['c'] > $ph;
+            $highBrk  = $d[$i]['h'] > $ph;
+            $hr = $s['high_rate'];
+            $type = null;
+            if ($closeBrk) $type = 'core';
+            elseif ($highBrk) $type = 'intra';                // 장중 고가만 60일 신고가 돌파(종가 밀림)
+            if ($type !== null) {
+                $signals[] = [
+                    'code' => $code, 'name' => $s['name'], 'rank' => $rk + 1,
+                    'today_rate' => (float)$s['rate'], 'high_rate' => $hr, 'close' => (int)$d[$i]['c'],
+                    'sig_open' => (int)round($d[$i]['o']), 'sig_high' => (int)round($d[$i]['h']), 'sig_low' => (int)round($d[$i]['l']),
+                    'type' => $type, 'prior_high' => (int)round($ph),
+                    'brk_mag' => $ph > 0 ? ($d[$i]['c'] - $ph)/$ph*100 : null,
+                    'vol_ratio' => $vr, 'vol_tier' => self::volTier($vr),
+                    'new_vol' => ($d[$i]['v'] > $vmax ? 1 : 0),
+                    'is_signal' => ($vr >= self::VOL_SURGE ? 1 : 0),
+                    'brk_period' => self::breakoutPeriod($d, $i),
+                ];
+            }
+            usleep(120000);
+        }
+
+        // 3) in-sample 셀 확률 (종류×등급)
+        $cell = [];
+        foreach ($obs as $type => $tiers) foreach ($tiers as $tier => $rows) {
+            $nn = count($rows);
+            $cell["{$type}:{$tier}"] = [
+                'hit3' => $nn ? array_sum(array_column($rows, 'hit3'))/$nn : null,
+                'up3'  => $nn ? array_sum(array_column($rows, 'up3'))/$nn : null,
+            ];
+        }
+
+        // 4) 신호 저장 — 당일 기존 신호 비우고 재삽입(재실행·기준변경 반영). 당일분은 채점 전이라 삭제 안전.
+        $this->pdo->prepare("DELETE FROM rise_pick WHERE signal_date = :d")->execute([':d' => $today]);
+        $ins = $this->pdo->prepare(
+            "INSERT INTO rise_pick
+              (signal_date, stock_code, stock_name, rank_no, today_rate, high_rate, close_price,
+               sig_open, sig_high, sig_low, signal_type,
+               brk_period, brk_mag, prior_high, vol_ratio60, vol_tier, new_vol60, is_signal, cell_key, pred_hit3, pred_up3)
+             VALUES (:sd,:code,:name,:rank,:trate,:hrate,:close,:so,:sh,:sl,:stype,:bp,:bmag,:phigh,:vr,:vt,:nv,:sig,:ck,:ph3,:pu3)
+             ON DUPLICATE KEY UPDATE
+               stock_name=VALUES(stock_name), rank_no=VALUES(rank_no), today_rate=VALUES(today_rate),
+               high_rate=VALUES(high_rate), close_price=VALUES(close_price),
+               sig_open=VALUES(sig_open), sig_high=VALUES(sig_high), sig_low=VALUES(sig_low), signal_type=VALUES(signal_type),
+               brk_period=VALUES(brk_period), brk_mag=VALUES(brk_mag), prior_high=VALUES(prior_high),
+               vol_ratio60=VALUES(vol_ratio60), vol_tier=VALUES(vol_tier), new_vol60=VALUES(new_vol60),
+               is_signal=VALUES(is_signal), cell_key=VALUES(cell_key), pred_hit3=VALUES(pred_hit3), pred_up3=VALUES(pred_up3)");
+        foreach ($signals as $s) {
+            $ck = "{$s['type']}:{$s['vol_tier']}";
+            $ct = $cell[$ck] ?? ['hit3' => null, 'up3' => null];
+            $ins->execute([
+                ':sd'=>$today, ':code'=>$s['code'], ':name'=>$s['name'], ':rank'=>$s['rank'],
+                ':trate'=>$s['today_rate'], ':hrate'=>$s['high_rate'], ':close'=>$s['close'],
+                ':so'=>$s['sig_open'], ':sh'=>$s['sig_high'], ':sl'=>$s['sig_low'], ':stype'=>$s['type'],
+                ':bp'=>$s['brk_period'], ':bmag'=>$s['brk_mag'], ':phigh'=>$s['prior_high'], ':vr'=>$s['vol_ratio'],
+                ':vt'=>$s['vol_tier'], ':nv'=>$s['new_vol'], ':sig'=>$s['is_signal'], ':ck'=>$ck,
+                ':ph3'=>$ct['hit3'], ':pu3'=>$ct['up3'],
+            ]);
+        }
+
+        // 5) 채점 + 6) 누적 통계
+        $graded = $this->gradePending($echo);
+        $retested = $this->gradeRetestPending($echo);
+        $this->backfillCloseRetest();
+        $this->updatePatternStats();
+
+        // 7) run 기록
+        $signalN = 0; foreach ($signals as $s) $signalN += $s['is_signal'];
+        $run = $this->pdo->prepare(
+            "INSERT INTO rise_run (run_date, run_dt, universe_n, signal_n, graded_n, note)
+             VALUES (:d, NOW(), :u, :s, :g, '')
+             ON DUPLICATE KEY UPDATE run_dt=NOW(), universe_n=VALUES(universe_n), signal_n=VALUES(signal_n), graded_n=VALUES(graded_n)");
+        $run->execute([':d'=>$today, ':u'=>count($cand), ':s'=>$signalN, ':g'=>$graded]);
+
+        return ['date'=>$today, 'scanned'=>count($scan), 'universe'=>count($cand),
+                'breakouts'=>count($signals), 'signals'=>$signalN, 'graded'=>$graded, 'retested'=>$retested];
+    }
+
+    // ── 채점 ─────────────────────────────────────────────────────
+    public function gradePending(bool $echo = false): int {
+        $sel = $this->pdo->query(
+            "SELECT signal_date, stock_code FROM rise_pick
+             WHERE graded=0 AND signal_date <= DATE_SUB(CURDATE(), INTERVAL 4 DAY)")->fetchAll(PDO::FETCH_ASSOC);
+        if (!$sel) return 0;
+        $upd = $this->pdo->prepare(
+            "UPDATE rise_pick SET graded=1, fwd_high3=:fh, fwd_low3=:fl, fwd_close3=:fc,
+                nx_open=:no, nx_high=:nh, nx_low=:nl, nx_close=:nc, fwd_path=:fp,
+                hit3_3pct=:h3, up3_close=:u3, graded_at=NOW()
+             WHERE signal_date=:sd AND stock_code=:code");
+        $count = 0;
+        foreach ($sel as $p) {
+            $d = $this->fetchDaily($p['stock_code']);
+            if (!$d) { usleep(100000); continue; }
+            $idx = -1;
+            foreach ($d as $j => $row) { if ($row['t'] === $p['signal_date']) { $idx = $j; break; } }
+            if ($idx < 0 || $idx + 3 >= count($d)) { usleep(100000); continue; }
+            $c = $d[$idx]['c']; if ($c <= 0) { usleep(100000); continue; }
+            $fh = (max($d[$idx+1]['h'], $d[$idx+2]['h'], $d[$idx+3]['h']) - $c)/$c*100;
+            $fl = (min($d[$idx+1]['l'], $d[$idx+2]['l'], $d[$idx+3]['l']) - $c)/$c*100;
+            $fc = (max($d[$idx+1]['c'], $d[$idx+2]['c'], $d[$idx+3]['c']) - $c)/$c*100;
+            // 다음날(D+1) OHLC — 신호일 종가 대비 % (시가 갭·장중 밀림 분석용)
+            $no = ($d[$idx+1]['o'] - $c)/$c*100;
+            $nh = ($d[$idx+1]['h'] - $c)/$c*100;
+            $nl = ($d[$idx+1]['l'] - $c)/$c*100;
+            $nc = ($d[$idx+1]['c'] - $c)/$c*100;
+            // 전향 경로 원본(D+1~D+3 OHLCV) — 추후 어떤 실패정의든 재계산 가능
+            $path = [];
+            for ($k = 1; $k <= 3; $k++) {
+                $b = $d[$idx+$k];
+                $path[] = ['t'=>$b['t'], 'o'=>$b['o'], 'h'=>$b['h'], 'l'=>$b['l'], 'c'=>$b['c'], 'v'=>$b['v']];
+            }
+            $fp = json_encode($path, JSON_UNESCAPED_UNICODE);
+            $upd->execute([':fh'=>$fh, ':fl'=>$fl, ':fc'=>$fc,
+                           ':no'=>$no, ':nh'=>$nh, ':nl'=>$nl, ':nc'=>$nc, ':fp'=>$fp,
+                           ':h3'=>($fh>=3?1:0), ':u3'=>($fc>0?1:0),
+                           ':sd'=>$p['signal_date'], ':code'=>$p['stock_code']]);
+            $count++; usleep(120000);
+        }
+        return $count;
+    }
+
+    // ── retest grading — runs once a signal is old enough to have RETEST_WINDOW forward bars
+    public function gradeRetestPending(bool $echo = false): int {
+        $sel = $this->pdo->query(
+            "SELECT signal_date, stock_code, prior_high FROM rise_pick
+             WHERE retest_graded=0 AND prior_high > 0
+               AND signal_date <= DATE_SUB(CURDATE(), INTERVAL 35 DAY)")->fetchAll(PDO::FETCH_ASSOC);
+        if (!$sel) return 0;
+        $upd = $this->pdo->prepare(
+            "UPDATE rise_pick SET retest_graded=1, retest_done=:rd, retest_day=:rday,
+                retest_result=:rr, fwd_ret_post=:rp, fwd_max25=:mx, fwd_min25=:mn, path25=:p25, retest_at=NOW(),
+                retest_done_c=:rdc, retest_day_c=:rdayc, retest_result_c=:rrc, fwd_ret_post_c=:rpc
+             WHERE signal_date=:sd AND stock_code=:code");
+        $count = 0;
+        foreach ($sel as $p) {
+            $d = $this->fetchDaily($p['stock_code']);
+            if (!$d) { usleep(100000); continue; }
+            $idx = -1;
+            foreach ($d as $j => $row) { if ($row['t'] === $p['signal_date']) { $idx = $j; break; } }
+            if ($idx < 0) { usleep(100000); continue; }
+            if (count($d) - 1 - $idx < self::RETEST_WINDOW) { usleep(100000); continue; }   // not enough bars yet
+            $path = [];
+            for ($k = 1; $k <= self::RETEST_WINDOW; $k++) {
+                $b = $d[$idx + $k];
+                $path[] = ['t'=>$b['t'], 'o'=>$b['o'], 'h'=>$b['h'], 'l'=>$b['l'], 'c'=>$b['c'], 'v'=>$b['v']];
+            }
+            $sigClose = (float)$d[$idx]['c'];
+            [$done, $rday, $rr, $rp, $mx, $mn] = self::classifyRetest($path, (float)$p['prior_high'], $sigClose);
+            [$donec, $rdayc, $rrc, $rpc] = self::classifyRetest($path, $sigClose, $sigClose);   // close-based (A/B)
+            $upd->execute([':rd'=>$done, ':rday'=>$rday, ':rr'=>$rr, ':rp'=>$rp, ':mx'=>$mx, ':mn'=>$mn,
+                           ':p25'=>json_encode($path, JSON_UNESCAPED_UNICODE),
+                           ':rdc'=>$donec, ':rdayc'=>$rdayc, ':rrc'=>$rrc, ':rpc'=>$rpc,
+                           ':sd'=>$p['signal_date'], ':code'=>$p['stock_code']]);
+            $count++; usleep(120000);
+        }
+        return $count;
+    }
+
+    // ── A/B backfill: close-based retest recomputed from stored path25 (no network)
+    public function backfillCloseRetest(): int {
+        $sel = $this->pdo->query(
+            "SELECT signal_date, stock_code, close_price, path25 FROM rise_pick
+             WHERE retest_graded=1 AND retest_result_c IS NULL AND path25 IS NOT NULL AND close_price > 0")->fetchAll(PDO::FETCH_ASSOC);
+        if (!$sel) return 0;
+        $upd = $this->pdo->prepare(
+            "UPDATE rise_pick SET retest_done_c=:rdc, retest_day_c=:rdayc, retest_result_c=:rrc, fwd_ret_post_c=:rpc
+             WHERE signal_date=:sd AND stock_code=:code");
+        $count = 0;
+        foreach ($sel as $p) {
+            $path = json_decode($p['path25'], true);
+            if (!is_array($path) || !$path) continue;
+            $c = (float)$p['close_price'];
+            [$donec, $rdayc, $rrc, $rpc] = self::classifyRetest($path, $c, $c);
+            $upd->execute([':rdc'=>$donec, ':rdayc'=>$rdayc, ':rrc'=>$rrc, ':rpc'=>$rpc,
+                           ':sd'=>$p['signal_date'], ':code'=>$p['stock_code']]);
+            $count++;
+        }
+        return $count;
+    }
+
+    // ── 누적 통계 (cell_key=종류:등급) ───────────────────────────
+    public function updatePatternStats(): void {
+        $rows = $this->pdo->query(
+            "SELECT cell_key, COUNT(*) n, SUM(hit3_3pct) h, SUM(up3_close) u, AVG(fwd_high3) mfe, AVG(fwd_low3) mae
+             FROM rise_pick WHERE graded=1 AND cell_key<>'' GROUP BY cell_key")->fetchAll(PDO::FETCH_ASSOC);
+        $up = $this->pdo->prepare(
+            "INSERT INTO rise_pattern_stats
+               (cell_key, n_samples, n_hit3, n_up3, hit3_rate, up3_rate, ci_low, ci_high, avg_mfe, avg_mae, updated_at)
+             VALUES (:c,:n,:h,:u,:hr,:ur,:lo,:hi,:mfe,:mae,NOW())
+             ON DUPLICATE KEY UPDATE n_samples=VALUES(n_samples), n_hit3=VALUES(n_hit3), n_up3=VALUES(n_up3),
+               hit3_rate=VALUES(hit3_rate), up3_rate=VALUES(up3_rate), ci_low=VALUES(ci_low), ci_high=VALUES(ci_high),
+               avg_mfe=VALUES(avg_mfe), avg_mae=VALUES(avg_mae), updated_at=NOW()");
+        foreach ($rows as $r) {
+            $n = (int)$r['n']; $h = (int)$r['h']; $u = (int)$r['u'];
+            [$lo, $hi] = self::wilson($h, $n);
+            $up->execute([':c'=>$r['cell_key'], ':n'=>$n, ':h'=>$h, ':u'=>$u,
+                ':hr'=>$n?$h/$n:null, ':ur'=>$n?$u/$n:null, ':lo'=>$lo, ':hi'=>$hi, ':mfe'=>$r['mfe'], ':mae'=>$r['mae']]);
+        }
+    }
+
+    // ── 리포트 조회 ──────────────────────────────────────────────
+    public function getLatestSignalDate(): ?string {
+        $v = $this->pdo->query("SELECT MAX(signal_date) FROM rise_pick")->fetchColumn();
+        return $v ?: null;
+    }
+    public function getPicks(string $date): array {
+        $st = $this->pdo->prepare("SELECT * FROM rise_pick WHERE signal_date=:d
+            ORDER BY is_signal DESC, FIELD(signal_type,'core','intra'), pred_hit3 DESC, vol_ratio60 DESC");
+        $st->execute([':d' => $date]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+    public function getCalibration(): array {
+        return $this->pdo->query("SELECT * FROM rise_pattern_stats ORDER BY cell_key")->fetchAll(PDO::FETCH_ASSOC);
+    }
+    public function getRecentGraded(int $limit = 30): array {
+        $st = $this->pdo->prepare("SELECT * FROM rise_pick WHERE graded=1 ORDER BY signal_date DESC, hit3_3pct DESC LIMIT :lim");
+        $st->bindValue(':lim', $limit, PDO::PARAM_INT); $st->execute();
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+    public function getRecentRuns(int $limit = 10): array {
+        $st = $this->pdo->prepare("SELECT * FROM rise_run ORDER BY run_date DESC LIMIT :lim");
+        $st->bindValue(':lim', $limit, PDO::PARAM_INT); $st->execute();
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+    public function getRetestCalibration(): array {
+        return $this->pdo->query(
+            "SELECT 'H' basis, signal_type, retest_result result, COUNT(*) n,
+                    AVG(fwd_ret_post) avg_post, AVG(fwd_max25) avg_mfe, AVG(fwd_min25) avg_mae, AVG(retest_day) avg_day
+             FROM rise_pick WHERE retest_graded=1 AND retest_result IS NOT NULL
+             GROUP BY signal_type, retest_result
+             UNION ALL
+             SELECT 'C' basis, signal_type, retest_result_c result, COUNT(*) n,
+                    AVG(fwd_ret_post_c) avg_post, AVG(fwd_max25) avg_mfe, AVG(fwd_min25) avg_mae, AVG(retest_day_c) avg_day
+             FROM rise_pick WHERE retest_graded=1 AND retest_result_c IS NOT NULL
+             GROUP BY signal_type, retest_result_c
+             ORDER BY basis, signal_type, result")->fetchAll(PDO::FETCH_ASSOC);
+    }
+    public function getRecentRetested(int $limit = 30): array {
+        $st = $this->pdo->prepare(
+            "SELECT * FROM rise_pick WHERE retest_graded=1 AND retest_result IS NOT NULL
+             ORDER BY signal_date DESC LIMIT :lim");
+        $st->bindValue(':lim', $limit, PDO::PARAM_INT); $st->execute();
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    // ── 백테스트: 재테스트-지지 진입 + 선 아래 손절 (저장된 path25 기반, 재크롤 없음) ──
+    //   진입: 가격이 기준선 L(±band) 밴드로 되돌아온 첫 봉에서, 그 봉 종가가 L 이상이면(지지 확인) 종가 진입
+    //   손절: L*(1-stopTol) (선 아래). 갭으로 손절선 하회 시 시가 체결
+    //   청산: 손절 또는 path25 마지막 봉 종가(시간청산)
+    private static function simRetestTrade(array $path, float $L, float $band, float $stopTol): ?array {
+        $n = count($path);
+        if ($n < 2 || $L <= 0) return null;
+        $bandUp = $L * (1 + $band);
+        $stop   = $L * (1 - $stopTol);
+        $r = -1;
+        for ($k = 0; $k < $n; $k++) { if ((float)$path[$k]['l'] <= $bandUp) { $r = $k; break; } }
+        if ($r < 0) return null;                          // runaway: 되돌림 없음 → 진입 없음
+        if ((float)$path[$r]['c'] < $L) return null;      // 재테스트 종가가 선 아래 → 롱 회피
+        $entry = (float)$path[$r]['c'];
+        if ($entry <= 0 || $r >= $n - 1) return null;     // 마지막 봉 진입은 추적 불가
+        $risk = ($entry - $stop) / $entry;
+        if ($risk <= 0) return null;
+        $exit = null; $reason = 'time';
+        for ($k = $r + 1; $k < $n; $k++) {
+            $o = (float)$path[$k]['o']; $lo = (float)$path[$k]['l'];
+            if ($o <= $stop) { $exit = $o; $reason = 'gap'; break; }   // 갭 하회 → 시가 체결
+            if ($lo <= $stop) { $exit = $stop; $reason = 'stop'; break; }
+        }
+        if ($exit === null) { $exit = (float)$path[$n - 1]['c']; $reason = 'time'; }
+        $ret = ($exit - $entry) / $entry * 100;
+        return ['entry'=>$entry, 'stop'=>$stop, 'exit'=>$exit, 'ret'=>$ret,
+                'r'=>$risk > 0 ? $ret / ($risk * 100) : 0, 'risk'=>$risk * 100,
+                'reason'=>$reason, 'entry_day'=>$r + 1];
+    }
+    private static function summarizeTrades(array $tr): array {
+        $n = count($tr);
+        if (!$n) return ['n'=>0, 'curve'=>[]];
+        $rets = array_column($tr, 'ret');
+        $rs   = array_column($tr, 'r');
+        $wins = array_values(array_filter($rets, fn($x) => $x > 0));
+        $los  = array_values(array_filter($rets, fn($x) => $x <= 0));
+        $gw = array_sum($wins); $gl = abs(array_sum($los));
+        $eq = 1.0; $peak = 1.0; $maxdd = 0.0; $curve = [1.0];
+        foreach ($tr as $x) { $eq *= (1 + $x['ret'] / 100); $curve[] = round($eq, 4);
+            if ($eq > $peak) $peak = $eq; $dd = $peak > 0 ? ($peak - $eq) / $peak : 0; if ($dd > $maxdd) $maxdd = $dd; }
+        return ['n'=>$n, 'winrate'=>count($wins) / $n, 'avg'=>array_sum($rets) / $n,
+                'avgR'=>array_sum($rs) / $n, 'avgWin'=>$wins ? $gw / count($wins) : 0,
+                'avgLoss'=>$los ? array_sum($los) / count($los) : 0,
+                'pf'=>$gl > 0 ? $gw / $gl : null, 'maxdd'=>$maxdd * 100,
+                'total'=>($eq - 1) * 100, 'curve'=>$curve,
+                'stops'=>count(array_filter($tr, fn($x) => $x['reason'] !== 'time'))];
+    }
+    public function backtestRetest(string $basis = 'H', float $band = 0.015, float $stopTol = 0.015): array {
+        $rows = $this->pdo->query(
+            "SELECT signal_date, stock_code, stock_name, signal_type, prior_high, close_price, path25
+             FROM rise_pick WHERE retest_graded=1 AND path25 IS NOT NULL AND close_price > 0
+             ORDER BY signal_date ASC, stock_code ASC")->fetchAll(PDO::FETCH_ASSOC);
+        $trades = [];
+        foreach ($rows as $row) {
+            $path = json_decode($row['path25'], true);
+            if (!is_array($path) || count($path) < 2) continue;
+            $L = $basis === 'C' ? (float)$row['close_price'] : (float)$row['prior_high'];
+            $tr = self::simRetestTrade($path, $L, $band, $stopTol);
+            if ($tr === null) continue;
+            $tr['signal_date'] = $row['signal_date']; $tr['stock_name'] = $row['stock_name'];
+            $tr['stock_code'] = $row['stock_code']; $tr['signal_type'] = $row['signal_type']; $tr['level'] = $L;
+            $trades[] = $tr;
+        }
+        return ['trades'=>$trades, 'summary'=>self::summarizeTrades($trades),
+                'candidates'=>count($rows)];
+    }
+
+    // ── 파라미터 스윕: band x stop 격자 (path25 1회 로드/디코드 후 메모리 격자 평가) ──
+    public function sweepRetest(string $basis, array $bands, array $stops): array {
+        $rows = $this->pdo->query(
+            "SELECT prior_high, close_price, path25 FROM rise_pick
+             WHERE retest_graded=1 AND path25 IS NOT NULL AND close_price > 0")->fetchAll(PDO::FETCH_ASSOC);
+        $dec = [];
+        foreach ($rows as $r) {
+            $path = json_decode($r['path25'], true);
+            if (!is_array($path) || count($path) < 2) continue;
+            $L = $basis === 'C' ? (float)$r['close_price'] : (float)$r['prior_high'];
+            if ($L <= 0) continue;
+            $dec[] = ['path'=>$path, 'L'=>$L];
+        }
+        $grid = [];
+        foreach ($stops as $stop) {
+            $line = [];
+            foreach ($bands as $band) {
+                $trades = [];
+                foreach ($dec as $d) {
+                    $tr = self::simRetestTrade($d['path'], $d['L'], $band / 100, $stop / 100);
+                    if ($tr !== null) $trades[] = $tr;
+                }
+                $s = self::summarizeTrades($trades);
+                $line[] = ['band'=>$band, 'stop'=>$stop, 'n'=>$s['n'] ?? 0,
+                           'avgR'=>$s['avgR'] ?? null, 'total'=>$s['total'] ?? null,
+                           'winrate'=>$s['winrate'] ?? null, 'maxdd'=>$s['maxdd'] ?? null,
+                           'pf'=>$s['pf'] ?? null, 'avg'=>$s['avg'] ?? null];
+            }
+            $grid[] = $line;
+        }
+        return ['bands'=>$bands, 'stops'=>$stops, 'grid'=>$grid, 'candidates'=>count($dec)];
+    }
+}
+?>
