@@ -1,8 +1,17 @@
 <?php
 
 require_once "./env/cnt.inc";
-require_once "./env/auth_fnc.php"; 
-require_login(); 
+require_once "./env/auth_fnc.php";
+
+// ── 공개 공유 링크(읽기 전용) ──────────────────────────────────
+// analysis_model.php?mode=daily&k=<토큰> 로 접속하면 로그인 없이 데일리 리포트 열람.
+// 데이터는 일반 시장 정보라 공개 가능. 토큰은 env/share_key.inc 단일 소스(유출 시 그 값만 교체).
+require_once "./env/share_key.inc";   // DAILY_SHARE_KEY (keyword_news.php 와 공용)
+$is_public = (($_REQUEST['mode'] ?? '') === 'daily'
+    && isset($_GET['k']) && hash_equals(DAILY_SHARE_KEY, (string)$_GET['k']));
+if (!$is_public) {
+    require_login();
+}
 require "./env/e.fnc";
 
 
@@ -38,31 +47,56 @@ $routes = [
 // 3. 공통 네비게이션 헤더 (daily / news 모드에서만 표시)
 // ==========================================================
 $nav_modes = ['daily'];
+$embed = !empty($_REQUEST['embed']) || !empty($is_public);   // 대시보드 iframe 내장(embed=1) 또는 공개 공유 시 상단 nav 숨김
 if (in_array($mode, $nav_modes)) {
     // ── 공통 상단 헤더 (PC nav + 모바일 햄버거 + viewport 메타 + 모바일 자동링크 JS) ──
     $current_user = $_SESSION['usr_name'] ?? '';   // header.php 환영문구용 (미정의 경고 방지)
     $expire_date  = $expire_date ?? '';
+    if (!empty($is_public)) {   // 공개 공유 링크: 제목/메신저 미리보기를 친근한 문구로
+        $page_title = '아현이를 위한 오늘의 증권뉴스';
+    }
     require_once "./env/header.php";
     // daily 리포트는 긴 세로 스크롤 페이지 → header.php의 고정 뷰포트 body를 스크롤형으로 override
     echo "<style>body{overflow:auto !important; height:auto !important; min-height:100vh; display:block !important;}</style>";
+    // 대시보드 iframe(폭 좁음) 내장 시: nav가 모바일 햄버거로 잘못 전환 → 통째로 숨김(부모에 이미 nav 존재)
+    if ($embed) {
+        echo "<style>.top-nav-bar{display:none !important;}</style>";
+    }
+    // 공개(읽기 전용) 모드: 키워드 뉴스는 로그인 밖 공개 뷰어로 우회, 그 외 로그인 필요한 링크는 비활성화
+    if (!empty($is_public)) {
+        $share_k = json_encode(DAILY_SHARE_KEY);   // JS 문자열 리터럴
+        echo "<style>"
+           . ".nik-del{display:none !important;}"                 // 제외단어 × 삭제(관리 기능) 숨김
+           . "[onclick*=\"gsnb\"]{cursor:default !important;}"    // 종목 뉴스(비공개)는 클릭 affordance 제거
+           . "</style>"
+           . "<script>(function(){var K={$share_k};var o=window.open;"
+           . "window.open=function(u){if(typeof u==='string'){"
+           // 키워드 뉴스(mode=gknb) → 로그인 없는 keyword_news.php 팝업으로 우회
+           . "var m=u.match(/etf_stock\\.php\\?mode=gknb&keyword=(.*)\$/);"
+           . "if(m){return o.call(window,'keyword_news.php?k='+K+'&keyword='+m[1],'kn_popup','width=900,height=900,scrollbars=yes');}"
+           . "if(u.indexOf('etf_stock.php')!==-1)return null;"    // 그 외(종목뉴스 등 로그인 필요) 차단
+           . "}return o.apply(window,arguments);};})();</script>";
+    }
 
     $cur_date = $_REQUEST['date'] ?? date('Y-m-d');
-    $tabs = [
-        'daily' => ['label' => '📊 데일리 시장 테마 리포트', 'icon' => '📊'],
-    ];
-    echo "<style>
-        .anav { display:flex; gap:0; background:#fff; border-bottom:2px solid #e2e8f0; font-family:'Malgun Gothic',sans-serif; }
-        .anav a { display:flex; align-items:center; gap:7px; padding:13px 22px; font-size:0.95rem; font-weight:700; color:#64748b; text-decoration:none; border-bottom:3px solid transparent; margin-bottom:-2px; transition:color 0.15s; }
-        .anav a:hover  { color:#2563eb; }
-        .anav a.active { color:#2563eb; border-bottom-color:#2563eb; }
-    </style>
-    <nav class='anav'>";
-    foreach ($tabs as $tab_mode => $tab) {
-        $active = ($mode === $tab_mode) ? ' class="active"' : '';
-        $href   = CUR_PHP . '?mode=' . $tab_mode . '&date=' . htmlspecialchars($cur_date);
-        echo "<a href='{$href}'{$active}>{$tab['label']}</a>";
+    if (!$embed) {   // 대시보드 임베드 시엔 단일 탭도 생략
+        $tabs = [
+            'daily' => ['label' => '📊 데일리 시장 테마 리포트', 'icon' => '📊'],
+        ];
+        echo "<style>
+            .anav { display:flex; gap:0; background:#fff; border-bottom:2px solid #e2e8f0; font-family:'Malgun Gothic',sans-serif; }
+            .anav a { display:flex; align-items:center; gap:7px; padding:13px 22px; font-size:0.95rem; font-weight:700; color:#64748b; text-decoration:none; border-bottom:3px solid transparent; margin-bottom:-2px; transition:color 0.15s; }
+            .anav a:hover  { color:#2563eb; }
+            .anav a.active { color:#2563eb; border-bottom-color:#2563eb; }
+        </style>
+        <nav class='anav'>";
+        foreach ($tabs as $tab_mode => $tab) {
+            $active = ($mode === $tab_mode) ? ' class="active"' : '';
+            $href   = CUR_PHP . '?mode=' . $tab_mode . '&date=' . htmlspecialchars($cur_date);
+            echo "<a href='{$href}'{$active}>{$tab['label']}</a>";
+        }
+        echo "</nav>";
     }
-    echo "</nav>";
 }
 
 // ==========================================================
@@ -1105,8 +1139,10 @@ function build_daily_header(string $date, array $date_list): string
     }
 
     // onchange → 같은 페이지를 ?mode=daily&date=선택값 으로 이동
-    $cur = CUR_PHP;
-    $js  = "location.href='{$cur}?mode=daily&date=' + this.value;";
+    global $is_public;
+    $cur   = CUR_PHP;
+    $key_q = !empty($is_public) ? '&k=' . rawurlencode(DAILY_SHARE_KEY) : '';   // 공개 링크는 날짜 바꿔도 토큰 유지
+    $js    = "location.href='{$cur}?mode=daily{$key_q}&date=' + this.value;";
 
     return "<div style='display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; margin-bottom:18px;'>"
          . "<h1 style='margin:0; font-size:1.5rem; font-weight:800; color:#1e293b; letter-spacing:-0.5px;'>📅 " . h($title) . "</h1>"

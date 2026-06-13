@@ -1,9 +1,10 @@
 <?php
 require_once "./env/cnt.inc";
 
-require_once "./env/auth_fnc.php"; 
-require_login(); 
+require_once "./env/auth_fnc.php";
+require_login();
 require_once "./classes/UI_Helper.class"; // UI 개선 (정렬)
+require_once "./env/keyword_news.inc";    // highlight_keyword(), get_keyword_news_by_naver() — 공개 뷰어와 공유
 
 # error 표시
  error_reporting( E_ALL  & ~E_NOTICE);
@@ -2286,22 +2287,8 @@ function thema_list($pdo) {
 
 
 #################################################################
-// 뉴스 제목에서 키워드를 하이라이트 (HTML 이스케이프 후 강조 처리)
-function highlight_keyword(string $text, string $keyword): string {
-    $safe_text = htmlspecialchars($text, ENT_QUOTES, 'UTF-8');
-    $keyword   = trim($keyword);
-    if ($keyword === '') return $safe_text;
-
-    $safe_kw = htmlspecialchars($keyword, ENT_QUOTES, 'UTF-8');
-    // 대소문자 무시, 첫 매칭들 모두 강조
-    return str_ireplace(
-        $safe_kw,
-        "<mark style='background:#fff3a3; color:#d6336c; font-weight:700; padding:0 2px; border-radius:3px;'>{$safe_kw}</mark>",
-        $safe_text
-    );
-}
-#################################################################
-
+// highlight_keyword() / get_keyword_news_by_naver() 는 env/keyword_news.inc 로 이동
+// (공개 뷰어 keyword_news.php 와 공유). 상단에서 require_once 됨.
 #################################################################
 function get_stock_news_by_naver() {
 #################################################################
@@ -2390,182 +2377,6 @@ echo $html_news;
 }
 #################################################################
 
-
-#################################################################
-function get_keyword_news_by_naver() {
-#################################################################
-
-    $keyword    = trim($_GET['keyword'] ?? '');
-    $page       = max(1, (int)($_GET['page'] ?? 1)); // '우리' 페이지(표시 단위)
-    $per_page   = 15;   // 표시 페이지당 기사 수 (균등 분할)
-    $max_total  = 30;   // 최대 수집 기사 수 (이만큼 모이면 스캔 중단 → 속도↑)
-    $max_scan   = 6;    // 네이버 검색 페이지 최대 스캔 수 (안전 상한)
-
-    if ($keyword === '') {
-        echo "<p style='padding:20px;color:#e74c3c;'>키워드가 없습니다.</p>";
-        return;
-    }
-
-    // 네이버 금융은 EUC-KR 기반 → 검색어를 EUC-KR로 인코딩해야 한글 검색됨
-    $encoded = urlencode(mb_convert_encoding($keyword, 'EUC-KR', 'UTF-8'));
-
-    // ── 제목에 키워드가 포함된 기사를 '끝까지' 모은 뒤 우리 기준으로 균등 분할 ──
-    // 네이버는 관련도순이라 매칭 기사가 앞쪽에 몰림 → 전체 수집 후 12개씩 나눠야 분포가 고름
-    $collected = [];
-    $seen      = [];
-
-    for ($np = 1; $np <= $max_scan; $np++) {
-        $url = "https://finance.naver.com/news/news_search.naver?q={$encoded}&date_type=1&page={$np}";
-
-        $ch = curl_init();
-        curl_setopt_array($ch, [
-            CURLOPT_URL            => $url,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT        => 10,
-            CURLOPT_SSL_VERIFYPEER => false,
-            CURLOPT_USERAGENT      => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-            CURLOPT_REFERER        => 'https://finance.naver.com/news/',
-            CURLOPT_HTTPHEADER     => ['Accept-Language: ko-KR,ko;q=0.9'],
-        ]);
-        $html = curl_exec($ch);
-        curl_close($ch);
-        if (!$html) break;
-
-        $html = mb_convert_encoding($html, 'UTF-8', 'EUC-KR');
-        $html = preg_replace('/<meta[^>]+charset=[\'"]?(euc-kr|EUC-KR)[\'"]?[^>]*>/i', '', $html);
-        $html = '<?xml encoding="UTF-8">' . $html;
-
-        libxml_use_internal_errors(true);
-        $dom = new DOMDocument();
-        @$dom->loadHTML($html, LIBXML_NOERROR | LIBXML_NOWARNING);
-        libxml_clear_errors();
-        $xpath = new DOMXPath($dom);
-
-        $subjects = $xpath->query("//dt[contains(@class,'articleSubject')]|//dd[contains(@class,'articleSubject')]");
-        if ($subjects->length === 0) break; // 네이버 결과 끝 → 중단
-
-        foreach ($subjects as $subject) {
-            $a = $xpath->query("./a", $subject)->item(0);
-            if (!$a) continue;
-            $title = trim($a->nodeValue);
-            if (empty($title) || isset($seen[$title])) continue;
-            $seen[$title] = true;
-
-            // 제목에 키워드가 실제로 포함된 기사만 (노이즈 제거)
-            if (stripos($title, $keyword) === false) continue;
-
-            $href = $a->getAttribute('href');
-            $link = (strpos($href, 'http') === 0) ? $href : 'https://finance.naver.com' . $href;
-
-            $summaryNode = $xpath->query("following-sibling::dd[contains(@class,'articleSummary')][1]", $subject)->item(0);
-            $press = $date_str = '';
-            if ($summaryNode) {
-                $pn = $xpath->query(".//span[contains(@class,'press')]", $summaryNode)->item(0);
-                $dn = $xpath->query(".//span[contains(@class,'wdate')]", $summaryNode)->item(0);
-                $press    = $pn ? trim($pn->nodeValue) : '';
-                $date_str = $dn ? trim($dn->nodeValue) : '';
-            }
-            $collected[] = ['title' => $title, 'link' => $link, 'press' => $press, 'date' => $date_str];
-        }
-        if (count($collected) >= $max_total) break;       // 목표치 도달 → 중단(속도↑)
-        if ($np < $max_scan) usleep(120000);              // IP 보호
-    }
-
-    // 최대 수집 개수로 제한
-    $collected   = array_slice($collected, 0, $max_total);
-    $total_found = count($collected);
-    $total_pages = max(1, (int)ceil($total_found / $per_page));
-
-    // ── HTML 출력 (전체 기사를 한 번에 렌더 → 페이징은 JS로 처리: 다음/이전 즉시 전환) ──
-    $kw_disp = htmlspecialchars($keyword);
-
-    echo "<style>
-        html, body { height:100%; margin:0; overflow-y:auto; font-family:'Malgun Gothic',sans-serif; background:#f8fafc; }
-        .kn-wrap   { padding:14px; }
-        .kn-header { font-size:16px; font-weight:800; color:#1e293b; border-left:5px solid #2563eb; padding-left:10px; margin-bottom:14px; }
-        .kn-item   { display:flex; flex-direction:column; padding:12px 8px; border-bottom:1px solid #f1f5f9; text-decoration:none; cursor:pointer; transition:background 0.15s; }
-        .kn-item:hover { background:#f0f7ff; }
-        .kn-item:last-child { border-bottom:none; }
-        .kn-meta   { display:flex; align-items:center; font-size:11px; color:#94a3b8; margin-bottom:5px; gap:8px; }
-        .kn-press  { background:#eef2ff; color:#4f46e5; padding:2px 7px; border-radius:4px; font-weight:700; font-size:11px; }
-        .kn-title  { font-size:14px; color:#1e293b; font-weight:600; line-height:1.45;
-                     display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-        .kn-item:hover .kn-title { color:#2563eb; text-decoration:underline; }
-        /* 페이저를 상단 고정 → 항목 수와 무관하게 위치 일정 */
-        .kn-pager  { display:flex; gap:8px; justify-content:center; align-items:center; padding:10px 0; margin-bottom:6px;
-                     position:sticky; top:0; background:#f8fafc; z-index:5; border-bottom:1px solid #e2e8f0; }
-        .kn-btn    { padding:6px 16px; border-radius:6px; border:1px solid #cbd5e1; background:#fff; cursor:pointer; font-size:13px; font-weight:600; color:#475569; }
-        .kn-btn:hover:not(:disabled) { background:#f0f7ff; color:#2563eb; }
-        .kn-btn:disabled { opacity:0.4; cursor:default; }
-        .kn-empty  { padding:40px; text-align:center; color:#94a3b8; font-size:14px; }
-    </style>";
-
-    echo "<div class='kn-wrap'>";
-    echo "<div class='kn-header'>🔍 <span style='color:#2563eb;'>#{$kw_disp}</span> 관련 뉴스 "
-       . "<span style='font-size:0.8rem; color:#94a3b8; font-weight:500;'>(총 {$total_found}건 · <span id='knPageInfo'>1/{$total_pages}</span>p)</span></div>";
-
-    if (empty($collected)) {
-        echo "<div class='kn-empty'>관련 뉴스가 없습니다.</div>";
-        echo "</div>";
-        return;
-    }
-
-    // 페이저 (JS 제어) — 목록 위에 상단 고정 배치
-    echo "<div class='kn-pager'>
-            <button id='knPrev' class='kn-btn' disabled>◀ 이전</button>
-            <button id='knNext' class='kn-btn'>다음 ▶</button>
-          </div>";
-
-    // 전체 기사를 모두 출력 (data-pg = 소속 페이지 번호). JS가 현재 페이지만 표시.
-    echo "<div id='knList'>";
-    foreach ($collected as $i => $news) {
-        $pg    = (int)floor($i / $per_page) + 1;
-        $link  = htmlspecialchars($news['link']);
-        $title = highlight_keyword($news['title'], $keyword);
-        $press = htmlspecialchars($news['press']);
-        $date  = htmlspecialchars($news['date']);
-        $show  = ($pg === 1) ? '' : 'display:none;';
-        echo "<a href='#' data-pg='{$pg}' onclick=\"window.open('{$link}','news_popup','width=900,height=900,scrollbars=yes'); return false;\" class='kn-item' style='{$show}'>
-            <div class='kn-meta'>
-                " . ($press ? "<span class='kn-press'>{$press}</span>" : '') . "
-                <span>{$date}</span>
-            </div>
-            <div class='kn-title'>{$title}</div>
-        </a>";
-    }
-    echo "</div>";
-
-    echo <<<JS
-    <script>
-    (function() {
-        var curPage   = 1;
-        var totalPage = {$total_pages};
-        var prevBtn = document.getElementById('knPrev');
-        var nextBtn = document.getElementById('knNext');
-        var info    = document.getElementById('knPageInfo');
-
-        function render() {
-            document.querySelectorAll('#knList .kn-item').forEach(function(el) {
-                el.style.display = (parseInt(el.getAttribute('data-pg'),10) === curPage) ? '' : 'none';
-            });
-            prevBtn.disabled = (curPage <= 1);
-            nextBtn.disabled = (curPage >= totalPage);
-            if (info) info.textContent = curPage + '/' + totalPage;
-            // 스크롤 맨 위로
-            window.scrollTo(0, 0);
-        }
-        prevBtn.addEventListener('click', function() { if (curPage > 1)        { curPage--; render(); } });
-        nextBtn.addEventListener('click', function() { if (curPage < totalPage){ curPage++; render(); } });
-        render();
-    })();
-    </script>
-JS;
-
-    echo "</div>";
-
-#################################################################
-}
-#################################################################
 
 #################################################################
 function api_find_stock($pdo) {
