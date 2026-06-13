@@ -1,6 +1,7 @@
 <?php
 require_once "./env/cnt.inc";
 require_once "./env/auth_fnc.php";
+require_once "./env/nav.inc";
 require_login();
 
 $mode = $_GET['mode'] ?? 'list';
@@ -35,15 +36,6 @@ function contact_list(PDO $pdo): void {
 *,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
 html, body { overflow-x:hidden; }
 body { font-family:'Pretendard','Malgun Gothic',sans-serif; background:#f0f2f5; color:#2c3e50; height:100vh; display:flex; flex-direction:column; overflow:hidden; }
-/* nav */
-.top-nav-bar { background:#2c3e50; color:#fff; height:60px; display:flex; justify-content:space-between; align-items:center; padding:0 20px; box-shadow:0 2px 8px rgba(0,0,0,.15); flex-shrink:0; }
-.nav-burger { display:none; background:none; border:none; color:#fff; font-size:22px; cursor:pointer; padding:4px 8px; line-height:1; }
-.nav-menu { display:flex; gap:10px; }
-.nav-menu a { color:#ecf0f1; text-decoration:none; font-size:16px; font-weight:600; padding:10px 16px; border-radius:6px; }
-.nav-menu a:hover, .nav-menu a.active { background:#34495e; color:#f1c40f; }
-.nav-user-info { display:flex; align-items:center; gap:15px; font-size:14px; color:#bdc3c7; }
-.nav-user-info .user-name { color:#f1c40f; font-weight:bold; }
-.btn-logout { background:#e74c3c; color:#fff; text-decoration:none; padding:6px 14px; border-radius:4px; font-size:13px; font-weight:bold; }
 .btn { border:none; cursor:pointer; border-radius:6px; font-size:var(--fs-sm); font-weight:600; padding:8px 14px; transition:.15s; }
 .btn-primary { background:#3498db; color:#fff; } .btn-primary:hover { background:#2980b9; }
 .btn-outline { background:#fff; border:1px solid #bdc3c7; color:#2c3e50; } .btn-outline:hover { background:#ecf0f1; }
@@ -56,16 +48,25 @@ body { font-family:'Pretendard','Malgun Gothic',sans-serif; background:#f0f2f5; 
 .left-head h2 { font-size:var(--fs-lg); margin-bottom:10px; display:flex; justify-content:space-between; align-items:center; }
 .search-box { display:flex; gap:6px; }
 .search-box input { flex:1; border:1px solid #dde; border-radius:6px; padding:7px 10px; font-size:var(--fs-sm); }
-/* 그룹 패널 (1단) */
-#groups-panel { width:200px; flex-shrink:0; background:#fff; border-radius:10px; box-shadow:0 1px 4px rgba(0,0,0,.08); display:flex; flex-direction:column; overflow:hidden; }
-.gp-head { padding:14px 16px; border-bottom:1px solid #eee; font-size:var(--fs-lg); font-weight:700; }
-.gp-list { flex:1; overflow-y:auto; padding:6px; }
-.gp-item { display:flex; justify-content:space-between; align-items:center; padding:9px 12px; border-radius:6px; cursor:pointer; font-size:var(--fs-base); transition:.1s; }
-.gp-item:hover { background:#f8f9fa; }
-.gp-item.active { background:#3498db; color:#fff; font-weight:600; }
-.gp-item .gp-cnt { font-size:12px; color:#aaa; }
-.gp-item.active .gp-cnt { color:#eaf4ff; }
-.gp-divider { height:1px; background:#eee; margin:6px 8px; }
+/* 상단 분류 칩 바 (places.php tb-chips 패턴) */
+#group-chipbar { display:flex; align-items:center; gap:8px; padding:12px 16px 0; flex-shrink:0; }
+.gc-chips { display:flex; gap:6px; overflow-x:auto; flex:1; scrollbar-width:thin; padding-bottom:2px; }
+.gc-chips::-webkit-scrollbar { height:5px; }
+.gc-chips::-webkit-scrollbar-thumb { background:#d8dde3; border-radius:3px; }
+.gc-chip { flex-shrink:0; white-space:nowrap; font-size:13px; font-weight:600; padding:7px 14px; border-radius:16px; background:#fff; border:1px solid #e2e7ec; color:#5a6b7b; cursor:pointer; transition:.12s; }
+.gc-chip:hover { background:#eaf3fb; border-color:#cfe4f7; color:#2471a3; }
+.gc-chip.active { background:#3498db; border-color:#2980b9; color:#fff; }
+.gc-chip .gc-cnt { font-size:11px; opacity:.6; margin-left:5px; font-weight:500; }
+.gc-chip.active .gc-cnt { opacity:.9; }
+.gc-chip.is-new { color:#e67e22; border-color:#ecdcc6; }
+.gc-chip.is-new.active { background:#e67e22; border-color:#d35400; color:#fff; }
+.gc-manage { flex-shrink:0; font-size:12px; padding:6px 11px; }
+/* 그룹 관리 모달 행 */
+.gm-row { display:flex; align-items:center; gap:8px; padding:8px 4px; border-bottom:1px solid #f3f3f3; }
+.gm-name { flex:1; min-width:0; border:1px solid transparent; border-radius:6px; padding:6px 8px; font-size:14px; background:#f8f9fa; }
+.gm-name:focus { border-color:#3498db; background:#fff; outline:none; }
+.gm-cnt { font-size:12px; color:#999; white-space:nowrap; }
+.gm-merge { border:1px solid #dde; border-radius:6px; padding:5px 6px; font-size:12px; max-width:110px; }
 .contact-list { flex:1; overflow-y:auto; }
 .contact-item { padding:12px 16px; border-bottom:1px solid #f3f3f3; cursor:pointer; transition:.1s; }
 .contact-item:hover { background:#f8f9fa; }
@@ -80,6 +81,8 @@ body { font-family:'Pretendard','Malgun Gothic',sans-serif; background:#f0f2f5; 
 .empty-state { color:#aaa; text-align:center; margin-top:80px; font-size:var(--fs-base); }
 .detail-head { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:18px; padding-bottom:14px; border-bottom:2px solid #f0f0f0; }
 .detail-head h2 { font-size:24px; }
+.edit-pencil { background:none; border:none; cursor:pointer; font-size:0.65em; line-height:1; padding:3px 6px; margin-left:8px; border-radius:6px; vertical-align:middle; opacity:.55; transition:.12s; }
+.edit-pencil:hover { opacity:1; background:#f0f0f0; }
 .detail-row { display:flex; padding:8px 0; font-size:var(--fs-base); border-bottom:1px solid #f8f8f8; }
 .detail-row .label { width:90px; color:#888; flex-shrink:0; }
 .detail-row .value { flex:1; }
@@ -122,23 +125,8 @@ body { font-family:'Pretendard','Malgun Gothic',sans-serif; background:#f0f2f5; 
 .modal-footer { display:flex; gap:8px; justify-content:flex-end; margin-top:18px; }
 /* 모바일 전용 버튼 (기본 숨김) */
 .m-only { display:none !important; }
-.drawer-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,.4); z-index:1400; }
 /* ── 모바일 (≤768px): 드릴다운 레이아웃 ── */
 @media (max-width:768px) {
-    /* 헤더: 햄버거 메뉴 */
-    .top-nav-bar { height:48px; padding:0 8px; }
-    .nav-burger { display:block; }
-    .nav-menu {
-        position:absolute; top:48px; left:0; right:0; flex-direction:column;
-        background:#2c3e50; gap:0; display:none; z-index:1501;
-        box-shadow:0 6px 16px rgba(0,0,0,.25); max-height:70vh; overflow-y:auto;
-    }
-    body.nav-open .nav-menu { display:flex; }
-    .nav-menu a { padding:13px 18px; border-bottom:1px solid rgba(255,255,255,.08); border-radius:0; }
-    .nav-menu a[href*="condition_analysis"],
-    .nav-menu a[href*="stock_analysis"],
-    .nav-menu a[href*="data_upload"] { display:none; }
-    .nav-user-info > span { display:none; }   /* 환영문구 숨김, 로그아웃만 */
     /* 모바일 글씨 키우기 */
     :root { --fs-sm:15px; --fs-base:17px; --fs-lg:20px; }
     .contact-item .c-name { font-size:18px; }
@@ -148,16 +136,8 @@ body { font-family:'Pretendard','Malgun Gothic',sans-serif; background:#f0f2f5; 
     .btn { font-size:15px; padding:9px 14px; }
     #wrap { flex-direction:column; padding:8px; gap:8px; position:relative; }
     .m-only { display:inline-flex !important; }
-    /* 1단 그룹 → 좌측 슬라이드 서랍 */
-    #groups-panel {
-        position:fixed; top:48px; left:0; bottom:0;
-        width:78%; max-width:300px; border-radius:0 12px 12px 0;
-        transform:translateX(-100%); transition:transform .25s ease;
-        z-index:1500; box-shadow:4px 0 16px rgba(0,0,0,.18);
-    }
-    body.groups-open #groups-panel { transform:translateX(0); }
-    body.groups-open .drawer-backdrop { display:block; }
-    /* 2단 목록 → 전체 폭 메인 화면 */
+    #group-chipbar { padding:8px 8px 0; }
+    /* 목록 → 전체 폭 메인 화면 */
     #left { width:100%; flex:1; }
     /* 3단 상세 → 전체화면 오버레이 (선택 시 슬라이드 인) */
     #right {
@@ -171,42 +151,23 @@ body { font-family:'Pretendard','Malgun Gothic',sans-serif; background:#f0f2f5; 
     .history-item .h-date { min-width:auto; }
 }
 </style>
+<?php nav_css(); ?>
 </head>
 <body>
-<div class="top-nav-bar">
-    <button class="nav-burger" onclick="document.body.classList.toggle('nav-open')" aria-label="메뉴">☰</button>
-    <div class="nav-menu">
-        <a href="/etf_stock.php?mode=ef">주식ETF분석</a>
-        <a href="/condition_analysis.php?mode=cf">조건검색분석</a>
-        <a href="/stock_analysis.php?mode=si">주식그래프</a>
-        <a href="/schedule.php?mode=calendar">스케줄러</a>
-        <a href="/contacts.php" class="active">주소록</a>
-        <a href="/anniversary.php">기념일</a>
-    </div>
-    <div class="nav-user-info">
-        <span>환영합니다, <span class="user-name"><?php echo htmlspecialchars($current_user); ?></span>님</span>
-        <a href="logout.php" class="btn-logout">로그아웃</a>
-    </div>
+<?php render_nav('contacts'); ?>
+
+<!-- 상단: 분류 칩 바 -->
+<div id="group-chipbar">
+    <div class="gc-chips" id="group-chips"></div>
+    <button class="btn btn-outline gc-manage" onclick="openGroupModal()" title="그룹 추가/이름변경/통합/삭제">⚙ 관리</button>
 </div>
-<script>
-(function(){ if (matchMedia('(max-width:768px)').matches || document.body.classList.contains('is-mobile')) {
-    document.querySelectorAll('.nav-menu a[href*="etf_stock.php"]').forEach(a=>a.href='/etf_stock.php?mode=m'); } })();
-</script>
 
 <div id="wrap">
-    <!-- 1단: 그룹 -->
-    <div id="groups-panel">
-        <div class="gp-head">그룹</div>
-        <div class="gp-list" id="group-panel-list"></div>
-    </div>
-    <div class="drawer-backdrop" onclick="toggleGroups(false)"></div>
-
-    <!-- 2단: 주소록 목록 -->
+    <!-- 주소록 목록 -->
     <div id="left">
         <div class="left-head">
             <h2>주소록
                 <span style="display:flex;gap:6px;">
-                    <button class="btn btn-outline m-only" onclick="toggleGroups()" title="그룹 보기">☰ 그룹</button>
                     <button class="btn btn-outline" onclick="importDrive()" title="구글드라이브 명함 CSV 동기화">☁ 드라이브</button>
                     <button class="btn btn-primary" onclick="openContactModal()">+ 추가</button>
                 </span>
@@ -233,8 +194,7 @@ body { font-family:'Pretendard','Malgun Gothic',sans-serif; background:#f0f2f5; 
             <label>이름 * <input type="text" id="cf-name" placeholder="이름"></label>
             <label>영문이름 <input type="text" id="cf-engname" placeholder="English name"></label>
             <label>그룹
-                <input type="text" id="cf-group" list="group-list" placeholder="가족/직장/거래처...">
-                <datalist id="group-list"></datalist>
+                <select id="cf-group" onchange="onGroupSelectChange()"></select>
             </label>
         </div>
         <div class="form-row">
@@ -336,6 +296,28 @@ body { font-family:'Pretendard','Malgun Gothic',sans-serif; background:#f0f2f5; 
     </div>
 </div>
 
+<!-- 그룹 관리 모달 -->
+<div class="modal-overlay" id="group-modal">
+    <div class="modal" style="width:460px;">
+        <h3>그룹 관리</h3>
+        <div style="display:flex;gap:6px;margin-bottom:14px;">
+            <input type="text" id="gm-add-input" placeholder="새 그룹 이름" maxlength="50"
+                   style="flex:1;border:1px solid #dde;border-radius:6px;padding:8px 10px;font-size:14px;"
+                   onkeydown="if(event.key==='Enter')gmAdd()">
+            <button class="btn btn-primary" onclick="gmAdd()">+ 추가</button>
+        </div>
+        <div id="gm-list" style="max-height:50vh;overflow-y:auto;"></div>
+        <div style="margin-top:12px;font-size:12px;color:#888;line-height:1.6;">
+            · 이름을 고치면 그 그룹의 모든 연락처에 반영됩니다.<br>
+            · 기존 그룹명으로 바꾸거나 <b>통합→</b>을 고르면 두 그룹이 합쳐집니다.<br>
+            · 삭제 시 소속 연락처는 <b>신규 미분류</b>로 이동합니다.
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-outline" onclick="closeGroupModal()">닫기</button>
+        </div>
+    </div>
+</div>
+
 <script>
 let CONTACTS=[], CUR_GROUP='', CUR_ID=null, EDIT_ID=null;
 const TYPE_ICON={timed:'⏰',allday:'📅',anniversary:'★',todo:'☑'};
@@ -354,31 +336,59 @@ async function api(action, payload={}, method='GET', signal=null) {
 }
 
 async function loadGroups() {
-    // 그룹 패널 (세로 리스트)
+    // 상단 분류 칩 바 (가로 스크롤)
     const res=await api('groups');
-    const panel=document.getElementById('group-panel-list');
-    let totalCnt=0, newCnt=0, groupItems='';
+    const box=document.getElementById('group-chips');
+    let totalCnt=0, newCnt=0, groupChips='';
     (res.data||[]).forEach(g=>{
         const gname=(g.group_name||'').trim();
         totalCnt += parseInt(g.cnt)||0;
         if (gname===''){ newCnt += parseInt(g.cnt)||0; return; } // 빈 그룹=신규
-        groupItems += gpItem(gname, gname, g.cnt);
+        groupChips += gcChip(gname, gname, g.cnt, false);
     });
-    let h = gpItem('', '전체', totalCnt);
-    if (newCnt>0) h += gpItem('__NEW__', '⭐ 신규 미분류', newCnt);
-    h += '<div class="gp-divider"></div>' + groupItems;
-    panel.innerHTML=h;
+    let h = gcChip('', '전체', totalCnt, false);
+    if (newCnt>0) h += gcChip('__NEW__', '⭐ 신규', newCnt, true);
+    h += groupChips;
+    box.innerHTML=h;
 
-    // datalist: 주소록에 등록된 그룹 (자동완성용)
-    document.getElementById('group-list').innerHTML=
-        (res.data||[]).filter(g=>(g.group_name||'').trim()!=='')
-            .map(g=>`<option value="${g.group_name}">`).join('');
+    // 수정 모달 그룹 드롭다운용 전체 그룹명 (빈 미분류 제외)
+    GROUP_NAMES = (res.data||[]).filter(g=>(g.group_name||'').trim()!=='').map(g=>g.group_name);
+    // 모달이 열려 있으면 선택값 유지하며 다시 채움
+    if (document.getElementById('contact-modal').classList.contains('open'))
+        fillGroupSelect(document.getElementById('cf-group').value);
 }
 
-function gpItem(value, label, cnt) {
+// 수정 모달 그룹 <select> 채우기 (전체 그룹 + 미분류 + 새 그룹 추가)
+let GROUP_NAMES = [];
+function fillGroupSelect(selected) {
+    selected = selected || '';
+    const sel = document.getElementById('cf-group');
+    const names = [...GROUP_NAMES];
+    // 현재 연락처 그룹이 목록에 없으면(미등록 그룹) 맨 앞에 보존
+    if (selected && !names.includes(selected)) names.unshift(selected);
+    let html = '<option value="">(미분류)</option>';
+    html += names.map(n=>`<option value="${escAttr(n)}">${escHtml(n)}</option>`).join('');
+    html += '<option value="__NEW__">➕ 새 그룹 추가…</option>';
+    sel.innerHTML = html;
+    sel.value = selected;
+}
+
+async function onGroupSelectChange() {
+    const sel = document.getElementById('cf-group');
+    if (sel.value !== '__NEW__') return;
+    const name = (prompt('새 그룹 이름을 입력하세요.')||'').trim();
+    if (!name){ sel.value=''; return; }
+    const res = await api('group_add', {name}, 'POST');
+    if (res && !res.ok){ alert(res.msg||'추가 실패'); sel.value=''; return; }
+    await loadGroups();        // GROUP_NAMES + 좌측 패널 갱신
+    fillGroupSelect(name);     // 새 그룹 선택된 상태로 재구성
+}
+
+function gcChip(value, label, cnt, isNew) {
     const active = (CUR_GROUP===value) ? ' active' : '';
-    return `<div class="gp-item${active}" onclick="filterGroup('${value}')">
-        <span>${label}</span><span class="gp-cnt">${cnt}</span></div>`;
+    const nw = isNew ? ' is-new' : '';
+    const v = String(value).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    return `<button class="gc-chip${nw}${active}" onclick="filterGroup('${v}')">${escHtml(label)}<span class="gc-cnt">${cnt}</span></button>`;
 }
 
 async function loadContacts() {
@@ -421,16 +431,12 @@ function renderList() {
     }).join('');
 }
 
-function filterGroup(g){ CUR_GROUP=g; loadGroups(); loadContacts(); toggleGroups(false); }
+function filterGroup(g){ CUR_GROUP=g; loadGroups(); loadContacts(); }
 
 let searchTimer=null;
 function debounceSearch(){ clearTimeout(searchTimer); searchTimer=setTimeout(loadContacts,250); }
 
 function isMobile(){ return window.matchMedia('(max-width:768px)').matches; }
-function toggleGroups(force){
-    const open = (force===undefined) ? !document.body.classList.contains('groups-open') : force;
-    document.body.classList.toggle('groups-open', open);
-}
 function closeDetail(){ document.body.classList.remove('detail-open'); }
 
 async function selectContact(id) {
@@ -464,10 +470,9 @@ async function selectContact(id) {
         <div class="detail-head">
             <div>
                 <button class="btn btn-outline m-only" onclick="closeDetail()" style="margin-bottom:8px">← 목록</button>
-                <h2>${c.name}</h2>
+                <h2>${c.name}<button class="edit-pencil" onclick="openContactModal(${c.id})" title="수정">✏️</button></h2>
                 <span class="c-group">${c.group_name||'기타'}</span>
             </div>
-            <button class="btn btn-outline" onclick="openContactModal(${c.id})">✏ 수정</button>
         </div>
         <div class="detail-row"><span class="label">영문이름</span><span class="value">${c.eng_name||'-'}</span></div>
         <div class="detail-row"><span class="label">휴대폰</span><span class="value">${c.phone||'-'}</span></div>
@@ -500,7 +505,7 @@ function openContactModal(id=null) {
     document.getElementById('cm-title').textContent=id?'인물 수정':'인물 추가';
     document.getElementById('cf-name').value=c?.name||'';
     document.getElementById('cf-engname').value=c?.eng_name||'';
-    document.getElementById('cf-group').value=c?.group_name||'';
+    fillGroupSelect(c?.group_name||'');
     document.getElementById('cf-phone').value=c?.phone||'';
     document.getElementById('cf-tel').value=c?.tel||'';
     document.getElementById('cf-email').value=c?.email||'';
@@ -524,7 +529,7 @@ async function saveContact() {
     const payload={
         name,
         eng_name:document.getElementById('cf-engname').value.trim(),
-        group_name:document.getElementById('cf-group').value.trim()||'기타',
+        group_name:(g=>g==='__NEW__'?'':g)(document.getElementById('cf-group').value),
         phone:document.getElementById('cf-phone').value.trim(),
         tel:document.getElementById('cf-tel').value.trim(),
         email:document.getElementById('cf-email').value.trim(),
@@ -568,9 +573,110 @@ async function importDrive() {
     await loadGroups(); await loadContacts();
 }
 
+// ━━━ 그룹 관리 ━━━
+let GROUPS_CACHE = [];
+function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escAttr(s){ return escHtml(s).replace(/"/g,'&quot;'); }
+
+async function openGroupModal() {
+    document.getElementById('gm-add-input').value='';
+    await loadGroupMgmt();
+    document.getElementById('group-modal').classList.add('open');
+    document.getElementById('gm-add-input').focus();
+}
+function closeGroupModal(){ document.getElementById('group-modal').classList.remove('open'); }
+
+async function loadGroupMgmt() {
+    const res = await api('groups');
+    // 실제 그룹만 (빈 '미분류' 버킷 제외) — 인덱스로 참조하므로 순서 유지
+    GROUPS_CACHE = (res.data||[]).filter(g=>(g.group_name||'').trim()!=='');
+    renderGroupMgmt();
+}
+
+function renderGroupMgmt() {
+    const el = document.getElementById('gm-list');
+    if (!GROUPS_CACHE.length){ el.innerHTML='<p style="color:#aaa;padding:14px 4px">그룹이 없습니다. 위에서 추가하세요.</p>'; return; }
+    el.innerHTML = GROUPS_CACHE.map((g,i)=>{
+        const name=g.group_name;
+        const others = GROUPS_CACHE.map((x,j)=>({n:x.group_name,j})).filter(x=>x.j!==i);
+        const mergeSel = others.length
+            ? `<select class="gm-merge" onchange="gmMerge(${i}, this.value); this.value='';">
+                 <option value="">통합→</option>
+                 ${others.map(o=>`<option value="${o.j}">${escHtml(o.n)}</option>`).join('')}
+               </select>`
+            : '';
+        return `<div class="gm-row">
+            <input class="gm-name" value="${escAttr(name)}" maxlength="50"
+                   onkeydown="if(event.key==='Enter')this.blur()" onblur="gmRename(${i}, this.value)">
+            <span class="gm-cnt">${g.cnt}명</span>
+            ${mergeSel}
+            <button class="btn btn-danger" style="padding:4px 9px;font-size:12px" onclick="gmDelete(${i})">삭제</button>
+        </div>`;
+    }).join('');
+}
+
+async function gmAdd() {
+    const inp = document.getElementById('gm-add-input');
+    const name = inp.value.trim();
+    if (!name){ inp.focus(); return; }
+    const res = await api('group_add', {name}, 'POST');
+    if (res && !res.ok){ alert(res.msg||'추가 실패'); return; }
+    if (res && res.added===false){ alert(`'${name}' 그룹은 이미 있습니다.`); return; }
+    inp.value=''; inp.focus();
+    await loadGroupMgmt();
+    await loadGroups();
+}
+
+async function gmRename(idx, newName) {
+    const from = GROUPS_CACHE[idx] && GROUPS_CACHE[idx].group_name;
+    const to = (newName||'').trim();
+    if (from===undefined || from===null) return;
+    if (to==='' || to===from){ renderGroupMgmt(); return; }   // 빈값/무변경 → 원복
+    const exists = GROUPS_CACHE.some((g,i)=>i!==idx && g.group_name===to);
+    if (exists && !confirm(`'${to}' 그룹이 이미 있습니다.\n두 그룹을 통합할까요?`)){ renderGroupMgmt(); return; }
+    const res = await api('group_rename', {from, to}, 'POST');
+    if (res && !res.ok){ alert(res.msg||'변경 실패'); renderGroupMgmt(); return; }
+    await loadGroupMgmt();
+    await afterGroupChange(from, to);
+}
+
+async function gmMerge(idx, targetIdx) {
+    if (targetIdx==='' || targetIdx===null || targetIdx===undefined) return;
+    const from = GROUPS_CACHE[idx] && GROUPS_CACHE[idx].group_name;
+    const to   = GROUPS_CACHE[parseInt(targetIdx)] && GROUPS_CACHE[parseInt(targetIdx)].group_name;
+    if (!from || !to) return;
+    if (!confirm(`'${from}' → '${to}' 로 통합하시겠습니까?\n'${from}'의 모든 연락처가 '${to}'로 이동합니다.`)){ renderGroupMgmt(); return; }
+    const res = await api('group_rename', {from, to}, 'POST');
+    if (res && !res.ok){ alert(res.msg||'통합 실패'); return; }
+    await loadGroupMgmt();
+    await afterGroupChange(from, to);
+}
+
+async function gmDelete(idx) {
+    const g = GROUPS_CACHE[idx];
+    if (!g) return;
+    const name = g.group_name, cnt = parseInt(g.cnt)||0;
+    const msg = cnt>0
+        ? `'${name}' 그룹을 삭제하시겠습니까?\n소속 연락처 ${cnt}명은 '신규 미분류'로 이동합니다.`
+        : `'${name}' 그룹을 삭제하시겠습니까?`;
+    if (!confirm(msg)) return;
+    const res = await api('group_delete', {name}, 'POST');
+    if (res && !res.ok){ alert(res.msg||'삭제 실패'); return; }
+    await loadGroupMgmt();
+    await afterGroupChange(name, '');
+}
+
+// 그룹 변경 후: 현재 필터가 사라진 그룹이면 이동시키고 패널/목록 갱신
+async function afterGroupChange(from, to) {
+    if (CUR_GROUP===from) CUR_GROUP = to || '';
+    await loadGroups();
+    await loadContacts();
+}
+
 document.getElementById('contact-modal').addEventListener('click',function(e){if(e.target===this)closeContactModal();});
 document.getElementById('anniv-modal').addEventListener('click',function(e){if(e.target===this)closeAnnivModal();});
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeContactModal();closeAnnivModal();}});
+document.getElementById('group-modal').addEventListener('click',function(e){if(e.target===this)closeGroupModal();});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeContactModal();closeAnnivModal();closeGroupModal();}});
 
 // ━━━ 기념일 관련 ━━━
 const ANNIV_TYPES = [

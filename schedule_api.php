@@ -5,8 +5,9 @@ require_once "./env/auth_fnc.php";
 require_login();
 
 // 지도/지오코딩 키 (없으면 GeoCoder 가 안내 메시지 반환)
-if (file_exists("./env/maps.inc"))  require_once "./env/maps.inc";
-if (file_exists("./env/kakao.inc")) require_once "./env/kakao.inc";
+if (file_exists("./env/maps.inc"))   require_once "./env/maps.inc";
+if (file_exists("./env/kakao.inc"))  require_once "./env/kakao.inc";
+if (file_exists("./env/gdrive.inc")) require_once "./env/gdrive.inc"; // 여행 동기화용 Drive 키
 
 ob_clean(); // stray output 제거 후 JSON 헤더 출력
 header('Content-Type: application/json; charset=utf-8');
@@ -22,6 +23,7 @@ try {
         case 'contacts': api_contacts($action, $pdo); break;
         case 'projects': api_projects($action, $pdo); break;
         case 'geo':      api_geo($action);            break;
+        case 'travel':   api_travel($action, $pdo);   break;
         // case 'kakao':    api_kakao($action, $pdo);    break;
         // case 'progress': api_progress($action, $pdo); break;
         default:
@@ -80,6 +82,15 @@ function api_calendar(string $action, PDO $pdo): void {
                 }
                 unset($ev);
             } catch (Exception $e) { /* 臾댁떆 */ }
+            // 활동 메모 개수 병합 (발생일 기준: 반복=origin_dt, 단일=자기 날짜)
+            try {
+                $logMap = $sch->logCountMap($start, $end);
+                foreach ($events as &$ev) {
+                    $occ = $ev['origin_dt'] ?? substr((string)($ev['start_dt'] ?? $ev['due_dt'] ?? ''), 0, 10);
+                    $ev['log_count'] = $logMap[($ev['id'] ?? '') . '|' . $occ] ?? 0;
+                }
+                unset($ev);
+            } catch (Exception $e) { /* 무시 */ }
             echo json_encode(['ok' => true, 'data' => $events]);
             break;
 
@@ -216,6 +227,31 @@ function api_calendar(string $action, PDO $pdo): void {
             echo json_encode(['ok' => true, 'data' => $sch->listAllAnniversaries()]);
             break;
 
+        // 활동 메모(타임스탬프 로그) — 일정 발생일(occ_date)별 [HH:MM] 메모
+        case 'log_list':
+            $sid = (int)($_GET['schedule_id'] ?? 0);
+            $od  = $_GET['occ_date'] ?? date('Y-m-d');
+            echo json_encode(['ok' => true, 'data' => $sid > 0 ? $sch->logList($sid, $od) : []]);
+            break;
+
+        case 'log_add':
+            $d    = json_decode(file_get_contents('php://input'), true);
+            $sid  = (int)($d['schedule_id'] ?? 0);
+            $od   = $d['occ_date'] ?? date('Y-m-d');
+            $note = trim((string)($d['note'] ?? ''));
+            if ($sid <= 0 || $note === '') {
+                echo json_encode(['ok' => false, 'msg' => '메모 내용이 비었습니다.']);
+                break;
+            }
+            echo json_encode(['ok' => true, 'data' => $sch->logAdd($sid, $od, $note, $d['time'] ?? null)]);
+            break;
+
+        case 'log_delete':
+            $id = (int)($_GET['id'] ?? $_POST['id'] ?? 0);
+            if ($id > 0) $sch->logDelete($id);
+            echo json_encode(['ok' => true]);
+            break;
+
         default:
             http_response_code(400);
             echo json_encode(['ok' => false, 'msg' => "unknown action: {$action}"]);
@@ -310,6 +346,26 @@ function api_contacts(string $action, PDO $pdo): void {
 
         case 'groups':
             echo json_encode(['ok' => true, 'data' => $contact->groups()]);
+            break;
+
+        // 그룹 추가 (빈 그룹 등록)
+        case 'group_add':
+            $d    = json_decode(file_get_contents('php://input'), true);
+            $name = trim($d['name'] ?? '');
+            if ($name === '') { echo json_encode(['ok' => false, 'msg' => '그룹명을 입력하세요.']); break; }
+            echo json_encode(['ok' => true, 'added' => $contact->addGroup($name)]);
+            break;
+
+        // 그룹 이름변경 / 통합 (to 가 이미 있으면 통합)
+        case 'group_rename':
+            $d = json_decode(file_get_contents('php://input'), true);
+            echo json_encode($contact->renameGroup($d['from'] ?? '', $d['to'] ?? ''));
+            break;
+
+        // 그룹 삭제 → 소속 연락처는 미분류로 이동
+        case 'group_delete':
+            $d = json_decode(file_get_contents('php://input'), true);
+            echo json_encode($contact->deleteGroup($d['name'] ?? ''));
             break;
 
         // CSV(紐낇븿) ?쇨큵 ?깅줉
@@ -441,6 +497,104 @@ function api_geo(string $action): void {
             http_response_code(400);
             echo json_encode(['ok' => false, 'msg' => "unknown action: {$action}"]);
     }
+}
+
+// ==========================================================
+// 여행 모듈 (읽기전용 — 캘린더 기간 막대용. tbl_travel 단방향 조회)
+// ==========================================================
+function api_travel(string $action, PDO $pdo): void {
+    // 정적지도 프록시 — DB 불필요, 바이너리(PNG) 응답이므로 먼저 처리하고 종료
+    if ($action === 'staticmap') { travel_static_map(); return; }
+
+    $travel = new Travel($pdo);
+    $travel->ensureTable();
+
+    switch ($action) {
+        // 전체 여행 목록 (캘린더 막대는 start_dt/end_dt 로 클라이언트에서 필터)
+        case 'list':
+            echo json_encode(['ok' => true, 'data' => $travel->listTravels()]);
+            break;
+
+        // 수동 동기화 (로그인 세션으로 보호). id 있으면 그 여행 1건만 새로고침
+        case 'sync':
+            set_time_limit(0);            // 사진 많으면 길어질 수 있어 타임아웃 해제
+            ignore_user_abort(true);
+            $tid = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+            if ($tid > 0) {
+                $one = $travel->refreshTravel($tid);   // 단건 새로고침
+                echo json_encode(['ok' => true, 'data' => $one ? [$one] : []]);
+            } else {
+                $summary = $travel->sync();            // 전체: 신규 폴더만 풀스캔
+                echo json_encode(['ok' => true, 'data' => $summary]);
+            }
+            break;
+
+        // 사진 1장 메모 저장 (일기 보기)
+        case 'photo_memo':
+            $d   = json_decode(file_get_contents('php://input'), true);
+            $pid = (int)($d['id'] ?? 0);
+            if ($pid <= 0) { echo json_encode(['ok' => false, 'msg' => '사진 id가 없습니다.']); break; }
+            $travel->setPhotoMemo($pid, $d['memo'] ?? '');
+            echo json_encode(['ok' => true]);
+            break;
+
+        // 사진 1장 숨김/표시 (일기에서만 제외, 드라이브 원본 유지)
+        case 'photo_hide':
+            $d   = json_decode(file_get_contents('php://input'), true);
+            $pid = (int)($d['id'] ?? 0);
+            if ($pid <= 0) { echo json_encode(['ok' => false, 'msg' => '사진 id가 없습니다.']); break; }
+            $travel->setPhotoHidden($pid, (bool)($d['hidden'] ?? true));
+            echo json_encode(['ok' => true]);
+            break;
+
+        // 한시적 공개 공유 링크 생성 (소유자 전용 — 파일 상단 require_login 으로 게이트됨)
+        case 'share_create':
+            $d   = json_decode(file_get_contents('php://input'), true);
+            $tid = (int)($d['id'] ?? 0);
+            $ttl = (int)($d['ttl'] ?? 86400);
+            if ($tid <= 0) { echo json_encode(['ok' => false, 'msg' => '여행 id가 없습니다.']); break; }
+            $sh = $travel->createShare($tid, $ttl);
+            echo json_encode(['ok' => true, 'token' => $sh['token'], 'expires_at' => $sh['expires_at']]);
+            break;
+
+        // 현재 활성 공유 링크 조회 (소유자 화면 로드 시 기존 링크 표시)
+        case 'share_status':
+            $tid = (int)($_GET['id'] ?? 0);
+            $sh  = $tid > 0 ? $travel->getActiveShare($tid) : null;
+            echo json_encode(['ok' => true, 'token' => $sh['token'] ?? null, 'expires_at' => $sh['expires_at'] ?? null]);
+            break;
+
+        // 공유 즉시 중단 ('지금 닫기' — 활성 토큰 전부 무효화)
+        case 'share_revoke':
+            $d   = json_decode(file_get_contents('php://input'), true);
+            $tid = (int)($d['id'] ?? 0);
+            if ($tid <= 0) { echo json_encode(['ok' => false, 'msg' => '여행 id가 없습니다.']); break; }
+            $travel->revokeShares($tid);
+            echo json_encode(['ok' => true]);
+            break;
+
+        default:
+            echo json_encode(['ok' => false, 'msg' => "unknown travel action: {$action}"]);
+    }
+}
+
+// 네이버 정적지도 프록시: <img src=...staticmap&lat=&lng=> → 인증헤더 붙여 PNG 스트리밍
+// (정적지도 API 는 인증헤더가 필요해 브라우저 <img> 가 직접 호출할 수 없음)
+function travel_static_map(): void {
+    $lat = (float)($_GET['lat'] ?? 0);
+    $lng = (float)($_GET['lng'] ?? 0);
+    if (abs($lat) < 0.0001 && abs($lng) < 0.0001) {
+        http_response_code(400); echo '{}'; return;
+    }
+    $r = GeoCoder::staticMap($lat, $lng);
+    if (empty($r['ok'])) {
+        http_response_code(502);
+        echo json_encode(['ok' => false, 'msg' => $r['msg'] ?? 'staticmap 실패']);
+        return;
+    }
+    header('Content-Type: image/png');                // 상단 application/json 헤더 교체
+    header('Cache-Control: public, max-age=2592000'); // 30일 브라우저 캐시 (좌표별 결정적)
+    echo $r['body'];
 }
 
 // ==========================================================

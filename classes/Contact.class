@@ -56,6 +56,26 @@ class Contact {
                 UNIQUE KEY uniq_sa (schedule_id, contact_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         ");
+        // 그룹 등록부 (빈 그룹도 독립 관리 — 연락처 유무와 무관하게 존재)
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS tbl_contact_group (
+                id         INT AUTO_INCREMENT PRIMARY KEY,
+                name       VARCHAR(50) NOT NULL,
+                sort_order INT DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uniq_cg_name (name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+        // 최초 1회: 기존 연락처의 그룹명을 등록부로 백필 (등록부가 비어있을 때만)
+        $cgCnt = (int)$this->pdo->query("SELECT COUNT(*) FROM tbl_contact_group")->fetchColumn();
+        if ($cgCnt === 0) {
+            $this->pdo->exec("
+                INSERT IGNORE INTO tbl_contact_group (name, sort_order)
+                SELECT group_name, 0 FROM tbl_contact
+                 WHERE TRIM(IFNULL(group_name,'')) <> ''
+                 GROUP BY group_name
+            ");
+        }
     }
 
     // ── 주소록 CRUD ───────────────────────────────────────────
@@ -118,13 +138,94 @@ class Contact {
         $this->pdo->prepare("DELETE FROM tbl_contact WHERE id=:id")->execute([':id' => $id]);
     }
 
-    // 사용 중인 그룹 목록 (주소록에 실제 등록된 그룹 + 카운트)
+    // 그룹 목록 = 등록부 그룹(빈 그룹 포함) ∪ 연락처에서 쓰이는 미등록 그룹 ∪ 미분류 버킷
+    // 각 행: group_name, cnt(소속 인원), sort_order
     public function groups(): array {
-        $rows = $this->pdo->query(
-            "SELECT group_name, COUNT(*) as cnt FROM tbl_contact
-             GROUP BY group_name ORDER BY group_name"
-        )->fetchAll(PDO::FETCH_ASSOC);
-        return $rows;
+        $sql = "
+            SELECT g.name AS group_name,
+                   COALESCE(c.cnt, 0) AS cnt,
+                   g.sort_order AS sort_order
+              FROM tbl_contact_group g
+              LEFT JOIN (
+                    SELECT group_name, COUNT(*) AS cnt
+                      FROM tbl_contact GROUP BY group_name
+              ) c ON c.group_name = g.name
+            UNION
+            SELECT o.group_name, o.cnt, 999999 AS sort_order
+              FROM (
+                    SELECT group_name, COUNT(*) AS cnt
+                      FROM tbl_contact
+                     WHERE TRIM(IFNULL(group_name,'')) <> ''
+                       AND group_name NOT IN (SELECT name FROM tbl_contact_group)
+                     GROUP BY group_name
+              ) o
+            UNION
+            SELECT '' AS group_name,
+                   (SELECT COUNT(*) FROM tbl_contact WHERE TRIM(IFNULL(group_name,'')) = '') AS cnt,
+                   -1 AS sort_order
+            ORDER BY group_name
+        ";
+        return $this->pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    // ── 그룹 관리 ─────────────────────────────────────────────
+    // 빈 그룹 추가. 이미 있으면 false 반환.
+    public function addGroup(string $name): bool {
+        $name = trim($name);
+        if ($name === '') return false;
+        $max = (int)$this->pdo->query("SELECT COALESCE(MAX(sort_order),0) FROM tbl_contact_group")->fetchColumn();
+        $stmt = $this->pdo->prepare("INSERT IGNORE INTO tbl_contact_group (name, sort_order) VALUES (:n, :so)");
+        $stmt->execute([':n' => $name, ':so' => $max + 1]);
+        return $stmt->rowCount() > 0;
+    }
+
+    // 이름변경 + 통합. to 가 이미 존재하면 두 그룹이 합쳐진다(merged=true).
+    public function renameGroup(string $from, string $to): array {
+        $from = trim($from); $to = trim($to);
+        if ($from === '' || $to === '') return ['ok' => false, 'msg' => '그룹명을 입력하세요.'];
+        if ($from === $to)               return ['ok' => true, 'merged' => false, 'moved' => 0];
+
+        $this->pdo->beginTransaction();
+        try {
+            $chk = $this->pdo->prepare("SELECT COUNT(*) FROM tbl_contact_group WHERE name = :to");
+            $chk->execute([':to' => $to]);
+            $merged = (int)$chk->fetchColumn() > 0;
+
+            // 소속 연락처 group_name 일괄 변경
+            $upd = $this->pdo->prepare("UPDATE tbl_contact SET group_name = :to WHERE group_name = :from");
+            $upd->execute([':to' => $to, ':from' => $from]);
+            $moved = $upd->rowCount();
+
+            // 등록부에서 from 제거 후 to 등록 보장
+            $this->pdo->prepare("DELETE FROM tbl_contact_group WHERE name = :from")->execute([':from' => $from]);
+            $max = (int)$this->pdo->query("SELECT COALESCE(MAX(sort_order),0) FROM tbl_contact_group")->fetchColumn();
+            $this->pdo->prepare("INSERT IGNORE INTO tbl_contact_group (name, sort_order) VALUES (:n, :so)")
+                      ->execute([':n' => $to, ':so' => $max + 1]);
+
+            $this->pdo->commit();
+            return ['ok' => true, 'merged' => $merged, 'moved' => $moved];
+        } catch (Exception $e) {
+            $this->pdo->rollBack();
+            return ['ok' => false, 'msg' => $e->getMessage()];
+        }
+    }
+
+    // 그룹 삭제 → 소속 연락처는 미분류(빈 group_name)로 이동
+    public function deleteGroup(string $name): array {
+        $name = trim($name);
+        if ($name === '') return ['ok' => false, 'msg' => '그룹명이 비었습니다.'];
+        $this->pdo->beginTransaction();
+        try {
+            $upd = $this->pdo->prepare("UPDATE tbl_contact SET group_name = '' WHERE group_name = :n");
+            $upd->execute([':n' => $name]);
+            $moved = $upd->rowCount();
+            $this->pdo->prepare("DELETE FROM tbl_contact_group WHERE name = :n")->execute([':n' => $name]);
+            $this->pdo->commit();
+            return ['ok' => true, 'moved' => $moved];
+        } catch (Exception $e) {
+            $this->pdo->rollBack();
+            return ['ok' => false, 'msg' => $e->getMessage()];
+        }
     }
 
 
