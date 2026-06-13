@@ -1,0 +1,849 @@
+<?php
+/**
+ * Travel.class — 여행 사진 갤러리 (DB 전담 + 구글 드라이브 연동)
+ *
+ * 구조(B안): 여행 = tbl_travel 1행 (프로젝트/캘린더와 완전 분리)
+ *   - 부모폴더 1개(TRAVEL_DRIVE_PARENT_ID)만 읽기전용 API 키로 조회
+ *   - 하위 여행폴더 자동 발견 → 사진 메타(촬영시각/GPS/썸네일)만 DB 저장
+ *   - 원본은 드라이브에 그대로, 서버엔 메타데이터만 (cafe24 용량 회피)
+ *
+ * 의존: env/gdrive.inc (GOOGLE_DRIVE_API_KEY, TRAVEL_DRIVE_PARENT_ID)
+ */
+class Travel
+{
+    private PDO $pdo;
+    private const DRIVE_API   = 'https://www.googleapis.com/drive/v3/files';
+    private const FOLDER_MIME = 'application/vnd.google-apps.folder';
+    private const EXIF_BYTES  = 131071; // GPS 추출용 부분 다운로드 (앞 128KB, EXIF APP1 포함)
+
+    public function __construct(PDO $pdo)
+    {
+        $this->pdo = $pdo;
+    }
+
+    // ======================================================
+    // 0. 테이블 보장 (Schedule.class ensureTable 패턴)
+    // ======================================================
+    public function ensureTable(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS tbl_travel (
+                id              INT AUTO_INCREMENT PRIMARY KEY,
+                title           VARCHAR(100) NOT NULL,
+                drive_folder_id VARCHAR(100) NOT NULL,
+                start_dt        DATE         DEFAULT NULL,
+                end_dt          DATE         DEFAULT NULL,
+                color           CHAR(7)      DEFAULT '#e67e22',
+                icon            VARCHAR(10)  DEFAULT NULL,
+                cover_thumb     VARCHAR(500) DEFAULT NULL,
+                memo            TEXT,
+                created_at      DATETIME     DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_travel_folder (drive_folder_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS tbl_travel_photo (
+                id            INT AUTO_INCREMENT PRIMARY KEY,
+                travel_id     INT          NOT NULL,
+                drive_file_id VARCHAR(100) NOT NULL,
+                name          VARCHAR(255) DEFAULT NULL,
+                taken_at      DATETIME     DEFAULT NULL,
+                lat           DECIMAL(10,7) DEFAULT NULL,
+                lng           DECIMAL(10,7) DEFAULT NULL,
+                provider      VARCHAR(20)  DEFAULT NULL,
+                thumb_url     VARCHAR(500) DEFAULT NULL,
+                memo          TEXT          DEFAULT NULL,
+                addr          VARCHAR(255)  DEFAULT NULL,
+                cached_at     DATETIME     DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_photo_file (drive_file_id),
+                KEY idx_photo_travel (travel_id),
+                KEY idx_photo_taken (taken_at),
+                CONSTRAINT fk_photo_travel
+                    FOREIGN KEY (travel_id) REFERENCES tbl_travel(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+        // 기존 설치본(컬럼 없던 시절)에도 사진별 메모/주소 캐시 컬럼 보강 (MariaDB 10.6 IF NOT EXISTS 지원)
+        $this->pdo->exec("ALTER TABLE tbl_travel_photo ADD COLUMN IF NOT EXISTS memo TEXT DEFAULT NULL");
+        $this->pdo->exec("ALTER TABLE tbl_travel_photo ADD COLUMN IF NOT EXISTS addr VARCHAR(255) DEFAULT NULL");
+        $this->pdo->exec("ALTER TABLE tbl_travel_photo ADD COLUMN IF NOT EXISTS hidden TINYINT(1) NOT NULL DEFAULT 0");  // 일기에서만 숨긴 사진(드라이브 원본은 유지)
+        $this->pdo->exec("ALTER TABLE tbl_travel_photo ADD COLUMN IF NOT EXISTS media_type VARCHAR(10) NOT NULL DEFAULT 'image'");  // image | video (동영상도 위치·시간으로 일기/지도에 포함)
+        $this->pdo->exec("ALTER TABLE tbl_travel_photo ADD COLUMN IF NOT EXISTS vid_w SMALLINT UNSIGNED DEFAULT NULL");   // 동영상 가로(px) — 재생 모달 비율 맞춤(검은 여백 제거)
+        $this->pdo->exec("ALTER TABLE tbl_travel_photo ADD COLUMN IF NOT EXISTS vid_h SMALLINT UNSIGNED DEFAULT NULL");   // 동영상 세로(px)
+        // 한시적 공개 공유 링크 (랜덤 토큰 + 만료시각). 외부인은 이 토큰으로만 읽기전용 접근
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS tbl_travel_share (
+                id          INT AUTO_INCREMENT PRIMARY KEY,
+                travel_id   INT          NOT NULL,
+                token       VARCHAR(64)  NOT NULL,
+                expires_at  DATETIME     NOT NULL,
+                revoked     TINYINT(1)   NOT NULL DEFAULT 0,
+                created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_share_token (token),
+                KEY idx_share_travel (travel_id),
+                CONSTRAINT fk_share_travel
+                    FOREIGN KEY (travel_id) REFERENCES tbl_travel(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+    }
+
+    // ======================================================
+    // 1. 구글 드라이브 조회 헬퍼
+    // ======================================================
+    private function driveEnabled(): bool
+    {
+        return defined('GOOGLE_DRIVE_API_KEY') && GOOGLE_DRIVE_API_KEY !== ''
+            && defined('TRAVEL_DRIVE_PARENT_ID') && TRAVEL_DRIVE_PARENT_ID !== '';
+    }
+
+    /** files.list 호출 (페이지네이션 자동 처리) */
+    private function driveList(string $q, string $fields): array
+    {
+        $files = [];
+        $pageToken = '';
+        do {
+            $params = [
+                'q'        => $q . ' and trashed=false',
+                'key'      => GOOGLE_DRIVE_API_KEY,
+                'fields'   => "nextPageToken,files({$fields})",
+                'pageSize' => 100,
+                'orderBy'  => 'name',
+            ];
+            if ($pageToken !== '') $params['pageToken'] = $pageToken;
+
+            $json = $this->curlGet(self::DRIVE_API . '?' . http_build_query($params));
+            $data = json_decode($json, true);
+            if (isset($data['error'])) {
+                throw new RuntimeException('Drive API: ' . ($data['error']['message'] ?? 'unknown'));
+            }
+            foreach ($data['files'] ?? [] as $f) $files[] = $f;
+            $pageToken = $data['nextPageToken'] ?? '';
+        } while ($pageToken !== '');
+
+        return $files;
+    }
+
+    /** 부모폴더 안의 여행폴더(하위 폴더) 목록 */
+    public function listDriveFolders(): array
+    {
+        $q = "'" . TRAVEL_DRIVE_PARENT_ID . "' in parents and mimeType='" . self::FOLDER_MIME . "'";
+        return $this->driveList($q, 'id,name');
+    }
+
+    /** 한 여행폴더 안의 미디어 목록 (이미지 + 동영상, 촬영시각·크기 포함) */
+    public function listDrivePhotos(string $folderId): array
+    {
+        // 동영상도 함께 — 사진은 imageMediaMetadata(time,location), 동영상은 size/createdTime 기반으로 별도 처리
+        $q = "'{$folderId}' in parents and (mimeType contains 'image/' or mimeType contains 'video/')";
+        return $this->driveList($q, 'id,name,mimeType,size,createdTime,imageMediaMetadata(time,location),videoMediaMetadata(durationMillis,width,height)');
+    }
+
+    /** 부분 다운로드(앞 128KB) + EXIF → [lat, lng] | null */
+    public function extractGps(string $fileId): ?array
+    {
+        $url = self::DRIVE_API . '/' . rawurlencode($fileId)
+             . '?alt=media&key=' . GOOGLE_DRIVE_API_KEY;
+        $bytes = $this->curlGet($url, self::EXIF_BYTES);
+        if ($bytes === '') return null;
+
+        // exif_read_data 는 파일/스트림 필요 → 임시파일 경유
+        $tmp = tempnam(sys_get_temp_dir(), 'tvexif');
+        file_put_contents($tmp, $bytes);
+        $exif = @exif_read_data($tmp);
+        @unlink($tmp);
+
+        if (empty($exif['GPSLatitude']) || empty($exif['GPSLongitude'])) return null;
+        $lat = $this->gpsToDecimal($exif['GPSLatitude'], $exif['GPSLatitudeRef'] ?? 'N');
+        $lng = $this->gpsToDecimal($exif['GPSLongitude'], $exif['GPSLongitudeRef'] ?? 'E');
+        if ($lat === null || $lng === null) return null;
+        // (0,0) = GPS 블록은 있으나 실측 좌표 없음(위치태그 OFF 등) → GPS 없는 것으로 간주
+        if (abs($lat) < 0.0001 && abs($lng) < 0.0001) return null;
+        return [$lat, $lng];
+    }
+
+    /**
+     * 동영상(MP4/MOV) 컨테이너에서 GPS(© xyz, ISO6709) + 촬영시각(creationdate) 추출.
+     * exif_read_data 는 이미지 전용이라 동영상은 못 읽음 → atom 을 직접 바이너리 스캔한다.
+     * 외부 도구(ffmpeg/exiftool) 없이 순수 PHP. 파일 앞 3MB + 뒤 3MB 만 받아 moov 박스를 찾는다
+     * (아이폰 .mov 는 moov 가 파일 끝에, fast-start MP4 는 앞에 있어 양쪽 모두 스캔).
+     * @return array{lat:?float,lng:?float,taken_at:?string}
+     */
+    public function extractVideoMeta(string $fileId, int $size = 0): array
+    {
+        $out = ['lat' => null, 'lng' => null, 'taken_at' => null];
+        $url = self::DRIVE_API . '/' . rawurlencode($fileId) . '?alt=media&key=' . GOOGLE_DRIVE_API_KEY;
+        $chunk = 3 * 1024 * 1024;                          // 앞/뒤 각 3MB
+
+        $buf = $this->curlRange($url, 0, $chunk);
+        if ($size > $chunk) {                              // 앞 3MB 초과면 뒤쪽(아이폰 moov 위치)도 스캔 (3~6MB 짧은 클립도 포함)
+            $buf .= $this->curlRange($url, max($chunk, $size - $chunk), $chunk);
+        }
+        if ($buf === '') return $out;
+
+        // ① 위치: 아이폰 © xyz atom → ISO 6709 ("+37.5665+126.9780/")
+        $pos = strpos($buf, "\xA9xyz");
+        if ($pos !== false && $pos + 8 <= strlen($buf)) {
+            $strLen = (ord($buf[$pos + 4]) << 8) | ord($buf[$pos + 5]);   // 16-bit 길이
+            $iso    = substr($buf, $pos + 8, max(0, $strLen));
+            $g      = $this->parseISO6709($iso);
+            // (0,0) = 위치태그 OFF → GPS 없음 처리
+            if ($g && (abs($g[0]) > 0.0001 || abs($g[1]) > 0.0001)) {
+                $out['lat'] = $g[0];
+                $out['lng'] = $g[1];
+            }
+        }
+
+        // ② 촬영시각
+        //   (a) Apple com.apple.quicktime.creationdate = 로컬 촬영시각("2026-06-08T17:42:22+0900").
+        //       키 이름(keys)과 값(ilst)이 떨어져 있어 버퍼 전체에서 ISO8601 패턴을 찾는다.
+        //   (b) 없으면 mvhd atom(거의 모든 MP4/MOV에 존재)의 생성시각으로 폴백.
+        $out['taken_at'] = $this->scanIsoDate($buf) ?? $this->parseMvhdTime($buf);
+        return $out;
+    }
+
+    /** 버퍼에서 ISO8601 촬영시각(YYYY-MM-DDThh:mm:ss) 1건 추출 — Apple creationdate(로컬시각) 값.
+     *  월·일·시 유효성으로 바이너리 오탐을 거른다. */
+    private function scanIsoDate(string $buf): ?string
+    {
+        if (preg_match_all('/(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/', $buf, $ms, PREG_SET_ORDER)) {
+            foreach ($ms as $m) {
+                $y=(int)$m[1]; $mo=(int)$m[2]; $d=(int)$m[3]; $h=(int)$m[4]; $mi=(int)$m[5]; $se=(int)$m[6];
+                if ($y>=1990 && $y<=2100 && $mo>=1 && $mo<=12 && $d>=1 && $d<=31 && $h<=23 && $mi<=59 && $se<=59) {
+                    return "{$m[1]}-{$m[2]}-{$m[3]} {$m[4]}:{$m[5]}:{$m[6]}";
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * mvhd(movie header) atom 의 creation_time → "Y-m-d H:i:s".
+     * QuickTime/MP4 거의 모든 파일에 존재 → Apple creationdate 가 없는 안드로이드 영상 등의 폴백.
+     * 값은 1904-01-01 00:00 UTC 기준 초. TZ 정보가 없어 한국 촬영 가정 +9h 보정한다.
+     */
+    private function parseMvhdTime(string $buf): ?string
+    {
+        $pos = strpos($buf, 'mvhd');
+        if ($pos === false) return null;
+        $len = strlen($buf);
+        $p   = $pos + 4;                     // 'mvhd' 다음
+        if ($p >= $len) return null;
+        $version = ord($buf[$p]);
+        $p += 4;                             // version(1) + flags(3)
+        if ($version === 1) {
+            if ($p + 8 > $len) return null;
+            $ct = $this->u64be($buf, $p);
+        } else {
+            if ($p + 4 > $len) return null;
+            $ct = $this->u32be($buf, $p);
+        }
+        if ($ct <= 2082844800) return null;  // 0/무효 또는 1970 이전
+        $unix = $ct - 2082844800;            // 1904 → 1970 기준 보정
+        if ($unix < 631152000 || $unix > 4102444800) return null;   // 1990~2100 밖이면 무효
+        return gmdate('Y-m-d H:i:s', $unix + 9 * 3600);             // KST(+9) 보정
+    }
+
+    private function u32be(string $b, int $o): int
+    {
+        return (ord($b[$o]) << 24) | (ord($b[$o + 1]) << 16) | (ord($b[$o + 2]) << 8) | ord($b[$o + 3]);
+    }
+
+    private function u64be(string $b, int $o): int
+    {
+        return $this->u32be($b, $o) * 4294967296 + $this->u32be($b, $o + 4);
+    }
+
+    /** ISO 6709 좌표 문자열 → [lat, lng] | null */
+    private function parseISO6709(string $s): ?array
+    {
+        if (preg_match('/([+\-]\d+\.?\d*)([+\-]\d+\.?\d*)/', $s, $m)) {
+            return [round((float)$m[1], 7), round((float)$m[2], 7)];
+        }
+        return null;
+    }
+
+    /** 임의 범위 부분 다운로드 (start 바이트부터 len 바이트) — 동영상 atom 스캔용 */
+    private function curlRange(string $url, int $start, int $len): string
+    {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_TIMEOUT        => 60,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_USERAGENT      => 'Mozilla/5.0',
+            CURLOPT_RANGE          => $start . '-' . ($start + $len - 1),
+        ]);
+        $res = curl_exec($ch);
+        curl_close($ch);
+        return $res === false ? '' : $res;
+    }
+
+    /** RFC3339(드라이브 createdTime "2026-06-08T08:42:22.000Z") → "Y-m-d H:i:s" (촬영시각 폴백) */
+    private function parseDriveTime(?string $t): ?string
+    {
+        if (!$t) return null;
+        if (preg_match('/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/', $t, $m)) {
+            return "{$m[1]}-{$m[2]}-{$m[3]} {$m[4]}:{$m[5]}:{$m[6]}";
+        }
+        return null;
+    }
+
+    /** EXIF 도/분/초 배열 → 십진수 (WGS84, 변환 불필요) */
+    private function gpsToDecimal(array $dms, string $ref): ?float
+    {
+        if (count($dms) < 3) return null;
+        $deg = $this->frac($dms[0]);
+        $min = $this->frac($dms[1]);
+        $sec = $this->frac($dms[2]);
+        if ($deg === null) return null;
+        $dec = $deg + $min / 60 + $sec / 3600;
+        if ($ref === 'S' || $ref === 'W') $dec = -$dec;
+        return round($dec, 7);
+    }
+
+    /** "deg/1" 같은 유리수 문자열 → float */
+    private function frac($v): ?float
+    {
+        if (is_numeric($v)) return (float)$v;
+        if (is_string($v) && strpos($v, '/') !== false) {
+            [$n, $d] = array_pad(explode('/', $v, 2), 2, '1');
+            return ((float)$d != 0.0) ? (float)$n / (float)$d : 0.0;
+        }
+        return null;
+    }
+
+    private function curlGet(string $url, int $rangeBytes = 0): string
+    {
+        $ch = curl_init($url);
+        $opts = [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_TIMEOUT        => 30,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_USERAGENT      => 'Mozilla/5.0',
+        ];
+        if ($rangeBytes > 0) $opts[CURLOPT_RANGE] = '0-' . $rangeBytes;
+        curl_setopt_array($ch, $opts);
+        $res  = curl_exec($ch);
+        curl_close($ch);
+        return $res === false ? '' : $res;
+    }
+
+    /** 드라이브 fileId → 안정적 공개 썸네일 URL (만료 없음) */
+    public static function thumbUrl(string $fileId, int $w = 400): string
+    {
+        return 'https://drive.google.com/thumbnail?id=' . rawurlencode($fileId) . '&sz=w' . $w;
+    }
+
+    /** 드라이브 fileId → 원본 보기 URL */
+    public static function viewUrl(string $fileId): string
+    {
+        return 'https://drive.google.com/uc?export=view&id=' . rawurlencode($fileId);
+    }
+
+    // ======================================================
+    // 2. 동기화 — 부모폴더 스캔 → tbl_travel / tbl_travel_photo upsert
+    // ======================================================
+    /**
+     * 전체 동기화.
+     * @return array 요약 [{travel, folder_id, photos_total, photos_new, gps_new}]
+     */
+    public function sync(): array
+    {
+        if (!$this->driveEnabled()) {
+            throw new RuntimeException('gdrive.inc 미설정 (API 키 또는 부모폴더 ID 없음)');
+        }
+        $this->ensureTable();
+
+        // 기존 여행 = 폴더ID → [id,title] 맵 (사진 스캔 없이 폴더명만 비교)
+        $known = [];
+        foreach ($this->pdo->query("SELECT id, drive_folder_id, title FROM tbl_travel")->fetchAll() as $r) {
+            $known[$r['drive_folder_id']] = $r;
+        }
+
+        // 폴더 목록 1회 조회(id·이름만, 가벼움) → 신규만 풀스캔, 기존은 제목만 갱신
+        $summary = [];
+        $liveIds = [];                       // 현재 드라이브에 실존하는 폴더ID (고아 정리용)
+        foreach ($this->listDriveFolders() as $folder) {
+            $fid = $folder['id'];
+            $liveIds[$fid] = true;
+            if (isset($known[$fid])) {
+                // 이미 가져온 폴더: 사진 스캔 생략. 폴더명 바뀌었으면 제목만 갱신(이름변경 반영)
+                if ($known[$fid]['title'] !== $folder['name']) {
+                    $this->pdo->prepare("UPDATE tbl_travel SET title = ? WHERE id = ?")
+                              ->execute([$folder['name'], $known[$fid]['id']]);
+                }
+                continue;
+            }
+            // 신규 폴더만 사진까지 풀스캔
+            $summary[] = $this->syncFolder($fid, $folder['name']);
+        }
+
+        // 드라이브에서 폴더가 사라진 여행은 목록에서 정리.
+        // listDriveFolders() 는 전체 목록이라 권위 있음(누락=삭제). API 오류 시엔 위에서 예외로 중단되어 여기 안 옴.
+        foreach ($known as $fid => $row) {
+            if (!isset($liveIds[$fid])) {
+                $this->deleteTravel((int)$row['id']);
+                $summary[] = ['travel' => $row['title'], 'folder_id' => $fid, 'deleted' => true];
+            }
+        }
+        return $summary;
+    }
+
+    /** 여행 1건만 다시 가져오기 (상세페이지 "이 여행 새로고침" — 사진 + 폴더명(이름변경) 반영) */
+    public function refreshTravel(int $travelId): ?array
+    {
+        if (!$this->driveEnabled()) {
+            throw new RuntimeException('gdrive.inc 미설정 (API 키 또는 부모폴더 ID 없음)');
+        }
+        $this->ensureTable();   // media_type 등 신규 컬럼 보강 (sync 안 거치고 새로고침만 해도 안전)
+        $t = $this->getTravel($travelId);
+        if (!$t) return null;
+        // 드라이브에서 폴더가 삭제/휴지통이면 이 여행을 목록에서 제거 (불확실하면 보존)
+        if ($this->driveFolderExists($t['drive_folder_id']) === false) {
+            $this->deleteTravel($travelId);
+            return ['deleted' => true, 'travel' => $t['title']];
+        }
+        // 드라이브에서 현재 폴더명을 다시 읽어 이름변경도 반영 (없으면 기존 제목 유지)
+        $name = $this->getDriveFolderName($t['drive_folder_id']) ?? $t['title'];
+        return $this->syncFolder($t['drive_folder_id'], $name);
+    }
+
+    /** 드라이브 폴더 ID → 현재 폴더명 (조회 실패 시 null) */
+    private function getDriveFolderName(string $folderId): ?string
+    {
+        $url = self::DRIVE_API . '/' . rawurlencode($folderId)
+             . '?key=' . GOOGLE_DRIVE_API_KEY . '&fields=name';
+        $data = json_decode($this->curlGet($url), true);
+        return $data['name'] ?? null;
+    }
+
+    /**
+     * 드라이브 폴더 존재 확인.
+     * @return bool|null true=존재, false=확실히 삭제됨(404)·휴지통, null=불확실(네트워크 오류 등)
+     */
+    private function driveFolderExists(string $folderId): ?bool
+    {
+        $url = self::DRIVE_API . '/' . rawurlencode($folderId)
+             . '?key=' . GOOGLE_DRIVE_API_KEY . '&fields=id,trashed';
+        $ch  = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_TIMEOUT        => 30,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_USERAGENT      => 'Mozilla/5.0',
+        ]);
+        $res  = curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        if ($res === false || $code === 0) return null;   // 네트워크 오류 → 불확실(보존)
+        if ($code === 404) return false;                  // 삭제됨
+        $data = json_decode($res, true);
+        if (isset($data['error'])) {
+            return ((int)($data['error']['code'] ?? 0) === 404) ? false : null;
+        }
+        if (!empty($data['trashed'])) return false;       // 휴지통 = 삭제로 간주
+        return isset($data['id']) ? true : null;
+    }
+
+    /** 여행 1건 삭제 (사진·공유는 FK CASCADE 로 함께 삭제) */
+    public function deleteTravel(int $id): void
+    {
+        // DB CASCADE 는 파일을 모르므로, 삭제 전에 이 여행 사진들의 디스크 썸네일 캐시도 정리
+        $this->purgeThumbCache($id);
+        $this->pdo->prepare("DELETE FROM tbl_travel WHERE id = ?")->execute([$id]);
+    }
+
+    /** 여행 사진들의 캐시 썸네일(cache/thumbs/{fileId}_w*.img) 삭제 — 고아 캐시 방지 */
+    private function purgeThumbCache(int $travelId): void
+    {
+        $dir = dirname(__DIR__) . '/cache/thumbs';   // 웹루트/cache/thumbs (travel_thumb.php 와 동일 경로)
+        if (!is_dir($dir)) return;
+        $stmt = $this->pdo->prepare("SELECT drive_file_id FROM tbl_travel_photo WHERE travel_id = ?");
+        $stmt->execute([$travelId]);
+        foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $fid) {
+            // 캐시 파일명은 안전문자(fileId)만 — 경로조작 방지용으로 한 번 더 검증
+            if (!preg_match('/^[A-Za-z0-9_-]+$/', (string)$fid)) continue;
+            foreach (glob($dir . '/' . $fid . '_w*.img') ?: [] as $f) @unlink($f);
+        }
+    }
+
+    /** 여행폴더 1개 동기화 */
+    public function syncFolder(string $folderId, string $title): array
+    {
+        // 1) tbl_travel upsert (drive_folder_id 기준)
+        $travelId = $this->upsertTravel($folderId, $title);
+
+        // 2) 기존 사진 캐시 (재스캔 불필요 시 좌표/시각 그대로 유지 → 비용 절감 + GPS wipe 방지)
+        $stmt = $this->pdo->prepare(
+            "SELECT drive_file_id, lat, lng, taken_at, media_type FROM tbl_travel_photo WHERE travel_id = ?"
+        );
+        $stmt->execute([$travelId]);
+        $known = [];
+        foreach ($stmt->fetchAll() as $r) {
+            $known[$r['drive_file_id']] = [
+                'lat' => $r['lat'], 'lng' => $r['lng'],
+                'taken' => $r['taken_at'], 'type' => $r['media_type'],
+            ];
+        }
+
+        // 3) 드라이브 미디어(사진+동영상) 순회 upsert
+        $photos  = $this->listDrivePhotos($folderId);
+        $newCnt  = 0;
+        $gpsCnt  = 0;
+        $nameCnt = 0;
+        $insPhoto = $this->pdo->prepare(
+            "INSERT INTO tbl_travel_photo
+                (travel_id, drive_file_id, name, taken_at, lat, lng, provider, thumb_url, media_type, vid_w, vid_h)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?)
+             ON DUPLICATE KEY UPDATE
+                name=VALUES(name), taken_at=VALUES(taken_at),
+                lat=VALUES(lat), lng=VALUES(lng),
+                provider=VALUES(provider), thumb_url=VALUES(thumb_url),
+                media_type=VALUES(media_type), vid_w=VALUES(vid_w), vid_h=VALUES(vid_h)"
+        );
+
+        // 3-a) 메타 수집 (아직 insert 안 함 — 형제 날짜 상속 / 좌표 보간 후 일괄 처리)
+        $records = [];
+        foreach ($photos as $p) {
+            $fileId   = $p['id'];
+            $prev     = $known[$fileId] ?? null;
+            $isNew    = ($prev === null);
+            // 저장된 좌표가 0(=가짜 GPS)이면 아직 GPS 없는 것으로 보고 재시도
+            $hadGps   = $prev && $prev['lat'] !== null && (float)$prev['lat'] != 0.0;
+            $isVideo  = (strpos($p['mimeType'] ?? '', 'video/') === 0);
+            $mediaType = $isVideo ? 'video' : 'image';
+
+            $lat = $lng = null;
+            $takenAt = null;
+            $vidW = $vidH = null;
+
+            if ($isVideo) {
+                // 동영상 촬영시각 = 파일명(YYYYMMDD_HHMMSS) 우선(다운로드 0). 컨테이너 메타
+                // 파싱은 자주 실패해 복사일자(오늘)로 떨어지므로 파일명을 먼저 믿는다.
+                $takenAt = $this->parseFilenameTime($p['name'] ?? null);
+                if ($takenAt) $nameCnt++;
+                // 재생 비율용 가로·세로는 리스트 API 가 제공 → 다운로드 불필요
+                $vm = $p['videoMediaMetadata'] ?? null;
+                if ($vm && !empty($vm['width']) && !empty($vm['height'])) {
+                    $vidW = (int)$vm['width'];
+                    $vidH = (int)$vm['height'];
+                }
+                // 앞뒤 3MB 바이너리 다운로드는 ①GPS 가 아직 없거나 ②파일명으로 시각을 못 구했을 때만.
+                // GPS 확정 + 파일명 시각이 있으면 재다운로드 스킵(이미지와 동일 정책).
+                if ($isNew || !$hadGps || !$takenAt) {
+                    $meta = $this->extractVideoMeta($fileId, (int)($p['size'] ?? 0));
+                    $lat  = $meta['lat'];
+                    $lng  = $meta['lng'];
+                    if (!$takenAt) { $takenAt = $meta['taken_at']; }   // 파일명 실패 시 컨테이너 메타 폴백
+                    if ($lat !== null) $gpsCnt++;
+                } else {
+                    $lat = $prev['lat']; $lng = $prev['lng'];           // GPS 확정 → 기존 좌표 유지(다운로드 없음)
+                }
+            } else {
+                // 이미지: 촬영시각은 EXIF 우선 → 없으면 파일명(YYYYMMDD_HHMMSS) 폴백
+                $takenAt = $this->parseExifTime($p['imageMediaMetadata']['time'] ?? null);
+                if (!$takenAt) { $takenAt = $this->parseFilenameTime($p['name'] ?? null); if ($takenAt) $nameCnt++; }
+                if ($isNew || !$hadGps) {
+                    $loc = $p['imageMediaMetadata']['location'] ?? null;
+                    if ($loc && isset($loc['latitude'], $loc['longitude'])
+                        && (abs((float)$loc['latitude']) > 0.0001 || abs((float)$loc['longitude']) > 0.0001)) {
+                        $lat = round((float)$loc['latitude'], 7);
+                        $lng = round((float)$loc['longitude'], 7);
+                    } else {
+                        $gps = $this->extractGps($fileId);
+                        if ($gps) { [$lat, $lng] = $gps; }
+                    }
+                    if ($lat !== null) $gpsCnt++;
+                } else {
+                    // 재스캔 불필요 → 기존 GPS 유지 (미스캔 시 lat=null 로 덮어써 좌표가 지워지던 문제 방지)
+                    $lat = $prev['lat']; $lng = $prev['lng'];
+                }
+            }
+            $records[] = [
+                'fileId' => $fileId, 'name' => $p['name'] ?? null,
+                'takenAt' => $takenAt, 'lat' => $lat, 'lng' => $lng,
+                'mediaType' => $mediaType, 'vidW' => $vidW, 'vidH' => $vidH,
+                'isNew' => $isNew,
+            ];
+        }
+
+        // 3-b) 메타·파일명으로도 시각을 못 구한 건 '예외' — 추정하지 않고 NULL 로 둬
+        //      상세 보기 맨 끝 '미분류' 섹션으로 따로 모은다(억지 추정 금지).
+        $unresolved = 0;
+        foreach ($records as $r) { if (empty($r['takenAt'])) $unresolved++; }
+
+        // 3-d) 수집·보정 끝난 레코드 일괄 upsert
+        $currentIds = [];
+        foreach ($records as $r) {
+            $currentIds[] = $r['fileId'];
+            $provider = $r['lat'] !== null ? 'naver' : null;
+            $insPhoto->execute([
+                $travelId, $r['fileId'], $r['name'], $r['takenAt'],
+                $r['lat'], $r['lng'], $provider, self::thumbUrl($r['fileId']),
+                $r['mediaType'], $r['vidW'], $r['vidH'],
+            ]);
+            if ($r['isNew']) $newCnt++;
+        }
+
+        // 4) 드라이브에서 사라진 사진은 DB에서도 제거 (재업로드/삭제 반영)
+        if ($currentIds) {
+            $ph  = implode(',', array_fill(0, count($currentIds), '?'));
+            $del = $this->pdo->prepare(
+                "DELETE FROM tbl_travel_photo WHERE travel_id = ? AND drive_file_id NOT IN ($ph)"
+            );
+            $del->execute(array_merge([$travelId], $currentIds));
+        } else {
+            $this->pdo->prepare("DELETE FROM tbl_travel_photo WHERE travel_id = ?")
+                      ->execute([$travelId]);
+        }
+
+        // 5) 여행 기간(start/end_dt) + 대표 썸네일 = 사진 taken_at 최소~최대 기준 자동 갱신
+        $this->refreshTravelMeta($travelId);
+
+        return [
+            'travel'          => $title,
+            'folder_id'       => $folderId,
+            'photos_total'    => count($photos),
+            'photos_new'      => $newCnt,
+            'gps_new'         => $gpsCnt,
+            'dates_from_name' => $nameCnt,
+            'unresolved'      => $unresolved,
+        ];
+    }
+
+    /**
+     * 파일명에서 촬영시각 추출 (갤럭시/안드로이드 규칙: YYYYMMDD_HHMMSS).
+     * IMG_/VID_/Screenshot_ 같은 접두사나 _001 접미사가 붙어도 8자리 날짜 + 6자리 시각을 찾아낸다.
+     * 메타데이터(EXIF/QuickTime)가 없을 때의 폴백 — 파일명이 곧 촬영시각인 단말이 많다.
+     * @return ?string 'Y-m-d H:i:s' 또는 매칭/검증 실패 시 null
+     */
+    private function parseFilenameTime(?string $name): ?string
+    {
+        if ($name === null || $name === '') return null;
+        if (!preg_match('/(20\d{2})(\d{2})(\d{2})[ _\-]?(\d{2})(\d{2})(\d{2})/', $name, $m)) return null;
+        $y = (int)$m[1]; $mo = (int)$m[2]; $d = (int)$m[3];
+        $h = (int)$m[4]; $mi = (int)$m[5]; $s = (int)$m[6];
+        if (!checkdate($mo, $d, $y) || $h > 23 || $mi > 59 || $s > 59) return null;
+        return sprintf('%04d-%02d-%02d %02d:%02d:%02d', $y, $mo, $d, $h, $mi, $s);
+    }
+
+
+    private function upsertTravel(string $folderId, string $title): int
+    {
+        $stmt = $this->pdo->prepare("SELECT id FROM tbl_travel WHERE drive_folder_id = ?");
+        $stmt->execute([$folderId]);
+        $id = $stmt->fetchColumn();
+        if ($id) {
+            // 폴더명(제목) 변경 반영
+            $u = $this->pdo->prepare("UPDATE tbl_travel SET title = ? WHERE id = ?");
+            $u->execute([$title, $id]);
+            return (int)$id;
+        }
+        $ins = $this->pdo->prepare(
+            "INSERT INTO tbl_travel (title, drive_folder_id) VALUES (?, ?)"
+        );
+        $ins->execute([$title, $folderId]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    /** 사진 기준으로 여행 기간/대표썸네일 재계산 */
+    private function refreshTravelMeta(int $travelId): void
+    {
+        $stmt = $this->pdo->prepare(
+            "SELECT DATE(MIN(taken_at)) AS s, DATE(MAX(taken_at)) AS e
+               FROM tbl_travel_photo WHERE travel_id = ? AND hidden = 0 AND taken_at IS NOT NULL"
+        );
+        $stmt->execute([$travelId]);
+        $r = $stmt->fetch();
+
+        // 대표 썸네일 = 가장 이른 사진
+        $cs = $this->pdo->prepare(
+            "SELECT thumb_url FROM tbl_travel_photo
+              WHERE travel_id = ? AND hidden = 0 ORDER BY taken_at IS NULL, taken_at ASC LIMIT 1"
+        );
+        $cs->execute([$travelId]);
+        $cover = $cs->fetchColumn() ?: null;
+
+        $u = $this->pdo->prepare(
+            "UPDATE tbl_travel SET start_dt = ?, end_dt = ?, cover_thumb = ? WHERE id = ?"
+        );
+        $u->execute([$r['s'] ?? null, $r['e'] ?? null, $cover, $travelId]);
+    }
+
+    /** "2026:06:08 09:42:22" → "2026-06-08 09:42:22" */
+    private function parseExifTime(?string $t): ?string
+    {
+        if (!$t) return null;
+        if (preg_match('/^(\d{4}):(\d{2}):(\d{2})\s+(\d{2}:\d{2}:\d{2})$/', $t, $m)) {
+            return "{$m[1]}-{$m[2]}-{$m[3]} {$m[4]}";
+        }
+        return null;
+    }
+
+    // ======================================================
+    // 3. 읽기 — 캘린더 막대 / 갤러리
+    // ======================================================
+    /** 전체 여행 목록 (캘린더 막대·목록용) */
+    public function listTravels(): array
+    {
+        return $this->pdo->query(
+            "SELECT t.*, (SELECT COUNT(*) FROM tbl_travel_photo p WHERE p.travel_id = t.id AND p.hidden = 0) AS photo_count,
+               (SELECT p2.drive_file_id FROM tbl_travel_photo p2
+                  WHERE p2.travel_id = t.id AND p2.hidden = 0
+                  ORDER BY p2.taken_at IS NULL, p2.taken_at ASC LIMIT 1) AS cover_file_id
+               FROM tbl_travel t
+              ORDER BY t.start_dt DESC, t.id DESC"
+        )->fetchAll();
+    }
+
+    /** 특정 기간과 겹치는 여행 (schedule.php 캘린더 막대 렌더용) */
+    public function listTravelsByRange(string $start, string $end): array
+    {
+        $stmt = $this->pdo->prepare(
+            "SELECT * FROM tbl_travel
+              WHERE start_dt IS NOT NULL AND end_dt IS NOT NULL
+                AND start_dt <= ? AND end_dt >= ?
+              ORDER BY start_dt ASC"
+        );
+        $stmt->execute([$end, $start]);
+        return $stmt->fetchAll();
+    }
+
+    public function getTravel(int $id): ?array
+    {
+        $stmt = $this->pdo->prepare("SELECT * FROM tbl_travel WHERE id = ?");
+        $stmt->execute([$id]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /** 여행의 사진 — 날짜→시간 순 (갤러리 GROUP BY 날짜용) */
+    public function listPhotos(int $travelId): array
+    {
+        $stmt = $this->pdo->prepare(
+            "SELECT * FROM tbl_travel_photo
+              WHERE travel_id = ? AND hidden = 0
+              ORDER BY taken_at IS NULL, taken_at ASC"
+        );
+        $stmt->execute([$travelId]);
+        $rows = $stmt->fetchAll();
+        foreach ($rows as &$r) {
+            $r['view_url'] = self::viewUrl($r['drive_file_id']);
+        }
+        return $rows;
+    }
+
+    /** 갤러리용: 날짜별로 묶은 사진 (['2026-06-08' => [photo,...]]) */
+    public function listPhotosByDate(int $travelId): array
+    {
+        $grouped = [];
+        foreach ($this->listPhotos($travelId) as $p) {
+            $day = $p['taken_at'] ? substr($p['taken_at'], 0, 10) : '날짜미상';
+            $grouped[$day][] = $p;
+        }
+        return $grouped;
+    }
+
+    // ======================================================
+    // 4. 사진별 메모 / 주소 캐시 (일기 보기용)
+    // ======================================================
+    /** 사진 1장 메모 저장 (빈 문자열이면 NULL 로 비움) */
+    public function setPhotoMemo(int $photoId, ?string $memo): void
+    {
+        $memo = ($memo === null || trim($memo) === '') ? null : $memo;
+        $this->pdo->prepare("UPDATE tbl_travel_photo SET memo = ? WHERE id = ?")
+                  ->execute([$memo, $photoId]);
+    }
+
+    /** 사진 1장 숨김/표시 토글 (드라이브 원본은 유지, 일기·지도·동선에서만 제외) */
+    public function setPhotoHidden(int $photoId, bool $hidden): void
+    {
+        $this->pdo->prepare("UPDATE tbl_travel_photo SET hidden = ? WHERE id = ?")
+                  ->execute([$hidden ? 1 : 0, $photoId]);
+    }
+
+    /**
+     * GPS 좌표는 있으나 주소(addr)가 아직 없는 사진만 역지오코딩해 DB 캐시.
+     * 상세보기 최초 1회만 외부 호출, 이후엔 캐시로 0콜. @return 갱신 건수
+     */
+    public function backfillAddresses(int $travelId): int
+    {
+        if (!class_exists('GeoCoder')) return 0;
+        $stmt = $this->pdo->prepare(
+            "SELECT id, lat, lng FROM tbl_travel_photo
+              WHERE travel_id = ? AND lat IS NOT NULL AND lng IS NOT NULL
+                AND (addr IS NULL OR addr = '')"
+        );
+        $stmt->execute([$travelId]);
+        $rows = $stmt->fetchAll();
+        if (!$rows) return 0;
+
+        $upd = $this->pdo->prepare("UPDATE tbl_travel_photo SET addr = ? WHERE id = ?");
+        $n = 0;
+        foreach ($rows as $r) {
+            $g = GeoCoder::reverseGeocode((float)$r['lat'], (float)$r['lng']);
+            if (!empty($g['ok']) && ($g['address'] ?? '') !== '') {
+                $upd->execute([$g['address'], $r['id']]);
+                $n++;
+            }
+        }
+        return $n;
+    }
+
+    // ======================================================
+    // 5. 한시적 공개 공유 (랜덤 토큰 + 만료/취소)
+    // ======================================================
+    /** 공유 링크 생성. 기존 활성 링크는 무효화하고 새 토큰 1개 발급. @return [token, expires_at] */
+    public function createShare(int $travelId, int $ttlSeconds): array
+    {
+        $this->revokeShares($travelId);                       // 활성 링크는 1개만 유지
+        $ttl   = max(60, min($ttlSeconds, 7 * 24 * 3600));    // 1분~7일로 클램프
+        $token = bin2hex(random_bytes(16));                   // 추측 불가 32자리
+        $this->pdo->prepare(
+            "INSERT INTO tbl_travel_share (travel_id, token, expires_at)
+             VALUES (?, ?, DATE_ADD(NOW(), INTERVAL ? SECOND))"
+        )->execute([$travelId, $token, $ttl]);
+        $row = $this->getShareByToken($token);
+        return ['token' => $token, 'expires_at' => $row['expires_at'] ?? null];
+    }
+
+    /** 토큰으로 유효한(미만료·미취소) 공유 조회 — 게스트 접근 검증용 */
+    public function getValidShare(string $token): ?array
+    {
+        if ($token === '') return null;
+        $stmt = $this->pdo->prepare(
+            "SELECT * FROM tbl_travel_share
+              WHERE token = ? AND revoked = 0 AND expires_at > NOW() LIMIT 1"
+        );
+        $stmt->execute([$token]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /** 여행의 현재 활성 공유 1건 (소유자 화면에 기존 링크 표시용) */
+    public function getActiveShare(int $travelId): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            "SELECT * FROM tbl_travel_share
+              WHERE travel_id = ? AND revoked = 0 AND expires_at > NOW()
+              ORDER BY id DESC LIMIT 1"
+        );
+        $stmt->execute([$travelId]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /** 해당 여행의 모든 활성 공유 즉시 차단 ('지금 닫기') */
+    public function revokeShares(int $travelId): void
+    {
+        $this->pdo->prepare("UPDATE tbl_travel_share SET revoked = 1 WHERE travel_id = ?")
+                  ->execute([$travelId]);
+    }
+
+    private function getShareByToken(string $token): ?array
+    {
+        $stmt = $this->pdo->prepare("SELECT * FROM tbl_travel_share WHERE token = ? LIMIT 1");
+        $stmt->execute([$token]);
+        return $stmt->fetch() ?: null;
+    }
+}
+?>

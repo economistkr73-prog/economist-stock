@@ -66,6 +66,9 @@ body { font-family:'Pretendard','Malgun Gothic',sans-serif; background:#f0f2f5; 
 .tv-meta .period { font-size:13px; color:#7f8c8d; }
 .dur { display:inline-block; background:#eef2f7; color:#5a6b7b; font-size:11px; font-weight:600; padding:1px 8px; border-radius:20px; margin-left:6px; white-space:nowrap; vertical-align:middle; }
 .empty { background:#fff; border-radius:12px; padding:40px; text-align:center; color:#7f8c8d; }
+/* 연도 그룹 헤딩 */
+.tv-year { font-size:19px; font-weight:800; color:#34495e; margin:26px 0 12px; padding-bottom:6px; border-bottom:2px solid #f0d9bf; }
+.tv-year:first-of-type { margin-top:8px; }
 /* 목록 헤더 + 동기화 버튼 */
 .tv-listhead { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:8px; }
 .tv-listhead h2 { font-size:22px; }
@@ -85,10 +88,23 @@ body { font-family:'Pretendard','Malgun Gothic',sans-serif; background:#f0f2f5; 
 .tv-sub { color:#7f8c8d; font-size:14px; margin-bottom:18px; }
 /* 상세보기 콘텐츠 폭 = 지도/리스트와 동일(810px) 한 컬럼 */
 .tv-detail { max-width:810px; }
-#tv-map { width:810px; max-width:100%; height:320px; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,.08); margin-bottom:8px; background:#e8ebee; }
+.tv-map-wrap { position:relative; width:810px; max-width:100%; margin-bottom:8px; }
+#tv-map { width:100%; height:320px; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,.08); background:#e8ebee; }
+/* 동선 지도 전체화면 토글 */
+.tv-mapfull-btn { position:absolute; top:8px; right:8px; z-index:5; width:34px; height:34px; padding:0; border:none; border-radius:8px; background:rgba(0,0,0,.55); color:#fff; font-size:17px; line-height:34px; text-align:center; cursor:pointer; transition:.15s; }
+.tv-mapfull-btn:hover { background:rgba(0,0,0,.78); }
+.tv-mapfull-close { display:none; position:fixed; top:14px; right:14px; z-index:1901; width:40px; height:40px; padding:0; border:none; border-radius:50%; background:rgba(0,0,0,.6); color:#fff; font-size:18px; line-height:40px; text-align:center; cursor:pointer; }
+.tv-map-wrap.full { position:fixed; inset:0; z-index:1900; width:auto; max-width:none; margin:0; }
+.tv-map-wrap.full #tv-map { height:100%; border-radius:0; box-shadow:none; }
+.tv-map-wrap.full .tv-mapfull-btn { display:none; }
+.tv-map-wrap.full .tv-mapfull-close { display:block; }
+body.tv-map-lock { overflow:hidden; }
 .map-note { font-size:12px; color:#95a5a6; margin-bottom:22px; }
 .day-sec { margin-bottom:26px; }
 .day-head { font-size:16px; font-weight:700; color:#34495e; margin-bottom:12px; padding-left:8px; border-left:4px solid #e67e22; }
+.day-sec--misc { margin-top:34px; padding-top:20px; border-top:1px dashed #cfd6dd; }
+.day-sec--misc .day-head { color:#7f8c8d; border-left-color:#b0b8c0; }
+.misc-note { font-size:12.5px; color:#8a949c; background:#f6f8fa; border:1px solid #e6eaee; border-radius:8px; padding:8px 11px; margin-bottom:12px; line-height:1.5; }
 .shots { display:flex; flex-wrap:wrap; gap:12px; }
 .shot { width:150px; }
 .shot a { display:block; aspect-ratio:1; border-radius:10px; overflow:hidden; background:#dfe4ea center/cover no-repeat; box-shadow:0 1px 4px rgba(0,0,0,.1); }
@@ -155,7 +171,7 @@ body.tv-edit-on .dm-edit { display:inline-block; }
 .dr-memo .dm-body { flex:1; font-size:14px; color:#4a4a4a; line-height:1.6; word-break:break-word; }
 .dr-memo .dm-empty { color:#bcae8a; font-style:italic; }
 .dr-memo.dm-blank { background:none; border:none; }
-.ps-top { display:flex; align-items:center; justify-content:space-between; gap:8px; min-height:20px; }
+.ps-top { display:flex; align-items:center; justify-content:flex-end; gap:8px; min-height:20px; }
 .dm-edit { display:none; background:none; border:none; color:#b8860b; font-size:15px; line-height:1; padding:3px 6px; border-radius:8px; cursor:pointer; opacity:.7; transition:.15s; flex-shrink:0; }
 .dm-edit:hover { opacity:1; background:#f6efda; }
 .dm-ta { width:100%; min-height:90px; border:1px solid #e0d6b8; border-radius:8px; padding:8px; font-size:14px; font-family:inherit; line-height:1.6; resize:vertical; box-sizing:border-box; }
@@ -169,13 +185,32 @@ body.tv-edit-on .dm-edit { display:inline-block; }
 .place-head .ph-time { font-size:13px; color:#7f8c8d; }
 .place-head .ph-count { font-size:12px; font-weight:600; color:#e67e22; background:#fdebd0; padding:1px 9px; border-radius:20px; white-space:nowrap; }
 .place-body { display:grid; grid-template-columns:1fr 1fr; gap:16px 18px; align-items:stretch; }
-.place-map { min-height:170px; height:auto; align-self:stretch; }
-.pshot { display:grid; grid-template-columns:120px 1fr; gap:14px; align-items:start; position:relative; }
-.ps-thumb { display:block; width:120px; aspect-ratio:3/4; flex-shrink:0; border-radius:10px; overflow:hidden; background:#dfe4ea center/cover no-repeat; box-shadow:0 1px 4px rgba(0,0,0,.12); cursor:pointer; }
-.ps-del { display:none; position:absolute; top:5px; left:5px; z-index:3; width:23px; height:23px; padding:0; border:none; border-radius:50%; background:rgba(0,0,0,.55); color:#fff; font-size:13px; line-height:23px; text-align:center; cursor:pointer; transition:.15s; }
+.place-map { min-height:0; height:auto; align-self:stretch; }   /* 시각+사진 높이에 맞춰 늘어남 */
+.pshot { display:grid; grid-template-columns:100px 1fr; gap:14px; align-items:start; position:relative; }
+.ps-thumb { display:block; width:100px; aspect-ratio:3/4; flex-shrink:0; border-radius:10px; overflow:hidden; background:#dfe4ea center/cover no-repeat; box-shadow:0 1px 4px rgba(0,0,0,.12); cursor:pointer; }
+/* 사진 칸 = [촬영시각 줄] + [썸네일] (지도 높이를 시각+사진에 맞추기 위함) */
+.ps-col { display:flex; flex-direction:column; gap:5px; min-width:0; }
+.ps-time { font-size:12px; font-weight:700; color:#34495e; line-height:1.2; padding-left:2px; white-space:nowrap; }
+.ps-del { display:none; position:absolute; top:5px; right:5px; z-index:3; width:23px; height:23px; padding:0; border:none; border-radius:50%; background:rgba(0,0,0,.55); color:#fff; font-size:13px; line-height:23px; text-align:center; cursor:pointer; transition:.15s; }
 .ps-del:hover { background:#e74c3c; transform:scale(1.08); }
+/* 동영상 썸네일 ▶ 재생 배지 (가운데) */
+.ps-thumb { position:relative; }
+.ps-thumb.is-vid::after { content:''; position:absolute; inset:0; background:rgba(0,0,0,.18); }
+.ps-play { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); z-index:2; width:38px; height:38px; border-radius:50%; background:rgba(0,0,0,.6); color:#fff; font-size:15px; line-height:38px; text-align:center; padding-left:3px; box-shadow:0 1px 6px rgba(0,0,0,.4); pointer-events:none; }
 .pshot .ps-side { display:flex; flex-direction:column; gap:6px; min-width:0; }
 .pshot .ps-side .dr-memo { flex:0 0 auto; align-self:stretch; }
+/* 메모 없는 사진 = 컴팩트 썸네일 줄 (그리드 전체폭 차지) */
+.ps-strip { grid-column:1 / -1; display:flex; flex-wrap:wrap; gap:12px 10px; }
+.ps-chip { position:relative; width:84px; }
+.ps-chip .ps-thumb { width:84px; aspect-ratio:3/4; }
+.ps-chip-time { font-size:11px; color:#7f8c8d; text-align:center; margin-top:3px; white-space:nowrap; }
+.ps-memo-add { display:none; position:absolute; top:5px; left:5px; z-index:3; width:23px; height:23px; padding:0; border:none; border-radius:50%; background:rgba(0,0,0,.55); color:#fff; font-size:12px; line-height:23px; text-align:center; cursor:pointer; transition:.15s; }
+.ps-memo-add:hover { background:#b8860b; transform:scale(1.08); }
+body.tv-edit-on .ps-memo-add { display:block; }
+/* 칩 인라인 메모 편집기 (저장 시 풀 카드로 재배치되도록 reload) */
+.ps-chip-editor { flex:0 0 100%; }
+/* 메모 사진이 없는 장소 → 지도를 전체폭 배너로 */
+.place-map--full { grid-column:1 / -1; height:200px; }
 /* 지도 팝업 모달 */
 .tv-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:2000; align-items:center; justify-content:center; padding:20px; }
 .tv-modal.on { display:flex; }
@@ -204,6 +239,19 @@ body.tv-edit-on .dm-edit { display:inline-block; }
 .tv-pmodal.on { display:flex; }
 .tv-pmodal img { max-width:100%; max-height:92vh; border-radius:8px; box-shadow:0 8px 30px rgba(0,0,0,.5); }
 .tv-pmodal .tv-modal-x { position:fixed; top:14px; right:14px; }
+/* 동선 모달 안 동영상(iframe) — 크기는 JS가 영상 비율로 inline 지정, 가운데 정렬 */
+.tv-modal-photo .tv-modal-vid { display:block; margin:0 auto; max-width:100%; border:0; border-radius:12px; background:#000; }
+/* 동영상 단순 재생 모달 */
+.tv-vmodal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.82); z-index:2100; align-items:center; justify-content:center; padding:20px; }
+.tv-vmodal.on { display:flex; }
+.tv-vbox { position:relative; }
+/* 크기(width/height)는 JS tvFitBox 가 영상 비율로 inline 지정 → 검은 여백 없음. 미지정 시 폴백 */
+.tv-vframe { position:relative; width:min(820px,96vw); max-width:96vw; aspect-ratio:16/9; background:#000; border-radius:10px; overflow:hidden; box-shadow:0 8px 30px rgba(0,0,0,.5); margin:0 auto; }
+.tv-vframe iframe { position:absolute; inset:0; width:100%; height:100%; border:0; }
+.tv-vmodal .tv-modal-x { position:fixed; top:14px; right:14px; }
+/* 모바일(터치)=화면 채움: 검은 배경 + iframe 풀뷰포트(드라이브 플레이어가 영상 비율 처리) */
+.tv-vmodal.full { background:#000; padding:0; }
+.tv-vmodal.full .tv-vframe { max-width:100vw; max-height:100vh; border-radius:0; box-shadow:none; aspect-ratio:auto; }
 /* ── 폴더블·태블릿(펼친 화면, 561~819px): 사진(좌, 세로로 김) | 지도·메모(우, 위아래) ── */
 @media (max-width:819px){
     /* (모바일 햄버거 헤더 CSS는 env/nav.inc 의 nav_css() 로 통합됨) */
@@ -212,17 +260,17 @@ body.tv-edit-on .dm-edit { display:inline-block; }
     .tv-headrow { flex-direction:column; }
     /* 폴더블·태블릿(561~819px): PC식 2열 유지, 사이즈만 축소 */
     .place-body { gap:14px; }
-    .place-map  { min-height:150px; }
-    .pshot { grid-template-columns:96px 1fr; gap:12px; }
-    .ps-thumb { width:96px; }
+    .place-map  { min-height:0; }
+    .pshot { grid-template-columns:88px 1fr; gap:12px; }
+    .ps-thumb { width:88px; }
 }
 /* ── 일반 세로 스마트폰(≤560px): 사진 / 지도 / 메모 단일 컬럼 3줄 ── */
 @media (max-width:560px){
     /* 세로 스마트폰: 단일 열 — 지도(풀폭) → [이미지|메모] 행 반복 */
     .place-body { grid-template-columns:1fr; }
     .place-map  { height:190px; min-height:0; align-self:auto; }
-    .pshot { grid-template-columns:104px 1fr; gap:12px; }
-    .ps-thumb { width:104px; }
+    .pshot { grid-template-columns:96px 1fr; gap:12px; }
+    .ps-thumb { width:96px; }
     /* 세로폰: 공유·새로고침·편집 버튼 모두 숨김 */
     .tv-subrow .tv-head-btns { display:none; }
 }
@@ -290,27 +338,43 @@ function tv_group_by_place(array $shots, float $maxMeters = 100.0): array {
 }
 
 /** 장소 카드 안의 사진 1장 = [썸네일 | 시각+메모] (소유자는 메모 편집 가능) */
-function tv_render_pshot(array $s, bool $guest): void {
+function tv_render_pshot(array $s, bool $guest, bool $mapsActive = false): void {
     $time = $s['taken_at'] ? substr($s['taken_at'], 11, 5) : '';
     $bg   = "background-image:url('" . htmlspecialchars($s['thumb_url']) . "')";
     $big  = htmlspecialchars(Travel::thumbUrl($s['drive_file_id'], 1600), ENT_QUOTES);
+    $isVid = (($s['media_type'] ?? 'image') === 'video');
+    $fid   = htmlspecialchars($s['drive_file_id'], ENT_QUOTES);
+    $vw    = (int)($s['vid_w'] ?? 0); $vh = (int)($s['vid_h'] ?? 0);
+
+    // 클릭: 동영상=전체화면 재생 / 사진=라이트박스
+    if ($isVid) {
+        $click = "tvOpenVideo('{$fid}',{$vw},{$vh})";
+    } else {
+        $click = "tvOpenPhoto('{$big}')";
+    }
+    $vidCls = $isVid ? ' is-vid' : '';
 
     echo "<div class='pshot' data-pid='{$s['id']}'>";
-    echo "<div class='ps-thumb' role='button' tabindex='0' style=\"{$bg}\" onclick=\"tvOpenPhoto('{$big}')\"></div>";
+    // 사진 칸 = [촬영시각 줄] + [썸네일]. 시각을 사진 위 줄에 둬서 지도 높이를 '시각+사진' 높이에 맞춤
+    echo "<div class='ps-col'>";
+    if ($time !== '') echo "<div class='ps-time'>🕒 {$time}</div>";
+    echo "<div class='ps-thumb{$vidCls}' role='button' tabindex='0' style=\"{$bg}\" onclick=\"{$click}\">";
     if (!$guest) {
-        echo "<button type='button' class='ps-del' title='이 사진 숨기기' aria-label='이 사진 숨기기' onclick='tvHidePhoto({$s['id']})'>✕</button>";
+        echo "<button type='button' class='ps-del' title='이 사진 숨기기' aria-label='이 사진 숨기기' onclick='event.stopPropagation();tvHidePhoto({$s['id']})'>✕</button>";
     }
+    if ($isVid) echo "<span class='ps-play' aria-hidden='true'>▶</span>";
+    echo "</div>"; // .ps-thumb
+    echo "</div>"; // .ps-col
     echo "<div class='ps-side'>";
 
     $memo = trim((string)($s['memo'] ?? ''));
-    // 상단 행: 시각(좌) + 메모 편집 연필 아이콘(우, 소유자만)
-    echo "<div class='ps-top'>";
-    echo "<span class='dr-time'>" . ($time !== '' ? "🕒 {$time}" : '') . "</span>";
+    // 메모 편집 연필 아이콘(우, 소유자만) — 시각은 썸네일 오버레이로 이동
     if (!$guest) {
         $ttl = $memo !== '' ? '메모 편집' : '메모 쓰기';
+        echo "<div class='ps-top'>";
         echo "<button type='button' class='dm-edit' title='{$ttl}' aria-label='{$ttl}' onclick='tvEditMemo(this)'>✏️</button>";
+        echo "</div>"; // .ps-top
     }
-    echo "</div>"; // .ps-top
 
     if ($guest) {
         if ($memo !== '') {
@@ -326,6 +390,50 @@ function tv_render_pshot(array $s, bool $guest): void {
     }
     echo "</div>"; // .ps-side
     echo "</div>"; // .pshot
+}
+
+/** 장소 그룹 사진 렌더: 메모 있는 사진 = 풀 카드 / 메모 없는 사진 = 컴팩트 썸네일 줄로 모음 */
+function tv_render_shots(array $gShots, bool $guest, bool $mapsActive): void {
+    $plain = [];
+    foreach ($gShots as $s) {
+        if (trim((string)($s['memo'] ?? '')) !== '') {
+            tv_render_pshot($s, $guest, $mapsActive);   // 메모 있는 사진 = 기존 풀 레이아웃
+        } else {
+            $plain[] = $s;                              // 메모 없는 사진은 한 줄로 모음
+        }
+    }
+    if ($plain) {
+        echo "<div class='ps-strip'>";
+        foreach ($plain as $s) tv_render_chip($s, $guest, $mapsActive);
+        echo "</div>";
+    }
+}
+
+/** 메모 없는 사진 1장 = 컴팩트 썸네일(시각 라벨 + 편집모드 연필·숨김) */
+function tv_render_chip(array $s, bool $guest, bool $mapsActive): void {
+    $time  = $s['taken_at'] ? substr($s['taken_at'], 11, 5) : '';
+    $bg    = "background-image:url('" . htmlspecialchars($s['thumb_url']) . "')";
+    $big   = htmlspecialchars(Travel::thumbUrl($s['drive_file_id'], 1600), ENT_QUOTES);
+    $isVid = (($s['media_type'] ?? 'image') === 'video');
+    $fid   = htmlspecialchars($s['drive_file_id'], ENT_QUOTES);
+    $vw    = (int)($s['vid_w'] ?? 0); $vh = (int)($s['vid_h'] ?? 0);
+    if ($isVid) {
+        $click = "tvOpenVideo('{$fid}',{$vw},{$vh})";   // 동영상은 전체화면 재생
+    } else {
+        $click = "tvOpenPhoto('{$big}')";
+    }
+    $vidCls = $isVid ? ' is-vid' : '';
+
+    echo "<div class='ps-chip' data-pid='{$s['id']}'>";
+    echo "<div class='ps-thumb{$vidCls}' role='button' tabindex='0' style=\"{$bg}\" onclick=\"{$click}\">";
+    if (!$guest) {
+        echo "<button type='button' class='ps-del' title='이 사진 숨기기' aria-label='이 사진 숨기기' onclick='event.stopPropagation();tvHidePhoto({$s['id']})'>✕</button>";
+        echo "<button type='button' class='ps-memo-add' title='메모 쓰기' aria-label='메모 쓰기' onclick='event.stopPropagation();tvChipMemo({$s['id']})'>✏️</button>";
+    }
+    if ($isVid) echo "<span class='ps-play' aria-hidden='true'>▶</span>";
+    echo "</div>"; // .ps-thumb
+    if ($time !== '') echo "<div class='ps-chip-time'>🕒 {$time}</div>";
+    echo "</div>"; // .ps-chip
 }
 
 // ##########################################################
@@ -408,30 +516,41 @@ JS;
         return;
     }
 
-    echo "<div class='tv-grid'>";
+    // 갤러리 기간(시작날짜) 기준으로 연도별 그룹핑 — 연도 내림차순(최신 위), 연도 내 월 오름차순(1월→12월)
+    $byYear = [];
     foreach ($travels as $t) {
-        // 표지 = 캐시 프록시(travel_thumb.php) 경유 + 지연로딩. 표지 file_id 없으면 기존 드라이브 URL 폴백
-        $coverUrl = !empty($t['cover_file_id'])
-            ? 'travel_thumb.php?id=' . rawurlencode($t['cover_file_id']) . '&w=400'
-            : ($t['cover_thumb'] ?? '');
-        $coverHtml = $coverUrl !== ''
-            ? "<img class='tv-cover-img' loading='lazy' decoding='async' src='" . htmlspecialchars($coverUrl, ENT_QUOTES) . "' alt=''>"
-            : '';
-        $period = $t['start_dt'] ? htmlspecialchars($t['start_dt']) . ' ~ ' . htmlspecialchars($t['end_dt']) : '기간 미상';
-        $icon   = $t['icon'] ? htmlspecialchars($t['icon']) . ' ' : '';
-        // 총 기간 = 시작~종료 포함 일수 (같은 날이면 '당일')
-        $dur = '';
-        if ($t['start_dt']) {
-            $n = (new DateTime($t['start_dt']))->diff(new DateTime($t['end_dt']))->days + 1;
-            $dur = " <span class='dur'>" . ($n <= 1 ? '당일' : "{$n}일") . "</span>";
-        }
-        echo "<a class='tv-card' href='/travel.php?mode=view&id={$t['id']}'>"
-           . "<div class='tv-cover'>{$coverHtml}</div>"
-           . "<div class='tv-meta'><h3>{$icon}" . htmlspecialchars($t['title'])
-           . " <span class='pc'>📷 {$t['photo_count']}</span></h3>"
-           . "<div class='period'>{$period}{$dur}</div></div></a>";
+        $y = $t['start_dt'] ? substr($t['start_dt'], 0, 4) : '0000';   // 기간 미상은 맨 끝('0000')
+        $byYear[$y][] = $t;
     }
-    echo "</div>";
+    krsort($byYear);                                                  // 연도 내림차순
+    foreach ($byYear as $y => $items) {
+        usort($items, fn($a, $b) => strcmp($a['start_dt'] ?? '9999', $b['start_dt'] ?? '9999'));  // 연도 내 시작일 오름차순
+        echo "<h2 class='tv-year'>" . ($y === '0000' ? '📅 기간 미상' : "{$y}년") . "</h2>";
+        echo "<div class='tv-grid'>";
+        foreach ($items as $t) {
+            // 표지 = 캐시 프록시(travel_thumb.php) 경유 + 지연로딩. 표지 file_id 없으면 기존 드라이브 URL 폴백
+            $coverUrl = !empty($t['cover_file_id'])
+                ? 'travel_thumb.php?id=' . rawurlencode($t['cover_file_id']) . '&w=400'
+                : ($t['cover_thumb'] ?? '');
+            $coverHtml = $coverUrl !== ''
+                ? "<img class='tv-cover-img' loading='lazy' decoding='async' src='" . htmlspecialchars($coverUrl, ENT_QUOTES) . "' alt=''>"
+                : '';
+            $period = $t['start_dt'] ? htmlspecialchars($t['start_dt']) . ' ~ ' . htmlspecialchars($t['end_dt']) : '기간 미상';
+            $icon   = $t['icon'] ? htmlspecialchars($t['icon']) . ' ' : '';
+            // 총 기간 = 시작~종료 포함 일수 (같은 날이면 '당일')
+            $dur = '';
+            if ($t['start_dt']) {
+                $n = (new DateTime($t['start_dt']))->diff(new DateTime($t['end_dt']))->days + 1;
+                $dur = " <span class='dur'>" . ($n <= 1 ? '당일' : "{$n}일") . "</span>";
+            }
+            echo "<a class='tv-card' href='/travel.php?mode=view&id={$t['id']}'>"
+               . "<div class='tv-cover'>{$coverHtml}</div>"
+               . "<div class='tv-meta'><h3>{$icon}" . htmlspecialchars($t['title'])
+               . " <span class='pc'>📷 {$t['photo_count']}</span></h3>"
+               . "<div class='period'>{$period}{$dur}</div></div></a>";
+        }
+        echo "</div>";
+    }
     travel_foot();
 }
 
@@ -506,6 +625,10 @@ function travel_view(PDO $pdo, bool $guest = false, ?int $forceId = null, ?strin
                     'place' => $placeIdx + 1,   // 속한 장소 핀 번호
                     'pi'    => $pi,             // 장소 내 순번
                     'memo'  => trim((string)($s['memo'] ?? '')),  // 사진별 메모(모달 오버레이용)
+                    'vid'   => (($s['media_type'] ?? 'image') === 'video') ? 1 : 0,   // 동영상이면 모달에서 iframe 재생
+                    'fid'   => (string)$s['drive_file_id'],                            // 동영상 preview iframe 용
+                    'vw'    => (int)($s['vid_w'] ?? 0),                                // 동영상 가로(px) — 모달 비율 맞춤
+                    'vh'    => (int)($s['vid_h'] ?? 0),                                // 동영상 세로(px)
                 ];
             } else {
                 $s['route_idx'] = null;
@@ -516,10 +639,15 @@ function travel_view(PDO $pdo, bool $guest = false, ?int $forceId = null, ?strin
     }
     unset($shots);
 
-    // ── 지도 provider 판별: 첫 GPS 좌표가 한국 밖이면 해외(구글맵), 안이면 국내(네이버) ──
-    //   여행 1건의 사진은 대개 같은 나라 → 대표(첫) 좌표로 통일 (지도 SDK가 섞이면 복잡)
-    $overseas = $routePts && class_exists('GeoCoder')
-        && !GeoCoder::isKorea((float)$routePts[0]['lat'], (float)$routePts[0]['lng']);
+    // ── 지도 provider 판별: 경로에 해외 좌표가 하나라도 있으면 해외(구글맵), 전부 국내면 네이버 ──
+    //   구글맵은 국내·해외 모두 표시되므로, 인천→해외→인천 같은 혼합 여행도 구글로 전 구간 정상 표시.
+    //   (순수 국내 여행만 네이버 = 한국 상세도 유지. 지도 SDK는 여행 1건당 1개로 통일)
+    $overseas = false;
+    if ($routePts && class_exists('GeoCoder')) {
+        foreach ($routePts as $pt) {
+            if (!GeoCoder::isKorea((float)$pt['lat'], (float)$pt['lng'])) { $overseas = true; break; }
+        }
+    }
     $mapProvider = $overseas ? ($googleKey !== '' ? 'google' : 'none')
                              : ($naverKey  !== '' ? 'naver'  : 'none');
     $mapsActive  = ($mapProvider === 'naver' || $mapProvider === 'google');  // none=키없음→폴백 링크만
@@ -600,8 +728,12 @@ function travel_view(PDO $pdo, bool $guest = false, ?int $forceId = null, ?strin
 
     // 전체 동선 지도 — 사진 GPS를 촬영 시간순(①②③…)으로 이은 동선 (국내=네이버 / 해외=구글)
     if ($mapsActive && $withGps > 0) {
-        echo "<div id='tv-map'></div>";
-        echo "<div class='map-note'>📍 사진에 남은 GPS를 촬영 시간순(①②③…)으로 이은 동선입니다. 핀을 누르면 위치를 크게 볼 수 있어요.</div>";
+        echo "<div class='tv-map-wrap'>"
+           . "<div id='tv-map'></div>"
+           . "<button type='button' class='tv-mapfull-btn' onclick='tvMapFull()' title='전체화면 지도' aria-label='전체화면 지도'>⛶</button>"
+           . "<button type='button' class='tv-mapfull-close' onclick='tvMapFull()' title='닫기' aria-label='닫기'>✕</button>"
+           . "</div>";
+        echo "<div class='map-note'>📍 사진에 남은 GPS를 촬영 시간순(①②③…)으로 이은 동선입니다. 핀을 누르면 위치를 크게 볼 수 있어요. <b>⛶</b> 로 전체화면.</div>";
     } elseif ($mapProvider === 'none' && $overseas && $withGps > 0) {
         // 해외 여행인데 구글 지도 브라우저 키가 아직 없음 → 외부 지도 링크로 폴백
         $gurl = "https://www.google.com/maps/search/?api=1&query={$extLat},{$extLng}";
@@ -612,8 +744,11 @@ function travel_view(PDO $pdo, bool $guest = false, ?int $forceId = null, ?strin
 
     // 날짜별 일기 — 같은 장소(≤100m) 사진은 하나의 카드로 묶어 [지도 1개 | 사진별 메모 리스트]
     foreach ($byDate as $day => $shots) {
-        $label = ($day === '날짜미상') ? '📅 날짜 미상' : '📅 ' . date('n월 j일 (D)', strtotime($day));
-        echo "<div class='day-sec'><div class='day-head'>{$label}</div>";
+        $isMisc = ($day === '날짜미상');
+        $label  = $isMisc ? '📌 미분류 · 촬영시각 없음' : '📅 ' . date('n월 j일 (D)', strtotime($day));
+        $secCls = $isMisc ? 'day-sec day-sec--misc' : 'day-sec';
+        echo "<div class='{$secCls}'><div class='day-head'>{$label}</div>";
+        if ($isMisc) echo "<div class='misc-note'>파일명·메타데이터에 촬영시각이 없어 날짜를 정하지 못한 항목입니다. 파일명을 <b>YYYYMMDD_HHMMSS</b> 형식으로 바꾸면 자동 분류됩니다.</div>";
 
         foreach (tv_group_by_place($shots) as $g) {
             $gShots = $g['shots'];
@@ -636,8 +771,15 @@ function travel_view(PDO $pdo, bool $guest = false, ?int $forceId = null, ?strin
                 foreach ($gShots as $s) { if (trim((string)($s['addr'] ?? '')) !== '') { $addr = (string)$s['addr']; break; } }
                 $firstPhoto = null;
                 foreach ($gShots as $s) { if (($s['photo_idx'] ?? null) !== null) { $firstPhoto = (int)$s['photo_idx']; break; } }
+                // 장소 번호(상단 동선 핀과 동일) = 첫 GPS 사진의 route_idx + 1 → 미니 지도 마커에 표시
+                $placeNum = null;
+                foreach ($gShots as $s) { if (($s['route_idx'] ?? null) !== null) { $placeNum = (int)$s['route_idx'] + 1; break; } }
                 $headAddr = $addr !== '' ? htmlspecialchars($addr) : '이 부근';
                 $alat = $g['alat']; $alng = $g['alng'];
+                // 메모 있는 사진이 하나도 없으면(=모두 컴팩트 줄로) 지도를 전체폭 배너로
+                $memoCnt = 0;
+                foreach ($gShots as $s) if (trim((string)($s['memo'] ?? '')) !== '') $memoCnt++;
+                $mapFull = ($memoCnt === 0) ? ' place-map--full' : '';
 
                 echo "<div class='place-card'>";
                 echo "<div class='place-head'><span class='ph-addr'>📍 {$headAddr}</span>{$headTime}{$headCnt}</div>";
@@ -645,16 +787,17 @@ function travel_view(PDO $pdo, bool $guest = false, ?int $forceId = null, ?strin
                 // 지도 = 사진 칸과 동일 크기의 첫 셀 (미니맵 재사용 + 클릭 시 동선 모달)
                 if ($mapsActive) {
                     $hit = $firstPhoto !== null ? "onclick=\"tvOpenPhotoAt({$firstPhoto})\"" : '';
-                    echo "<div class='dr-map place-map' data-lat='{$alat}' data-lng='{$alng}'>"
+                    $dn = $placeNum !== null ? " data-n='{$placeNum}'" : '';
+                    echo "<div class='dr-map place-map{$mapFull}' data-lat='{$alat}' data-lng='{$alng}'{$dn}>"
                        . "<div class='dr-map-canvas'></div>"
                        . "<div class='dr-map-hit' title='크게 보기' {$hit}></div>"
                        . "</div>";
                 } elseif ($mapProvider === 'none' && $overseas) {
                     // 해외+키없음 → 미니맵 대신 구글 지도 외부 링크
                     $gurl = "https://www.google.com/maps/search/?api=1&query={$alat},{$alng}";
-                    echo "<a class='dr-map-ext place-map' href='" . htmlspecialchars($gurl, ENT_QUOTES) . "' target='_blank' rel='noopener'>🌍 구글 지도에서 보기 ↗</a>";
+                    echo "<a class='dr-map-ext place-map{$mapFull}' href='" . htmlspecialchars($gurl, ENT_QUOTES) . "' target='_blank' rel='noopener'>🌍 구글 지도에서 보기 ↗</a>";
                 }
-                foreach ($gShots as $s) tv_render_pshot($s, $guest);
+                tv_render_shots($gShots, $guest, $mapsActive);
                 echo "</div>"; // .place-body
                 echo "</div>"; // .place-card
             } else {
@@ -662,7 +805,7 @@ function travel_view(PDO $pdo, bool $guest = false, ?int $forceId = null, ?strin
                 echo "<div class='place-card'>";
                 echo "<div class='place-head'><span class='ph-addr'>📍 위치 미상</span>{$headTime}{$headCnt}</div>";
                 echo "<div class='place-body no-map'><div class='place-shots'>";
-                foreach ($gShots as $s) tv_render_pshot($s, $guest);
+                tv_render_shots($gShots, $guest, $mapsActive);
                 echo "</div></div>";
                 echo "</div>"; // .place-card
             }
@@ -683,11 +826,16 @@ function travel_view(PDO $pdo, bool $guest = false, ?int $forceId = null, ?strin
        . "<button class='tv-modal-nav prev' id='tv-modal-prev' type='button' title='이전 사진' onclick='tvPhotoGo(-1)' hidden>‹</button>"
        . "<button class='tv-modal-nav next' id='tv-modal-next' type='button' title='다음 사진' onclick='tvPhotoGo(1)' hidden>›</button>"
        . "<div class='tv-modal-memo' id='tv-modal-memo'></div>"
-       . "<div class='tv-modal-photo' id='tv-modal-photo' style='display:none'>"
-       . "<img id='tv-modal-thumb' alt='사진'>"
-       . "</div>"
+       . "<div class='tv-modal-photo' id='tv-modal-photo' style='display:none'></div>"   // 사진 img / 동영상 iframe 을 JS 가 동적 삽입
        . "<div id='tv-modal-map'></div>"
        . "<div class='tv-modal-cap' id='tv-modal-cap'></div>"
+       . "</div></div>";
+
+    // 동영상 단순 재생 모달 (GPS 없는 동영상 / 지도 없는 여행용) — 드라이브 preview iframe
+    echo "<div class='tv-vmodal' id='tv-vmodal' onclick='tvCloseVideo(event)'>"
+       . "<div class='tv-vbox'>"
+       . "<button class='tv-modal-x' type='button' onclick='tvCloseVideo()'>✕</button>"
+       . "<div class='tv-vframe' id='tv-vframe'></div>"
        . "</div></div>";
 
     echo "</div>"; // .tv-detail
@@ -697,7 +845,15 @@ function travel_view(PDO $pdo, bool $guest = false, ?int $forceId = null, ?strin
     echo "<script>"
        . "function tvOpenPhoto(u){var m=document.getElementById('tv-pmodal');document.getElementById('tv-pimg').src=u;m.classList.add('on');}"
        . "function tvClosePhoto(e){if(e&&e.target&&e.target.id!=='tv-pmodal'&&!e.target.classList.contains('tv-modal-x'))return;document.getElementById('tv-pmodal').classList.remove('on');}"
-       . "document.addEventListener('keydown',function(e){if(e.key==='Escape'){var m=document.getElementById('tv-pmodal');if(m)m.classList.remove('on');}});"
+       // 영상 비율(w:h)을 가용영역(maxW×maxH)에 맞춰 픽셀 크기 산출 — 검은 여백 제거(없으면 16:9 폴백)
+       . "function tvFitBox(maxW,maxH,w,h){var ar=(w>0&&h>0)?(w/h):(16/9);var fw=maxW,fh=maxW/ar;if(fh>maxH){fh=maxH;fw=maxH*ar;}return{w:Math.round(fw),h:Math.round(fh)};}"
+       // 동영상 재생 모달 (drive preview iframe). 터치기기(폰·와이드)=화면 가득 채운 iframe → 드라이브 플레이어가 영상 방향/비율 알아서 배치(회전 메타 한계 회피) / PC=창(비율 맞춤). 좁은 폰(≤560)만 네이티브 풀스크린(컨트롤 자동숨김)
+       . "function tvOpenVideo(fid,w,h){var m=document.getElementById('tv-vmodal');var fr=document.getElementById('tv-vframe');var touch=!!(window.matchMedia&&window.matchMedia('(pointer:coarse)').matches);var phone=touch&&window.innerWidth<=560;m.classList.toggle('full',touch);if(touch){fr.style.width=window.innerWidth+'px';fr.style.height=Math.round(window.innerHeight*0.95)+'px';}else{var b=tvFitBox(Math.min(window.innerWidth*0.96,820),window.innerHeight*0.86,w,h);fr.style.width=b.w+'px';fr.style.height=b.h+'px';}fr.innerHTML=\"<iframe src='https://drive.google.com/file/d/\"+fid+\"/preview' allow='autoplay; fullscreen' allowfullscreen></iframe>\";m.classList.add('on');if(phone){var ifr=fr.querySelector('iframe');var rq=ifr.requestFullscreen||ifr.webkitRequestFullscreen;if(rq){try{var pr=rq.call(ifr);if(pr&&pr.catch)pr.catch(function(){});}catch(e){}}}}"
+       . "function tvCloseVideo(e){if(e&&e.target&&e.target.id!=='tv-vmodal'&&!e.target.classList.contains('tv-modal-x'))return;if(document.fullscreenElement&&document.exitFullscreen){document.exitFullscreen().catch(function(){});}document.getElementById('tv-vframe').innerHTML='';document.getElementById('tv-vmodal').classList.remove('on');}"
+       // 네이티브 전체화면을 빠져나오면(시스템 뒤로가기 등) 동영상 모달도 함께 닫고 재생 중지
+       . "function tvVfsChange(){if(!(document.fullscreenElement||document.webkitFullscreenElement)){var m=document.getElementById('tv-vmodal');if(m&&m.classList.contains('on')){document.getElementById('tv-vframe').innerHTML='';m.classList.remove('on');}}}"
+       . "document.addEventListener('fullscreenchange',tvVfsChange);document.addEventListener('webkitfullscreenchange',tvVfsChange);"
+       . "document.addEventListener('keydown',function(e){if(e.key==='Escape'){['tv-pmodal','tv-vmodal'].forEach(function(id){var m=document.getElementById(id);if(m&&m.classList.contains('on')){if(id==='tv-vmodal')document.getElementById('tv-vframe').innerHTML='';m.classList.remove('on');}});}});"
        . "</script>";
 
     // ── 스크립트(소유자 전용): 새로고침 + 메모 편집 + 공유 ──
@@ -723,7 +879,14 @@ async function travelRefresh(id){
             return;
         }
         st.className='tv-sync-status ok';
-        st.textContent = s ? (' ✅ 사진 '+s.photos_total+'장(신규 '+s.photos_new+') — 갱신합니다.') : ' ✅ 갱신합니다.';
+        if(s){
+            let msg=' ✅ 사진 '+s.photos_total+'장(신규 '+s.photos_new+')';
+            if(s.dates_from_name) msg+=' · 파일명시각 '+s.dates_from_name+'건';
+            if(s.unresolved)      msg+=' · 미분류 '+s.unresolved+'건';
+            st.textContent=msg+' — 갱신합니다.';
+        }else{
+            st.textContent=' ✅ 갱신합니다.';
+        }
         setTimeout(()=>location.reload(), 900);
     }catch(e){
         st.className='tv-sync-status err'; st.textContent=' ❌ '+e.message;
@@ -771,10 +934,36 @@ function tvToggleEdit(btn){
     btn.title = on ? '편집 끝내기' : '사진 편집(숨기기)';
 }
 
+// ── 컴팩트 칩(메모 없는 사진)에 메모 추가 — 저장하면 풀 카드로 재배치되도록 reload ──
+function tvChipMemo(pid){
+    var chip=document.querySelector('.ps-chip[data-pid="'+pid+'"]');
+    if(!chip) return;
+    if(chip.nextElementSibling && chip.nextElementSibling.classList.contains('ps-chip-editor')) return;  // 이미 열림
+    var ed=document.createElement('div'); ed.className='ps-chip-editor';
+    ed.innerHTML="<textarea class='dm-ta' placeholder='이 순간의 메모를 남겨보세요...'></textarea>"
+        +"<div class='dm-actions'><button type='button' class='dm-cancel'>취소</button><button type='button' class='dm-save'>저장</button></div>";
+    chip.insertAdjacentElement('afterend', ed);
+    var ta=ed.querySelector('.dm-ta'); ta.focus();
+    ed.querySelector('.dm-cancel').onclick=function(){ ed.remove(); };
+    ed.querySelector('.dm-save').onclick=async function(){
+        var val=ta.value, sv=ed.querySelector('.dm-save');
+        sv.disabled=true; sv.textContent='저장중...';
+        try{
+            var res=await fetch('schedule_api.php?module=travel&action=photo_memo',{
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({id:Number(pid), memo:val})
+            });
+            var j=await res.json(); if(!j.ok) throw new Error(j.msg||'저장 실패');
+            if(val.trim()!==''){ location.reload(); }   // 메모 생겼으면 메모 사진 영역으로 재배치
+            else { ed.remove(); }
+        }catch(e){ sv.disabled=false; sv.textContent='저장'; alert(e.message); }
+    };
+}
+
 // ── 사진 숨기기 (일기에서만 제외, 드라이브 원본은 유지) — reload 없이 즉시 DOM 갱신 ──
 async function tvHidePhoto(pid){
     if(!confirm('이 사진을 일기에서 숨길까요?\n구글 드라이브 원본은 그대로 유지됩니다.')) return;
-    const card=document.querySelector('.pshot[data-pid="'+pid+'"]');
+    const card=document.querySelector('.pshot[data-pid="'+pid+'"], .ps-chip[data-pid="'+pid+'"]');
     try{
         const res=await fetch('schedule_api.php?module=travel&action=photo_hide',{
             method:'POST', headers:{'Content-Type':'application/json'},
@@ -798,7 +987,7 @@ async function tvHidePhoto(pid){
             var stat=document.getElementById('tv-stat-photos');
             if(stat){ var n=parseInt(stat.textContent,10); if(!isNaN(n)) stat.textContent=Math.max(0,n-1); }
             if(!placeCard) return;
-            var left=placeCard.querySelectorAll('.pshot').length;
+            var left=placeCard.querySelectorAll('.pshot, .ps-chip').length;
             if(left<=0){
                 placeCard.remove();          // 장소의 마지막 사진 → 장소 카드 통째 제거
             }else{
@@ -912,7 +1101,7 @@ var TV_gmap=null, TV_gmarker=null;   // 해외(구글맵) 모달 지도/마커
 // 방향 d(+1/-1)로 i부터 숨기지 않은(hidden!=true) 첫 사진 인덱스 (없으면 -1)
 function tvNextVisible(i, d){
     var ph=window.TV_PHOTOS||[];
-    for(var k=i; k>=0 && k<ph.length; k+=d){ if(ph[k] && !ph[k].hidden) return k; }
+    for(var k=i; k>=0 && k<ph.length; k+=d){ if(ph[k] && !ph[k].hidden && !ph[k].vid) return k; }   // 동영상은 사진 네비에서 제외(전용 플레이어로)
     return -1;
 }
 // 사진 단위 네비게이션 — 모달에서 이전/다음으로 전체 여행 사진을 촬영 시간순으로 넘김
@@ -924,6 +1113,7 @@ function tvOpenPhotoAt(i){
         if(j<0) return; i=j; p=ph[i];
     }
     if(!p) return;
+    if(p.vid){ tvOpenVideo(p.fid, p.vw, p.vh); return; }   // 동영상은 전용 플레이어(모바일=전체화면 / PC=창)
     TV_photoIdx=i;
     var pts=window.TV_ROUTE||[];
     var place=pts[p.place-1]||{};
@@ -935,43 +1125,48 @@ function tvOpenPhotoAt(i){
     var modal=document.getElementById('tv-modal');
     modal.classList.add('on');
     document.getElementById('tv-modal-cap').textContent=label;
-    // 항상 사진+지도 (사진별 썸네일)
-    var img=document.getElementById('tv-modal-thumb');
-    img.src=p.thumb; document.getElementById('tv-modal-photo').style.display='block'; modal.classList.add('has-thumb');
+    // 사진만 (동영상은 위에서 전용 플레이어로 분기) — 썸네일 img + 지도
+    var box=document.getElementById('tv-modal-photo');
+    document.getElementById('tv-modal-map').style.display='';
+    box.innerHTML="<img id='tv-modal-thumb' alt='사진'>";
+    document.getElementById('tv-modal-thumb').src=p.thumb;
+    box.style.display='block'; modal.classList.add('has-thumb');
     // 사진별 메모 — 있으면 사진 위 반투명 레이어로 표시
     var memoEl=document.getElementById('tv-modal-memo');
     if(memoEl){ var mt=(p.memo||'').trim(); memoEl.textContent=mt; memoEl.classList.toggle('on', mt!==''); }
     // 이전/다음 화살표 — 남은(보이는) 사진 기준으로 양끝에서만 숨김
     var pv=document.getElementById('tv-modal-prev'), nx=document.getElementById('tv-modal-next');
     pv.hidden=(tvNextVisible(i-1,-1)<0); nx.hidden=(tvNextVisible(i+1,1)<0);
-    // 지도 — 해외=구글맵 / 국내=네이버. 둘 다 장소 번호를 마커에 표시
-    if(window.TV_MAP_PROVIDER==='google'){
-        tvLoadGoogle().then(function(){
-            var pos={lat:p.lat,lng:p.lng};
-            if(!TV_gmap){
-                TV_gmap=new google.maps.Map(document.getElementById('tv-modal-map'),
-                    {center:pos,zoom:16,mapTypeControl:false,streetViewControl:false,fullscreenControl:false});
-                TV_gmarker=new google.maps.Marker({position:pos,map:TV_gmap});
-            }else{
-                TV_gmap.setCenter(pos); TV_gmarker.setPosition(pos);
-            }
-            TV_gmarker.setLabel({text:String(p.place),color:'#fff',fontWeight:'700'});
-            setTimeout(function(){ if(TV_gmap){ google.maps.event.trigger(TV_gmap,'resize'); TV_gmap.setCenter(pos);} },150);
-        }).catch(function(){});
-    }else{
-        var pinIcon={ content:"<div class='pin-num'><span>"+p.place+"</span></div>", anchor:new naver.maps.Point(12,24) };
-        tvLoadNaver().then(function(){
-            var pos=new naver.maps.LatLng(p.lat,p.lng);
-            if(!TV_map){
-                TV_map=new naver.maps.Map('tv-modal-map',{center:pos,zoom:16});
-                TV_marker=new naver.maps.Marker({position:pos,map:TV_map});
-            }else{
-                TV_map.setCenter(pos); TV_marker.setPosition(pos);
-            }
-            TV_marker.setIcon(pinIcon);
-            // 숨김→표시 직후엔 컨테이너 크기 0 → resize 후 재중심
-            setTimeout(function(){ if(TV_map){ naver.maps.Event.trigger(TV_map,'resize'); TV_map.setCenter(pos);} },150);
-        }).catch(function(){});
+    // 지도 — 사진일 때만 렌더(동영상은 위에서 지도 숨김). 해외=구글맵 / 국내=네이버, 장소 번호 마커
+    if(!p.vid){
+        if(window.TV_MAP_PROVIDER==='google'){
+            tvLoadGoogle().then(function(){
+                var pos={lat:p.lat,lng:p.lng};
+                if(!TV_gmap){
+                    TV_gmap=new google.maps.Map(document.getElementById('tv-modal-map'),
+                        {center:pos,zoom:16,mapTypeControl:false,streetViewControl:false,fullscreenControl:false});
+                    TV_gmarker=new google.maps.Marker({position:pos,map:TV_gmap});
+                }else{
+                    TV_gmap.setCenter(pos); TV_gmarker.setPosition(pos);
+                }
+                TV_gmarker.setLabel({text:String(p.place),color:'#fff',fontWeight:'700'});
+                setTimeout(function(){ if(TV_gmap){ google.maps.event.trigger(TV_gmap,'resize'); TV_gmap.setCenter(pos);} },150);
+            }).catch(function(){});
+        }else{
+            var pinIcon={ content:"<div class='pin-num'><span>"+p.place+"</span></div>", anchor:new naver.maps.Point(12,24) };
+            tvLoadNaver().then(function(){
+                var pos=new naver.maps.LatLng(p.lat,p.lng);
+                if(!TV_map){
+                    TV_map=new naver.maps.Map('tv-modal-map',{center:pos,zoom:16});
+                    TV_marker=new naver.maps.Marker({position:pos,map:TV_map});
+                }else{
+                    TV_map.setCenter(pos); TV_marker.setPosition(pos);
+                }
+                TV_marker.setIcon(pinIcon);
+                // 숨김→표시 직후엔 컨테이너 크기 0 → resize 후 재중심
+                setTimeout(function(){ if(TV_map){ naver.maps.Event.trigger(TV_map,'resize'); TV_map.setCenter(pos);} },150);
+            }).catch(function(){});
+        }
     }
 }
 function tvPhotoGo(d){ if(TV_photoIdx<0) return; var j=tvNextVisible(TV_photoIdx+d, d); if(j>=0) tvOpenPhotoAt(j); }
@@ -994,12 +1189,13 @@ function tvPhotoGo(d){ if(TV_photoIdx<0) return; var j=tvNextVisible(TV_photoIdx
 })();
 function tvCloseMap(e){
     if(e&&e.target&&e.target.id!=='tv-modal'&&!e.target.classList.contains('tv-modal-x')) return;
+    var box=document.getElementById('tv-modal-photo'); if(box) box.innerHTML='';   // 동영상 재생 중지
     document.getElementById('tv-modal').classList.remove('on');
 }
 document.addEventListener('keydown',function(e){
     var m=document.getElementById('tv-modal');
     if(!m || !m.classList.contains('on')) return;
-    if(e.key==='Escape'){ m.classList.remove('on'); }
+    if(e.key==='Escape'){ var b=document.getElementById('tv-modal-photo'); if(b) b.innerHTML=''; m.classList.remove('on'); }
     else if(e.key==='ArrowLeft' && TV_photoIdx>0){ tvPhotoGo(-1); }
     else if(e.key==='ArrowRight' && TV_photoIdx>=0 && TV_photoIdx<(window.TV_PHOTOS||[]).length-1){ tvPhotoGo(1); }
 });
@@ -1008,6 +1204,7 @@ document.addEventListener('keydown',function(e){
 function tvInitMini(el){
     if(el.dataset.done) return; el.dataset.done='1';
     var la=parseFloat(el.dataset.lat), ln=parseFloat(el.dataset.lng);
+    var n=el.dataset.n||'';   // 장소 번호 (상단 동선 핀과 동일)
     if(window.TV_MAP_PROVIDER==='google'){
         tvLoadGoogle().then(function(){
             var pos={lat:la,lng:ln};
@@ -1015,7 +1212,8 @@ function tvInitMini(el){
                 center:pos, zoom:15, disableDefaultUI:true, gestureHandling:'none',
                 keyboardShortcuts:false, clickableIcons:false
             });
-            new google.maps.Marker({position:pos, map:map});
+            new google.maps.Marker({position:pos, map:map,
+                label: n?{text:String(n), color:'#fff', fontWeight:'700'}:null});
             setTimeout(function(){ google.maps.event.trigger(map,'resize'); map.setCenter(pos); }, 80);
         }).catch(function(){ el.dataset.done=''; });
         return;
@@ -1027,7 +1225,8 @@ function tvInitMini(el){
             keyboardShortcuts:false, disableDoubleClickZoom:true, scaleControl:false,
             mapDataControl:false, zoomControl:false, logoControl:true
         });
-        new naver.maps.Marker({position:pos, map:map});
+        new naver.maps.Marker({position:pos, map:map,
+            icon: n?{content:"<div class='pin-num'><span>"+n+"</span></div>", anchor:new naver.maps.Point(12,24)}:undefined});
         // 생성 시점 컨테이너 크기 미확정 대비 → resize 후 재중심 (회색 방지)
         setTimeout(function(){ naver.maps.Event.trigger(map,'resize'); map.setCenter(pos); }, 80);
     }).catch(function(){ el.dataset.done=''; });
@@ -1070,6 +1269,8 @@ function tvInitRoute(){
             }
         }
         applyView();
+        // 전체화면 토글 시 resize 후 경로 재맞춤에 재사용
+        window.__tvRouteFit=function(){ naver.maps.Event.trigger(map,'resize'); applyView(); };
         // 숨김/레이아웃 직후 컨테이너 크기 0 대비 → resize 후 재적용 (회색 타일 방지)
         setTimeout(function(){ naver.maps.Event.trigger(map,'resize'); applyView(); }, 150);
     }).catch(function(){});
@@ -1093,18 +1294,35 @@ function tvInitRouteGoogle(el,pts){
         var lats=pts.map(function(p){return p.lat;}), lngs=pts.map(function(p){return p.lng;});
         var minLa=Math.min.apply(null,lats), maxLa=Math.max.apply(null,lats);
         var minLn=Math.min.apply(null,lngs), maxLn=Math.max.apply(null,lngs);
-        if((maxLa-minLa)<0.0015 && (maxLn-minLn)<0.0015){
-            map.setCenter({lat:(minLa+maxLa)/2,lng:(minLn+maxLn)/2}); map.setZoom(16);
-        }else{
-            var b=new google.maps.LatLngBounds();
-            pts.forEach(function(p){ b.extend({lat:p.lat,lng:p.lng}); });
-            map.fitBounds(b);
-            google.maps.event.addListenerOnce(map,'idle',function(){ if(map.getZoom()>18) map.setZoom(18); });
+        function applyG(){
+            if((maxLa-minLa)<0.0015 && (maxLn-minLn)<0.0015){
+                map.setCenter({lat:(minLa+maxLa)/2,lng:(minLn+maxLn)/2}); map.setZoom(16);
+            }else{
+                var b=new google.maps.LatLngBounds();
+                pts.forEach(function(p){ b.extend({lat:p.lat,lng:p.lng}); });
+                map.fitBounds(b);
+                google.maps.event.addListenerOnce(map,'idle',function(){ if(map.getZoom()>18) map.setZoom(18); });
+            }
         }
+        applyG();
+        // 전체화면 토글 시 resize 후 경로 재맞춤에 재사용
+        window.__tvRouteFit=function(){ google.maps.event.trigger(map,'resize'); applyG(); };
         setTimeout(function(){ google.maps.event.trigger(map,'resize'); },150);
     }).catch(function(){});
 }
 tvInitRoute();
+
+// 동선 지도 전체화면 토글 — 경로(핀·선) 그대로, 토글 후 resize+재맞춤
+function tvMapFull(){
+    var w=document.querySelector('.tv-map-wrap'); if(!w) return;
+    var on=w.classList.toggle('full');
+    document.body.classList.toggle('tv-map-lock', on);
+    setTimeout(function(){ if(window.__tvRouteFit) window.__tvRouteFit(); }, 80);
+}
+document.addEventListener('keydown',function(e){
+    if(e.key!=='Escape') return;
+    var w=document.querySelector('.tv-map-wrap.full'); if(w) tvMapFull();
+});
 
 (function(){
     var els=document.querySelectorAll('.dr-map[data-lat]');
