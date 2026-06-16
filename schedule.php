@@ -948,15 +948,39 @@ function logMark(ev) {
     return ` <span class="chip-log-mark" title="메모 ${n}개">📝(<b>${n}</b>)</span>`;
 }
 
-// 칩의 위치 마커 클릭 → 제공자에 맞는 외부 지도 새 탭
+// 칩의 위치 마커 클릭 → 현재위치에서 일정 장소로 길찾기
 function openMapFromChip(e, id) {
     e.stopPropagation();
     const ev = S.events.find(x => x.id == id);
     if (!ev) return;
-    const url = ev.provider === 'google'
-        ? googleMapUrl(ev.address, ev.lat, ev.lng)
-        : naverMapUrl(ev.address, ev.lat, ev.lng);
-    window.open(url, '_blank', 'noopener');
+    const name = ev.place_name || ev.address || '목적지';
+    const lat = ev.lat, lng = ev.lng;
+    if (ev.provider === 'google') {
+        // 구글: origin 생략 시 현재위치 → 목적지 길찾기 (모바일/PC 모두 정상)
+        const dest = (lat && lng) ? (lat + ',' + lng) : (ev.address || '');
+        window.open('https://www.google.com/maps/dir/?api=1&destination=' + encodeURIComponent(dest), '_blank', 'noopener');
+        return;
+    }
+    // 네이버: 모바일은 지도 앱 딥링크(폰 실제 GPS로 현재위치 출발), 그 외는 웹 검색
+    if (isMobileView() && lat && lng) {
+        openNaverRouteApp(lat, lng, name);
+    } else {
+        window.open(naverMapUrl(ev.address, lat, lng), '_blank', 'noopener');
+    }
+}
+
+// 네이버 지도 앱으로 [현재위치 → 목적지] 길찾기. 출발지 생략 → 앱이 폰 GPS 현재위치 사용.
+// 앱 미설치 시 1.2초 후 웹 지도로 폴백 (앱이 떠서 페이지가 백그라운드면 폴백 안 함)
+function openNaverRouteApp(lat, lng, name) {
+    const dn      = encodeURIComponent(name || '목적지');
+    const appname = location.hostname || 'economist.kr';
+    const scheme  = `nmap://route/car?dlat=${lat}&dlng=${lng}&dname=${dn}&appname=${appname}`;
+    const webFallback = naverMapUrl('', lat, lng);
+    const t = Date.now();
+    window.location.href = scheme;
+    setTimeout(() => {
+        if (Date.now() - t < 1600) window.open(webFallback, '_blank', 'noopener');
+    }, 1200);
 }
 
 // 프로젝트 D-day (종료일 기준): D-n / D-DAY / 종료 +n일
