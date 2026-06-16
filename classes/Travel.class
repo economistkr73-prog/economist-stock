@@ -69,6 +69,7 @@ class Travel
         $this->pdo->exec("ALTER TABLE tbl_travel_photo ADD COLUMN IF NOT EXISTS media_type VARCHAR(10) NOT NULL DEFAULT 'image'");  // image | video (동영상도 위치·시간으로 일기/지도에 포함)
         $this->pdo->exec("ALTER TABLE tbl_travel_photo ADD COLUMN IF NOT EXISTS vid_w SMALLINT UNSIGNED DEFAULT NULL");   // 동영상 가로(px) — 재생 모달 비율 맞춤(검은 여백 제거)
         $this->pdo->exec("ALTER TABLE tbl_travel_photo ADD COLUMN IF NOT EXISTS vid_h SMALLINT UNSIGNED DEFAULT NULL");   // 동영상 세로(px)
+        $this->pdo->exec("ALTER TABLE tbl_travel_photo ADD COLUMN IF NOT EXISTS gps_scanned TINYINT(1) NOT NULL DEFAULT 0");  // GPS 스캔 시도 끝남(없어도 재다운로드 방지)
         // 한시적 공개 공유 링크 (랜덤 토큰 + 만료시각). 외부인은 이 토큰으로만 읽기전용 접근
         $this->pdo->exec("
             CREATE TABLE IF NOT EXISTS tbl_travel_share (
@@ -268,7 +269,8 @@ class Travel
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_TIMEOUT        => 60,
+            CURLOPT_CONNECTTIMEOUT => 8,
+            CURLOPT_TIMEOUT        => 15,
             CURLOPT_SSL_VERIFYPEER => false,
             CURLOPT_USERAGENT      => 'Mozilla/5.0',
             CURLOPT_RANGE          => $start . '-' . ($start + $len - 1),
@@ -391,7 +393,7 @@ class Travel
     }
 
     /** 여행 1건만 다시 가져오기 (상세페이지 "이 여행 새로고침" — 사진 + 폴더명(이름변경) 반영) */
-    public function refreshTravel(int $travelId): ?array
+    public function refreshTravel(int $travelId, int $offset = 0, int $limit = 0): ?array
     {
         if (!$this->driveEnabled()) {
             throw new RuntimeException('gdrive.inc 미설정 (API 키 또는 부모폴더 ID 없음)');
@@ -399,14 +401,17 @@ class Travel
         $this->ensureTable();   // media_type 등 신규 컬럼 보강 (sync 안 거치고 새로고침만 해도 안전)
         $t = $this->getTravel($travelId);
         if (!$t) return null;
-        // 드라이브에서 폴더가 삭제/휴지통이면 이 여행을 목록에서 제거 (불확실하면 보존)
-        if ($this->driveFolderExists($t['drive_folder_id']) === false) {
-            $this->deleteTravel($travelId);
-            return ['deleted' => true, 'travel' => $t['title']];
+        $name = $t['title'];
+        if ($offset === 0) {
+            // 첫 청크에서만 폴더 존재·이름 확인(이후 청크는 같은 폴더 슬라이스만 — API 호출 절약)
+            if ($this->driveFolderExists($t['drive_folder_id']) === false) {
+                $this->deleteTravel($travelId);
+                return ['deleted' => true, 'travel' => $t['title']];
+            }
+            // 드라이브에서 현재 폴더명을 다시 읽어 이름변경도 반영 (없으면 기존 제목 유지)
+            $name = $this->getDriveFolderName($t['drive_folder_id']) ?? $t['title'];
         }
-        // 드라이브에서 현재 폴더명을 다시 읽어 이름변경도 반영 (없으면 기존 제목 유지)
-        $name = $this->getDriveFolderName($t['drive_folder_id']) ?? $t['title'];
-        return $this->syncFolder($t['drive_folder_id'], $name);
+        return $this->syncFolder($t['drive_folder_id'], $name, $offset, $limit);
     }
 
     /** 드라이브 폴더 ID → 현재 폴더명 (조회 실패 시 null) */
@@ -470,14 +475,14 @@ class Travel
     }
 
     /** 여행폴더 1개 동기화 */
-    public function syncFolder(string $folderId, string $title): array
+    public function syncFolder(string $folderId, string $title, int $offset = 0, int $limit = 0): array
     {
         // 1) tbl_travel upsert (drive_folder_id 기준)
         $travelId = $this->upsertTravel($folderId, $title);
 
         // 2) 기존 사진 캐시 (재스캔 불필요 시 좌표/시각 그대로 유지 → 비용 절감 + GPS wipe 방지)
         $stmt = $this->pdo->prepare(
-            "SELECT drive_file_id, lat, lng, taken_at, media_type FROM tbl_travel_photo WHERE travel_id = ?"
+            "SELECT drive_file_id, lat, lng, taken_at, media_type, gps_scanned FROM tbl_travel_photo WHERE travel_id = ?"
         );
         $stmt->execute([$travelId]);
         $known = [];
@@ -485,33 +490,45 @@ class Travel
             $known[$r['drive_file_id']] = [
                 'lat' => $r['lat'], 'lng' => $r['lng'],
                 'taken' => $r['taken_at'], 'type' => $r['media_type'],
+                'scanned' => (int)$r['gps_scanned'],
             ];
         }
 
         // 3) 드라이브 미디어(사진+동영상) 순회 upsert
         $photos  = $this->listDrivePhotos($folderId);
+        $total   = count($photos);
+        // 청크 처리: limit>0 이면 [offset, offset+limit) 구간만 처리(대용량 여행 타임아웃 방지).
+        // 목록 조회는 매 청크 다시 하지만(가벼움), 무거운 바이너리 다운로드는 슬라이스에만 발생.
+        $slice   = ($limit > 0) ? array_slice($photos, $offset, $limit) : $photos;
         $newCnt  = 0;
         $gpsCnt  = 0;
         $nameCnt = 0;
         $insPhoto = $this->pdo->prepare(
             "INSERT INTO tbl_travel_photo
-                (travel_id, drive_file_id, name, taken_at, lat, lng, provider, thumb_url, media_type, vid_w, vid_h)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                (travel_id, drive_file_id, name, taken_at, lat, lng, provider, thumb_url, media_type, vid_w, vid_h, gps_scanned)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
              ON DUPLICATE KEY UPDATE
                 name=VALUES(name), taken_at=VALUES(taken_at),
                 lat=VALUES(lat), lng=VALUES(lng),
                 provider=VALUES(provider), thumb_url=VALUES(thumb_url),
-                media_type=VALUES(media_type), vid_w=VALUES(vid_w), vid_h=VALUES(vid_h)"
+                media_type=VALUES(media_type), vid_w=VALUES(vid_w), vid_h=VALUES(vid_h),
+                gps_scanned=VALUES(gps_scanned)"
         );
 
         // 3-a) 메타 수집 (아직 insert 안 함 — 형제 날짜 상속 / 좌표 보간 후 일괄 처리)
         $records = [];
-        foreach ($photos as $p) {
+        $startTs = microtime(true);
+        $procN   = 0;   // 이번 요청에서 실제 처리한 미디어 수(시간예산으로 덜 처리될 수 있음)
+        foreach ($slice as $p) {
+            // 요청당 시간예산: 동영상 다운로드가 느려도 한 요청이 게이트웨이 타임아웃/세션락을
+            // 장기 점유하지 못하게 ~18초 넘으면 끊고 다음 요청(next_offset)으로 넘긴다.
+            if ($limit > 0 && $procN > 0 && (microtime(true) - $startTs) > 18.0) break;
             $fileId   = $p['id'];
             $prev     = $known[$fileId] ?? null;
             $isNew    = ($prev === null);
             // 저장된 좌표가 0(=가짜 GPS)이면 아직 GPS 없는 것으로 보고 재시도
             $hadGps   = $prev && $prev['lat'] !== null && (float)$prev['lat'] != 0.0;
+            $wasScanned = $prev && !empty($prev['scanned']);   // 이전에 GPS 스캔 끝남(없어도 재다운로드 안 함)
             $isVideo  = (strpos($p['mimeType'] ?? '', 'video/') === 0);
             $mediaType = $isVideo ? 'video' : 'image';
 
@@ -532,7 +549,7 @@ class Travel
                 }
                 // 앞뒤 3MB 바이너리 다운로드는 ①GPS 가 아직 없거나 ②파일명으로 시각을 못 구했을 때만.
                 // GPS 확정 + 파일명 시각이 있으면 재다운로드 스킵(이미지와 동일 정책).
-                if ($isNew || !$hadGps || !$takenAt) {
+                if ($isNew || (!$hadGps && !$wasScanned) || !$takenAt) {
                     $meta = $this->extractVideoMeta($fileId, (int)($p['size'] ?? 0));
                     $lat  = $meta['lat'];
                     $lng  = $meta['lng'];
@@ -545,7 +562,7 @@ class Travel
                 // 이미지: 촬영시각은 EXIF 우선 → 없으면 파일명(YYYYMMDD_HHMMSS) 폴백
                 $takenAt = $this->parseExifTime($p['imageMediaMetadata']['time'] ?? null);
                 if (!$takenAt) { $takenAt = $this->parseFilenameTime($p['name'] ?? null); if ($takenAt) $nameCnt++; }
-                if ($isNew || !$hadGps) {
+                if ($isNew || (!$hadGps && !$wasScanned)) {
                     $loc = $p['imageMediaMetadata']['location'] ?? null;
                     if ($loc && isset($loc['latitude'], $loc['longitude'])
                         && (abs((float)$loc['latitude']) > 0.0001 || abs((float)$loc['longitude']) > 0.0001)) {
@@ -565,8 +582,9 @@ class Travel
                 'fileId' => $fileId, 'name' => $p['name'] ?? null,
                 'takenAt' => $takenAt, 'lat' => $lat, 'lng' => $lng,
                 'mediaType' => $mediaType, 'vidW' => $vidW, 'vidH' => $vidH,
-                'isNew' => $isNew,
+                'isNew' => $isNew, 'scanned' => 1,
             ];
+            $procN++;
         }
 
         // 3-b) 메타·파일명으로도 시각을 못 구한 건 '예외' — 추정하지 않고 NULL 로 둬
@@ -582,34 +600,45 @@ class Travel
             $insPhoto->execute([
                 $travelId, $r['fileId'], $r['name'], $r['takenAt'],
                 $r['lat'], $r['lng'], $provider, self::thumbUrl($r['fileId']),
-                $r['mediaType'], $r['vidW'], $r['vidH'],
+                $r['mediaType'], $r['vidW'], $r['vidH'], $r['scanned'],
             ]);
             if ($r['isNew']) $newCnt++;
         }
 
-        // 4) 드라이브에서 사라진 사진은 DB에서도 제거 (재업로드/삭제 반영)
-        if ($currentIds) {
-            $ph  = implode(',', array_fill(0, count($currentIds), '?'));
-            $del = $this->pdo->prepare(
-                "DELETE FROM tbl_travel_photo WHERE travel_id = ? AND drive_file_id NOT IN ($ph)"
-            );
-            $del->execute(array_merge([$travelId], $currentIds));
-        } else {
-            $this->pdo->prepare("DELETE FROM tbl_travel_photo WHERE travel_id = ?")
-                      ->execute([$travelId]);
-        }
+        // 도달 위치 기준 완료 판정(시간예산으로 조기 종료됐으면 $procN < slice 라 아직 안 끝남)
+        $reached = $offset + $procN;
+        $done    = ($limit <= 0) || ($reached >= $total);
 
-        // 5) 여행 기간(start/end_dt) + 대표 썸네일 = 사진 taken_at 최소~최대 기준 자동 갱신
-        $this->refreshTravelMeta($travelId);
+        // 4) 마지막 청크에서만: 사라진 사진 제거 + 여행 메타 재계산.
+        //    delete-missing 은 전체 fileId 기준이어야 하므로 중간 청크에서 돌리면 안 된다.
+        if ($done) {
+            $allIds = array_map(static fn($x) => $x['id'], $photos);
+            if ($allIds) {
+                $ph  = implode(',', array_fill(0, count($allIds), '?'));
+                $del = $this->pdo->prepare(
+                    "DELETE FROM tbl_travel_photo WHERE travel_id = ? AND drive_file_id NOT IN ($ph)"
+                );
+                $del->execute(array_merge([$travelId], $allIds));
+            } else {
+                $this->pdo->prepare("DELETE FROM tbl_travel_photo WHERE travel_id = ?")
+                          ->execute([$travelId]);
+            }
+            // 5) 여행 기간(start/end_dt) + 대표 썸네일 = 사진 taken_at 최소~최대 기준 자동 갱신
+            $this->refreshTravelMeta($travelId);
+        }
 
         return [
             'travel'          => $title,
             'folder_id'       => $folderId,
-            'photos_total'    => count($photos),
+            'photos_total'    => $total,
             'photos_new'      => $newCnt,
             'gps_new'         => $gpsCnt,
             'dates_from_name' => $nameCnt,
             'unresolved'      => $unresolved,
+            'total'           => $total,
+            'processed'       => ($limit <= 0) ? $total : min($reached, $total),
+            'done'            => $done,
+            'next_offset'     => $done ? null : $reached,
         ];
     }
 
@@ -761,6 +790,64 @@ class Travel
     {
         $this->pdo->prepare("UPDATE tbl_travel_photo SET hidden = ? WHERE id = ?")
                   ->execute([$hidden ? 1 : 0, $photoId]);
+    }
+
+    /**
+     * 위치 미상(GPS 없는) 사진들에 좌표를 직접 지정한다.
+     * 드라이브 imageMediaMetadata(GPS)는 첫 업로드 때 1회만 계산·캐시 → EXIF 재편집·재업로드로는
+     * 좌표 수정이 구조적으로 불가하므로, 수동 좌표는 DB 에 직접 쓴다.
+     * gps_scanned=1 로 표시해 새로고침(syncFolder)이 이 좌표를 재스캔으로 건드리지 않게 한다.
+     * @param int[]       $ids  같은 장소로 묶을 사진 id 들
+     * @param string|null $addr 역지오코딩 주소(검색 결과). 없으면 NULL → 다음 상세 로드 시 backfill
+     * @return int 갱신 건수
+     */
+    public function setPhotoLoc(array $ids, float $lat, float $lng, ?string $addr = null): int
+    {
+        $ids = array_values(array_filter(array_map('intval', $ids), fn($v) => $v > 0));
+        if (!$ids) return 0;
+        if (abs($lat) < 0.0001 && abs($lng) < 0.0001) return 0;   // (0,0) = 무효 좌표
+        $addr = ($addr === null || trim($addr) === '') ? null : trim($addr);
+        $in   = implode(',', array_fill(0, count($ids), '?'));
+        $stmt = $this->pdo->prepare(
+            "UPDATE tbl_travel_photo
+                SET lat = ?, lng = ?, addr = ?, gps_scanned = 1
+              WHERE id IN ($in)"
+        );
+        $stmt->execute(array_merge([$lat, $lng, $addr], $ids));
+        return $stmt->rowCount();
+    }
+
+    /**
+     * 앵커 사진(들)의 촬영시각 전후 $spreadMin 분 안에 있는, 아직 위치 미상(lat/lng NULL)인
+     * 같은 여행 사진들의 id 를 찾는다. 수동 좌표 지정 시 "전후 ±N분 같이 지정" 옵션의 대상 산출용.
+     * ★자동 sync 보간(과거 제거됨)과 다름: 이건 사용자가 좌표 찍는 순간 1회만 호출되고,
+     *   결과를 setPhotoLoc 로 DB 에 직접 박아 gps_scanned=1 → 새로고침에 재계산·stale 없음.
+     * @return int[] 대상 사진 id (앵커 제외, 시각 없으면 전후 판단 불가하므로 빈 배열)
+     */
+    public function findUnlocatedNear(int $travelId, array $anchorIds, int $spreadMin): array
+    {
+        $anchorIds = array_values(array_filter(array_map('intval', $anchorIds), fn($v) => $v > 0));
+        if (!$anchorIds || $spreadMin <= 0) return [];
+        $in   = implode(',', array_fill(0, count($anchorIds), '?'));
+        $stmt = $this->pdo->prepare(
+            "SELECT MIN(taken_at) AS mn, MAX(taken_at) AS mx
+               FROM tbl_travel_photo
+              WHERE id IN ($in) AND taken_at IS NOT NULL"
+        );
+        $stmt->execute($anchorIds);
+        $r = $stmt->fetch();
+        if (!$r || $r['mn'] === null) return [];   // 앵커에 촬영시각 없으면 전후 판단 불가
+        $sec  = $spreadMin * 60;
+        $stmt = $this->pdo->prepare(
+            "SELECT id FROM tbl_travel_photo
+              WHERE travel_id = ? AND hidden = 0
+                AND (lat IS NULL OR lng IS NULL)
+                AND taken_at IS NOT NULL
+                AND taken_at BETWEEN DATE_SUB(?, INTERVAL ? SECOND)
+                                 AND DATE_ADD(?, INTERVAL ? SECOND)"
+        );
+        $stmt->execute([$travelId, $r['mn'], $sec, $r['mx'], $sec]);
+        return array_map('intval', array_column($stmt->fetchAll(), 'id'));
     }
 
     /**

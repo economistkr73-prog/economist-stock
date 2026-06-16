@@ -184,6 +184,33 @@ body.tv-edit-on .dm-edit { display:inline-block; }
 .place-head .ph-addr { font-size:15px; font-weight:700; color:#34495e; word-break:keep-all; }
 .place-head .ph-time { font-size:13px; color:#7f8c8d; }
 .place-head .ph-count { font-size:12px; font-weight:600; color:#e67e22; background:#fdebd0; padding:1px 9px; border-radius:20px; white-space:nowrap; }
+.place-head .ph-setloc { margin-left:auto; background:#eaf4ff; border:1px solid #b9dcff; color:#1a73c2; font-size:12px; font-weight:600; padding:3px 10px; border-radius:14px; cursor:pointer; white-space:nowrap; transition:.15s; }
+.place-head .ph-setloc:hover { background:#1a73c2; color:#fff; border-color:#1a73c2; }
+/* 위치 지정 모달 (위치 미상 사진에 좌표 수동 등록) */
+.tv-locmodal { display:none; position:fixed; inset:0; z-index:2100; background:rgba(0,0,0,.55); align-items:center; justify-content:center; padding:16px; }
+.tv-locmodal.on { display:flex; }
+.tv-locbox { position:relative; background:#fff; border-radius:16px; width:min(440px,100%); max-height:88vh; overflow:auto; padding:22px 20px 18px; box-shadow:0 18px 50px rgba(0,0,0,.3); }
+.tv-loc-title { margin:0 0 4px; font-size:18px; color:#2c3e50; }
+.tv-loc-sub { margin:0 0 14px; font-size:12.5px; color:#8a949c; line-height:1.5; }
+.tv-loc-search { display:flex; gap:7px; }
+.tv-loc-search input { flex:1; padding:9px 11px; border:1px solid #ccd3da; border-radius:9px; font-size:14px; }
+.tv-loc-search button, .tv-loc-manual button { padding:9px 14px; border:none; border-radius:9px; background:#1a73c2; color:#fff; font-weight:600; cursor:pointer; white-space:nowrap; }
+.tv-loc-results { margin-top:10px; max-height:34vh; overflow:auto; }
+.tv-loc-item { padding:9px 11px; border:1px solid #eef1f4; border-radius:9px; margin-bottom:6px; cursor:pointer; transition:.12s; }
+.tv-loc-item:hover { background:#f3f8ff; border-color:#cfe3fb; }
+.tv-loc-item.sel { background:#e7f2ff; border-color:#1a73c2; }
+.tv-loc-item .tl-name { font-size:14px; font-weight:600; color:#2c3e50; }
+.tv-loc-item .tl-addr { font-size:12px; color:#8a949c; margin-top:2px; }
+.tv-loc-empty { font-size:13px; color:#8a949c; padding:10px 4px; }
+.tv-loc-manual { margin-top:12px; font-size:12.5px; color:#7f8c8d; display:flex; gap:7px; align-items:center; flex-wrap:wrap; }
+.tv-loc-manual input { flex:1; min-width:160px; padding:8px 10px; border:1px solid #ccd3da; border-radius:9px; font-size:13px; }
+.tv-loc-spread { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:12px; font-size:13px; color:#34495e; }
+.tv-loc-spread input[type=number] { width:54px; padding:5px 6px; border:1px solid #ccd3da; border-radius:7px; font-size:13px; text-align:center; }
+.tv-loc-spread input[type=checkbox] { width:16px; height:16px; }
+.tv-loc-foot { display:flex; align-items:center; gap:10px; margin-top:16px; padding-top:13px; border-top:1px solid #eef1f4; }
+.tv-loc-sel { flex:1; font-size:13px; color:#1a73c2; font-weight:600; word-break:break-all; }
+.tv-loc-save { padding:10px 16px; border:none; border-radius:10px; background:#27ae60; color:#fff; font-weight:700; cursor:pointer; white-space:nowrap; }
+.tv-loc-save:disabled { background:#c5ccd2; cursor:not-allowed; }
 .place-body { display:grid; grid-template-columns:1fr 1fr; gap:16px 18px; align-items:stretch; }
 .place-map { min-height:0; height:auto; align-self:stretch; }   /* 시각+사진 높이에 맞춰 늘어남 */
 .pshot { display:grid; grid-template-columns:100px 1fr; gap:14px; align-items:start; position:relative; }
@@ -207,6 +234,11 @@ body.tv-edit-on .dm-edit { display:inline-block; }
 .ps-memo-add { display:none; position:absolute; top:5px; left:5px; z-index:3; width:23px; height:23px; padding:0; border:none; border-radius:50%; background:rgba(0,0,0,.55); color:#fff; font-size:12px; line-height:23px; text-align:center; cursor:pointer; transition:.15s; }
 .ps-memo-add:hover { background:#b8860b; transform:scale(1.08); }
 body.tv-edit-on .ps-memo-add { display:block; }
+/* 사진 1장 위치 지정 버튼(썸네일 하단 좌측). GPS 없는 사진엔 항상, 그 외엔 편집모드에서 노출 */
+.ps-loc { display:none; position:absolute; bottom:5px; left:5px; z-index:3; height:22px; padding:0 8px; border:none; border-radius:12px; background:rgba(26,115,194,.9); color:#fff; font-size:11px; font-weight:600; line-height:22px; cursor:pointer; transition:.15s; }
+.ps-loc:hover { background:#1a73c2; transform:scale(1.06); }
+.pshot[data-nogps="1"] .ps-loc, .ps-chip[data-nogps="1"] .ps-loc { display:block; }
+body.tv-edit-on .ps-loc { display:block; }
 /* 칩 인라인 메모 편집기 (저장 시 풀 카드로 재배치되도록 reload) */
 .ps-chip-editor { flex:0 0 100%; }
 /* 메모 사진이 없는 장소 → 지도를 전체폭 배너로 */
@@ -353,14 +385,16 @@ function tv_render_pshot(array $s, bool $guest, bool $mapsActive = false): void 
         $click = "tvOpenPhoto('{$big}')";
     }
     $vidCls = $isVid ? ' is-vid' : '';
+    $noGps  = ($s['lat'] === null || $s['lng'] === null);   // GPS 없는 사진 = 위치 지정 대상
 
-    echo "<div class='pshot' data-pid='{$s['id']}'>";
+    echo "<div class='pshot' data-pid='{$s['id']}'" . ($noGps ? " data-nogps='1'" : '') . ">";
     // 사진 칸 = [촬영시각 줄] + [썸네일]. 시각을 사진 위 줄에 둬서 지도 높이를 '시각+사진' 높이에 맞춤
     echo "<div class='ps-col'>";
     if ($time !== '') echo "<div class='ps-time'>🕒 {$time}</div>";
     echo "<div class='ps-thumb{$vidCls}' role='button' tabindex='0' style=\"{$bg}\" onclick=\"{$click}\">";
     if (!$guest) {
         echo "<button type='button' class='ps-del' title='이 사진 숨기기' aria-label='이 사진 숨기기' onclick='event.stopPropagation();tvHidePhoto({$s['id']})'>✕</button>";
+        echo "<button type='button' class='ps-loc' title='이 사진만 위치 지정' aria-label='이 사진만 위치 지정' data-ids=\"[{$s['id']}]\" onclick='event.stopPropagation();tvSetLoc(this)'>📍</button>";
     }
     if ($isVid) echo "<span class='ps-play' aria-hidden='true'>▶</span>";
     echo "</div>"; // .ps-thumb
@@ -423,12 +457,14 @@ function tv_render_chip(array $s, bool $guest, bool $mapsActive): void {
         $click = "tvOpenPhoto('{$big}')";
     }
     $vidCls = $isVid ? ' is-vid' : '';
+    $noGps  = ($s['lat'] === null || $s['lng'] === null);   // GPS 없는 사진 = 위치 지정 대상
 
-    echo "<div class='ps-chip' data-pid='{$s['id']}'>";
+    echo "<div class='ps-chip' data-pid='{$s['id']}'" . ($noGps ? " data-nogps='1'" : '') . ">";
     echo "<div class='ps-thumb{$vidCls}' role='button' tabindex='0' style=\"{$bg}\" onclick=\"{$click}\">";
     if (!$guest) {
         echo "<button type='button' class='ps-del' title='이 사진 숨기기' aria-label='이 사진 숨기기' onclick='event.stopPropagation();tvHidePhoto({$s['id']})'>✕</button>";
         echo "<button type='button' class='ps-memo-add' title='메모 쓰기' aria-label='메모 쓰기' onclick='event.stopPropagation();tvChipMemo({$s['id']})'>✏️</button>";
+        echo "<button type='button' class='ps-loc' title='이 사진만 위치 지정' aria-label='이 사진만 위치 지정' data-ids=\"[{$s['id']}]\" onclick='event.stopPropagation();tvSetLoc(this)'>📍</button>";
     }
     if ($isVid) echo "<span class='ps-play' aria-hidden='true'>▶</span>";
     echo "</div>"; // .ps-thumb
@@ -801,9 +837,15 @@ function travel_view(PDO $pdo, bool $guest = false, ?int $forceId = null, ?strin
                 echo "</div>"; // .place-body
                 echo "</div>"; // .place-card
             } else {
-                // 위치 미상 그룹 (지도 없음)
+                // 위치 미상 그룹 (지도 없음) — 소유자는 좌표 직접 지정 가능
+                $setBtn = '';
+                if (!$guest) {
+                    $ids = array_map(fn($s) => (int)$s['id'], $gShots);
+                    $idsAttr = htmlspecialchars(json_encode($ids), ENT_QUOTES);
+                    $setBtn = "<button type='button' class='ph-setloc' title='이 그룹 사진 전체를 같은 위치로 지정' data-ids=\"{$idsAttr}\" onclick='tvSetLoc(this)'>📍 전체 지정</button>";
+                }
                 echo "<div class='place-card'>";
-                echo "<div class='place-head'><span class='ph-addr'>📍 위치 미상</span>{$headTime}{$headCnt}</div>";
+                echo "<div class='place-head'><span class='ph-addr'>📍 위치 미상</span>{$headTime}{$headCnt}{$setBtn}</div>";
                 echo "<div class='place-body no-map'><div class='place-shots'>";
                 tv_render_shots($gShots, $guest, $mapsActive);
                 echo "</div></div>";
@@ -838,6 +880,31 @@ function travel_view(PDO $pdo, bool $guest = false, ?int $forceId = null, ?strin
        . "<div class='tv-vframe' id='tv-vframe'></div>"
        . "</div></div>";
 
+    // 위치 지정 모달 (위치 미상 사진에 좌표 수동 등록 — 소유자 전용)
+    if (!$guest) {
+        echo "<div class='tv-locmodal' id='tv-locmodal' onclick='tvLocClose(event)'>"
+           . "<div class='tv-locbox'>"
+           . "<button class='tv-modal-x' type='button' onclick='tvLocClose()'>✕</button>"
+           . "<h3 class='tv-loc-title'>📍 위치 지정</h3>"
+           . "<p class='tv-loc-sub' id='tv-loc-sub'>사진이 찍힌 장소를 검색해 지정하세요. 지정한 좌표는 새로고침해도 유지됩니다.</p>"
+           . "<div class='tv-loc-search'>"
+           . "<input type='text' id='tv-loc-q' placeholder='장소·주소 검색 (예: 경복궁, 해운대해수욕장)' autocomplete='off' onkeydown='if(event.key===\"Enter\"){event.preventDefault();tvLocSearch();}'>"
+           . "<button type='button' onclick='tvLocSearch()'>검색</button>"
+           . "</div>"
+           . "<div class='tv-loc-results' id='tv-loc-results'></div>"
+           . "<div class='tv-loc-manual'>또는 좌표 직접 입력:"
+           . "<input type='text' id='tv-loc-ll' placeholder=\"37.5796, 126.9770  또는  12°45'21&quot;N, 100°55'39&quot;E\">"
+           . "<button type='button' onclick='tvLocManual()'>적용</button>"
+           . "</div>"
+           . "<label class='tv-loc-spread'><input type='checkbox' id='tv-loc-spread-on' checked> 전후 "
+           . "<input type='number' id='tv-loc-spread-min' value='30' min='1' max='240'>분 안의 '위치 미상' 사진도 함께 지정</label>"
+           . "<div class='tv-loc-foot'>"
+           . "<span id='tv-loc-sel' class='tv-loc-sel'></span>"
+           . "<button type='button' id='tv-loc-save' class='tv-loc-save' onclick='tvLocSave()' disabled>이 위치로 지정</button>"
+           . "</div>"
+           . "</div></div>";
+    }
+
     echo "</div>"; // .tv-detail
     travel_foot();
 
@@ -867,25 +934,40 @@ async function travelRefresh(id){
     const orig=btn.textContent;
     btn.disabled=true; btn.textContent='⏳ 새로고침 중...';
     st.className='tv-sync-status loading'; st.textContent=' 드라이브에서 이 여행을 다시 가져오는 중...';
+    // 사진/동영상이 많으면 한 요청에 다 처리하다 게이트웨이 타임아웃(HTML 504)이 나서
+    // JSON 파싱이 깨진다 → offset/limit 으로 끊어 여러 번 호출하고 진행률을 표시한다.
+    const CHUNK=40;   // 서버가 요청당 ~18초 시간예산으로 다시 끊으므로 넉넉히(사진 많으면 자동 분할)
     try{
-        const res=await fetch('schedule_api.php?module=travel&action=sync&id='+id);
-        const j=await res.json();
-        if(!j.ok) throw new Error(j.msg||'새로고침 실패');
-        const s=(j.data&&j.data[0])||null;
-        if(s&&s.deleted){   // 드라이브 폴더가 삭제됨 → 이 여행은 제거됨, 목록으로 이동
-            st.className='tv-sync-status ok';
-            st.textContent=' 🗑️ 드라이브 폴더가 삭제되어 목록에서 제거했습니다.';
-            setTimeout(()=>location.href='travel.php', 900);
-            return;
-        }
-        st.className='tv-sync-status ok';
-        if(s){
-            let msg=' ✅ 사진 '+s.photos_total+'장(신규 '+s.photos_new+')';
-            if(s.dates_from_name) msg+=' · 파일명시각 '+s.dates_from_name+'건';
-            if(s.unresolved)      msg+=' · 미분류 '+s.unresolved+'건';
-            st.textContent=msg+' — 갱신합니다.';
-        }else{
-            st.textContent=' ✅ 갱신합니다.';
+        let offset=0, newTotal=0, names=0, unresolved=0, total=0, guard=0;
+        while(true){
+            if(++guard>2000) throw new Error('새로고침이 너무 오래 걸립니다');
+            const res=await fetch('schedule_api.php?module=travel&action=sync&id='+id+'&offset='+offset+'&limit='+CHUNK);
+            const j=await res.json();
+            if(!j.ok) throw new Error(j.msg||'새로고침 실패');
+            const s=(j.data&&j.data[0])||null;
+            if(s&&s.deleted){   // 드라이브 폴더가 삭제됨 → 이 여행은 제거됨, 목록으로 이동
+                st.className='tv-sync-status ok';
+                st.textContent=' 🗑️ 드라이브 폴더가 삭제되어 목록에서 제거했습니다.';
+                setTimeout(()=>location.href='travel.php', 900);
+                return;
+            }
+            if(!s){ break; }
+            total=s.total||total;
+            newTotal+=s.photos_new||0;
+            names+=s.dates_from_name||0;
+            unresolved+=s.unresolved||0;
+            if(s.done){
+                st.className='tv-sync-status ok';
+                let msg=' ✅ 사진 '+total+'장(신규 '+newTotal+')';
+                if(names)      msg+=' · 파일명시각 '+names+'건';
+                if(unresolved) msg+=' · 미분류 '+unresolved+'건';
+                st.textContent=msg+' — 갱신합니다.';
+                break;
+            }
+            st.className='tv-sync-status loading';
+            st.textContent=' ⏳ 가져오는 중… '+(s.processed||0)+'/'+(total||'?');
+            offset=s.next_offset;
+            if(offset===null||offset===undefined) break;
         }
         setTimeout(()=>location.reload(), 900);
     }catch(e){
@@ -996,6 +1078,111 @@ async function tvHidePhoto(pid){
             }
         },210);
     }catch(e){ alert(e.message); }
+}
+
+// ── 위치 미상 사진에 좌표 직접 지정 (GPS 없는 사진 수동 등록) ──
+// 드라이브 EXIF 재편집은 imageMediaMetadata 캐시 때문에 불가 → DB(setPhotoLoc)에 직접 쓴다.
+var TV_LOC = {ids:[], lat:null, lng:null, addr:'', name:''};
+function tvSetLoc(btn){
+    try{ TV_LOC.ids = JSON.parse(btn.dataset.ids||'[]'); }catch(e){ TV_LOC.ids=[]; }
+    TV_LOC.lat=null; TV_LOC.lng=null; TV_LOC.addr=''; TV_LOC.name='';
+    var n=TV_LOC.ids.length;
+    document.getElementById('tv-loc-sub').textContent =
+        (n>1 ? '사진 '+n+'장을 같은 장소로 한 번에 지정합니다.'
+             : '이 사진 한 장의 위치를 지정합니다.')
+        + ' 장소를 검색해 고르거나 좌표를 직접 입력하세요. 지정한 좌표는 새로고침해도 유지됩니다.';
+    document.getElementById('tv-loc-q').value='';
+    document.getElementById('tv-loc-ll').value='';
+    document.getElementById('tv-loc-results').innerHTML='';
+    tvLocUpdateSel();
+    document.getElementById('tv-locmodal').classList.add('on');
+    setTimeout(function(){ document.getElementById('tv-loc-q').focus(); }, 50);
+}
+function tvLocClose(e){
+    if(e&&e.target&&e.target.id!=='tv-locmodal'&&!e.target.classList.contains('tv-modal-x')) return;
+    document.getElementById('tv-locmodal').classList.remove('on');
+}
+function tvLocUpdateSel(){
+    var sel=document.getElementById('tv-loc-sel'), sv=document.getElementById('tv-loc-save');
+    if(TV_LOC.lat!==null && TV_LOC.lng!==null){
+        sel.textContent='✓ '+(TV_LOC.name||TV_LOC.addr||(TV_LOC.lat.toFixed(5)+', '+TV_LOC.lng.toFixed(5)));
+        sv.disabled=false;
+    }else{ sel.textContent=''; sv.disabled=true; }
+}
+async function tvLocSearch(){
+    var q=document.getElementById('tv-loc-q').value.trim();
+    var box=document.getElementById('tv-loc-results');
+    if(!q){ box.innerHTML=''; return; }
+    box.innerHTML="<div class='tv-loc-empty'>검색 중…</div>";
+    try{
+        var res=await fetch('schedule_api.php?module=geo&action=place_search&q='+encodeURIComponent(q));
+        var j=await res.json();
+        if(!j.ok) throw new Error(j.msg||'검색 실패');
+        var ps=j.places||[];
+        if(!ps.length){ box.innerHTML="<div class='tv-loc-empty'>검색 결과가 없습니다. 좌표를 직접 입력해 보세요.</div>"; return; }
+        box.innerHTML='';
+        ps.forEach(function(p){
+            var it=document.createElement('div'); it.className='tv-loc-item';
+            it.innerHTML="<div class='tl-name'></div><div class='tl-addr'></div>";
+            it.querySelector('.tl-name').textContent=p.name||'';
+            it.querySelector('.tl-addr').textContent=p.address||'';
+            it.onclick=function(){ tvLocPick(parseFloat(p.lat), parseFloat(p.lng), p.name||'', p.address||'', it); };
+            box.appendChild(it);
+        });
+    }catch(e){ box.innerHTML="<div class='tv-loc-empty'>❌ "+e.message+"</div>"; }
+}
+function tvLocPick(lat,lng,name,addr,el){
+    TV_LOC.lat=lat; TV_LOC.lng=lng; TV_LOC.name=name; TV_LOC.addr=addr;
+    Array.prototype.forEach.call(document.querySelectorAll('#tv-loc-results .tv-loc-item'),function(n){ n.classList.remove('sel'); });
+    if(el) el.classList.add('sel');
+    tvLocUpdateSel();
+}
+// 좌표 문자열 파싱 — 소수점(37.5796, 126.9770)과 도분초(12°45'21"N, 100°55'39"E) 둘 다 지원
+function tvParseCoord(str){
+    str=(str||'').trim().replace(/^\(/,'').replace(/\)$/,'');
+    // 도분초: 도[°] 분['′] 초["″] 방위(NSEW). 분·초는 선택적
+    var dms=/(\d+(?:\.\d+)?)\s*[°˚]\s*(?:(\d+(?:\.\d+)?)\s*['′]\s*)?(?:(\d+(?:\.\d+)?)\s*["″]?\s*)?([NSEWnsew])/g;
+    var found=[], m;
+    while((m=dms.exec(str))){
+        var dec=(parseFloat(m[1])||0)+(parseFloat(m[2]||0))/60+(parseFloat(m[3]||0))/3600;
+        var dir=m[4].toUpperCase();
+        if(dir==='S'||dir==='W') dec=-dec;
+        found.push({dir:dir, val:dec});
+    }
+    if(found.length>=2){
+        var lat=null, lng=null;
+        found.forEach(function(f){ if(f.dir==='N'||f.dir==='S') lat=f.val; else lng=f.val; });
+        if(lat===null||lng===null){ lat=found[0].val; lng=found[1].val; }   // 방위 누락 시 입력순(위도,경도)
+        return [lat, lng];
+    }
+    // 소수점 형식
+    var nums=str.split(/[ ,]+/).map(function(x){return parseFloat(x);}).filter(function(x){return !isNaN(x);});
+    if(nums.length>=2) return [nums[0], nums[1]];
+    return null;
+}
+function tvLocManual(){
+    var c=tvParseCoord(document.getElementById('tv-loc-ll').value);
+    if(!c){ alert('좌표를 인식하지 못했습니다.\n예) 37.5796, 126.9770\n또는 12°45\'21"N, 100°55\'39"E'); return; }
+    var lat=c[0], lng=c[1];
+    if(isNaN(lat)||isNaN(lng)||Math.abs(lat)>90||Math.abs(lng)>180){ alert('좌표 범위가 올바르지 않습니다.'); return; }
+    tvLocPick(lat,lng,'','');
+}
+async function tvLocSave(){
+    if(TV_LOC.lat===null||!TV_LOC.ids.length) return;
+    var sv=document.getElementById('tv-loc-save'); sv.disabled=true; sv.textContent='저장 중…';
+    // 전후 ±N분 위치 미상 사진도 함께 지정(옵션, 기본 켜짐) — 서버가 같은 여행의 시각 인접 사진을 찾아 같은 좌표로
+    var spreadOn=document.getElementById('tv-loc-spread-on').checked;
+    var spreadMin=spreadOn ? Math.max(1, Math.min(240, parseInt(document.getElementById('tv-loc-spread-min').value,10)||0)) : 0;
+    try{
+        var res=await fetch('schedule_api.php?module=travel&action=photo_setloc',{
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({ids:TV_LOC.ids, lat:TV_LOC.lat, lng:TV_LOC.lng, addr:TV_LOC.addr,
+                                 spread:spreadMin, travel_id:(window.TV_ID||0)})
+        });
+        var j=await res.json(); if(!j.ok) throw new Error(j.msg||'저장 실패');
+        sv.textContent = '✓ '+(j.count||0)+'장 지정' + (j.auto>0 ? ' (전후 '+j.auto+'장 자동)' : '');
+        setTimeout(function(){ location.reload(); }, 700);   // 좌표 생겼으니 지도 그룹으로 재배치
+    }catch(e){ sv.disabled=false; sv.textContent='이 위치로 지정'; alert(e.message); }
 }
 
 // ── 공유 링크 (생성 / 복사 / 중단) ──

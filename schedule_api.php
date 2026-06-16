@@ -310,7 +310,8 @@ function adjust_overlaps(PDO $pdo, int $newId, string $newStart, string $newEnd)
 
         [$newEvStart, $newEvEnd] = calc_shift($newStartTs, $newEndTs, $evStartTs, $evEndTs);
 
-        // 湲곗〈 "?뱀씪留??섏젙" 濡쒖쭅 ?ъ궗??        $data             = $inst;
+        // 기존 "당일만 수정" 로직 재사용
+        $data             = $inst;
         $data['start_dt'] = $newEvStart;
         $data['end_dt']   = $newEvEnd;
         $sch->updateScoped((int)$inst['id'], 'one', $date, $data);
@@ -324,10 +325,11 @@ function adjust_overlaps(PDO $pdo, int $newId, string $newStart, string $newEnd)
 function calc_shift(int $newStartTs, int $newEndTs, int $evStartTs, int $evEndTs): array {
     $duration = $evEndTs - $evStartTs;
     if ($newStartTs <= $evStartTs) {
-        // ?좉퇋媛 ?욎そ ??湲곗〈???ㅻ줈
+        // 신규가 앞쪽 → 기존을 뒤로
         return [date('Y-m-d H:i:s', $newEndTs), date('Y-m-d H:i:s', $newEndTs + $duration)];
     } else {
-        // ?좉퇋媛 ?ㅼそ ??湲곗〈???욎쑝濡?        return [date('Y-m-d H:i:s', $newStartTs - $duration), date('Y-m-d H:i:s', $newStartTs)];
+        // 신규가 뒤쪽 → 기존을 앞으로
+        return [date('Y-m-d H:i:s', $newStartTs - $duration), date('Y-m-d H:i:s', $newStartTs)];
     }
 }
 
@@ -518,12 +520,20 @@ function api_travel(string $action, PDO $pdo): void {
         // 수동 동기화 (로그인 세션으로 보호). id 있으면 그 여행 1건만 새로고침
         case 'sync':
             set_time_limit(0);            // 사진 많으면 길어질 수 있어 타임아웃 해제
-            ignore_user_abort(true);
+            // ★중요: 세션 잠금 즉시 해제. sync 는 세션에 쓰지 않는데, 여기서 닫지 않으면
+            //   이 긴 요청이 사용자 세션 파일을 독점 잠가, 같은 로그인의 다른 모든 페이지
+            //   (심지어 로그인 POST)가 sync 가 끝날 때까지 대기 → 사이트 전체가 멈춘 것처럼 보인다.
+            if (session_status() === PHP_SESSION_ACTIVE) { session_write_close(); }
             $tid = isset($_GET['id']) ? (int)$_GET['id'] : 0;
             if ($tid > 0) {
-                $one = $travel->refreshTravel($tid);   // 단건 새로고침
+                // 청크 새로고침: offset/limit 으로 N개씩 끊어 처리(대용량 여행 게이트웨이 타임아웃 방지).
+                // 단건은 ignore_user_abort 를 켜지 않는다 → 탭을 닫으면 이 요청도 멈춰 워커를 안 잡음.
+                $offset = isset($_GET['offset']) ? max(0, (int)$_GET['offset']) : 0;
+                $limit  = isset($_GET['limit'])  ? max(0, (int)$_GET['limit'])  : 0;
+                $one = $travel->refreshTravel($tid, $offset, $limit);   // 단건 새로고침(청크)
                 echo json_encode(['ok' => true, 'data' => $one ? [$one] : []]);
             } else {
+                ignore_user_abort(true);               // 전체 신규폴더 풀스캔만 완주 보장
                 $summary = $travel->sync();            // 전체: 신규 폴더만 풀스캔
                 echo json_encode(['ok' => true, 'data' => $summary]);
             }
@@ -545,6 +555,27 @@ function api_travel(string $action, PDO $pdo): void {
             if ($pid <= 0) { echo json_encode(['ok' => false, 'msg' => '사진 id가 없습니다.']); break; }
             $travel->setPhotoHidden($pid, (bool)($d['hidden'] ?? true));
             echo json_encode(['ok' => true]);
+            break;
+
+        // 위치 미상 사진들에 좌표 직접 지정 (GPS 없는 사진 수동 등록 — EXIF 재편집 불가 우회)
+        // spread(분)>0 이면 앵커 사진 촬영시각 전후 ±spread 분의 위치 미상 사진도 같은 좌표로 함께 지정.
+        case 'photo_setloc':
+            $d      = json_decode(file_get_contents('php://input'), true);
+            $ids    = $d['ids'] ?? [];
+            $lat    = (float)($d['lat'] ?? 0);
+            $lng    = (float)($d['lng'] ?? 0);
+            $addr   = trim((string)($d['addr'] ?? ''));
+            $spread = max(0, min(240, (int)($d['spread'] ?? 0)));   // 전후 ±분 (0=끔, 최대 4시간)
+            $tid    = (int)($d['travel_id'] ?? 0);
+            if (!is_array($ids) || !$ids) { echo json_encode(['ok' => false, 'msg' => '사진이 선택되지 않았습니다.']); break; }
+            if (abs($lat) < 0.0001 && abs($lng) < 0.0001) { echo json_encode(['ok' => false, 'msg' => '좌표가 올바르지 않습니다.']); break; }
+            $explicit = count($ids);
+            if ($spread > 0 && $tid > 0) {
+                $near = $travel->findUnlocatedNear($tid, $ids, $spread);   // 전후 ±분 위치 미상 사진
+                $ids  = array_values(array_unique(array_merge($ids, $near)));
+            }
+            $n = $travel->setPhotoLoc($ids, $lat, $lng, $addr !== '' ? $addr : null);
+            echo json_encode(['ok' => true, 'count' => $n, 'auto' => max(0, $n - $explicit)]);
             break;
 
         // 한시적 공개 공유 링크 생성 (소유자 전용 — 파일 상단 require_login 으로 게이트됨)
