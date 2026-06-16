@@ -48,7 +48,7 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
     $place = new Place($pdo);
 
     // 게스트(공유 링크)는 읽기전용 — 검색/출처/지오코딩/자동완성/태그검색만 허용
-    if ($isGuest && !in_array($action, ['search', 'refs', 'geocode', 'suggest', 'tag_list', 'tag_search'], true)) {
+    if ($isGuest && !in_array($action, ['search', 'refs', 'geocode', 'suggest', 'place_name_search', 'tag_list', 'tag_search'], true)) {
         http_response_code(403);
         echo json_encode(['ok' => false, 'msg' => 'forbidden']);
         return;
@@ -69,7 +69,7 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
             $category = trim((string)($_GET['category'] ?? ''));
             $keyword  = trim((string)($_GET['keyword'] ?? ''));
 
-            $allowed = ['travel', 'event', 'restaurant', 'etc'];
+            $allowed = ['travel', 'stay', 'restaurant', 'etc'];
             if ($category !== '' && !in_array($category, $allowed, true)) {
                 $category = '';
             }
@@ -95,15 +95,7 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
             break;
         }
 
-        // ── 미좌표(좌표 못 찾은) 장소 목록 — 지도에 안 뜨는 건 열람용 ──
-        case 'ungeocoded': {
-            $status = (string)($_GET['status'] ?? 'failed');
-            $items  = $place->listUngeocoded($status, 3000);
-            echo json_encode(['ok' => true, 'total' => count($items), 'status' => $status, 'items' => $items], JSON_UNESCAPED_UNICODE);
-            break;
-        }
-
-        // ── 미좌표 장소 수정 (이름/분류 변경 + 좌표 직접 지정) ──
+        // ── 장소 수정 (이름/분류 변경 + 좌표 직접 지정) ──
         case 'place_update': {
             $id = (int)($_GET['id'] ?? $_POST['id'] ?? 0);
             if ($id <= 0) {
@@ -116,11 +108,13 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
             $hasCoord = (isset($_GET['lat']) || isset($_POST['lat'])) && (isset($_GET['lng']) || isset($_POST['lng']));
             $lat = $hasCoord ? (float)($_GET['lat'] ?? $_POST['lat']) : null;
             $lng = $hasCoord ? (float)($_GET['lng'] ?? $_POST['lng']) : null;
+            $address = trim((string)($_GET['address'] ?? $_POST['address'] ?? ''));
             $ok = $place->adminUpdate(
                 $id,
                 $name     !== '' ? $name     : null,
                 $category !== '' ? $category : null,
-                $lat, $lng
+                $lat, $lng,
+                $address !== '' ? $address : null
             );
             echo json_encode(['ok' => $ok, 'geocoded' => $hasCoord], JSON_UNESCAPED_UNICODE);
             break;
@@ -140,7 +134,8 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
             }
             $lat   = (float)($_GET['lat'] ?? $_POST['lat']);
             $lng   = (float)($_GET['lng'] ?? $_POST['lng']);
-            $newId = $place->addLinkedPlace($srcId, $name, $category, $lat, $lng);
+            $address = trim((string)($_GET['address'] ?? $_POST['address'] ?? ''));
+            $newId = $place->addLinkedPlace($srcId, $name, $category, $lat, $lng, $address);
             echo json_encode(['ok' => $newId > 0, 'id' => $newId], JSON_UNESCAPED_UNICODE);
             break;
         }
@@ -155,6 +150,74 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
             }
             $n = $place->deletePlace($id);
             echo json_encode(['ok' => $n > 0, 'deleted' => $n], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+
+        // ── 기사(ref) 영구 삭제 (소유자 전용) — 지정 장소에 속한 것만 ──
+        case 'ref_delete': {
+            $refId   = (int)($_GET['ref_id']   ?? $_POST['ref_id']   ?? 0);
+            $placeId = (int)($_GET['place_id'] ?? $_POST['place_id'] ?? 0);
+            if ($refId <= 0 || $placeId <= 0) {
+                http_response_code(400);
+                echo json_encode(['ok' => false, 'msg' => 'ref_id, place_id 가 필요합니다.']);
+                return;
+            }
+            $n = $place->deleteRef($refId, $placeId);
+            echo json_encode(['ok' => $n > 0, 'deleted' => $n, 'refs' => $place->getRefs($placeId)], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+
+        // ── 장소에 기사(출처) 직접 추가 (소유자 전용) — 제목 + URL ──
+        case 'ref_add': {
+            $placeId = (int)($_GET['place_id'] ?? $_POST['place_id'] ?? 0);
+            $title   = trim((string)($_GET['title'] ?? $_POST['title'] ?? ''));
+            $url     = trim((string)($_GET['url']   ?? $_POST['url']   ?? ''));
+            if ($placeId <= 0 || ($title === '' && $url === '')) {
+                http_response_code(400);
+                echo json_encode(['ok' => false, 'msg' => 'place_id 와 제목 또는 URL 이 필요합니다.']);
+                return;
+            }
+            $added = $place->addRef($placeId, [
+                'source_type' => 'article',
+                'title'       => $title !== '' ? $title : null,
+                'url'         => $url   !== '' ? $url   : null,
+            ]);
+            echo json_encode(['ok' => true, 'added' => $added, 'refs' => $place->getRefs($placeId)], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+
+        // ── 장소 병합(중복 정리, 소유자 전용) — from_ids 의 기사·태그를 대표 to_id 로 이관 후 삭제 ──
+        case 'place_merge': {
+            $toId = (int)($_GET['to_id'] ?? $_POST['to_id'] ?? 0);
+            $raw  = (string)($_GET['from_ids'] ?? $_POST['from_ids'] ?? '');
+            $fromIds = array_values(array_filter(array_map('intval', explode(',', $raw)), fn($x) => $x > 0));
+            if ($toId <= 0 || !$fromIds) {
+                http_response_code(400);
+                echo json_encode(['ok' => false, 'msg' => 'to_id, from_ids 가 필요합니다.']);
+                return;
+            }
+            echo json_encode($place->mergePlaces($toId, $fromIds), JSON_UNESCAPED_UNICODE);
+            break;
+        }
+
+        // ── 장소 일괄 병합(소유자 전용) — jobs=[{gi,to_id,from_ids[]}] 를 한 요청에 모두 처리 ──
+        case 'place_merge_batch': {
+            $raw  = (string)($_POST['jobs'] ?? $_GET['jobs'] ?? '');
+            $jobs = json_decode($raw, true);
+            if (!is_array($jobs) || !$jobs) {
+                http_response_code(400);
+                echo json_encode(['ok' => false, 'msg' => 'jobs 가 필요합니다.']);
+                return;
+            }
+            $results = [];
+            foreach ($jobs as $j) {
+                $toId    = (int)($j['to_id'] ?? 0);
+                $fromIds = array_map('intval', (array)($j['from_ids'] ?? []));
+                $r = $place->mergePlaces($toId, $fromIds);
+                $r['gi'] = $j['gi'] ?? null;   // 클라이언트가 그룹 매핑에 사용
+                $results[] = $r;
+            }
+            echo json_encode(['ok' => true, 'results' => $results], JSON_UNESCAPED_UNICODE);
             break;
         }
 
@@ -178,8 +241,11 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
             echo json_encode(['ok' => true, 'items' => $place->getTags($id)], JSON_UNESCAPED_UNICODE);
             break;
         }
-        case 'tag_list': {              // 태그 목록(자동완성·상단 칩바). {tag,kind,cnt} 빈도순
-            echo json_encode(['ok' => true, 'items' => $place->listTags(500)], JSON_UNESCAPED_UNICODE);
+        case 'tag_list': {              // 태그 목록. {tag,kind,cnt} 빈도순
+            // bar=1: 상단 칩바용 — kind 무시·월 제외·지도표시(ok·활성) 장소 기준 distinct
+            //        → 칩 카운트가 클릭 시 tag_search 결과와 일치. 그 외: 자동완성·태그관리용 전체
+            $bar = ((int)($_GET['bar'] ?? 0) === 1);
+            echo json_encode(['ok' => true, 'items' => $place->listTags(500, $bar)], JSON_UNESCAPED_UNICODE);
             break;
         }
         case 'tag_search': {            // 태그(들) AND 검색 → GeoJSON. tags=콤마구분, 또는 단일 tag
@@ -223,6 +289,14 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
                 'items' => $kw['items'] ?? [],
                 'msg'   => $kw['msg'] ?? '',
             ], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+
+        // ── 통합 검색 자동완성: 우리 DB 등록 장소를 이름으로(전국, 좌표 포함) ──
+        case 'place_name_search': {
+            $q = trim((string)($_GET['q'] ?? $_POST['q'] ?? ''));
+            if (mb_strlen($q) < 2) { echo json_encode(['ok' => true, 'items' => []]); return; }
+            echo json_encode(['ok' => true, 'items' => $place->searchByNameForBox($q, 8)], JSON_UNESCAPED_UNICODE);
             break;
         }
 
@@ -287,7 +361,8 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
         case 'seed_clear': {
             $n = $pdo->exec(
                 "DELETE FROM place
-                  WHERE COALESCE(JSON_UNQUOTE(JSON_EXTRACT(attributes, '$.source_site')), '') <> 'ardentnews'"
+                  WHERE COALESCE(JSON_UNQUOTE(JSON_EXTRACT(attributes, '$.source_site')), '') <> 'ardentnews'
+                    AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(attributes, '$.system')), '') <> 'uncategorized'"
             );
             echo json_encode(['ok' => true, 'deleted' => (int)$n, 'msg' => '데모/시드 더미 삭제(아덴트뉴스 보존)'], JSON_UNESCAPED_UNICODE);
             break;
@@ -333,11 +408,11 @@ function seed_demo(Place $place): array
                       'url' => 'https://example.com/seorak', 'published_at' => '2024-10-20'],
         ],
         [
-            'name' => '여의도 봄꽃축제', 'category' => 'event',
+            'name' => '여의도 봄꽃축제', 'category' => 'travel',
             'address' => '서울 영등포구 여의동로 330', 'region_lv1' => '서울', 'region_lv2' => '영등포구',
             'lat' => 37.5283, 'lng' => 126.9320,
             'period_start' => '2026-04-04', 'period_end' => '2026-04-12',
-            'attributes' => ['tags' => ['벚꽃', '봄축제']],
+            'attributes' => ['tags' => ['벚꽃', '봄축제', '축제']],
             'ref' => ['source_type' => 'official', 'title' => '여의도 봄꽃축제 안내',
                       'url' => 'https://example.com/yeouido-festival', 'published_at' => '2026-03-15'],
         ],

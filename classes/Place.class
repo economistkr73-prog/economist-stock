@@ -30,7 +30,7 @@ class Place
             CREATE TABLE IF NOT EXISTS place (
                 id             BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
                 name           VARCHAR(255)    NOT NULL,
-                category       ENUM('travel','event','restaurant','etc')
+                category       ENUM('travel','stay','restaurant','etc')
                                                NOT NULL DEFAULT 'travel',
                 address        VARCHAR(500)    NULL,
                 region_lv1     VARCHAR(40)     NULL,
@@ -270,13 +270,14 @@ class Place
 
         $sql = "SELECT p.id, p.name, p.category, p.lat, p.lng, p.phone,
                        p.address, p.region_lv1, p.region_lv2,
-                       p.period_start, p.period_end, p.attributes,
+                       p.period_start, p.period_end, p.attributes, p.updated_at,
                        (6371 * ACOS(LEAST(1.0,
                           COS(RADIANS(:lat_c)) * COS(RADIANS(p.lat)) *
                           COS(RADIANS(p.lng) - RADIANS(:lng_c)) +
                           SIN(RADIANS(:lat_s)) * SIN(RADIANS(p.lat))
                        ))) AS dist_km,
-                       (SELECT COUNT(*) FROM place_ref r WHERE r.place_id = p.id) AS ref_count
+                       (SELECT COUNT(*) FROM place_ref r WHERE r.place_id = p.id) AS ref_count,
+                       (SELECT GROUP_CONCAT(t.tag ORDER BY t.tag SEPARATOR ',') FROM place_tag t WHERE t.place_id = p.id AND t.kind <> 'month') AS tags
                 FROM place p
                 WHERE p.is_active = 1
                   AND p.geocode_status = 'ok'
@@ -322,7 +323,9 @@ class Place
                     'period_start' => $row['period_start'],
                     'period_end'   => $row['period_end'],
                     'attributes'   => $row['attributes'] ? json_decode($row['attributes'], true) : null,
+                    'updated_at'   => $row['updated_at'],
                     'ref_count'    => (int)$row['ref_count'],
+                    'tags'         => $row['tags'] ? explode(',', $row['tags']) : [],
                     'dist_km'      => round((float)$row['dist_km'], 3),
                 ],
             ];
@@ -350,8 +353,9 @@ class Place
         $need = count($tags);
         $sql = "SELECT p.id, p.name, p.category, p.lat, p.lng, p.phone,
                        p.address, p.region_lv1, p.region_lv2,
-                       p.period_start, p.period_end, p.attributes,
-                       (SELECT COUNT(*) FROM place_ref r WHERE r.place_id = p.id) AS ref_count
+                       p.period_start, p.period_end, p.attributes, p.updated_at,
+                       (SELECT COUNT(*) FROM place_ref r WHERE r.place_id = p.id) AS ref_count,
+                       (SELECT GROUP_CONCAT(t.tag ORDER BY t.tag SEPARATOR ',') FROM place_tag t WHERE t.place_id = p.id AND t.kind <> 'month') AS tags
                   FROM place p
                  WHERE p.is_active = 1 AND p.geocode_status = 'ok'
                    AND p.id IN (
@@ -380,7 +384,9 @@ class Place
                     'period_start' => $row['period_start'],
                     'period_end'   => $row['period_end'],
                     'attributes'   => $row['attributes'] ? json_decode($row['attributes'], true) : null,
+                    'updated_at'   => $row['updated_at'],
                     'ref_count'    => (int)$row['ref_count'],
+                    'tags'         => $row['tags'] ? explode(',', $row['tags']) : [],
                     'dist_km'      => null,
                 ],
             ];
@@ -404,6 +410,142 @@ class Place
             $r['extra'] = $r['extra'] ? json_decode($r['extra'], true) : null;
         }
         return $rows;
+    }
+
+    // ======================================================
+    //  미분류(보관) 장소 — 잘못 묶인 기사를 삭제하지 않고 보존
+    // ======================================================
+    /** '(미분류)' 보관 장소(싱글톤) id. 없으면 생성. 좌표없음+is_active=0 → 지도/목록 어디에도 안 뜸 */
+    public function getUncategorizedId(): int
+    {
+        $id = (int)$this->pdo->query(
+            "SELECT id FROM place
+              WHERE JSON_UNQUOTE(JSON_EXTRACT(attributes, '$.system')) = 'uncategorized'
+              ORDER BY id LIMIT 1"
+        )->fetchColumn();
+        if ($id > 0) return $id;
+        $st = $this->pdo->prepare(
+            "INSERT INTO place (name, category, geocode_status, is_active, attributes, dedup_key)
+             VALUES ('(미분류)', 'etc', 'pending', 0, JSON_OBJECT('system', 'uncategorized'), :dk)"
+        );
+        $st->execute([':dk' => md5('__system_uncategorized__')]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    /**
+     * 한 장소에서 기사(ref)를 '(미분류)' 보관함으로 이동 — 삭제 아님(데이터 보존).
+     * 같은 기사가 이미 보관함에 있으면(uq 충돌) 원래 행 제거(중복 정리).
+     * @return array{ok:bool, bucket:int, dedup?:bool}
+     */
+    public function detachRef(int $refId, int $fromPlaceId): array
+    {
+        if ($refId <= 0 || $fromPlaceId <= 0) return ['ok' => false, 'bucket' => 0];
+        $bucket = $this->getUncategorizedId();
+        if ($bucket === $fromPlaceId) return ['ok' => false, 'bucket' => $bucket];
+        try {
+            $st = $this->pdo->prepare("UPDATE place_ref SET place_id = ? WHERE id = ? AND place_id = ?");
+            $st->execute([$bucket, $refId, $fromPlaceId]);
+            return ['ok' => $st->rowCount() > 0, 'bucket' => $bucket];
+        } catch (PDOException $e) {
+            if ($e->getCode() === '23000') {   // 이미 보관함에 동일 기사 → 원래 것 삭제
+                $d = $this->pdo->prepare("DELETE FROM place_ref WHERE id = ? AND place_id = ?");
+                $d->execute([$refId, $fromPlaceId]);
+                return ['ok' => $d->rowCount() > 0, 'bucket' => $bucket, 'dedup' => true];
+            }
+            throw $e;
+        }
+    }
+
+    /** 미분류 보관함의 기사 목록(최신순) */
+    public function listUncategorizedRefs(int $limit = 2000): array
+    {
+        $bucket = $this->getUncategorizedId();
+        $limit  = max(1, min(5000, $limit));
+        $st = $this->pdo->prepare(
+            "SELECT id, source_type, title, url, summary, published_at
+               FROM place_ref WHERE place_id = ?
+              ORDER BY published_at DESC, id DESC LIMIT {$limit}"
+        );
+        $st->execute([$bucket]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 미분류 보관함의 기사 1건 영구 삭제(보관함에 있는 것만 안전 삭제) @return int */
+    public function purgeRef(int $refId): int
+    {
+        if ($refId <= 0) return 0;
+        $bucket = $this->getUncategorizedId();
+        $st = $this->pdo->prepare("DELETE FROM place_ref WHERE id = ? AND place_id = ?");
+        $st->execute([$refId, $bucket]);
+        return $st->rowCount();
+    }
+
+    /** 기사(ref) 1건 영구 삭제 — 지정 장소에 속한 것만 안전 삭제 @return int */
+    public function deleteRef(int $refId, int $placeId): int
+    {
+        if ($refId <= 0 || $placeId <= 0) return 0;
+        $st = $this->pdo->prepare("DELETE FROM place_ref WHERE id = ? AND place_id = ?");
+        $st->execute([$refId, $placeId]);
+        return $st->rowCount();
+    }
+
+    /** 우리 DB 장소를 이름으로 검색(재연결 대상 선택용). 미분류·비활성 제외 */
+    public function findPlacesByName(string $kw, int $limit = 20): array
+    {
+        $kw = trim($kw);
+        if ($kw === '') return [];
+        $limit = max(1, min(50, $limit));
+        $st = $this->pdo->prepare(
+            "SELECT id, name, category, region_lv1, region_lv2, geocode_status
+               FROM place
+              WHERE is_active = 1
+                AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(attributes, '$.system')), '') <> 'uncategorized'
+                AND name LIKE :kw
+              ORDER BY (geocode_status = 'ok') DESC, name LIMIT {$limit}"
+        );
+        $st->execute([':kw' => '%' . $kw . '%']);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 통합 검색창 자동완성용 — 우리 DB의 좌표 있는(ok) 장소를 이름으로 검색(좌표 포함) @return array */
+    public function searchByNameForBox(string $kw, int $limit = 8): array
+    {
+        $kw = trim($kw);
+        if ($kw === '') return [];
+        $limit = max(1, min(20, $limit));
+        $st = $this->pdo->prepare(
+            "SELECT id, name, category, address, region_lv1, region_lv2, lat, lng
+               FROM place
+              WHERE is_active = 1 AND geocode_status = 'ok'
+                AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(attributes, '$.system')), '') <> 'uncategorized'
+                AND name LIKE :kw
+              ORDER BY (name = :exact) DESC, CHAR_LENGTH(name), name LIMIT {$limit}"
+        );
+        $st->execute([':kw' => '%' . $kw . '%', ':exact' => $kw]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * 미분류 보관함의 기사를 특정 장소로 재연결(이동). uq 충돌 시 보관함 행 삭제(이미 그 장소에 있음).
+     * @return array{ok:bool, dedup?:bool}
+     */
+    public function reattachRef(int $refId, int $toPlaceId): array
+    {
+        if ($refId <= 0 || $toPlaceId <= 0) return ['ok' => false];
+        $bucket = $this->getUncategorizedId();
+        if ($toPlaceId === $bucket) return ['ok' => false];
+        try {
+            $st = $this->pdo->prepare("UPDATE place_ref SET place_id = ? WHERE id = ? AND place_id = ?");
+            $st->execute([$toPlaceId, $refId, $bucket]);
+            return ['ok' => $st->rowCount() > 0];
+        } catch (PDOException $e) {
+            if ($e->getCode() === '23000') {
+                $d = $this->pdo->prepare("DELETE FROM place_ref WHERE id = ? AND place_id = ?");
+                $d->execute([$refId, $bucket]);
+                return ['ok' => $d->rowCount() > 0, 'dedup' => true];
+            }
+            throw $e;
+        }
     }
 
     /**
@@ -531,50 +673,27 @@ class Place
     }
 
     /**
-     * 좌표 없는(failed/pending) 장소 목록 — 지도에 안 뜨는 미좌표 건을 패널에서 열람.
-     * 대표 출처(최신 ref 1건) 링크/제목과 출처 수를 함께 반환. 활성(is_active) 건만.
-     * @return array 각 행: id,name,category,region_lv1,region_lv2,geocode_status,ref_cnt,top_url,top_title
-     */
-    public function listUngeocoded(string $status = 'failed', int $limit = 3000): array
-    {
-        $status = in_array($status, ['failed', 'pending'], true) ? $status : 'failed';
-        $limit  = max(1, min(5000, $limit));
-        $sql =
-            "SELECT p.id, p.name, p.category, p.region_lv1, p.region_lv2, p.geocode_status,
-                    (SELECT COUNT(*) FROM place_ref r WHERE r.place_id = p.id) AS ref_cnt,
-                    (SELECT r.url   FROM place_ref r WHERE r.place_id = p.id
-                       ORDER BY r.published_at DESC, r.id DESC LIMIT 1) AS top_url,
-                    (SELECT r.title FROM place_ref r WHERE r.place_id = p.id
-                       ORDER BY r.published_at DESC, r.id DESC LIMIT 1) AS top_title
-               FROM place p
-              WHERE p.geocode_status = :st
-                AND (p.is_active = 1 OR p.is_active IS NULL)
-              ORDER BY (p.region_lv1 IS NULL OR p.region_lv1 = ''), p.region_lv1, p.name, p.id
-              LIMIT {$limit}";
-        $st = $this->pdo->prepare($sql);
-        $st->execute([':st' => $status]);
-        return $st->fetchAll(PDO::FETCH_ASSOC);
-    }
-
-    /**
-     * 미좌표 패널 수정용: 이름/분류 변경 + (좌표 지정 시) lat/lng + geocode_status='ok'.
+     * 장소 수정용: 이름/분류 변경 + (좌표 지정 시) lat/lng + geocode_status='ok'.
      * null 인 항목은 미변경. 좌표는 lat/lng 둘 다 와야 적용(ok 로 마킹 → 지도에 표시됨).
      * @return bool 1건 이상 SET 되어 실행했으면 true
      */
-    public function adminUpdate(int $id, ?string $name, ?string $category, ?float $lat, ?float $lng): bool
+    public function adminUpdate(int $id, ?string $name, ?string $category, ?float $lat, ?float $lng, ?string $address = null): bool
     {
         if ($id <= 0) return false;
         $sets = []; $params = [':id' => $id];
         if ($name !== null && $name !== '') {
             $sets[] = 'name = :name';     $params[':name'] = mb_substr($name, 0, 255);
         }
-        $allowed = ['travel', 'event', 'restaurant', 'etc'];
+        $allowed = ['travel', 'stay', 'restaurant', 'etc'];
         if ($category !== null && in_array($category, $allowed, true)) {
             $sets[] = 'category = :cat';  $params[':cat'] = $category;
         }
         if ($lat !== null && $lng !== null) {
             $sets[] = 'lat = :lat'; $sets[] = 'lng = :lng'; $sets[] = "geocode_status = 'ok'";
             $params[':lat'] = $lat; $params[':lng'] = $lng;
+        }
+        if ($address !== null && $address !== '') {
+            $sets[] = 'address = :addr'; $params[':addr'] = mb_substr($address, 0, 255);
         }
         if (!$sets) return false;
         $sets[] = 'updated_at = NOW()';
@@ -606,17 +725,18 @@ class Place
      * 새 place(좌표=ok) upsert 후 $srcId 의 출처자료를 복제 연결한다.
      * @return int 새(또는 dedup 으로 합쳐진) place id
      */
-    public function addLinkedPlace(int $srcId, string $name, string $category, float $lat, float $lng): int
+    public function addLinkedPlace(int $srcId, string $name, string $category, float $lat, float $lng, string $address = ''): int
     {
         $name = trim($name);
         if ($name === '') throw new InvalidArgumentException('place name 은 필수입니다.');
-        $allowed = ['travel', 'event', 'restaurant', 'etc'];
+        $allowed = ['travel', 'stay', 'restaurant', 'etc'];
         if (!in_array($category, $allowed, true)) $category = 'travel';
         $newId = $this->upsertPlace([
             'name'           => $name,
             'category'       => $category,
             'lat'            => $lat,
             'lng'            => $lng,
+            'address'        => ($address !== '' ? $address : null),
             'geocode_status' => 'ok',
         ]);
         if ($newId > 0 && $newId !== $srcId) {
@@ -635,6 +755,51 @@ class Place
         $st = $this->pdo->prepare("DELETE FROM place WHERE id = ?");
         $st->execute([$id]);
         return $st->rowCount();
+    }
+
+    /**
+     * 장소 병합(중복 정리) — $fromIds 의 기사(place_ref)·태그(place_tag)를 대표 $toId 로 이관 후
+     * $fromIds 장소들을 삭제한다. 같은 URL/태그가 이미 대표에 있으면 IGNORE(중복 스킵→from 삭제 시 CASCADE 정리).
+     * 대표 장소의 이름/좌표/분류 등 자체 필드는 건드리지 않는다.
+     * @return array{ok:bool, merged?:int, to_id?:int, ref_count?:int, msg?:string}
+     */
+    public function mergePlaces(int $toId, array $fromIds): array
+    {
+        $toId = (int)$toId;
+        $fromIds = array_values(array_unique(array_filter(
+            array_map('intval', $fromIds), fn($x) => $x > 0 && $x !== $toId
+        )));
+        if ($toId <= 0 || !$fromIds) return ['ok' => false, 'msg' => '대상/병합 id 오류'];
+        $bucket = $this->getUncategorizedId();
+        if ($toId === $bucket || in_array($bucket, $fromIds, true)) {
+            return ['ok' => false, 'msg' => '미분류 보관함은 병합에 쓸 수 없습니다'];
+        }
+        // 대표가 실제 존재하는지 확인
+        $chk = $this->pdo->prepare("SELECT COUNT(*) FROM place WHERE id = ?");
+        $chk->execute([$toId]);
+        if (!(int)$chk->fetchColumn()) return ['ok' => false, 'msg' => '대표 장소를 찾을 수 없습니다'];
+
+        $in = implode(',', $fromIds);   // 모두 정수로 정제됨 — 주입 위험 없음
+        $this->pdo->beginTransaction();
+        try {
+            // 기사 이관 (대표에 같은 URL 있으면 uq_place_url 충돌 → UPDATE IGNORE 스킵, from 삭제 시 CASCADE 정리)
+            $this->pdo->exec("UPDATE IGNORE place_ref SET place_id = {$toId} WHERE place_id IN ({$in})");
+            // 태그 이관 (중복은 INSERT IGNORE)
+            $this->pdo->exec(
+                "INSERT IGNORE INTO place_tag (place_id, kind, tag)
+                 SELECT {$toId}, kind, tag FROM place_tag WHERE place_id IN ({$in})"
+            );
+            // 중복 장소 삭제 (남은 ref/tag 는 FK CASCADE)
+            $del = $this->pdo->prepare("DELETE FROM place WHERE id IN ({$in})");
+            $del->execute();
+            $deleted = $del->rowCount();
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            return ['ok' => false, 'msg' => $e->getMessage()];
+        }
+        $refCnt = (int)$this->pdo->query("SELECT COUNT(*) FROM place_ref WHERE place_id = {$toId}")->fetchColumn();
+        return ['ok' => true, 'merged' => $deleted, 'to_id' => $toId, 'ref_count' => $refCnt];
     }
 
     // ======================================================
@@ -687,10 +852,25 @@ class Place
         }
     }
 
-    /** 자동완성용 기존 태그 목록 [{tag, kind, cnt}] (사용빈도순) */
-    public function listTags(int $limit = 500): array
+    /**
+     * 기존 태그 목록 [{tag, kind, cnt}] (사용빈도순).
+     * @param bool $mappableOnly 상단 칩바용: kind 무시·월 제외하고 '지도에 뜨는(ok·활성)'
+     *   장소 기준 태그별 distinct 개수 → 클릭 시 searchByTags 결과와 카운트가 일치한다.
+     *   false(기본): 자동완성·태그관리용 — (tag, kind)별 전체 행 수.
+     */
+    public function listTags(int $limit = 500, bool $mappableOnly = false): array
     {
         $limit = max(1, min(2000, $limit));
+        if ($mappableOnly) {
+            $st = $this->pdo->query(
+                "SELECT pt.tag, MIN(pt.kind) kind, COUNT(DISTINCT pt.place_id) cnt
+                   FROM place_tag pt
+                   JOIN place p ON p.id = pt.place_id
+                  WHERE pt.kind <> 'month' AND p.is_active = 1 AND p.geocode_status = 'ok'
+                  GROUP BY pt.tag ORDER BY cnt DESC, pt.tag LIMIT {$limit}"
+            );
+            return $st->fetchAll(PDO::FETCH_ASSOC);
+        }
         $st = $this->pdo->query(
             "SELECT tag, kind, COUNT(*) cnt FROM place_tag
               GROUP BY tag, kind ORDER BY cnt DESC, tag LIMIT {$limit}"

@@ -79,6 +79,7 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .pl-ac-cat { font-size: 10.5px; color: #16a085; margin-left: 6px; font-weight: 600; }
 .pl-ac-addr { font-size: 11.5px; color: #8a97a3; margin-top: 1px; }
 .pl-ac-empty { padding: 12px; font-size: 12.5px; color: #aaa; text-align: center; }
+.pl-ac-grp { padding: 6px 12px 4px; font-size: 11px; font-weight: 700; color: #95a5a6; background: #f7f9fb; border-bottom: 1px solid #eef1f4; position: sticky; top: 0; }
 
 /* 상단 태그 칩 바 (가로 스크롤) */
 #pl-tagbar { display: flex; align-items: center; gap: 6px; padding: 7px 12px; background: #fff; border-top: 1px solid #f0f2f5; box-shadow: 0 1px 3px rgba(0,0,0,.05); flex-shrink: 0; }
@@ -113,13 +114,13 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .pl-legend { position: absolute; left: 12px; bottom: 12px; z-index: 5; background: rgba(255,255,255,.95); border-radius: 8px; padding: 8px 12px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.15); display: flex; gap: 12px; flex-wrap: wrap; }
 .pl-legend span { display: inline-flex; align-items: center; gap: 5px; }
 .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
-.dot.travel { background: #3498db; } .dot.event { background: #e67e22; }
+.dot.travel { background: #3498db; } .dot.stay { background: #8e44ad; }
 .dot.restaurant { background: #e74c3c; } .dot.etc { background: #7f8c8d; }
 
 /* 번호 마커 (HTML 아이콘) — 흰 배경 + 카테고리색 테두리 + 빨간 번호로 잘 보이게 */
 .mk-pin { width: 28px; height: 28px; border-radius: 50% 50% 50% 0; transform: rotate(-45deg); background: #fff; border: 3px solid #3498db; box-shadow: 0 2px 5px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; }
 .mk-pin b { transform: rotate(45deg); color: #e74c3c; font-weight: 800; font-size: 13px; line-height: 1; }
-.mk-pin.cat-event { border-color: #e67e22; } .mk-pin.cat-restaurant { border-color: #e74c3c; } .mk-pin.cat-etc { border-color: #7f8c8d; }
+.mk-pin.cat-stay { border-color: #8e44ad; } .mk-pin.cat-restaurant { border-color: #e74c3c; } .mk-pin.cat-etc { border-color: #7f8c8d; }
 .mk-pin.active { background: #e74c3c; border-color: #c0392b; transform: rotate(-45deg) scale(1.28); }
 .mk-pin.active b { color: #fff; }
 
@@ -138,13 +139,43 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .pl-li:hover { background: #f7fbff; }
 .pl-li.active { background: #fdecea; }
 .li-no { flex-shrink: 0; width: 26px; height: 26px; border-radius: 50%; background: #fff; border: 2px solid #3498db; color: #e74c3c; font-weight: 800; font-size: 13px; display: flex; align-items: center; justify-content: center; }
-.li-no.cat-event { border-color: #e67e22; } .li-no.cat-restaurant { border-color: #e74c3c; } .li-no.cat-etc { border-color: #7f8c8d; }
+.li-no.cat-stay { border-color: #8e44ad; } .li-no.cat-restaurant { border-color: #e74c3c; } .li-no.cat-etc { border-color: #7f8c8d; }
 .pl-li.active .li-no { background: #e74c3c; border-color: #c0392b; color: #fff; }
 .li-body { min-width: 0; flex: 1; }
-.li-name { font-size: 13.5px; display: flex; align-items: baseline; gap: 6px; }
+.li-name { font-size: 13.5px; display: flex; align-items: center; gap: 5px; }
 .li-name .nm { font-weight: 600; color: #2c3e50; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.li-dist { margin-left: auto; font-size: 11px; color: #3498db; font-weight: 700; white-space: nowrap; flex-shrink: 0; }
+.li-dist { font-size: 11px; color: #3498db; font-weight: 700; white-space: nowrap; flex-shrink: 0; }
 .li-sub { font-size: 11.5px; color: #8a97a3; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 이름 우측 메타(거리·기사수) */
+.li-meta { margin-left: auto; flex-shrink: 0; display: flex; align-items: baseline; gap: 6px; }
+.li-refs { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; min-width: 12px; height: 12px; padding: 0 3px; box-sizing: border-box; border-radius: 999px; background: #fcebe9; color: #cf5b4e; font-size: 8px; font-weight: 700; line-height: 1; }
+/* 이름 아래 태그(#둘레길 #호수) — 주소 대신 표시 */
+.li-tags { display: flex; gap: 7px; margin-top: 3px; white-space: nowrap; overflow: hidden; }
+.li-tag { flex-shrink: 0; font-size: 11px; font-weight: 600; color: #2980b9; }
+.lh-acts { display: flex; align-items: center; gap: 6px; }
+.lh-edit { background: #eef2f6; border: 1px solid #dde3e9; color: #5b6b7b; font-size: 12px; font-weight: 600; padding: 4px 9px; border-radius: 6px; cursor: pointer; line-height: 1; white-space: nowrap; }
+.lh-edit:hover { background: #e1e8ef; }
+.lh-edit.active { background: #2980b9; border-color: #2471a3; color: #fff; }
+.li-edit { display: none; flex-shrink: 0; font-size: 12px; padding: 4px 7px; border-radius: 6px; cursor: pointer; line-height: 1; background: #eef2f6; border: 1px solid #dde3e9; color: #5b6b7b; }
+.li-edit:hover { background: #e1e8ef; }
+#pl-list.edit-on .li-edit { display: inline-block; }
+/* 편집모드: 원+숫자(li-no) 클릭으로 병합 선택 → 행 배경 반전 + 원 강조 */
+#pl-list.edit-on .li-no { cursor: pointer; }
+#pl-list.edit-on .li-no:hover { box-shadow: 0 0 0 2px #b6d7f2; }
+#pl-list.edit-on .pl-li.mc-sel { background: #e3f1ff; }
+.pl-li.mc-sel .li-no { background: #2980b9 !important; border-color: #2471a3 !important; color: #fff !important; }
+/* 상단 병합 버튼(편집 중 옆) */
+.lh-merge { background: #eaf3fb; border: 1px solid #b6d7f2; color: #2471a3; font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 6px; cursor: pointer; line-height: 1; white-space: nowrap; }
+.lh-merge:hover { background: #d8ebfa; }
+/* 병합 대표선택 모달 */
+.pm-pick { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.pm-row { display: flex; gap: 9px; align-items: flex-start; padding: 9px 11px; border: 1px solid #e2e6ea; border-radius: 9px; cursor: pointer; }
+.pm-row.main { border-color: #27ae60; background: #f3fbf6; }
+.pm-row input { margin-top: 3px; }
+.pm-nm { font-size: 13.5px; font-weight: 600; color: #2c3e50; }
+.pm-nm .pm-refs { font-size: 11px; font-weight: 700; color: #cf5b4e; background: #fcebe9; border-radius: 9px; padding: 1px 7px; margin-left: 6px; }
+.pm-ad { font-size: 11.5px; color: #8a97a3; margin-top: 1px; }
+.pm-main-tag { font-size: 10.5px; font-weight: 700; color: #1e8449; margin-left: 6px; }
 .pl-list-empty { color: #aaa; font-size: 13px; text-align: center; padding: 30px 12px; }
 @media (max-width: 640px) {
     #pl-list { width: 100%; max-width: 100%; top: auto; height: 42vh; box-shadow: 0 -3px 12px rgba(0,0,0,.15); }
@@ -152,11 +183,11 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 }
 
 /* 우측 상세 패널 (마커 클릭 시) */
-#pl-panel { position: absolute; top: 0; right: 0; bottom: 0; width: 340px; max-width: 88vw; background: #fff; box-shadow: -3px 0 14px rgba(0,0,0,.15); z-index: 20; transform: translateX(100%); transition: transform .25s; display: flex; flex-direction: column; }
+#pl-panel { position: absolute; top: 0; right: 0; bottom: 0; width: 340px; max-width: 88vw; background: #fff; box-shadow: -3px 0 14px rgba(0,0,0,.15); z-index: 30; transform: translateX(100%); transition: transform .25s; display: flex; flex-direction: column; }
 #pl-panel.open { transform: translateX(0); }
 .panel-head { padding: 16px 18px 12px; border-bottom: 1px solid #eee; }
 .panel-head .cat-badge { font-size: 11px; font-weight: 700; color: #fff; padding: 2px 8px; border-radius: 10px; }
-.cat-badge.travel { background: #3498db; } .cat-badge.event { background: #e67e22; }
+.cat-badge.travel { background: #3498db; } .cat-badge.stay { background: #8e44ad; }
 .cat-badge.restaurant { background: #e74c3c; } .cat-badge.etc { background: #7f8c8d; }
 .panel-head h3 { font-size: 19px; margin: 8px 0 6px; }
 .panel-head .meta { font-size: 13px; color: #5b6b7b; line-height: 1.7; }
@@ -174,33 +205,103 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .ref-item .rsum { font-size: 12px; color: #7f8c8d; }
 .ref-empty { color: #aaa; font-size: 13px; text-align: center; padding: 30px 0; }
 
-/* 미좌표(좌표 없는) 장소 패널 — 우측 슬라이드인 */
-#pl-nogeo { position: absolute; top: 0; right: 0; bottom: 0; width: 380px; max-width: 92vw; background: #fff; box-shadow: -3px 0 14px rgba(0,0,0,.15); z-index: 25; transform: translateX(100%); transition: transform .25s; display: flex; flex-direction: column; }
-#pl-nogeo.open { transform: translateX(0); }
-.ng-head { padding: 14px 16px 10px; border-bottom: 1px solid #eee; display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.ng-head h3 { font-size: 16px; margin: 0; flex: 1; }
-.ng-head .ng-close { background: none; border: none; font-size: 22px; color: #aaa; cursor: pointer; line-height: 1; }
-.ng-sub { font-size: 12px; color: #95a5a6; padding: 8px 16px; line-height: 1.5; border-bottom: 1px solid #f1f3f5; flex-shrink: 0; }
-.ng-body { flex: 1; overflow-y: auto; }
-.ng-li { padding: 9px 16px; border-bottom: 1px solid #f3f5f7; }
-.ng-li .ng-nm { font-size: 13.5px; font-weight: 600; color: #2c3e50; }
-.ng-li .ng-cat { font-size: 10px; font-weight: 700; color: #fff; padding: 1px 6px; border-radius: 8px; margin-right: 6px; }
-.ng-cat.travel { background: #3498db; } .ng-cat.event { background: #e67e22; }
-.ng-cat.restaurant { background: #e74c3c; } .ng-cat.etc { background: #7f8c8d; }
-.ng-li .ng-reg { font-size: 11.5px; color: #8a97a3; margin-top: 2px; }
-.ng-li .ng-link { font-size: 11.5px; color: #3498db; text-decoration: none; }
-.ng-li .ng-link:hover { text-decoration: underline; }
-.ng-empty { color: #aaa; font-size: 13px; text-align: center; padding: 30px 12px; }
-.ng-row { display: flex; align-items: center; gap: 6px; }
-.ng-row .ng-nm { flex: 1; min-width: 0; }
-.ng-acts { flex-shrink: 0; display: flex; gap: 5px; }
-.ng-edit { background: #eef2f6; border: 1px solid #dde3e9; color: #5b6b7b; font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 6px; cursor: pointer; }
-.ng-edit:hover { background: #e1e8ef; }
-.ng-del { background: #fdecea; border: 1px solid #f5c6c0; color: #c0392b; font-size: 12px; padding: 3px 8px; border-radius: 6px; cursor: pointer; line-height: 1; }
-.ng-del:hover { background: #f9d9d4; }
-@media (max-width: 640px) { #pl-nogeo { width: 100%; max-width: 100%; } }
+/* ── 여행지도(경로 만들기) 모드 ───────────────────────── */
+.btn-route { background: #fff; border: 1px solid #6c5ce7; color: #6c5ce7; }
+.btn-route:hover { background: #f3f1fb; }
+.btn-route.active { background: #6c5ce7; color: #fff; border-color: #5a4cd0; }
+/* 모드 ON 안내 배너(지도 위) */
+.rt-banner { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); z-index: 18; background: rgba(108,92,231,.95); color: #fff; font-size: 12.5px; font-weight: 600; padding: 7px 14px; border-radius: 20px; box-shadow: 0 2px 8px rgba(0,0,0,.2); display: none; white-space: nowrap; max-width: 90%; }
+body.rt-on .rt-banner { display: block; }
+/* 경로 만들기 우측 패널 */
+/* 두 패널을 오른쪽에 나란히 붙여 한 덩어리로 슬라이드(시선 분산 방지) */
+#rt-dock { position: absolute; top: 0; right: 0; bottom: 0; z-index: 26; display: flex; transform: translateX(100%); transition: transform .25s; box-shadow: -3px 0 16px rgba(0,0,0,.16); }
+body.rt-on #rt-dock { transform: translateX(0); }
+#rt-panel { width: 322px; max-width: 46vw; flex-shrink: 0; background: #fff; display: flex; flex-direction: column; }
+#rt-sum-panel { width: 300px; max-width: 44vw; flex-shrink: 0; background: #fff; border-right: 1px solid #e8eaf0; display: flex; flex-direction: column; }
+#rt-sum-panel .rt-sum { flex: 1; overflow-y: auto; }
+.rt-head { padding: 14px 16px 10px; border-bottom: 1px solid #eee; display: flex; align-items: center; justify-content: space-between; }
+.rt-head h3 { font-size: 16px; font-weight: 800; color: #5a4cd0; }
+.rt-head .rt-x { background: none; border: none; font-size: 22px; color: #aaa; cursor: pointer; line-height: 1; }
+.rt-tip { padding: 9px 16px; font-size: 11.5px; color: #8a7fd0; background: #f5f3fd; line-height: 1.55; }
+.rt-input-row { display: flex; gap: 6px; padding: 10px 14px 6px; }
+.rt-input-row input { flex: 1; min-width: 0; font-size: 13px; padding: 8px 10px; border: 1px solid #d8dde3; border-radius: 7px; }
+.rt-input-row button { flex-shrink: 0; background: #6c5ce7; border: none; color: #fff; font-size: 13px; font-weight: 700; padding: 0 14px; border-radius: 7px; cursor: pointer; }
+.rt-input-row button:hover { background: #5a4cd0; }
+.rt-rows { flex: 1; overflow-y: auto; padding: 6px 12px; display: flex; flex-direction: column; gap: 7px; }
+.rt-empty { padding: 28px 12px; text-align: center; color: #b0b8bf; font-size: 12.5px; line-height: 1.7; }
+.rt-row { display: flex; align-items: center; gap: 7px; background: #f9fafb; border: 1px solid #e7ebef; border-radius: 9px; padding: 7px 8px; }
+.rt-row.drag-over { box-shadow: 0 0 0 2px #c5bdf2; }
+.rt-row.dragging { opacity: .45; }
+.rt-handle { flex-shrink: 0; cursor: grab; color: #b9c3cc; font-size: 15px; line-height: 1; user-select: none; }
+.rt-num { flex-shrink: 0; width: 25px; height: 25px; border-radius: 50%; color: #fff; font-weight: 800; font-size: 12.5px; display: flex; align-items: center; justify-content: center; }
+.rt-info { min-width: 0; flex: 1; }
+.rt-name { font-size: 13px; font-weight: 600; color: #2c3e50; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rt-addr { font-size: 11px; color: #8a97a3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rt-del { flex-shrink: 0; background: none; border: none; color: #c3ccd4; font-size: 17px; line-height: 1; cursor: pointer; }
+.rt-del:hover { color: #c0392b; }
+/* 경로 번호 마커(채워진 색 물방울) — 검색 마커와 구분 */
+.rt-pin { width: 30px; height: 30px; border-radius: 50% 50% 50% 0; transform: rotate(-45deg); border: 3px solid #fff; box-shadow: 0 3px 8px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; }
+.rt-pin b { transform: rotate(45deg); color: #fff; font-weight: 800; font-size: 13px; line-height: 1; }
+/* 주변 장소 스팟 마커(작은 원, 지점 색상) */
+.rt-spot { width: 16px; height: 16px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.4); }
+.rt-spot.active { width: 22px; height: 22px; box-shadow: 0 0 0 3px rgba(231,76,60,.5), 0 2px 5px rgba(0,0,0,.4); }
 
-/* 수정 모달 (미좌표 장소 이름/분류/좌표 지정) */
+/* 패널 상단 컨트롤(버튼) 영역 */
+.rt-controls { padding: 9px 14px; border-bottom: 1px solid #f0f1f5; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.rt-controls .rt-clbl { font-size: 12px; color: #5b6b7b; font-weight: 700; }
+.rt-rquick { display: inline-flex; gap: 4px; }
+.rt-rq { font-size: 12px; font-weight: 600; padding: 5px 9px; border-radius: 13px; background: #f4f6f8; border: 1px solid #e2e7ec; color: #5a6b7b; cursor: pointer; }
+.rt-rq:hover { background: #eef0fb; border-color: #cfc8f3; color: #5a4cd0; }
+.rt-rq.on { background: #6c5ce7; border-color: #5a4cd0; color: #fff; }
+.rt-rnum { width: 56px; font-size: 12px; padding: 5px 7px; border: 1px solid #d8dde3; border-radius: 6px; }
+.rt-chk { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: #5b6b7b; cursor: pointer; user-select: none; }
+.rt-chk input { margin: 0; cursor: pointer; }
+.rt-go { background: #6c5ce7; border: none; color: #fff; font-size: 12.5px; font-weight: 700; padding: 7px 12px; border-radius: 7px; cursor: pointer; margin-left: auto; }
+.rt-go:hover { background: #5a4cd0; }
+.rt-go.on { background: #2c3e50; }
+.rt-go.on:hover { background: #1f2c39; }
+
+/* 패널 본문 스크롤 + 섹션 헤더 */
+.rt-scroll { flex: 1; overflow-y: auto; min-height: 0; }
+.rt-sec-hd { position: sticky; top: 0; z-index: 1; background: #fff; padding: 10px 14px 7px; font-size: 12.5px; font-weight: 800; color: #5a4cd0; border-bottom: 1px solid #f3f3fa; }
+.rt-sec-hd .rt-sub { font-size: 11px; font-weight: 600; color: #aab3bc; }
+.rt-sec-hd-row { display: flex; align-items: center; gap: 6px; }
+.rt-clearbtn { margin-left: auto; background: #fdecea; border: 1px solid #f5c6c0; color: #c0392b; font-size: 11.5px; font-weight: 700; padding: 4px 10px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.rt-clearbtn:hover { background: #f9d9d4; }
+
+/* 종합(지점별 주변 장소) */
+.rt-sum { padding: 8px 12px 4px; }
+.rt-sum-empty { padding: 22px 12px; text-align: center; color: #b0b8bf; font-size: 12.5px; line-height: 1.7; }
+.rt-wp { border: 1px solid #eef1f4; border-radius: 10px; margin-bottom: 9px; overflow: hidden; }
+.rt-wp-head { display: flex; align-items: center; gap: 8px; padding: 9px 11px; cursor: pointer; background: #fbfcfd; }
+.rt-wp-head:hover { background: #f4f3fc; }
+.rt-wp-num { flex-shrink: 0; width: 24px; height: 24px; border-radius: 50%; color: #fff; font-weight: 800; font-size: 12px; display: flex; align-items: center; justify-content: center; }
+.rt-wp-info { min-width: 0; flex: 1; }
+.rt-wp-nm { font-size: 13px; font-weight: 700; color: #2c3e50; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rt-wp-cnt { font-size: 11px; color: #8a97a3; margin-top: 1px; }
+.rt-wp-places { padding: 3px 6px 6px; }
+.rt-place { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 7px; cursor: pointer; }
+.rt-place:hover { background: #f3f6ff; }
+.rt-place.active { background: #fdecea; }
+.rt-pdot { flex-shrink: 0; width: 10px; height: 10px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.12); }
+.rt-pbody { min-width: 0; flex: 1; }
+.rt-pname { font-size: 12.5px; font-weight: 600; color: #2c3e50; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rt-pcat { font-size: 11px; color: #8a97a3; }
+.rt-pdist { flex-shrink: 0; font-size: 11px; font-weight: 700; color: #6c5ce7; }
+.rt-wp-none { padding: 8px 11px; font-size: 11.5px; color: #b0b8bf; }
+/* 좌측 '지점별 주변 장소' 종합 패널 (경로 패널과 별개) */
+/* 상세패널 '경로에 추가' 버튼 */
+.rt-addcur { display: block; width: 100%; margin-top: 12px; background: #6c5ce7; border: none; color: #fff; font-size: 13.5px; font-weight: 700; padding: 10px; border-radius: 8px; cursor: pointer; }
+.rt-addcur:hover { background: #5a4cd0; }
+@media (max-width: 640px) {
+    /* 모바일: 두 패널을 하단 시트로 모아 위아래로 쌓음 */
+    #rt-dock { left: 0; right: 0; top: auto; height: 64vh; flex-direction: column; transform: translateY(100%); box-shadow: 0 -3px 14px rgba(0,0,0,.18); }
+    body.rt-on #rt-dock { transform: translateY(0); }
+    #rt-sum-panel, #rt-panel { width: 100%; max-width: 100%; flex: 1; min-height: 0; }
+    #rt-sum-panel { border-right: none; border-bottom: 1px solid #e8eaf0; }
+}
+
+/* 수정 모달 (장소 이름/분류/좌표 지정) */
 .pl-modal { position: fixed; inset: 0; z-index: 1000; background: rgba(0,0,0,.45); display: none; align-items: center; justify-content: center; }
 .pl-modal.open { display: flex; }
 .pem-box { background: #fff; border-radius: 12px; width: 440px; max-width: 94vw; max-height: 90vh; display: flex; flex-direction: column; box-shadow: 0 12px 40px rgba(0,0,0,.3); }
@@ -218,9 +319,35 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .pem-res b { font-size: 13.5px; color: #2c3e50; font-weight: 600; }
 .pem-rcat { font-size: 10.5px; color: #16a085; margin-left: 6px; font-weight: 600; }
 .pem-raddr { font-size: 11.5px; color: #8a97a3; margin-top: 1px; }
+/* 좌표 검색 결과: 주소를 주 표시로(같은 이름 구분), 이름은 보조 */
+.pem-raddr-main { font-size: 13px; color: #2c3e50; font-weight: 600; line-height: 1.35; }
+.pem-rname { font-size: 11.5px; color: #8a97a3; margin-top: 1px; }
 .pem-empty { padding: 12px; font-size: 12.5px; color: #aaa; text-align: center; }
 .pem-picked { margin-top: 10px; font-size: 12.5px; color: #1e8449; line-height: 1.5; }
 .pem-picked span { color: #8a97a3; }
+/* 최근 수정 시각 */
+.pem-updated { font-size: 11.5px; color: #8a97a3; margin-bottom: 10px; }
+.pem-updated:empty { display: none; }
+.pem-updated b { color: #5a6b7b; font-weight: 700; }
+/* 연결된 기사 목록 + 제거 */
+.pem-refs-hd { font-size: 12px; font-weight: 700; color: #5a6b7b; margin: 10px 0 4px; }
+.pem-refs-cnt { color: #2980b9; margin-left: 2px; }
+.pem-refs { display: flex; flex-direction: column; gap: 6px; max-height: 190px; overflow-y: auto; }
+.pem-ref { display: flex; align-items: center; gap: 7px; background: #f7fafc; border: 1px solid #e7edf2; border-radius: 8px; padding: 7px 9px; }
+.pem-ref-rt { flex-shrink: 0; font-size: 10px; font-weight: 700; color: #fff; background: #95a5a6; border-radius: 4px; padding: 2px 5px; }
+.pem-ref-rt.article { background: #3498db; } .pem-ref-rt.youtube { background: #e74c3c; } .pem-ref-rt.blog { background: #16a085; } .pem-ref-rt.official { background: #8e44ad; }
+.pem-ref-t { flex: 1; min-width: 0; font-size: 12.5px; color: #2c3e50; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
+.pem-ref-d { flex-shrink: 0; font-size: 10.5px; color: #aab3bc; }
+.pem-ref-del { flex-shrink: 0; background: none; border: none; color: #c3ccd4; font-size: 16px; line-height: 1; cursor: pointer; padding: 0 2px; }
+.pem-ref-del:hover { color: #c0392b; }
+.pem-refs-hint { margin-top: 6px; font-size: 11px; color: #95a5a6; line-height: 1.45; }
+/* 기사 직접 추가(제목 + URL) */
+.pem-refadd { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.pem-refadd #pemRefTitle { flex: 1 1 100%; }
+.pem-refadd #pemRefUrl { flex: 1 1 60%; min-width: 0; }
+.pem-refadd-btn { flex-shrink: 0; background: #eef7f0; border: 1px solid #cfe6d6; color: #1e8449; font-size: 12.5px; font-weight: 600; padding: 0 12px; border-radius: 7px; cursor: pointer; white-space: nowrap; }
+.pem-refadd-btn:hover { background: #e1f0e6; }
 /* 검색 결과 행: 본문(클릭=기본좌표) + ➕(추가 장소로) */
 .pem-res-main { cursor: pointer; }
 .pem-res-row { display: flex; align-items: flex-start; gap: 8px; }
@@ -263,20 +390,41 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .pem-tag button { background: none; border: none; font-size: 14px; line-height: 1; cursor: pointer; color: inherit; opacity: .55; padding: 0 1px; }
 .pem-tag button:hover { opacity: 1; color: #c0392b; }
 .pem-hint { margin-top: 10px; font-size: 11.5px; color: #95a5a6; line-height: 1.5; }
-/* 태그 관리 */
-.tm-hint { font-size: 12px; color: #7b8794; line-height: 1.6; margin-bottom: 12px; }
-.tm-body { display: flex; flex-direction: column; }
-.tm-empty { padding: 18px; text-align: center; color: #aab3bc; font-size: 13px; }
-.tm-row { display: flex; align-items: center; gap: 7px; padding: 8px 2px; border-bottom: 1px solid #f1f3f5; }
-.tm-name { font-size: 13.5px; font-weight: 600; color: #2c3e50; }
-.tm-cnt { font-size: 11px; color: #fff; background: #aab3bc; border-radius: 9px; padding: 1px 7px; }
-.tm-sp { flex: 1; }
-.tm-to { width: 118px; font-size: 12.5px; padding: 5px 8px; border: 1px solid #d8dde3; border-radius: 6px; }
-.tm-merge { background: #eaf3fb; border: 1px solid #b6d7f2; color: #2471a3; font-size: 11.5px; font-weight: 600; padding: 5px 9px; border-radius: 6px; cursor: pointer; }
-.tm-merge:hover { background: #d8ebfa; }
-.tm-del { background: #fdecea; border: 1px solid #f5c6c0; color: #c0392b; font-size: 12px; padding: 5px 8px; border-radius: 6px; cursor: pointer; line-height: 1; }
-.tm-del:hover { background: #f9d9d4; }
+/* 태그 관리 — 칩 그리드 + 선택형 액션바 */
+#pl-tagmgr { z-index: 1100; }   /* 수정모달(1000) 위에 표시 */
+.tm-box { width: 540px; max-width: 94vw; height: 78vh; }
+.tm-top { padding: 12px 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #eee; flex-shrink: 0; }
+.tm-top .pem-inp { flex: 1; }
+.tm-count { font-size: 12px; color: #95a5a6; white-space: nowrap; }
+.tm-grid { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-wrap: wrap; align-content: flex-start; gap: 8px; }
+.tm-empty { width: 100%; padding: 24px; text-align: center; color: #aab3bc; font-size: 13px; }
+.tm-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 5px 11px; border-radius: 16px; border: 1px solid #dde3e9; background: #f6f8fa; color: #2c3e50; cursor: pointer; user-select: none; }
+.tm-chip:hover { border-color: #b6d7f2; background: #eef6ff; }
+.tm-chip.sel { background: #2980b9; border-color: #2471a3; color: #fff; }
+.tm-chip .tm-c { font-size: 10.5px; font-weight: 700; opacity: .65; }
+.tm-chip.sel .tm-c { opacity: .9; }
+.tm-action { flex-shrink: 0; border-top: 1px solid #eee; padding: 12px 16px; background: #fafbfc; }
+.tm-hint { font-size: 12.5px; color: #95a5a6; line-height: 1.5; }
+.tm-sel-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.tm-selchip { font-size: 12px; background: #eef3f8; border: 1px solid #cfe0ef; color: #2471a3; border-radius: 13px; padding: 2px 4px 2px 10px; display: inline-flex; align-items: center; gap: 3px; }
+.tm-selchip button { background: none; border: none; cursor: pointer; color: #2471a3; font-size: 14px; line-height: 1; padding: 0 2px; }
+.tm-act-btns { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.tm-act-btns .tm-inp { flex: 1; min-width: 120px; font-size: 13.5px; padding: 7px 10px; border: 1px solid #d8dde3; border-radius: 7px; }
+.tm-btn { font-size: 13px; font-weight: 600; padding: 7px 14px; border-radius: 7px; cursor: pointer; border: 1px solid; white-space: nowrap; }
+.tm-btn.merge { background: #eaf3fb; border-color: #b6d7f2; color: #2471a3; }
+.tm-btn.del { background: #fdecea; border-color: #f5c6c0; color: #c0392b; }
+.tm-btn.rename { background: #eef7f0; border-color: #cfe6d6; color: #1e8449; }
+.tm-btn.primary { background: #2980b9; border-color: #2471a3; color: #fff; }
+.tm-btn.ghost { background: #fff; border-color: #d8dde3; color: #5b6b7b; }
+.tm-merge-pick { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 10px; }
+.tm-pick { font-size: 12.5px; padding: 5px 11px; border-radius: 14px; border: 1px solid #d8dde3; background: #fff; cursor: pointer; }
+.tm-pick.on { background: #27ae60; border-color: #229954; color: #fff; }
 .pem-foot { padding: 12px 18px; border-top: 1px solid #eee; display: flex; justify-content: flex-end; gap: 8px; }
+.pl-autochk { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; color: #5b6b7b; white-space: nowrap; cursor: pointer; user-select: none; }
+.pl-autochk input { cursor: pointer; margin: 0; }
+.pem-lbl-row { display: flex; align-items: center; gap: 6px; }
+.pem-tagmgr { margin-left: auto; background: #f3f1fb; border: 1px solid #d9d2f0; color: #6c5ce7; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.pem-tagmgr:hover { background: #e9e4f8; }
 </style>
 </head>
 <body>
@@ -296,7 +444,7 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
     <select id="category" onchange="plSearchHere()">
         <option value="">전체</option>
         <option value="travel">여행지</option>
-        <option value="event">축제</option>
+        <option value="stay">숙소</option>
         <option value="restaurant">맛집</option>
         <option value="etc">기타</option>
     </select>
@@ -309,11 +457,11 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
         <option value="30">30km</option>
         <option value="50">50km</option>
     </select>
-    <input type="text" id="keyword" placeholder="이름 검색" onkeydown="if(event.key==='Enter')plSearchHere()">
-    <button class="btn btn-outline" onclick="plSearchHere()">이 지역 검색</button>
+    <label class="pl-autochk" title="체크하면 지도를 옮길 때마다 그 지역 장소를 자동으로 표시합니다">
+        <input type="checkbox" id="autoSearch" onchange="plAutoToggle()"> 이동 시 주변검색
+    </label>
 <?php if (!$isGuest): ?>
-    <button class="btn btn-outline" onclick="plNoGeoToggle()" title="좌표를 못 찾아 지도에 표시되지 않는 장소 목록">📍 미좌표</button>
-    <button class="btn btn-outline" onclick="plTagMgrOpen()" title="태그 정리·병합">🏷 태그 관리</button>
+    <button class="btn btn-route" id="rtModeBtn" onclick="rtToggleMode()" title="여행 경로(동선)를 만듭니다">🧭 여행지도 만들기</button>
     <div class="pl-share-wrap">
         <button class="btn btn-share" onclick="plShareToggle()">🔗 공유</button>
         <div id="pl-share">
@@ -354,13 +502,19 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 <div id="pl-main">
     <div id="map"></div>
     <div id="pl-list">
-        <div class="pl-list-head"><span id="plListTitle">결과</span><button class="lh-close" onclick="plToggleList(false)" title="목록 닫기">×</button></div>
+        <div class="pl-list-head"><span id="plListTitle">결과</span>
+            <div class="lh-acts">
+<?php if (!$isGuest): ?>                <button class="lh-merge" id="plMergeBtn" onclick="plMergeOpen()" style="display:none" title="선택한 중복 장소 병합">🔀 병합</button>
+                <button class="lh-edit" id="plEditToggle" onclick="plToggleEdit()" title="장소 수정 연필 표시/숨김">✏️ 편집</button>
+<?php endif; ?>                <button class="lh-close" onclick="plToggleList(false)" title="목록 닫기">×</button>
+            </div>
+        </div>
         <div class="pl-list-body" id="plListBody"></div>
     </div>
     <div class="pl-hint" id="hint">주소를 검색하거나 지도를 옮긴 뒤 '이 지역 검색'을 누르세요</div>
     <div class="pl-legend">
         <span><i class="dot travel"></i>여행지</span>
-        <span><i class="dot event"></i>축제</span>
+        <span><i class="dot stay"></i>숙소</span>
         <span><i class="dot restaurant"></i>맛집</span>
         <span><i class="dot etc"></i>기타</span>
         <span><i class="dot" style="background:#ff2d2d"></i>검색 위치</span>
@@ -370,13 +524,41 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
         <div class="panel-refs" id="panelRefs"></div>
     </div>
 <?php if (!$isGuest): ?>
-    <div id="pl-nogeo">
-        <div class="ng-head">
-            <h3>📍 미좌표 장소</h3>
-            <button class="ng-close" onclick="plNoGeoClose()" title="닫기">×</button>
+    <div class="rt-banner">🧭 경로 만들기 중 — 지도 마커를 클릭하거나 주소를 입력해 경로를 만드세요 (검색 마커는 유지됩니다)</div>
+    <div id="rt-dock">
+    <div id="rt-sum-panel">
+        <div class="rt-head"><h3>📋 지점별 주변 장소</h3><span class="rt-sub" id="rtSumCnt"></span></div>
+        <div class="rt-sum" id="rtSum">
+            <div class="rt-sum-empty">경로를 추가하면 각 지점 반경 안의<br>장소가 자동으로 여기에 모입니다.</div>
         </div>
-        <div class="ng-sub" id="ngSub">불러오는 중…</div>
-        <div class="ng-body" id="ngBody"></div>
+    </div>
+    <div id="rt-panel">
+        <div class="rt-head"><h3>🧭 경로 만들기</h3><button class="rt-x" onclick="rtToggleMode()" title="닫기">×</button></div>
+        <div class="rt-controls">
+            <span class="rt-clbl">반경</span>
+            <span class="rt-rquick">
+                <button type="button" class="rt-rq" data-r="3" onclick="rtSetRadius(3)">3km</button>
+                <button type="button" class="rt-rq on" data-r="5" onclick="rtSetRadius(5)">5km</button>
+                <button type="button" class="rt-rq" data-r="10" onclick="rtSetRadius(10)">10km</button>
+            </span>
+            <input type="number" id="rtRadius" class="rt-rnum" min="0.5" max="50" step="0.5" value="5" onchange="rtRadiusInput()" title="직접 입력(km)">
+            <label class="rt-chk"><input type="checkbox" id="rtCircleChk" checked onchange="rtToggleCircles()"> 반경 원</label>
+            <label class="rt-chk"><input type="checkbox" id="rtDistChk" checked onchange="rtRenderSummary()"> 거리</label>
+            <button class="rt-go" id="rtFinalBtn" onclick="rtFinalize()" title="반경 밖 마커를 숨기거나 다시 표시합니다">🙈 마크 숨기기</button>
+        </div>
+        <div class="rt-tip">검색해 둔 마커는 <b>그대로 유지</b>됩니다. 경로를 추가하면 <b>반경 안의 장소는 작은 원</b>으로 바뀌고 오른쪽 종합에 자동 정리됩니다(반경 밖은 그대로). <b>지도 마커 클릭</b>·<b>주소 직접 입력</b>으로 경로에 추가, <b>≡</b> 드래그로 순서변경. <b>🙈 마크 숨기기</b>로 반경 밖 마커를 감출 수 있습니다.</div>
+        <div class="rt-input-row">
+            <input type="text" id="rtAddr" placeholder="주소·장소명 직접 입력 (예: 강릉시청)"
+                   onkeydown="if(event.key==='Enter'){event.preventDefault();rtAddrAdd();}">
+            <button onclick="rtAddrAdd()">추가</button>
+        </div>
+        <div class="rt-scroll">
+            <div class="rt-sec-hd rt-sec-hd-row">📍 경로 지점 <span class="rt-sub" id="rtRowsCnt"></span>
+                <button class="rt-clearbtn" onclick="rtClear()" title="경로를 모두 비웁니다">경로비우기</button>
+            </div>
+            <div class="rt-rows" id="rtRows"></div>
+        </div>
+    </div>
     </div>
 <?php endif; ?>
 </div>
@@ -384,20 +566,32 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 <?php if (!$isGuest): ?>
 <div id="pl-edit" class="pl-modal">
     <div class="pem-box">
-        <div class="pem-head"><span>✏️ 미좌표 장소 수정</span><button class="pem-x" onclick="plEditClose()">×</button></div>
+        <div class="pem-head"><span>✏️ 장소 수정</span><button class="pem-x" onclick="plEditClose()">×</button></div>
         <div class="pem-body">
+            <div id="pemUpdated" class="pem-updated"></div>
             <label class="pem-lbl">이름</label>
             <input type="text" id="pemName" class="pem-inp">
             <label class="pem-lbl">분류</label>
             <select id="pemCat" class="pem-inp">
                 <option value="travel">여행지</option>
-                <option value="event">축제</option>
+                <option value="stay">숙소</option>
                 <option value="restaurant">맛집</option>
                 <option value="etc">기타</option>
             </select>
+            <div class="pem-refs-hd">📰 연결된 기사 <span class="pem-refs-cnt" id="pemRefsCnt"></span></div>
+            <div id="pemRefs" class="pem-refs"></div>
+            <div class="pem-refadd">
+                <input type="text" id="pemRefTitle" class="pem-inp" placeholder="기사 제목">
+                <input type="text" id="pemRefUrl" class="pem-inp" placeholder="원문 URL (선택)"
+                       onkeydown="if(event.key==='Enter'){event.preventDefault();plEditAddRef();}">
+                <button type="button" class="pem-refadd-btn" onclick="plEditAddRef()">➕ 기사 추가</button>
+            </div>
+            <div class="pem-refs-hint" id="pemRefsHint">잘못 연결된 기사는 <b>✕</b>로 영구 삭제할 수 있습니다(되돌릴 수 없음).</div>
             <label class="pem-lbl">방문시기 <span class="pem-sub">해당 월을 클릭</span></label>
             <div class="pem-months" id="pemMonths"></div>
-            <label class="pem-lbl">태그 <span class="pem-sub">벚꽃·캠핑장·야경 등 — 검색에 쓰입니다</span></label>
+            <div class="pem-lbl pem-lbl-row">태그 <span class="pem-sub">벚꽃·캠핑장·야경 등 — 검색에 쓰입니다</span>
+                <button type="button" class="pem-tagmgr" onclick="plTagMgrOpen()" title="태그 정리·병합·삭제">🏷 태그 관리</button>
+            </div>
             <input type="text" id="pemTagInput" class="pem-inp" list="pemTagList" autocomplete="off"
                    placeholder="태그 입력 후 Enter (쉼표로 여러 개)"
                    onkeydown="if(event.key==='Enter'){event.preventDefault();plEditTagAdd();}">
@@ -424,15 +618,27 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 </div>
 
 <div id="pl-tagmgr" class="pl-modal">
-    <div class="pem-box">
+    <div class="pem-box tm-box">
         <div class="pem-head"><span>🏷 태그 관리</span><button class="pem-x" onclick="plTagMgrClose()">×</button></div>
+        <div class="tm-top">
+            <input type="text" id="tmSearch" class="pem-inp" placeholder="🔍 태그 찾기…" autocomplete="off" oninput="plTagMgrRender()">
+            <span class="tm-count" id="tmCount"></span>
+        </div>
+        <div id="tmGrid" class="tm-grid"></div>
+        <div id="tmAction" class="tm-action"></div>
+    </div>
+</div>
+
+<div id="pl-merge" class="pl-modal">
+    <div class="pem-box" style="width:480px;max-width:94vw;">
+        <div class="pem-head"><span>🔀 중복 장소 병합</span><button class="pem-x" onclick="plMergeClose()">×</button></div>
         <div class="pem-body">
-            <div class="tm-hint">비슷한 태그를 <b>한 태그로 병합</b>하거나 이름을 바꿔 정리하세요. 옆 칸에 합칠/바꿀 이름을 적고 <b>병합</b>을 누르면, 그 태그를 가진 모든 장소가 새 이름으로 합쳐집니다. (월 태그는 제외)</div>
-            <datalist id="tmList"></datalist>
-            <div id="tmBody" class="tm-body"></div>
+            <div class="tm-hint">남길 <b>대표 장소</b>를 고르세요. 나머지의 <b>기사·태그가 대표로 합쳐지고</b> 중복 장소는 삭제됩니다(되돌릴 수 없음).</div>
+            <div id="plMergePick" class="pm-pick"></div>
         </div>
         <div class="pem-foot">
-            <button class="btn btn-ghost" onclick="plTagMgrClose()">닫기</button>
+            <button class="btn btn-ghost" onclick="plMergeClose()">취소</button>
+            <button class="tm-btn primary" onclick="plMergeApply()">합치기</button>
         </div>
     </div>
 </div>
@@ -443,6 +649,9 @@ var PLACE_NAVER_KEY = <?= json_encode($naverClientId) ?>;
 var PL_SHARE        = <?= json_encode($isGuest ? $shareToken : '') ?>; // 게스트면 토큰, 소유자면 ''
 var plMap = null, plMarkers = [], plReady = false;
 var plFeatures = [], plActive = -1;
+var plPendingFocusId = null;          // 통합검색에서 우리 DB 장소 선택 시, 검색결과 렌더 후 그 마커 강조
+var plIdleTimer = null, plLastSearchAt = 0;   // 지도 멈춤(idle) 자동검색 디바운스 + 중복방지
+var plMergeSel = [];                  // 편집모드 병합 선택 장소 id 목록
 var plSearchMarker = null; // 검색으로 이동한 위치 마커(여행지 마커와 별개로 유지)
 
 // 검색 위치 마커 표시(기존 것 교체) — 보라 별 핀
@@ -495,6 +704,18 @@ function plInit() {
         plReady = true;
         plTagBarInit();   // 상단 태그 칩 바 로드
 
+        // 지도 멈추면(이동·줌 종료) 그 지역 자동 검색 — 별도 '이 지역 검색' 버튼 대체
+        naver.maps.Event.addListener(plMap, 'idle', function () {
+            clearTimeout(plIdleTimer);
+            plIdleTimer = setTimeout(function () {
+                var chk = document.getElementById('autoSearch');
+                if (!chk || !chk.checked) return;                  // 옵션 꺼져 있으면 이동 자동검색 안 함(기본)
+                if (plSelTags.length || plSelMonth) return;        // 태그 검색 중이면 자동검색 안 함
+                if (Date.now() - plLastSearchAt < 800) return;     // 방금 검색했으면(프로그램 이동) 중복 방지
+                plSearchHere();
+            }, 450);
+        });
+
         // 생성 직후 컨테이너 크기 보정 (회색 타일 방지) — 레이아웃 확정 타이밍을 놓치지 않게 다단 + 옵저버
         [60, 250, 600].forEach(function (ms) { setTimeout(plBumpResize, ms); });
         window.addEventListener('resize', plBumpResize);
@@ -511,10 +732,12 @@ function plInit() {
 plInit();
 
 // ── 상단 태그 칩 바 + 월 바 (태그 1 + 월 1 을 동시에 AND 선택) ──
-var plTagBarAll = [], plTagBarExpanded = false, plSelTag = null, plSelMonth = null;
+var plTagBarAll = [], plTagBarExpanded = false, plSelTags = [], plSelMonth = null;
+var PL_TAG_MAX = 3;   // 태그 동시 선택 최대 개수(AND)
 var PL_TAGBAR_TOP = 14;
 function plTagBarInit() {
-    fetch(plApiUrl({ module: 'place', action: 'tag_list' }))
+    // bar=1: 지도에 뜨는(ok·활성) 장소 기준 distinct 카운트 → 칩 숫자 = 클릭 시 리스트 곳수
+    fetch(plApiUrl({ module: 'place', action: 'tag_list', bar: 1 }))
         .then(function (r) { return r.json(); })
         .then(function (d) {
             plTagBarAll = ((d && d.items) || []).filter(function (t) { return t.kind !== 'month'; }); // 월 제외
@@ -545,7 +768,7 @@ function plTagBarRender() {
     var list = plTagBarExpanded ? plTagBarAll : plTagBarAll.slice(0, PL_TAGBAR_TOP);
     box.innerHTML = list.map(function (t) {
         var tg = t.tag.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-        var on = (plSelTag === t.tag) ? ' active' : '';
+        var on = (plSelTags.indexOf(t.tag) >= 0) ? ' active' : '';
         return '<button class="tb-chip' + on + '" onclick="plTagBarClick(\'' + tg + '\')">' +
             plEsc(t.tag) + '<span class="tb-cnt">' + t.cnt + '</span></button>';
     }).join('');
@@ -559,15 +782,19 @@ function plTagBarRender() {
 }
 function plTagBarToggleMore() { plTagBarExpanded = !plTagBarExpanded; plTagBarRender(); }
 function plTagBarClick(tag) {
-    plSelTag = (plSelTag === tag) ? null : tag;       // 재클릭=해제, 월 선택과 독립
+    var i = plSelTags.indexOf(tag);
+    if (i >= 0) { plSelTags.splice(i, 1); }            // 재클릭=해제
+    else {
+        if (plSelTags.length >= PL_TAG_MAX) { plHint('태그는 최대 ' + PL_TAG_MAX + '개까지 선택할 수 있습니다'); return; }
+        plSelTags.push(tag);                           // 추가(최대 3개 AND)
+    }
     plTagBarRender();
     plRunTagSearch();
 }
-function plClearTagSel() { plSelTag = null; plSelMonth = null; plTagBarRender(); plMonthBarRender(); }
-// 현재 선택된 태그 + 월을 AND 로 검색 (둘 다 없으면 해제)
+function plClearTagSel() { plSelTags = []; plSelMonth = null; plTagBarRender(); plMonthBarRender(); }
+// 현재 선택된 태그(최대 3) + 월을 AND 로 검색 (없으면 해제)
 function plRunTagSearch() {
-    var tags = [];
-    if (plSelTag) tags.push(plSelTag);
+    var tags = plSelTags.slice();
     if (plSelMonth) tags.push(plSelMonth);
     if (!tags.length) { plTagClear(); return; }
     plTagSearch(tags);
@@ -588,6 +815,7 @@ function plTagSearch(tags) {
             plClearMarkers(); plActive = -1; plFeatures = feats;
             feats.forEach(plAddMarker);
             plRenderList(feats);
+            plRefreshCurrent = function () { plTagSearch(tags); };   // 수정 후 목록 갱신용
             document.getElementById('plListTitle').textContent = '🏷 ' + label + ' ' + feats.length + '곳';
             plToggleList(feats.length > 0);
             if (feats.length) plFitToFeatures(feats);
@@ -637,6 +865,12 @@ function plSearchHere() {
     plSearch(c.lat(), c.lng(), parseFloat(document.getElementById('radius').value));
 }
 
+// '이동 시 주변검색' 토글: 켜면 지금 화면을 즉시 한 번 검색(이후 이동마다 자동)
+function plAutoToggle() {
+    var chk = document.getElementById('autoSearch');
+    if (chk && chk.checked) plSearchHere();
+}
+
 // 반경 드롭다운 변경 → 줌도 그 반경에 맞게 바꾸고 재검색
 function plRadiusChange() {
     if (!plReady) return;
@@ -653,14 +887,15 @@ function plNextRadius(cur) {
 // 좌표 기준 검색 → GeoJSON → 마커 렌더
 //  expandFrom 가 숫자면: 결과 0곳일 때 다음 반경으로 자동 확장(데이터 나올 때까지, 최대 50km)
 function plSearch(lat, lng, expandFrom) {
-    if (plSelTag || plSelMonth) plClearTagSel();   // 지역 검색 시 태그·월 선택 해제
+    if (plSelTags.length || plSelMonth) plClearTagSel();   // 지역 검색 시 태그·월 선택 해제
+    plMergeSel = [];                                       // 새 검색 시 병합 선택 초기화
+    plLastSearchAt = Date.now();                           // idle 자동검색 중복 방지용 타임스탬프
     var rad = (expandFrom != null) ? expandFrom : parseFloat(document.getElementById('radius').value);
     fetch(plApiUrl({
         module: 'place', action: 'search',
         lat: lat, lng: lng,
         radius: rad,
-        category: document.getElementById('category').value,
-        keyword: document.getElementById('keyword').value.trim()
+        category: document.getElementById('category').value
     }))
         .then(function (r) { return r.json(); })
         .then(function (geo) {
@@ -683,6 +918,7 @@ function plSearch(lat, lng, expandFrom) {
             plFeatures = feats;
             feats.forEach(plAddMarker);   // (f, idx) — forEach 2번째 인자가 번호
             plRenderList(feats);
+            plRefreshCurrent = function () { plSearch(lat, lng); };   // 수정 후 목록 갱신용
             plToggleList(feats.length > 0);
             if (expandFrom != null) document.getElementById('radius').value = String(rad);
             plHint(feats.length ? (rad + 'km 반경 ' + feats.length + '곳')
@@ -725,15 +961,35 @@ function plRenderList(feats) {
     title.textContent = '이 지역 ' + feats.length + '곳';
     body.innerHTML = feats.map(function (f, i) {
         var pr = f.properties, c = pr.category || 'etc';
-        var sub = pr.address || (CAT_KO[pr.category] || '');
         var dist = (pr.dist_km != null) ? '<span class="li-dist">~' + plFmtDist(pr.dist_km) + '</span>' : '';
-        return '<div class="pl-li" id="pl-li-' + i + '" onclick="plFocus(' + i + ')">' +
-            '<span class="li-no cat-' + c + '">' + (i + 1) + '</span>' +
+        var refs = (pr.ref_count > 0)
+            ? '<span class="li-refs" title="연결된 기사 ' + pr.ref_count + '건">' + pr.ref_count + '</span>' : '';
+        // 주소 대신 태그(#둘레길 #호수). 태그 없으면 분류명으로 폴백(빈 줄 방지)
+        var sub = (pr.tags && pr.tags.length)
+            ? '<div class="li-tags">' + pr.tags.slice(0, 6).map(function (t) {
+                  return '<span class="li-tag">#' + plEsc(t) + '</span>'; }).join('') + '</div>'
+            : '<div class="li-sub">' + plEsc(CAT_KO[c] || '기타') + '</div>';
+        var edit = (!PL_SHARE && pr.id) ? '<button class="li-edit" title="수정" onclick="event.stopPropagation();plEditOpen(' + pr.id + ',\'list\')">✏️</button>' : '';
+        var selCls = (pr.id && plMergeSel.indexOf(pr.id) >= 0) ? ' mc-sel' : '';
+        var noClick = (!PL_SHARE && pr.id) ? ' onclick="plNoClick(event,' + pr.id + ')"' : '';
+        return '<div class="pl-li' + selCls + '" id="pl-li-' + i + '" data-pid="' + (pr.id || 0) + '" onclick="plFocus(' + i + ')">' +
+            '<span class="li-no cat-' + c + '"' + noClick + '>' + (i + 1) + '</span>' +
             '<div class="li-body">' +
-                '<div class="li-name"><span class="nm">' + plEsc(pr.name) + '</span>' + dist + '</div>' +
-                '<div class="li-sub">' + plEsc(sub) + '</div>' +
-            '</div></div>';
+                '<div class="li-name"><span class="nm">' + plEsc(pr.name) + '</span>' + refs +
+                    '<span class="li-meta">' + dist + '</span></div>' +
+                sub +
+            '</div>' + edit + '</div>';
     }).join('');
+    // 통합검색에서 우리 DB 장소를 골랐으면, 그 마커를 강조 + 상세패널 표시
+    if (plPendingFocusId != null) {
+        for (var k = 0; k < feats.length; k++) {
+            if (feats[k].properties && feats[k].properties.id == plPendingFocusId) { plFocus(k); break; }
+        }
+        plPendingFocusId = null;
+    }
+    plMergeHeadRender();   // 상단 병합 버튼 상태 동기화 (행 mc-sel 은 렌더 시 반영됨)
+    // 경로 모드 중 새 검색이면, 결과 마커를 반경 기준으로 다시 스타일링(반경 안=작은 원)
+    if (typeof rtMode !== 'undefined' && rtMode) rtRefresh();
 }
 
 // 거리(km) 표기: 1km 미만은 m, 그 이상은 소수1자리 km
@@ -745,13 +1001,112 @@ function plFmtDist(km) {
 }
 
 function plToggleList(show) {
+    if (typeof rtMode !== 'undefined' && rtMode) show = false;  // 경로 모드에선 좌측이 '주변 종합' 패널이라 검색 목록은 닫음
     document.getElementById('pl-list').classList.toggle('open', show);
     setTimeout(plBumpResize, 60); // 지도 폭 변동 → 회색 타일 방지
 }
 
+// 편집 모드 토글: 켰을 때만 리스트 항목에 ✏️ 수정 연필 + ✓ 병합 선택이 보인다(기본 숨김)
+function plToggleEdit() {
+    var p = document.getElementById('pl-list');
+    var on = !p.classList.contains('edit-on');
+    p.classList.toggle('edit-on', on);
+    var b = document.getElementById('plEditToggle');
+    if (b) { b.classList.toggle('active', on); b.textContent = on ? '✏️ 편집 중' : '✏️ 편집'; }
+    if (!on) plMergeClearSel();   // 편집 끄면 병합 선택 해제
+    else plMergeHeadRender();
+}
+
+// ── 중복 장소 병합: 편집모드에서 ✓로 2곳+ 선택 → 대표 골라 합치기 ──
+function plFeatById(id) {
+    for (var i = 0; i < plFeatures.length; i++) { if (plFeatures[i].properties && plFeatures[i].properties.id == id) return plFeatures[i].properties; }
+    return null;
+}
+// 편집모드에서만 원+숫자 클릭 = 병합 선택 토글(그 외엔 행 클릭(plFocus)에 맡김)
+function plNoClick(e, id) {
+    var list = document.getElementById('pl-list');
+    if (!list.classList.contains('edit-on')) return;   // 일반 모드: 버블링 → plFocus
+    e.stopPropagation();
+    plMergeToggle(id);
+}
+function plMergeToggle(id) {
+    var i = plMergeSel.indexOf(id);
+    if (i >= 0) plMergeSel.splice(i, 1); else plMergeSel.push(id);
+    plMergeSyncRows();
+    plMergeHeadRender();
+}
+function plMergeSyncRows() {   // 선택 상태를 행 배경(mc-sel)에 반영
+    var rows = document.querySelectorAll('#plListBody .pl-li');
+    for (var i = 0; i < rows.length; i++) {
+        var pid = parseInt(rows[i].getAttribute('data-pid'), 10);
+        rows[i].classList.toggle('mc-sel', plMergeSel.indexOf(pid) >= 0);
+    }
+}
+function plMergeHeadRender() {   // 상단 '병합 N' 버튼 (2곳 이상일 때만)
+    var b = document.getElementById('plMergeBtn');
+    if (!b) return;
+    var n = plMergeSel.length;
+    if (n >= 2) { b.style.display = ''; b.textContent = '🔀 병합 ' + n; }
+    else { b.style.display = 'none'; b.textContent = '🔀 병합'; }
+}
+function plMergeClearSel() {
+    plMergeSel = [];
+    plMergeSyncRows();
+    plMergeHeadRender();
+}
+function plMergeOpen() {
+    if (plMergeSel.length < 2) return;
+    var rows = plMergeSel.map(function (id) { return plFeatById(id); }).filter(Boolean);
+    if (rows.length < 2) { alert('선택한 장소 정보를 찾을 수 없습니다. 다시 검색해 주세요.'); return; }
+    // 기본 대표 = 기사 수 최다
+    var mainId = rows.slice().sort(function (a, b) { return (b.ref_count || 0) - (a.ref_count || 0); })[0].id;
+    document.getElementById('plMergePick').innerHTML = rows.map(function (p) {
+        var reg = [p.region_lv1, p.region_lv2].filter(Boolean).join(' ');
+        var ad = p.address || reg || '(주소 없음)';
+        var checked = (p.id == mainId) ? ' checked' : '';
+        var mainTag = (p.id == mainId) ? '<span class="pm-main-tag">대표</span>' : '';
+        var refs = (p.ref_count > 0) ? '<span class="pm-refs">기사 ' + p.ref_count + '</span>' : '';
+        return '<label class="pm-row' + (checked ? ' main' : '') + '">' +
+            '<input type="radio" name="pmMain" value="' + p.id + '"' + checked + ' onchange="plMergePickMain(' + p.id + ')">' +
+            '<div><div class="pm-nm">' + plEsc(p.name) + refs + mainTag + '</div>' +
+            '<div class="pm-ad">' + plEsc(ad) + '</div></div></label>';
+    }).join('');
+    document.getElementById('pl-merge').classList.add('open');
+}
+function plMergePickMain(id) {   // 라디오 바뀌면 '대표' 강조 갱신
+    var rows = document.querySelectorAll('#plMergePick .pm-row');
+    for (var i = 0; i < rows.length; i++) {
+        var r = rows[i], inp = r.querySelector('input'), on = (inp.value == id);
+        r.classList.toggle('main', on);
+        var nm = r.querySelector('.pm-nm'); var tag = r.querySelector('.pm-main-tag');
+        if (on && !tag) nm.insertAdjacentHTML('beforeend', '<span class="pm-main-tag">대표</span>');
+        if (!on && tag) tag.remove();
+    }
+}
+function plMergeClose() { document.getElementById('pl-merge').classList.remove('open'); }
+function plMergeApply() {
+    var sel = document.querySelector('#plMergePick input[name=pmMain]:checked');
+    if (!sel) return;
+    var mainId = parseInt(sel.value, 10);
+    var others = plMergeSel.filter(function (id) { return id != mainId; });
+    if (!others.length) { plMergeClose(); return; }
+    fetch(plApiUrl({ module: 'place', action: 'place_merge', to_id: mainId, from_ids: others.join(',') }))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            if (!d || !d.ok) { alert((d && d.msg) || '병합 실패'); return; }
+            plMergeClose();
+            plMergeSel = [];
+            plHint((d.merged || others.length) + '곳을 대표로 병합했습니다');
+            if (typeof plRefreshCurrent === 'function') plRefreshCurrent();   // 목록·마커 갱신
+        })
+        .catch(function () { alert('병합 실패'); });
+}
+
 // 리스트/마커 클릭 → 지도 이동 + 양쪽 강조 + 상세패널
+//  (경로 만들기 모드에서는 상세패널 대신 그 장소를 경로에 추가)
 function plFocus(idx) {
     var f = plFeatures[idx]; if (!f) return;
+    if (typeof rtMode !== 'undefined' && rtMode) { rtAddFromFeature(f); return; }
     var co = f.geometry.coordinates;
     plMap.panTo(new naver.maps.LatLng(co[1], co[0]));
 
@@ -772,22 +1127,29 @@ function plFocus(idx) {
     plOpenPanel(f.properties);
 }
 
-var CAT_KO = { travel: '여행지', event: '축제', restaurant: '맛집', etc: '기타' };
+var CAT_KO = { travel: '여행지', stay: '숙소', restaurant: '맛집', etc: '기타' };
 
+var plPanelPlace = null;   // 현재 상세패널에 띄운 장소(경로 추가 버튼용)
 function plOpenPanel(pr) {
+    plPanelPlace = pr;
     var head = document.getElementById('panelHead');
     var meta = [];
     if (pr.address) meta.push('📍 ' + pr.address);
     if (pr.phone)   meta.push('📞 ' + pr.phone);
     if (pr.period_start) meta.push('🗓️ ' + pr.period_start + (pr.period_end ? ' ~ ' + pr.period_end : ''));
-    var tags = (pr.attributes && pr.attributes.tags) || [];
+    if (pr.dist != null) meta.push('↔️ 동선 지점에서 ~' + plFmtDist(pr.dist));
+    var tags = (pr.tags && pr.tags.length) ? pr.tags : ((pr.attributes && pr.attributes.tags) || []);
+    // 경로 모드 + 좌표가 있으면 '경로에 추가' 버튼 노출
+    var addBtn = (typeof rtMode !== 'undefined' && rtMode && pr.lat != null && pr.lng != null)
+        ? '<button class="rt-addcur" onclick="rtAddCurrent()">➕ 경로에 추가</button>' : '';
 
     head.innerHTML =
         '<button class="panel-close" onclick="plClosePanel()">×</button>' +
         '<span class="cat-badge ' + (pr.category || 'etc') + '">' + (CAT_KO[pr.category] || '기타') + '</span>' +
         '<h3>' + plEsc(pr.name) + '</h3>' +
         '<div class="meta">' + meta.map(plEsc).join('<br>') + '</div>' +
-        (tags.length ? '<div class="tags">' + tags.map(function (t) { return '<em>' + plEsc(t) + '</em>'; }).join('') + '</div>' : '');
+        (tags.length ? '<div class="tags">' + tags.map(function (t) { return '<em>' + plEsc(t) + '</em>'; }).join('') + '</div>' : '') +
+        addBtn;
 
     document.getElementById('panelRefs').innerHTML = '<div class="ref-empty">불러오는 중…</div>';
     document.getElementById('pl-panel').classList.add('open');
@@ -815,84 +1177,85 @@ function plRenderRefs(refs) {
 
 function plClosePanel() { document.getElementById('pl-panel').classList.remove('open'); }
 
-// ── 미좌표(좌표 없는) 장소 목록 패널 ──
-function plNoGeoToggle() {
-    var p = document.getElementById('pl-nogeo');
-    if (!p) return;
-    var open = !p.classList.contains('open');
-    p.classList.toggle('open', open);
-    if (open) plNoGeoLoad();
-}
-function plNoGeoClose() {
-    var p = document.getElementById('pl-nogeo');
-    if (p) p.classList.remove('open');
-}
-function plNoGeoLoad() {
-    var body = document.getElementById('ngBody');
-    var sub  = document.getElementById('ngSub');
-    body.innerHTML = '<div class="ng-empty">불러오는 중…</div>';
-    sub.textContent = '불러오는 중…';
-    fetch(plApiUrl({ module: 'place', action: 'ungeocoded', status: 'failed' }))
-        .then(function (r) { return r.json(); })
-        .then(function (d) {
-            if (!d || !d.ok) { body.innerHTML = '<div class="ng-empty">' + plEsc((d && d.msg) || '불러오기 실패') + '</div>'; sub.textContent = ''; return; }
-            sub.textContent = '좌표를 못 찾아 지도에 표시되지 않는 장소 · 총 ' + d.total + '건';
-            plNoGeoRender(d.items || []);
-        })
-        .catch(function () { body.innerHTML = '<div class="ng-empty">불러오기 실패</div>'; sub.textContent = ''; });
-}
-var plNoGeoItems = [];
-function plNoGeoRender(items) {
-    plNoGeoItems = items || [];
-    var body = document.getElementById('ngBody');
-    if (!plNoGeoItems.length) { body.innerHTML = '<div class="ng-empty">미좌표 장소가 없습니다 🎉</div>'; return; }
-    body.innerHTML = plNoGeoItems.map(function (it) {
-        var reg = [it.region_lv1, it.region_lv2].filter(Boolean).join(' ');
-        var c = it.category || 'etc';
-        var more = (it.ref_cnt > 1) ? ' 외 ' + (it.ref_cnt - 1) + '건' : '';
-        var link = it.top_url
-            ? '<a class="ng-link" href="' + plEsc(it.top_url) + '" onclick="plOpenArticle(this.href);return false;">🔗 ' + plEsc(it.top_title || '원문') + more + '</a>'
-            : '<span class="ng-reg">연결된 출처 없음</span>';
-        return '<div class="ng-li" id="ng-li-' + it.id + '">' +
-            '<div class="ng-row">' +
-                '<div class="ng-nm"><span class="ng-cat ' + c + '">' + (CAT_KO[c] || '기타') + '</span>' + plEsc(it.name) + '</div>' +
-                '<div class="ng-acts">' +
-                    '<button class="ng-edit" onclick="plEditOpen(' + it.id + ')">✏️ 수정</button>' +
-                    '<button class="ng-del" onclick="plNoGeoDelete(' + it.id + ')" title="이 장소 삭제">🗑</button>' +
-                '</div>' +
-            '</div>' +
-            (reg ? '<div class="ng-reg">' + plEsc(reg) + '</div>' : '') +
-            '<div style="margin-top:3px">' + link + '</div>' +
-        '</div>';
-    }).join('');
-}
-
-// 미좌표 장소 삭제 (place_ref CASCADE) — 되돌릴 수 없음
-function plNoGeoDelete(id) {
-    var it = null;
-    for (var i = 0; i < plNoGeoItems.length; i++) { if (plNoGeoItems[i].id == id) { it = plNoGeoItems[i]; break; } }
-    var nm = it ? it.name : '이 장소';
-    if (!confirm('“' + nm + '” 장소와 연결된 출처를 삭제합니다.\n되돌릴 수 없습니다. 삭제할까요?')) return;
-    fetch(plApiUrl({ module: 'place', action: 'place_delete', id: id }))
-        .then(function (r) { return r.json(); })
-        .then(function (d) {
-            if (!d || !d.ok) { alert((d && d.msg) || '삭제 실패'); return; }
-            plNoGeoLoad(); // 목록 갱신(카운트 포함)
-        })
-        .catch(function () { alert('삭제 실패'); });
-}
-
 // 기사 원문 → JS 팝업창
 function plOpenArticle(url) {
     if (!url) return;
     window.open(url, 'plArticle', 'width=920,height=860,scrollbars=yes,resizable=yes,menubar=no,toolbar=no');
 }
 
-// ── 미좌표 장소 수정 모달 (이름/분류 변경 + 카카오로 좌표 직접 지정) ──
+// ── 장소 수정 모달 (이름/분류 변경 + 카카오로 좌표 직접 지정) ──
 var plEditId = 0, plEditResults = [], plEditSel = null, plEditTimer = null, plEditExtras = [], plEditTags = [], plTagListLoaded = false;
+var plEditFrom = 'list';         // 모달을 연 곳: 'list'(좌측 결과 리스트)
+var plRefreshCurrent = null;     // 마지막 검색을 다시 실행해 리스트/마커 갱신 (수정 저장 후)
+
+// 수정 모달에 채울 장소 데이터 찾기 — 지도 검색결과(properties)에서
+function plFindPlaceData(id) {
+    for (var j = 0; j < plFeatures.length; j++) { var p = plFeatures[j].properties; if (p && p.id == id) return p; }
+    return null;
+}
+function plFmtDateTime(s) { return s ? String(s).slice(0, 16) : ''; }   // 'YYYY-MM-DD HH:MM:SS' → 분까지
+
+// 연결된 기사(출처) 목록 로드/렌더/제거
+var PL_RT = { article: '기사', youtube: '유튜브', blog: '블로그', official: '공식', manual: '메모' };
+function plEditLoadRefs(id) {
+    var box = document.getElementById('pemRefs'); document.getElementById('pemRefsCnt').textContent = '';
+    box.innerHTML = '<div class="pem-empty">불러오는 중…</div>';
+    fetch(plApiUrl({ module: 'place', action: 'refs', id: id }))
+        .then(function (r) { return r.json(); })
+        .then(function (d) { if (id !== plEditId) return; plEditRenderRefs((d && d.refs) || []); })
+        .catch(function () { box.innerHTML = '<div class="pem-empty">불러오기 실패</div>'; });
+}
+function plEditRenderRefs(refs) {
+    var box = document.getElementById('pemRefs');
+    document.getElementById('pemRefsCnt').textContent = refs.length ? '(' + refs.length + '건)' : '';
+    if (!refs.length) { box.innerHTML = '<div class="pem-empty">연결된 기사가 없습니다</div>'; return; }
+    box.innerHTML = refs.map(function (r) {
+        var title = plEsc(r.title || '(제목 없음)');
+        var t = r.url
+            ? '<a href="' + plEsc(r.url) + '" class="pem-ref-t" onclick="plOpenArticle(this.href);return false;">' + title + '</a>'
+            : '<span class="pem-ref-t">' + title + '</span>';
+        var del = '<button class="pem-ref-del" title="이 기사 영구 삭제" onclick="plEditDeleteRef(' + r.id + ')">✕</button>';
+        return '<div class="pem-ref">' +
+            '<span class="pem-ref-rt ' + plEsc(r.source_type) + '">' + (PL_RT[r.source_type] || plEsc(r.source_type)) + '</span>' +
+            t +
+            (r.published_at ? '<span class="pem-ref-d">' + plEsc(r.published_at) + '</span>' : '') +
+            del +
+        '</div>';
+    }).join('');
+}
+// 이 장소에서 기사(출처)를 영구 삭제
+function plEditDeleteRef(refId) {
+    if (!plEditId) return;
+    if (!confirm('이 기사를 영구 삭제합니다.\n되돌릴 수 없습니다. 삭제할까요?')) return;
+    fetch(plApiUrl({ module: 'place', action: 'ref_delete', ref_id: refId, place_id: plEditId }))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            if (!d || !d.ok) { alert((d && d.msg) || '삭제 실패'); return; }
+            plEditRenderRefs(d.refs || []);
+            plHint('기사 1건을 삭제했습니다');
+        })
+        .catch(function () { alert('삭제 실패'); });
+}
+// 이 장소에 기사(출처)를 직접 추가 — 제목 + URL (연결된 기사가 없을 때 등)
+function plEditAddRef() {
+    if (!plEditId) return;
+    var ti = document.getElementById('pemRefTitle');
+    var ui = document.getElementById('pemRefUrl');
+    var title = ti.value.trim(), url = ui.value.trim();
+    if (!title && !url) { alert('기사 제목 또는 URL을 입력하세요'); return; }
+    fetch(plApiUrl({ module: 'place', action: 'ref_add', place_id: plEditId, title: title, url: url }))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            if (!d || !d.ok) { alert((d && d.msg) || '추가 실패'); return; }
+            ti.value = ''; ui.value = '';
+            plEditRenderRefs(d.refs || []);
+            plHint(d.added ? '기사를 추가했습니다' : '이미 연결된 URL 입니다');
+        })
+        .catch(function () { alert('추가 실패'); });
+}
 
 // 분류 옵션(수정 모달 select 와 동일). 추가 장소 행의 <select> 생성에 재사용
-var PL_CAT_OPTS = [['travel', '여행지'], ['event', '축제'], ['restaurant', '맛집'], ['etc', '기타']];
+var PL_CAT_OPTS = [['travel', '여행지'], ['stay', '숙소'], ['restaurant', '맛집'], ['etc', '기타']];
 function plCatSelectHtml(sel, onchange) {
     var opts = PL_CAT_OPTS.map(function (o) {
         return '<option value="' + o[0] + '"' + (o[0] === sel ? ' selected' : '') + '>' + o[1] + '</option>';
@@ -900,16 +1263,20 @@ function plCatSelectHtml(sel, onchange) {
     return '<select class="pem-esel" onchange="' + onchange + '">' + opts + '</select>';
 }
 
-function plEditOpen(id) {
-    var it = null;
-    for (var i = 0; i < plNoGeoItems.length; i++) { if (plNoGeoItems[i].id == id) { it = plNoGeoItems[i]; break; } }
+function plEditOpen(id, from) {
+    var it = plFindPlaceData(id);
     if (!it) return;
-    plEditId = id; plEditSel = null; plEditResults = []; plEditExtras = [];
+    plEditId = id; plEditFrom = from || 'list'; plEditSel = null; plEditResults = []; plEditExtras = [];
     document.getElementById('pemName').value = it.name || '';
     document.getElementById('pemCat').value  = it.category || 'travel';
-    document.getElementById('pemSearch').value = it.name || '';
+    document.getElementById('pemSearch').value = it.address || it.name || '';  // 주소 우선(없으면 이름)
     document.getElementById('pemPicked').innerHTML = '';
     document.getElementById('pemResults').innerHTML = '';
+    document.getElementById('pemRefTitle').value = '';   // 기사 추가 입력 초기화
+    document.getElementById('pemRefUrl').value = '';
+    document.getElementById('pemUpdated').innerHTML =
+        it.updated_at ? ('🕒 최근 수정: <b>' + plEsc(plFmtDateTime(it.updated_at)) + '</b>') : '';
+    plEditLoadRefs(id);                   // 연결된 기사 목록
     plEditRenderExtras();
     plEditTags = [];                      // 태그: 초기화 후 비동기 로드
     plSuggestExpanded = false;            // 추천칩 펼침 상태 초기화
@@ -918,7 +1285,7 @@ function plEditOpen(id) {
     plLoadTagDatalist();                  // 자동완성 후보(최초 1회)
     plEditTagsLoad(id);                   // 이 장소의 기존 태그
     document.getElementById('pl-edit').classList.add('open');
-    plEditSearch(); // 장소명으로 즉시 후보 검색
+    plEditSearch(); // 주소(없으면 이름)로 즉시 후보 검색
     setTimeout(function () { document.getElementById('pemSearch').focus(); }, 50);
 }
 function plEditClose() {
@@ -926,38 +1293,58 @@ function plEditClose() {
     plEditId = 0; plEditSel = null;
 }
 function plEditSearchDebounced() { clearTimeout(plEditTimer); plEditTimer = setTimeout(plEditSearch, 250); }
+function plEditRenderResults(items) {
+    var box = document.getElementById('pemResults');
+    plEditResults = items;
+    if (!items.length) { box.innerHTML = '<div class="pem-empty">검색 결과 없음</div>'; return; }
+    box.innerHTML = items.map(function (it, i) {
+        return '<div class="pem-res pem-res-row" id="pem-res-' + i + '">' +
+            '<div class="pem-res-main" onclick="plEditPick(' + i + ')">' +
+                '<div class="pem-raddr-main">' + plEsc(it.address || '(주소 없음)') + '</div>' +
+                '<div class="pem-rname">' + plEsc(it.name) +
+                    (it.category ? '<span class="pem-rcat">' + plEsc(it.category) + '</span>' : '') +
+                '</div>' +
+            '</div>' +
+            '<button class="pem-add" title="이 장소를 추가 장소로 등록" onclick="plEditAddExtra(' + i + ')">＋</button>' +
+        '</div>';
+    }).join('');
+}
 function plEditSearch() {
     var q = document.getElementById('pemSearch').value.trim();
     var box = document.getElementById('pemResults');
     if (q.length < 2) { box.innerHTML = '<div class="pem-empty">2글자 이상 입력</div>'; return; }
     box.innerHTML = '<div class="pem-empty">검색 중…</div>';
+    // ① 카카오 키워드(장소명·POI)
     fetch(plApiUrl({ module: 'place', action: 'suggest', q: q }))
         .then(function (r) { return r.json(); })
         .then(function (d) {
             var items = (d && d.items) || [];
-            plEditResults = items;
-            if (!items.length) { box.innerHTML = '<div class="pem-empty">검색 결과 없음</div>'; return; }
-            box.innerHTML = items.map(function (it, i) {
-                return '<div class="pem-res pem-res-row" id="pem-res-' + i + '">' +
-                    '<div class="pem-res-main" onclick="plEditPick(' + i + ')">' +
-                        '<b>' + plEsc(it.name) + '</b>' +
-                        (it.category ? '<span class="pem-rcat">' + plEsc(it.category) + '</span>' : '') +
-                        '<div class="pem-raddr">' + plEsc(it.address || '') + '</div>' +
-                    '</div>' +
-                    '<button class="pem-add" title="이 장소를 추가 장소로 등록" onclick="plEditAddExtra(' + i + ')">＋</button>' +
-                '</div>';
-            }).join('');
+            if (items.length) { plEditRenderResults(items); return; }
+            // ② 키워드 결과 없으면 주소 지오코딩 폴백(네이버 도로명/지번 등) — 전체 주소 입력 대응
+            fetch(plApiUrl({ module: 'place', action: 'geocode', address: q }))
+                .then(function (r) { return r.json(); })
+                .then(function (g) {
+                    if (g && g.ok && g.lat && g.lng) {
+                        plEditRenderResults([{ name: (g.address || q), address: q, category: '', lat: +g.lat, lng: +g.lng }]);
+                    } else {
+                        plEditRenderResults([]);
+                    }
+                })
+                .catch(function () { box.innerHTML = '<div class="pem-empty">검색 결과 없음</div>'; });
         })
         .catch(function () { box.innerHTML = '<div class="pem-empty">검색 실패</div>'; });
 }
 function plEditPick(i) {
     var it = plEditResults[i]; if (!it) return;
     plEditSel = { lat: it.lat, lng: it.lng, name: it.name, addr: it.address };
+    // 선택한 항목의 주소를 좌표지정 입력창에 표시(값만 세팅 → oninput 미발생, 재검색 안 됨)
+    document.getElementById('pemSearch').value = it.address || it.name;
     var els = document.querySelectorAll('.pem-res');
     for (var k = 0; k < els.length; k++) els[k].classList.remove('active');
     var el = document.getElementById('pem-res-' + i); if (el) el.classList.add('active');
     document.getElementById('pemPicked').innerHTML =
-        '✅ 지정 좌표: <b>' + plEsc(it.name) + '</b> <span>' + plEsc(it.address || '') + '</span>';
+        '✅ 지정 좌표: <b>' + plEsc(it.address || it.name) + '</b>' +
+        (it.address ? ' <span>' + plEsc(it.name) + '</span>' : '');
 }
 // 멀티 등록 — 검색 결과를 '추가 장소'로 담아둔다(같은 기사를 공유하는 별도 place)
 // 각 추가 장소는 제목(name)·분류(cat)·좌표(lat/lng) 를 독립 보유한다.
@@ -1085,7 +1472,7 @@ function plEditSave() {
     if (!name) { alert('이름을 입력하세요'); return; }
     var btn = document.getElementById('pemSave'); btn.disabled = true; btn.textContent = '저장 중…';
     var primary = { module: 'place', action: 'place_update', id: plEditId, name: name, category: cat };
-    if (plEditSel) { primary.lat = plEditSel.lat; primary.lng = plEditSel.lng; }
+    if (plEditSel) { primary.lat = plEditSel.lat; primary.lng = plEditSel.lng; primary.address = plEditSel.addr || ''; }
     fetch(plApiUrl(primary))
         .then(function (r) { return r.json(); })
         .then(function (d) {
@@ -1094,7 +1481,7 @@ function plEditSave() {
             var extraJobs = plEditExtras.map(function (ex) {
                 return fetch(plApiUrl({ module: 'place', action: 'place_add', src_id: plEditId,
                                         name: (ex.name || '').trim() || ex.name, category: ex.cat || cat,
-                                        lat: ex.lat, lng: ex.lng }))
+                                        lat: ex.lat, lng: ex.lng, address: ex.addr || '' }))
                     .then(function (r) { return r.json(); });
             });
             // 태그(기본 장소) 저장
@@ -1106,68 +1493,139 @@ function plEditSave() {
             btn.disabled = false; btn.textContent = '저장';
             var added = (res[0] || []).filter(function (x) { return x && x.ok; }).length;
             plEditClose();
-            plNoGeoLoad(); // 좌표 지정됐으면 목록에서 빠짐
+            // 지도 결과리스트의 마지막 검색을 다시 실행해 목록/마커 갱신
+            if (typeof plRefreshCurrent === 'function') plRefreshCurrent();
             if (added) plHint(added + '곳을 추가 등록했습니다');
         })
         .catch(function (e) { btn.disabled = false; btn.textContent = '저장'; alert((e && e.message) || '저장 실패'); });
 }
 
 // ── 태그 관리(병합/이름변경/삭제) 모달 ──
+// 칩 그리드 + 선택형: 태그 클릭=다중선택 → 하단 액션바에서 이름변경/삭제/병합
+var plTagAll = [], plTagSel = [], plTagMode = '', plTagMergeMain = null;
 function plTagMgrOpen() { document.getElementById('pl-tagmgr').classList.add('open'); plTagMgrLoad(); }
 function plTagMgrClose() {
     document.getElementById('pl-tagmgr').classList.remove('open');
-    plTagListLoaded = false;        // 다음 수정 모달에서 추천/자동완성 갱신되도록
+    plTagListLoaded = false;        // 추천/자동완성 갱신되도록
+    // 수정모달 위에서 닫혔으면(병합·이름변경 반영) 그 자리에서 자동완성·추천 즉시 갱신
+    if (document.getElementById('pl-edit').classList.contains('open')) {
+        plLoadTagDatalist();
+    }
 }
 function plTagMgrLoad() {
-    var body = document.getElementById('tmBody');
-    body.innerHTML = '<div class="tm-empty">불러오는 중…</div>';
+    plTagSel = []; plTagMode = ''; plTagMergeMain = null;
+    var s = document.getElementById('tmSearch'); if (s) s.value = '';
+    document.getElementById('tmGrid').innerHTML = '<div class="tm-empty">불러오는 중…</div>';
     fetch(plApiUrl({ module: 'place', action: 'tag_list' }))
         .then(function (r) { return r.json(); })
-        .then(function (d) { plTagMgrRender((d && d.items) || []); })
-        .catch(function () { body.innerHTML = '<div class="tm-empty">불러오기 실패</div>'; });
+        .then(function (d) {
+            plTagAll = ((d && d.items) || []).filter(function (t) { return t.kind !== 'month'; }); // 월 제외
+            plTagMgrRender();
+        })
+        .catch(function () { document.getElementById('tmGrid').innerHTML = '<div class="tm-empty">불러오기 실패</div>'; });
 }
-function plTagMgrRender(items) {
-    var tags = items.filter(function (t) { return t.kind !== 'month'; });   // 월 태그 제외
-    document.getElementById('tmList').innerHTML =
-        tags.map(function (t) { return '<option value="' + plEsc(t.tag) + '">'; }).join('');
-    var body = document.getElementById('tmBody');
-    if (!tags.length) { body.innerHTML = '<div class="tm-empty">아직 태그가 없습니다</div>'; return; }
-    body.innerHTML = tags.map(function (t) {
-        var tgJs = t.tag.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-        return '<div class="tm-row">' +
-            '<span class="tm-name">' + plEsc(t.tag) + '</span><span class="tm-cnt">' + t.cnt + '</span>' +
-            '<span class="tm-sp"></span>' +
-            '<input class="tm-to" list="tmList" placeholder="합칠/바꿀 이름" ' +
-                'onkeydown="if(event.key===\'Enter\')plTagRename(this.parentNode.querySelector(\'.tm-merge\'),\'' + tgJs + '\')">' +
-            '<button class="tm-merge" onclick="plTagRename(this,\'' + tgJs + '\')">병합·변경</button>' +
-            '<button class="tm-del" onclick="plTagDelete(this,\'' + tgJs + '\')" title="이 태그 삭제">🗑</button>' +
-        '</div>';
-    }).join('');
+function plTagCnt(tag) { for (var i = 0; i < plTagAll.length; i++) { if (plTagAll[i].tag === tag) return plTagAll[i].cnt; } return 0; }
+function plTagJs(t) { return t.replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+function plTagMgrRender() {
+    var q = (document.getElementById('tmSearch').value || '').trim().toLowerCase();
+    var list = q ? plTagAll.filter(function (t) { return t.tag.toLowerCase().indexOf(q) >= 0; }) : plTagAll;
+    document.getElementById('tmCount').textContent = '총 ' + plTagAll.length + '개' + (q ? (' · ' + list.length + ' 일치') : '');
+    var grid = document.getElementById('tmGrid');
+    if (!plTagAll.length) { grid.innerHTML = '<div class="tm-empty">아직 태그가 없습니다</div>'; }
+    else if (!list.length) { grid.innerHTML = '<div class="tm-empty">일치하는 태그 없음</div>'; }
+    else {
+        grid.innerHTML = list.map(function (t) {
+            var sel = plTagSel.indexOf(t.tag) >= 0 ? ' sel' : '';
+            return '<button class="tm-chip' + sel + '" onclick="plTagChip(\'' + plTagJs(t.tag) + '\')">' +
+                plEsc(t.tag) + '<span class="tm-c">' + t.cnt + '</span></button>';
+        }).join('');
+    }
+    plTagActionRender();
 }
-function plTagRename(btn, from) {
-    var inp = btn.closest('.tm-row').querySelector('.tm-to');
-    var to = plNormTag(inp.value);
-    if (!to) { inp.focus(); return; }
-    if (to === from) { inp.value = ''; return; }
-    btn.disabled = true;
+function plTagChip(tag) {
+    var i = plTagSel.indexOf(tag);
+    if (i >= 0) plTagSel.splice(i, 1); else plTagSel.push(tag);
+    plTagMode = '';                  // 선택이 바뀌면 진행 중 모드 취소
+    plTagMgrRender();
+}
+function plTagDeselect(tag) { var i = plTagSel.indexOf(tag); if (i >= 0) plTagSel.splice(i, 1); plTagMode = ''; plTagMgrRender(); }
+function plTagModeSet(m) { plTagMode = m; if (m === 'merge') plTagMergeMain = null; plTagActionRender(); }
+function plTagActionRender() {
+    var box = document.getElementById('tmAction');
+    var n = plTagSel.length;
+    if (!n) { box.innerHTML = '<div class="tm-hint">정리할 태그를 클릭해 선택하세요. 여러 개 선택하면 <b>병합·삭제</b>할 수 있습니다.</div>'; return; }
+    var chips = '<div class="tm-sel-chips">' + plTagSel.map(function (t) {
+        return '<span class="tm-selchip">' + plEsc(t) + '<button onclick="plTagDeselect(\'' + plTagJs(t) + '\')" title="선택 해제">×</button></span>';
+    }).join('') + '</div>';
+
+    if (plTagMode === 'rename') {
+        box.innerHTML = chips +
+            '<div class="tm-act-btns">' +
+                '<input id="tmRenameInp" class="tm-inp" value="' + plEsc(plTagSel[0]) + '" ' +
+                    'onkeydown="if(event.key===\'Enter\')plTagRenameApply();else if(event.key===\'Escape\')plTagModeSet(\'\');">' +
+                '<button class="tm-btn primary" onclick="plTagRenameApply()">변경</button>' +
+                '<button class="tm-btn ghost" onclick="plTagModeSet(\'\')">취소</button>' +
+            '</div>';
+        setTimeout(function () { var i = document.getElementById('tmRenameInp'); if (i) { i.focus(); i.select(); } }, 30);
+        return;
+    }
+    if (plTagMode === 'merge') {
+        if (!plTagMergeMain || plTagSel.indexOf(plTagMergeMain) < 0) {   // 기본 메인 = 개수 최다
+            plTagMergeMain = plTagSel.slice().sort(function (a, b) { return plTagCnt(b) - plTagCnt(a); })[0];
+        }
+        var picks = '<div class="tm-merge-pick">' + plTagSel.map(function (t) {
+            var on = (t === plTagMergeMain) ? ' on' : '';
+            return '<button class="tm-pick' + on + '" onclick="plTagMergeMain=\'' + plTagJs(t) + '\';plTagActionRender();">' +
+                plEsc(t) + ' ' + plTagCnt(t) + '</button>';
+        }).join('') + '</div>';
+        var others = plTagSel.length - 1;
+        box.innerHTML = chips +
+            '<div class="tm-hint">합칠 <b>메인 이름</b>을 고르세요 — 나머지 ' + others + '개가 <b>' + plEsc(plTagMergeMain) + '</b>(으)로 흡수됩니다.</div>' +
+            picks +
+            '<div class="tm-act-btns">' +
+                '<button class="tm-btn primary" onclick="plTagMergeApply()">합치기</button>' +
+                '<button class="tm-btn ghost" onclick="plTagModeSet(\'\')">취소</button>' +
+            '</div>';
+        return;
+    }
+    // 기본: 선택 개수에 맞는 액션
+    var btns = '<div class="tm-act-btns">';
+    if (n === 1) btns += '<button class="tm-btn rename" onclick="plTagModeSet(\'rename\')">✏️ 이름 변경</button>';
+    if (n >= 2) btns += '<button class="tm-btn merge" onclick="plTagModeSet(\'merge\')">🔀 병합</button>';
+    btns += '<button class="tm-btn del" onclick="plTagDeleteSel()">🗑 삭제' + (n > 1 ? (' (' + n + ')') : '') + '</button>';
+    btns += '</div>';
+    box.innerHTML = chips + btns;
+}
+// 작업 후: 서버가 준 최신 목록(있으면)으로 갱신 + 선택/모드 초기화
+function plTagMgrAfter(items) {
+    plTagSel = []; plTagMode = ''; plTagMergeMain = null;
+    if (items) { plTagAll = items.filter(function (t) { return t.kind !== 'month'; }); plTagMgrRender(); }
+    else plTagMgrLoad();
+}
+function plTagRenameApply() {
+    var from = plTagSel[0];
+    var to = plNormTag(document.getElementById('tmRenameInp').value);
+    if (!to || to === from) { plTagModeSet(''); return; }
     fetch(plApiUrl({ module: 'place', action: 'tag_rename', from: from, to: to }))
         .then(function (r) { return r.json(); })
-        .then(function (d) {
-            if (!d || !d.ok) { alert((d && d.msg) || '실패'); btn.disabled = false; return; }
-            plTagMgrRender(d.items || []);
-        })
-        .catch(function () { alert('실패'); btn.disabled = false; });
+        .then(function (d) { if (!d || !d.ok) { alert((d && d.msg) || '실패'); return; } plHint('“' + from + '” → “' + to + '” 변경'); plTagMgrAfter(d.items); })
+        .catch(function () { alert('실패'); });
 }
-function plTagDelete(btn, tag) {
-    if (!confirm('“' + tag + '” 태그를 모든 장소에서 삭제할까요?')) return;
-    btn.disabled = true;
-    fetch(plApiUrl({ module: 'place', action: 'tag_delete', tag: tag }))
-        .then(function (r) { return r.json(); })
-        .then(function (d) {
-            if (!d || !d.ok) { alert((d && d.msg) || '실패'); btn.disabled = false; return; }
-            plTagMgrRender(d.items || []);
-        })
-        .catch(function () { alert('실패'); btn.disabled = false; });
+function plTagDeleteSel() {
+    var sel = plTagSel.slice(), n = sel.length;
+    if (!confirm(n + '개 태그를 모든 장소에서 삭제합니다.\n' + sel.join(', ') + '\n되돌릴 수 없습니다. 삭제할까요?')) return;
+    var seq = Promise.resolve(null);
+    sel.forEach(function (t) { seq = seq.then(function () { return fetch(plApiUrl({ module: 'place', action: 'tag_delete', tag: t })).then(function (r) { return r.json(); }); }); });
+    seq.then(function (d) { plHint(n + '개 태그를 삭제했습니다'); plTagMgrAfter(d && d.items); })
+       .catch(function () { alert('삭제 중 오류'); plTagMgrLoad(); });
+}
+function plTagMergeApply() {
+    var main = plTagMergeMain, others = plTagSel.filter(function (t) { return t !== main; });
+    if (!others.length) { plTagModeSet(''); return; }
+    var seq = Promise.resolve(null);
+    others.forEach(function (t) { seq = seq.then(function () { return fetch(plApiUrl({ module: 'place', action: 'tag_rename', from: t, to: main })).then(function (r) { return r.json(); }); }); });
+    seq.then(function (d) { plHint(others.length + '개를 “' + main + '”(으)로 병합했습니다'); plTagMgrAfter(d && d.items); })
+       .catch(function () { alert('병합 중 오류'); plTagMgrLoad(); });
 }
 
 // 주소 → 좌표 (서버 GeoCoder) → 지도 이동 후 검색
@@ -1194,10 +1652,26 @@ function plSuggest(q) {
     clearTimeout(plAcTimer);
     if (q.length < 2) { plAcClose(); return; }
     plAcTimer = setTimeout(function () {       // 디바운스 220ms — 타이핑마다 호출 방지
-        fetch(plApiUrl({ module: 'place', action: 'suggest', q: q }))
-            .then(function (r) { return r.json(); })
-            .then(function (j) { plAcRender((j && j.items) || []); })
-            .catch(function () { plAcClose(); });
+        // 우리 DB(등록 장소) + 카카오 장소를 동시(병렬) 검색해 한 드롭다운에 병합
+        var dbP = fetch(plApiUrl({ module: 'place', action: 'place_name_search', q: q }))
+            .then(function (r) { return r.json(); }).catch(function () { return null; });
+        var kkP = fetch(plApiUrl({ module: 'place', action: 'suggest', q: q }))
+            .then(function (r) { return r.json(); }).catch(function () { return null; });
+        Promise.all([dbP, kkP]).then(function (res) {
+            var db = (res[0] && res[0].items) || [];
+            var kk = (res[1] && res[1].items) || [];
+            var items = [];
+            db.slice(0, 6).forEach(function (p) {
+                items.push({ src: 'db', id: p.id, name: p.name,
+                    address: (p.address || [p.region_lv1, p.region_lv2].filter(Boolean).join(' ')),
+                    category: (CAT_KO[p.category] || ''), lat: +p.lat, lng: +p.lng });
+            });
+            kk.slice(0, 7).forEach(function (p) {
+                items.push({ src: 'kakao', name: p.name, address: p.address,
+                    category: p.category, lat: +p.lat, lng: +p.lng });
+            });
+            plAcRender(items);
+        });
     }, 220);
 }
 
@@ -1208,14 +1682,20 @@ function plAcRender(items) {
         box.innerHTML = '<div class="pl-ac-empty">검색 결과가 없습니다</div>';
         box.classList.add('open'); return;
     }
-    box.innerHTML = items.map(function (it, i) {
-        return '<div class="pl-ac-item" data-i="' + i + '" onmousedown="plAcPick(' + i + ')">' +
+    var html = '', lastSrc = '';
+    items.forEach(function (it, i) {
+        if (it.src !== lastSrc) {   // 소스 바뀌면 구역 헤더(📍 내 지도 / 🔍 카카오)
+            html += '<div class="pl-ac-grp">' + (it.src === 'db' ? '📍 내 지도 (등록된 곳)' : '🔍 카카오 장소') + '</div>';
+            lastSrc = it.src;
+        }
+        html += '<div class="pl-ac-item" data-i="' + i + '" onmousedown="plAcPick(' + i + ')">' +
             '<div class="pl-ac-name">' + plEsc(it.name) +
                 (it.category ? '<span class="pl-ac-cat">' + plEsc(it.category) + '</span>' : '') +
             '</div>' +
             (it.address ? '<div class="pl-ac-addr">' + plEsc(it.address) + '</div>' : '') +
         '</div>';
-    }).join('');
+    });
+    box.innerHTML = html;
     box.classList.add('open');
 }
 
@@ -1234,15 +1714,23 @@ function plAcHighlight() {
     }
 }
 
-// 후보 선택 → 지도 이동 + 주변 여행지 검색 (onmousedown: input blur보다 먼저 실행)
+// 후보 선택 (onmousedown: input blur보다 먼저 실행)
+//  · 우리 DB 장소(src=db)  → 그 위치로 이동 + 그 마커 강조·상세패널
+//  · 카카오 장소(src=kakao) → 그 위치로 이동(빨강 검색마커) + 주변 우리 마커 검색
 function plAcPick(i) {
     var it = plAcItems[i]; if (!it || !plReady) return;
     document.getElementById('addr').value = it.name;
     plAcClose();
+    var rad = parseFloat(document.getElementById('radius').value);
     plMap.setCenter(new naver.maps.LatLng(it.lat, it.lng));
-    plMap.setZoom(plZoomForRadius(document.getElementById('radius').value));
-    plSetSearchMarker(it.lat, it.lng, it.name);
-    plSearch(it.lat, it.lng, parseFloat(document.getElementById('radius').value));
+    plMap.setZoom(plZoomForRadius(rad));
+    if (it.src === 'db') {
+        plPendingFocusId = it.id;                 // 검색 결과 렌더 후 이 장소 마커 강조
+        plSearch(it.lat, it.lng, rad);
+    } else {
+        plSetSearchMarker(it.lat, it.lng, it.name);
+        plSearch(it.lat, it.lng, rad);
+    }
 }
 
 // 검색창 키보드: ↑↓ 후보이동, Enter 선택/검색, Esc 닫기
@@ -1312,6 +1800,357 @@ function plEsc(s) {
         return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
 }
+
+// ══════════════════════════════════════════════════════════
+//  여행지도(경로 만들기) 모드
+//   · 지도 마커·좌측 목록 클릭(plFocus 가로채기) 또는 주소 직접 입력으로 경로 지점 추가
+//   · 번호 마커(채운 색 물방울) + 동선 polyline 을 검색 마커 위에 겹쳐 표시
+//   · 데이터는 클라이언트 전용(localStorage 보존). 서버 변경 없음.
+// ══════════════════════════════════════════════════════════
+var rtMode = false;
+var rtRoute = [];                 // [{name, lat, lng, address, placeId}]
+var rtRouteMarkers = [], rtRoutePolyline = null, rtDragIdx = -1;
+var rtRadius = 5;                 // 주변 종합 반경(km)
+var rtNearby = [];                // 지점별 주변 장소: rtNearby[wi] = [rec...]
+var rtNearbyActive = false;       // 종합을 계산했는지
+var rtAssign = {};                // 마커 인덱스 → 배정된 지점(반경 안)
+var rtFinalized = false;          // '지도 만들기'(영역 밖 마커 숨김) 상태
+var rtActiveMi = null;            // 종합에서 클릭해 강조 중인 마커 인덱스
+var rtCircles = [];
+var RT_COLORS = ['#e74c3c','#2980b9','#27ae60','#e67e22','#8e44ad','#16a085','#d35400','#2c3e50','#c0392b','#1abc9c','#9b59b6','#f39c12'];
+function rtColor(i) { return RT_COLORS[i % RT_COLORS.length]; }
+
+function rtToggleMode() {
+    rtMode = !rtMode;
+    document.body.classList.toggle('rt-on', rtMode);
+    var b = document.getElementById('rtModeBtn');
+    if (b) { b.classList.toggle('active', rtMode); b.textContent = rtMode ? '🧭 경로 만들기 종료' : '🧭 여행지도 만들기'; }
+    if (rtMode) {
+        plClosePanel();              // 상세패널 닫고 경로패널로
+        plToggleList(false);         // 좌측은 '주변 종합' 패널 차지 → 검색 목록 닫음
+        rtUpdateFinalBtn();          // 진입 시 버튼 라벨 동기화(기본=마크보기 → '마크 숨기기')
+        rtRenderRows(); rtDraw();
+        rtRefresh();                 // 진입 즉시 자동 종합(현재 떠 있는 마커 기준 — 검색 결과 유지)
+        plHint('지도 마커를 클릭하거나 주소를 입력해 경로를 만드세요');
+        setTimeout(plBumpResize, 60);
+    } else {
+        rtFinalized = false;
+        rtClearLayer(); rtClearCircles(); rtRestoreMarkers();  // 경로/원 감추고 마커 원복(입력 데이터는 보존)
+        setTimeout(plBumpResize, 60);
+    }
+}
+
+// 검색 결과(마커/리스트 항목)를 경로에 추가
+function rtAddFromFeature(f) {
+    var pr = f.properties, co = f.geometry.coordinates;   // [lng, lat]
+    plMap.panTo(new naver.maps.LatLng(co[1], co[0]));
+    rtAdd({ name: pr.name, lat: co[1], lng: co[0], address: pr.address || '', placeId: pr.id });
+}
+
+// 상세패널에 띄운 장소(주변 종합에서 클릭)를 경로에 추가
+function rtAddCurrent() {
+    var pr = plPanelPlace;
+    if (!pr || pr.lat == null || pr.lng == null) return;
+    rtAdd({ name: pr.name, lat: +pr.lat, lng: +pr.lng, address: pr.address || '', placeId: pr.id });
+    plClosePanel();
+}
+
+// 주소·장소명 직접 입력 → 지오코딩 → 추가
+function rtAddrAdd() {
+    var inp = document.getElementById('rtAddr');
+    var q = (inp.value || '').trim();
+    if (!q || !plReady) return;
+    plHint('“' + q + '” 좌표 변환 중…');
+    fetch(plApiUrl({ module: 'place', action: 'geocode', address: q }))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            if (!d || !d.ok || d.lat == null) { plHint('좌표를 찾지 못했습니다'); return; }
+            plMap.setCenter(new naver.maps.LatLng(+d.lat, +d.lng));
+            rtAdd({ name: d.address || q, lat: +d.lat, lng: +d.lng, address: d.address || q });
+            inp.value = '';
+        })
+        .catch(function () { plHint('지오코딩 실패'); });
+}
+
+function rtAdd(wp) {
+    if (!wp || wp.lat == null || wp.lng == null) return;
+    var last = rtRoute[rtRoute.length - 1];
+    if (last && wp.placeId && last.placeId === wp.placeId) { plHint('이미 마지막 경로 지점입니다'); return; }
+    rtRoute.push(wp);
+    rtRenderRows(); rtDraw(); rtSave(); rtRefresh();
+    plHint('경로 ' + rtRoute.length + '번째 추가: ' + wp.name);
+}
+function rtRemove(i) { rtRoute.splice(i, 1); rtRenderRows(); rtDraw(); rtSave(); rtRefresh(); }
+function rtClear() {
+    if (rtRoute.length && !confirm('만든 경로를 모두 비울까요?')) return;
+    rtRoute = []; rtNearby = []; rtAssign = {};
+    rtClearCircles(); rtRestoreMarkers();
+    rtRenderRows(); rtRenderSummary(); rtDraw(); rtSave();
+}
+
+function rtRenderRows() {
+    var box = document.getElementById('rtRows');
+    if (!box) return;
+    var cnt = document.getElementById('rtRowsCnt'); if (cnt) cnt.textContent = rtRoute.length ? (rtRoute.length + '곳') : '';
+    if (!rtRoute.length) {
+        box.innerHTML = '<div class="rt-empty">아직 경로가 없습니다.<br>지도 마커·좌측 목록을 클릭하거나<br>위 칸에 주소를 입력해 추가하세요.</div>';
+        return;
+    }
+    box.innerHTML = rtRoute.map(function (wp, i) {
+        return '<div class="rt-row" id="rt-row-' + i + '" draggable="true" data-i="' + i + '"' +
+                   ' ondragstart="rtDragStart(event,' + i + ')" ondragover="rtDragOver(event,' + i + ')"' +
+                   ' ondragleave="rtDragLeave(event)" ondrop="rtDrop(event,' + i + ')" ondragend="rtDragEnd(event)">' +
+                '<span class="rt-handle" title="드래그하여 순서변경">≡</span>' +
+                '<span class="rt-num" style="background:' + rtColor(i) + '">' + (i + 1) + '</span>' +
+                '<div class="rt-info"><div class="rt-name">' + plEsc(wp.name) + '</div>' +
+                    (wp.address ? '<div class="rt-addr">' + plEsc(wp.address) + '</div>' : '') +
+                '</div>' +
+                '<button class="rt-del" title="삭제" onclick="rtRemove(' + i + ')">×</button>' +
+            '</div>';
+    }).join('');
+}
+
+// 경로 번호 마커 + 동선 polyline (검색 마커 위에 겹침)
+function rtDraw() {
+    rtClearLayer();
+    if (!rtMode || !plReady) return;
+    var path = [];
+    rtRoute.forEach(function (wp, i) {
+        var pos = new naver.maps.LatLng(wp.lat, wp.lng);
+        path.push(pos);
+        var mk = new naver.maps.Marker({
+            position: pos, map: plMap, zIndex: 400, title: (i + 1) + '. ' + wp.name,
+            icon: { content: '<div class="rt-pin" style="background:' + rtColor(i) + '"><b>' + (i + 1) + '</b></div>', anchor: new naver.maps.Point(15, 30) }
+        });
+        (function (idx, p) {
+            naver.maps.Event.addListener(mk, 'click', function () {
+                plMap.panTo(p);
+                var r = document.getElementById('rt-row-' + idx);
+                if (r) { r.scrollIntoView({ block: 'nearest' }); r.style.background = '#efe9ff'; setTimeout(function () { r.style.background = ''; }, 700); }
+            });
+        })(i, pos);
+        rtRouteMarkers.push(mk);
+    });
+    if (path.length >= 2) {
+        rtRoutePolyline = new naver.maps.Polyline({
+            map: plMap, path: path, strokeColor: '#5a4cd0', strokeWeight: 5, strokeOpacity: 0.85,
+            strokeLineCap: 'round', strokeLineJoin: 'round', zIndex: 350
+        });
+    }
+}
+function rtClearLayer() {
+    rtRouteMarkers.forEach(function (m) { m.setMap(null); });
+    rtRouteMarkers = [];
+    if (rtRoutePolyline) { rtRoutePolyline.setMap(null); rtRoutePolyline = null; }
+}
+
+// 드래그 순서변경
+function rtDragStart(e, i) { rtDragIdx = i; e.dataTransfer.effectAllowed = 'move'; e.currentTarget.classList.add('dragging'); }
+function rtDragOver(e, i) { e.preventDefault(); if (i !== rtDragIdx) e.currentTarget.classList.add('drag-over'); }
+function rtDragLeave(e) { e.currentTarget.classList.remove('drag-over'); }
+function rtDrop(e, i) {
+    e.preventDefault(); e.currentTarget.classList.remove('drag-over');
+    if (rtDragIdx < 0 || rtDragIdx === i) return;
+    var m = rtRoute.splice(rtDragIdx, 1)[0];
+    rtRoute.splice(i, 0, m);
+    rtDragIdx = -1;
+    rtRenderRows(); rtDraw(); rtSave(); rtRefresh();
+}
+function rtDragEnd(e) { rtDragIdx = -1; document.querySelectorAll('#rtRows .rt-row').forEach(function (r) { r.classList.remove('dragging', 'drag-over'); }); }
+
+// ── 반경 컨트롤 ──
+function rtSetRadius(km) {
+    rtRadius = km;
+    var inp = document.getElementById('rtRadius'); if (inp) inp.value = km;
+    document.querySelectorAll('.rt-rq').forEach(function (b) { b.classList.toggle('on', +b.getAttribute('data-r') === km); });
+    rtRefresh();
+}
+function rtRadiusInput() {
+    var v = parseFloat(document.getElementById('rtRadius').value);
+    if (isNaN(v) || v <= 0) v = 5;
+    v = Math.min(50, Math.max(0.5, v));
+    rtRadius = v;
+    document.getElementById('rtRadius').value = v;
+    document.querySelectorAll('.rt-rq').forEach(function (b) { b.classList.toggle('on', +b.getAttribute('data-r') === v); });
+    rtRefresh();
+}
+
+// 거리(km) — Haversine
+function rtHaversine(la1, lo1, la2, lo2) {
+    var R = 6371, d2r = Math.PI / 180;
+    var dLa = (la2 - la1) * d2r, dLo = (lo2 - lo1) * d2r;
+    var a = Math.sin(dLa / 2) * Math.sin(dLa / 2) +
+            Math.cos(la1 * d2r) * Math.cos(la2 * d2r) * Math.sin(dLo / 2) * Math.sin(dLo / 2);
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+
+// ── 경로 주변 종합 ──
+//  새로 검색하지 않고, 지금 지도에 떠 있는 마커(plFeatures = 태그/지역 검색 결과)를
+//  각 지점 반경으로 판정 → 가장 가까운 지점에 1번만 배정. (검색 결과를 지우지 않음)
+function rtComputeNearby() {
+    rtAssign = {};                       // 마커 인덱스 → 배정된 지점
+    rtNearby = rtRoute.map(function () { return []; });
+    if (!rtRoute.length || !plFeatures.length) return;
+    for (var i = 0; i < plFeatures.length; i++) {
+        var co = plFeatures[i].geometry.coordinates;   // [lng, lat]
+        var lat = co[1], lng = co[0], best = -1, bestD = Infinity;
+        for (var w = 0; w < rtRoute.length; w++) {
+            var d = rtHaversine(lat, lng, rtRoute[w].lat, rtRoute[w].lng);
+            if (d <= rtRadius && d < bestD) { bestD = d; best = w; }
+        }
+        if (best >= 0) {
+            rtAssign[i] = best;
+            var rec = Object.assign({}, plFeatures[i].properties, { lat: lat, lng: lng, dist: bestD, _mi: i });
+            rtNearby[best].push(rec);
+        }
+    }
+    rtNearby.forEach(function (a) { a.sort(function (x, y) { return x.dist - y.dist; }); });
+}
+
+// 마커 스타일링: 반경 안 → 지점 색 작은 원 / 반경 밖 → 원래 번호 마커(단, 지도만들기 ON 이면 숨김)
+function rtStyleMarkers() {
+    rtActiveMi = null;
+    for (var i = 0; i < plFeatures.length; i++) {
+        var mk = plMarkers[i]; if (!mk) continue;
+        var wi = rtAssign[i];
+        if (wi != null) {                 // 반경 안 → 작은 색 원
+            mk.setMap(plMap);
+            mk.setIcon({ content: '<div class="rt-spot" style="background:' + rtColor(wi) + '"></div>', anchor: new naver.maps.Point(8, 8) });
+            mk.setZIndex(120);
+        } else if (rtFinalized) {          // 반경 밖 + 지도만들기 ON → 숨김
+            mk.setMap(null);
+        } else {                           // 반경 밖 → 원래 마커 그대로
+            mk.setMap(plMap);
+            mk.setIcon(plMarkerIcon(plFeatures[i].properties.category, i + 1, false));
+            mk.setZIndex(100);
+        }
+    }
+}
+// 경로 모드 종료 시: 모든 마커를 원래 상태로 복원
+function rtRestoreMarkers() {
+    for (var i = 0; i < plFeatures.length; i++) {
+        var mk = plMarkers[i]; if (!mk) continue;
+        mk.setMap(plMap);
+        mk.setIcon(plMarkerIcon(plFeatures[i].properties.category, i + 1, false));
+        mk.setZIndex(100);
+    }
+}
+
+// 경로/반경/마커 변경 시 자동 갱신(검색 X, 즉시)
+function rtRefresh() {
+    if (!rtMode) return;
+    rtNearbyActive = true;
+    rtComputeNearby();
+    rtStyleMarkers();
+    rtDrawCircles();
+    rtRenderSummary();
+}
+
+// 마크 보기 / 마크 숨기기 토글 — 경로 반경 밖 마커를 감추거나 다시 표시(기본=마크보기)
+function rtFinalize() {
+    if (!rtFinalized && !rtRoute.length) { plHint('먼저 경로를 추가하세요'); return; }
+    rtFinalized = !rtFinalized;
+    rtUpdateFinalBtn();
+    rtStyleMarkers();
+    plHint(rtFinalized ? '경로 영역 밖 마커를 숨겼습니다' : '전체 마커를 다시 표시합니다');
+}
+function rtUpdateFinalBtn() {
+    var b = document.getElementById('rtFinalBtn');
+    if (!b) return;
+    b.textContent = rtFinalized ? '👁️ 마크 보기' : '🙈 마크 숨기기';   // 라벨 = 누르면 할 동작
+    b.classList.toggle('on', rtFinalized);
+}
+
+// 반경 원(지점 색상)
+function rtToggleCircles() { rtDrawCircles(); }
+function rtDrawCircles() {
+    rtClearCircles();
+    var chk = document.getElementById('rtCircleChk');
+    if (!rtMode || !chk || !chk.checked) return;
+    rtRoute.forEach(function (wp, i) {
+        rtCircles.push(new naver.maps.Circle({
+            map: plMap, center: new naver.maps.LatLng(wp.lat, wp.lng), radius: rtRadius * 1000,
+            strokeColor: rtColor(i), strokeWeight: 1.5, strokeOpacity: 0.7,
+            fillColor: rtColor(i), fillOpacity: 0.06, zIndex: 60
+        }));
+    });
+}
+function rtClearCircles() { rtCircles.forEach(function (c) { c.setMap(null); }); rtCircles = []; }
+
+// 종합(지점별 주변 장소) 패널 렌더
+function rtRenderSummary() {
+    var box = document.getElementById('rtSum'); if (!box) return;
+    var cnt = document.getElementById('rtSumCnt');
+    var showDist = (function () { var c = document.getElementById('rtDistChk'); return !c || c.checked; })();
+    if (!rtNearbyActive || !rtRoute.length) {
+        if (cnt) cnt.textContent = '';
+        box.innerHTML = '<div class="rt-sum-empty">경로를 추가하면 각 지점 반경 안의<br>장소가 자동으로 여기에 모입니다.</div>';
+        return;
+    }
+    var total = 0; rtNearby.forEach(function (a) { total += (a ? a.length : 0); });
+    if (cnt) cnt.textContent = '반경 ' + rtRadius + 'km · ' + total + '곳';
+    box.innerHTML = rtRoute.map(function (wp, wi) {
+        var col = rtColor(wi);
+        var arr = rtNearby[wi] || [];
+        var places = arr.length
+            ? arr.map(function (s) {
+                var d = showDist ? '<span class="rt-pdist">~' + plFmtDist(s.dist) + '</span>' : '';
+                return '<div class="rt-place" id="rt-pl-' + wi + '-' + s.id + '" onclick="rtSpotFocusById(' + wi + ',' + s.id + ')">' +
+                    '<span class="rt-pdot" style="background:' + col + '"></span>' +
+                    '<div class="rt-pbody"><div class="rt-pname">' + plEsc(s.name) + '</div>' +
+                        '<div class="rt-pcat">' + plEsc(CAT_KO[s.category] || '기타') + (s.ref_count ? ' · 기사 ' + s.ref_count : '') + '</div>' +
+                    '</div>' + d +
+                '</div>';
+            }).join('')
+            : '<div class="rt-wp-none">반경 ' + rtRadius + 'km 안에 등록된 장소가 없습니다</div>';
+        return '<div class="rt-wp">' +
+            '<div class="rt-wp-head" onclick="rtFocusWaypoint(' + wi + ')">' +
+                '<span class="rt-wp-num" style="background:' + col + '">' + (wi + 1) + '</span>' +
+                '<div class="rt-wp-info"><div class="rt-wp-nm">' + plEsc(wp.name) + '</div>' +
+                    '<div class="rt-wp-cnt">주변 ' + arr.length + '곳</div></div>' +
+            '</div>' +
+            '<div class="rt-wp-places">' + places + '</div>' +
+        '</div>';
+    }).join('');
+}
+
+// 지점 헤더 클릭 → 그 지점으로 이동
+function rtFocusWaypoint(wi) {
+    var wp = rtRoute[wi]; if (!wp) return;
+    plMap.morph(new naver.maps.LatLng(wp.lat, wp.lng), Math.max(11, plZoomForRadius(rtRadius)));
+}
+
+// 스팟 마커/종합 항목 클릭 → 지도 이동 + 강조 + 상세패널(기존 plOpenPanel 재사용)
+function rtSpotFocusById(wi, pid) {
+    var arr = rtNearby[wi] || [];
+    var s = arr.filter(function (x) { return x.id == pid; })[0];
+    if (s) rtSpotFocus(s, wi);
+}
+function rtSpotFocus(s, wi) {
+    if (!s) return;
+    plMap.panTo(new naver.maps.LatLng(s.lat, s.lng));
+    // 마커 강조 토글(반경 안 작은 원 → 강조 큰 원)
+    if (rtActiveMi != null && plMarkers[rtActiveMi] && rtAssign[rtActiveMi] != null) {
+        plMarkers[rtActiveMi].setIcon({ content: '<div class="rt-spot" style="background:' + rtColor(rtAssign[rtActiveMi]) + '"></div>', anchor: new naver.maps.Point(8, 8) });
+    }
+    var mi = s._mi;
+    if (mi != null && plMarkers[mi]) {
+        plMarkers[mi].setIcon({ content: '<div class="rt-spot active" style="background:' + rtColor(wi) + '"></div>', anchor: new naver.maps.Point(11, 11) });
+        rtActiveMi = mi;
+    }
+    // 리스트 강조
+    document.querySelectorAll('#rtSum .rt-place').forEach(function (el) { el.classList.remove('active'); });
+    var li = document.getElementById('rt-pl-' + (wi != null ? wi : '') + '-' + s.id);
+    if (li) { li.classList.add('active'); li.scrollIntoView({ block: 'nearest' }); }
+    plOpenPanel(s);   // 상세 패널(분류·주소·태그·출처) — 경로 패널 위로 슬라이드
+}
+
+// localStorage 보존(새로고침 대비)
+function rtSave() { try { localStorage.setItem('placesRoute', JSON.stringify(rtRoute)); } catch (e) {} }
+function rtLoad() {
+    try { var raw = localStorage.getItem('placesRoute'); if (raw) { var a = JSON.parse(raw); if (Array.isArray(a)) rtRoute = a; } } catch (e) {}
+}
+rtLoad();
 </script>
 </body>
 </html>

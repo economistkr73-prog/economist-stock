@@ -449,7 +449,6 @@ class ArdentNews
     private static function guessCategory(array $keywords, string $title): string
     {
         $hay = mb_strtolower(implode(' ', $keywords) . ' ' . $title);
-        if (preg_match('/축제|페스티벌|festival/u', $hay)) return 'event';
         if (preg_match('/맛집|식당|음식점|먹거리|restaurant/u', $hay)) return 'restaurant';
         return 'travel';
     }
