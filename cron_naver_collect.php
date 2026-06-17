@@ -7,15 +7,15 @@
  *  한 회차(period=YYYY-MM)의 모든 지역이 done 이 되면 이후 호출은 no-op.
  *
  *  ★외부 HTTP 크론(cron-job.org 등) 권장 — cafe24 웹호스팅은 자체 크론 없음.
- *    URL : /cron_naver_collect.php?key=econ-naver-9x2k&max=5&delay=3
+ *    URL : /cron_naver_collect.php?key=econ-naver-9x2k&bg=1&max=10&delay=4&max_sec=120
  *    스케줄(매월 1일·10분 간격·새벽):
- *        분 0,10,20,30,40,50 / 시 3-11 / 일 1 / 월·요일 매번  → 54회 fire
- *    → 회당 5지역×3초딜레이 ≈ 25초(외부크론 30초 타임아웃 안에 깔끔히 종료).
- *      5×54=270 ≥ 229 시군구 커버, 다 done 되면 남은 fire 는 즉시 no-op(=성공).
- *    ※ 각 지역은 처리 즉시 done 커밋 → 호출이 중간에 끊겨도 진행분 보존(resume).
- *    ※ 네이버 안티봇은 IP당 누적 예산형. 회당 5건+10분 휴식이면 429 회피.
- *      몰아치기(연속 호출·짧은 휴식)는 IP 일시차단 위험.
- *    ※ 서비스 타임아웃이 60초면 max=10 으로 올려 fire 수를 줄여도 됨.
+ *        분 0,10,20,30,40,50 / 시 3-7 / 일 1 / 월·요일 매번  → 30회 fire
+ *    → bg=1 이라 크론은 즉시 OK 받고(타임아웃 무관), 백그라운드에서 회당 10지역×4초
+ *      딜레이(≈50초·max_sec 120초 내) 수집. 10×30=300 ≥ 229 커버, 완료 후 fire 는 no-op.
+ *    ※ 각 지역은 처리 즉시 done 커밋 → 호출이 끊겨도 진행분 보존(resume).
+ *    ※ 네이버 안티봇은 IP당 누적 예산형. 회당 10건+10분 휴식이면 429 회피.
+ *      몰아치기(연속 호출·짧은 휴식)는 IP 일시차단 위험 → max_sec 로 회당 시간 제한 필수.
+ *    ※ 수동 디버깅/이어받기는 bg 빼고 호출하면 진행 리포트를 그대로 받아 볼 수 있음.
  *
  *  파라미터:
  *    key       (필수) 실행 토큰
@@ -39,7 +39,6 @@ if (PHP_SAPI !== 'cli' && ($_GET['key'] ?? '') !== NAVER_COLLECT_KEY) {
 }
 
 @set_time_limit(0);
-ignore_user_abort(false);                         // 클라이언트 끊기면 종료(좀비 워커 방지)
 
 $period   = preg_match('/^\d{4}-\d{2}$/', (string)($_GET['period'] ?? '')) ? $_GET['period'] : date('Y-m');
 $maxReg   = max(1, min(250, (int)($_GET['max'] ?? 30)));
@@ -47,6 +46,23 @@ $maxSec   = max(30, min(540, (int)($_GET['max_sec'] ?? 480)));
 $delaySec = max(0, min(10, (int)($_GET['delay'] ?? 3)));
 $dry      = !empty($_GET['dry']);
 $START    = microtime(true);
+
+// 외부 HTTP 크론(cron-job.org 등)은 응답 타임아웃(보통 30초)이 있다.
+// bg=1 → 즉시 200 OK 로 연결을 끊어 크론은 성공 처리하고, 수집은 백그라운드에서
+// 이어서 수행한다(cron_keyword_collector.php 와 동일 패턴). max_sec 시간예산이
+// 종료를 보장하므로 좀비 워커는 생기지 않는다. (수동 디버깅은 bg 없이 호출 → 리포트 수신)
+if (!empty($_GET['bg'])) {
+    ignore_user_abort(true);
+    ob_start();
+    echo "OK";
+    header("Content-Length: " . ob_get_length());
+    header("Connection: close");
+    ob_end_flush();
+    flush();
+    if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
+} else {
+    ignore_user_abort(false);                     // 수동 호출: 끊기면 종료(좀비 방지)
+}
 
 $col = new NaverPlaceCollector($pdo);
 $col->ensureTables();
