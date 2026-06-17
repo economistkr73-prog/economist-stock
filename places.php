@@ -117,8 +117,9 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .dot.travel { background: #3498db; } .dot.stay { background: #8e44ad; }
 .dot.restaurant { background: #e74c3c; } .dot.etc { background: #7f8c8d; }
 
-/* 현재위치 버튼 (지도 우하단 플로팅, GPS 크로스헤어) */
-.pl-myloc { position: absolute; right: 12px; bottom: 12px; z-index: 6; width: 42px; height: 42px; border-radius: 50%; background: #fff; border: none; box-shadow: 0 2px 8px rgba(0,0,0,.25); cursor: pointer; display: flex; align-items: center; justify-content: center; color: #3498db; transition: .15s; }
+/* 현재위치 버튼 (지도 좌상단 플로팅, GPS 크로스헤어) */
+.pl-myloc { position: absolute; left: 12px; top: 12px; z-index: 6; width: 42px; height: 42px; border-radius: 50%; background: #fff; border: none; box-shadow: 0 2px 8px rgba(0,0,0,.25); cursor: pointer; display: flex; align-items: center; justify-content: center; color: #3498db; transition: .15s; }
+#pl-list.open ~ .pl-myloc { left: 276px; }
 .pl-myloc:hover { background: #f0f7ff; }
 .pl-myloc.loading { pointer-events: none; opacity: .65; }
 .pl-myloc.loading svg { animation: pl-spin 1s linear infinite; }
@@ -138,7 +139,11 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .mk-food .mk-fnum .mk-star { font-size: 9px; font-style: normal; color: #d4a23a; line-height: 1; }  /* 미쉐린 = 골드 별 */
 .mk-food .mk-fnum .mk-gstar { color: #1a9c4f; }                                  /* 그린스타 */
 .mk-food .mk-fnum .mk-bib { font-size: 8px; font-style: normal; font-weight: 800; color: #c0392b; line-height: 1; }
-.mk-food.active { transform: scale(1.28); box-shadow: 0 4px 11px rgba(0,0,0,.55); }
+.mk-food.active { transform: scale(1.38); background: #2979ff !important; border-color: #fff; z-index: 1000; animation: pl-food-glow 1.7s ease-in-out infinite; }
+@keyframes pl-food-glow {
+    0%, 100% { box-shadow: 0 0 5px 2px rgba(41,121,255,.45), 0 4px 11px rgba(0,0,0,.5); }
+    50%      { box-shadow: 0 0 16px 6px rgba(41,121,255,.85), 0 4px 11px rgba(0,0,0,.5); }
+}
 .mk-food.active .mk-fnum { background: #2c3e50; border-color: #2c3e50; }
 .mk-food.active .mk-fnum .mk-rb { fill: #9ec3f5; }
 .mk-food.active .mk-fnum .mk-gstar { color: #6ee29b; }
@@ -171,6 +176,10 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 /* 이름 아래 태그(#둘레길 #호수) — 주소 대신 표시 */
 .li-tags { display: flex; gap: 7px; margin-top: 3px; white-space: nowrap; overflow: hidden; }
 .li-tag { flex-shrink: 0; font-size: 11px; font-weight: 600; color: #2980b9; }
+/* 네이버 평점·리뷰 한 줄 */
+.li-nv { display: flex; align-items: center; gap: 6px; margin-top: 3px; font-size: 11.5px; color: #5a6570; }
+.li-nv-it { white-space: nowrap; }
+.li-nv-sep { color: #cbd2d8; }
 /* 맛집 가이드 배지(블루리본·미쉐린 등급) — 카드 */
 .li-guides { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
 .li-guide { flex-shrink: 0; font-size: 10px; font-weight: 700; color: #fff; padding: 1px 7px; border-radius: 9px; line-height: 1.5; letter-spacing: -.2px; }
@@ -230,6 +239,22 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .cat-badge.restaurant { background: #e74c3c; } .cat-badge.etc { background: #7f8c8d; }
 .panel-head h3 { font-size: 19px; margin: 8px 0 6px; }
 .panel-head .meta { font-size: 13px; color: #5b6b7b; line-height: 1.7; }
+.panel-head .meta .nv-map-btn { display: inline-flex; align-items: center; vertical-align: middle; background: #03c75a; border: none; color: #fff; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 10px; cursor: pointer; margin-left: 6px; line-height: 1.4; }
+.panel-head .meta .nv-map-btn:hover { background: #02b350; }
+.panel-head .pl-nv { margin-top: 10px; padding: 9px 12px; background: #f3faf5; border: 1px solid #d9ece0; border-radius: 9px; font-size: 12.5px; color: #36504a; display: flex; flex-wrap: wrap; gap: 5px 14px; align-items: center; }
+.panel-head .pl-nv .nv-it { font-weight: 700; white-space: nowrap; }
+.panel-head .pl-nv .nv-it small { font-weight: 500; color: #7a8a85; }
+.panel-head .pl-nv .nv-micro { flex-basis: 100%; font-style: italic; color: #586c66; margin-top: 1px; line-height: 1.45; }
+.panel-head .pl-nv .nv-link { flex-basis: 100%; margin-top: 2px; color: #03c75a; font-weight: 700; text-decoration: none; }
+.panel-head .pl-nv .nv-link:hover { text-decoration: underline; }
+/* 전월 대비 추이 */
+.panel-head .pl-nv .nv-trend { flex-basis: 100%; margin-top: 4px; }
+.panel-head .pl-nv .nvt-h { font-size: 11px; color: #8a9a94; font-weight: 700; margin-bottom: 3px; }
+.panel-head .pl-nv .nvt-row { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.panel-head .pl-nv .nvt-it { font-weight: 700; white-space: nowrap; font-size: 12px; }
+.panel-head .pl-nv .nvt-it.up { color: #e8493f; }
+.panel-head .pl-nv .nvt-it.down { color: #2f7bd6; }
+.panel-head .pl-nv .nvt-flat { font-size: 11.5px; color: #9aa6a2; }
 .panel-head .tags { margin-top: 8px; display: flex; gap: 5px; flex-wrap: wrap; }
 .panel-head .tags em { font-style: normal; font-size: 11px; background: #eef2f6; color: #5b6b7b; padding: 2px 8px; border-radius: 10px; }
 .panel-close { float: right; background: none; border: none; font-size: 22px; color: #aaa; cursor: pointer; line-height: 1; }
@@ -1015,7 +1040,7 @@ function plTagSearch(tags, opts) {
     fetch(plApiUrl(params))
         .then(function (r) { return r.json(); })
         .then(function (geo) {
-            var feats = (geo && geo.features) || [];
+            var feats = plSortFeatures((geo && geo.features) || []);
             plClearMarkers(); plActive = -1; plFeatures = feats;
             feats.forEach(plAddMarker);
             plRenderList(feats);
@@ -1028,6 +1053,24 @@ function plTagSearch(tags, opts) {
         })
         .catch(function () { plHint('검색 실패'); });
 }
+// 맛집(네이버 리뷰 있는 곳)은 거리 무관 '리뷰 많은 순'. 리뷰 없는 곳은 거리순 유지하며 뒤로.
+function plSortFeatures(feats) {
+    var rev = function (f) {
+        var nv = f.properties && f.properties.attributes && f.properties.attributes.naver;
+        return (nv && nv.review != null) ? Number(nv.review) : null;
+    };
+    feats.sort(function (a, b) {
+        var ra = rev(a), rb = rev(b);
+        if (ra != null && rb != null) return rb - ra;       // 둘 다 리뷰: 많은 순
+        if (ra != null) return -1;                          // 리뷰 있는 쪽 먼저
+        if (rb != null) return 1;
+        var da = a.properties.dist_km != null ? a.properties.dist_km : 9999;
+        var db = b.properties.dist_km != null ? b.properties.dist_km : 9999;
+        return da - db;                                     // 둘 다 리뷰 없음: 거리순
+    });
+    return feats;
+}
+
 function plFitToFeatures(feats) {
     if (!feats.length) return;
     var c0 = feats[0].geometry.coordinates;
@@ -1117,6 +1160,7 @@ function plSearch(lat, lng, expandFrom) {
                 }
             }
 
+            feats = plSortFeatures(feats);   // 맛집은 리뷰순(거리 무관)
             plClearMarkers();
             plActive = -1;
             plFeatures = feats;
@@ -1187,6 +1231,8 @@ function plRenderList(feats) {
         // 맛집이면 가이드 배지(블루리본·미쉐린 등급)
         var gb = plGuideBadges(pr.guides);
         var gbLine = gb ? '<div class="li-guides">' + gb + '</div>' : '';
+        // 네이버 평점·리뷰 (attributes.naver 있을 때만)
+        var nvLine = plNaverLine(pr);
         // 주소 대신 태그(#둘레길 #호수). 태그 없으면 분류명으로 폴백(빈 줄 방지)
         var sub = (pr.tags && pr.tags.length)
             ? '<div class="li-tags">' + pr.tags.slice(0, 6).map(function (t) {
@@ -1200,7 +1246,7 @@ function plRenderList(feats) {
             '<div class="li-body">' +
                 '<div class="li-name"><span class="nm">' + plEsc(pr.name) + '</span>' + refs +
                     '<span class="li-meta">' + dist + '</span></div>' +
-                gbLine + sub +
+                gbLine + nvLine + sub +
             '</div>' + edit + '</div>';
     }).join('');
     // 통합검색에서 우리 DB 장소를 골랐으면, 그 마커를 강조 + 상세패널 표시
@@ -1356,11 +1402,14 @@ var plPanelPlace = null;   // 현재 상세패널에 띄운 장소(경로 추가
 function plOpenPanel(pr) {
     plPanelPlace = pr;
     var head = document.getElementById('panelHead');
-    var meta = [];
-    if (pr.address) meta.push('📍 ' + pr.address);
-    if (pr.phone)   meta.push('📞 ' + pr.phone);
-    if (pr.period_start) meta.push('🗓️ ' + pr.period_start + (pr.period_end ? ' ~ ' + pr.period_end : ''));
-    if (pr.dist != null) meta.push('↔️ 동선 지점에서 ~' + plFmtDist(pr.dist));
+    var meta = [];   // 각 줄은 이미 escape 처리된 HTML 문자열
+    if (pr.address) meta.push('📍 ' + plEsc(pr.address) +
+        ' <button class="nv-map-btn" onclick="plOpenNaverMap()" title="네이버에서 검색">🔍 네이버검색</button>');
+    else if (pr.lat != null && pr.lng != null) meta.push(
+        '<button class="nv-map-btn" onclick="plOpenNaverMap()" title="네이버에서 검색">🔍 네이버검색</button>');
+    if (pr.phone)   meta.push('📞 ' + plEsc(pr.phone));
+    if (pr.period_start) meta.push('🗓️ ' + plEsc(pr.period_start + (pr.period_end ? ' ~ ' + pr.period_end : '')));
+    if (pr.dist != null) meta.push('↔️ 동선 지점에서 ~' + plEsc(plFmtDist(pr.dist)));
     var tags = (pr.tags && pr.tags.length) ? pr.tags : ((pr.attributes && pr.attributes.tags) || []);
     // 경로 모드 + 좌표가 있으면 '경로에 추가' 버튼 노출
     var addBtn = (typeof rtMode !== 'undefined' && rtMode && pr.lat != null && pr.lng != null)
@@ -1371,12 +1420,17 @@ function plOpenPanel(pr) {
         '<span class="cat-badge ' + (pr.category || 'etc') + '">' + (CAT_KO[pr.category] || '기타') + '</span>' +
         (plGuideBadges(pr.guides) ? '<div class="panel-guides">' + plGuideBadges(pr.guides) + '</div>' : '') +
         '<h3>' + plEsc(pr.name) + '</h3>' +
-        '<div class="meta">' + meta.map(plEsc).join('<br>') + '</div>' +
+        '<div class="meta">' + meta.join('<br>') + '</div>' +
+        plNaverHtml(pr) +
         (tags.length ? '<div class="tags">' + tags.map(function (t) { return '<em>' + plEsc(t) + '</em>'; }).join('') + '</div>' : '') +
         addBtn;
 
     document.getElementById('panelRefs').innerHTML = '<div class="ref-empty">불러오는 중…</div>';
     document.getElementById('pl-panel').classList.add('open');
+
+    // 네이버 맛집이면 전월 대비 추이 비동기 로드
+    var _nv = pr.attributes && pr.attributes.naver;
+    if (_nv && _nv.id) plLoadNaverTrend(String(_nv.id));
 
     fetch(plApiUrl({ module: 'place', action: 'refs', id: pr.id }))
         .then(function (r) { return r.json(); })
@@ -1390,7 +1444,8 @@ function plRenderRefs(refs) {
     var RT = { article: '기사', youtube: '유튜브', blog: '블로그', official: '공식', manual: '메모' };
     box.innerHTML = '<h4>출처 ' + refs.length + '건</h4>' + refs.map(function (r) {
         var href = r.url ? plEsc(r.url) : '#';
-        return '<a class="ref-item" href="' + href + '" target="_blank" rel="noopener">' +
+        var onclk = r.url ? ' onclick="plOpenArticle(this.href); return false;"' : '';
+        return '<a class="ref-item" href="' + href + '" target="_blank" rel="noopener"' + onclk + '>' +
             '<span class="rt ' + r.source_type + '">' + (RT[r.source_type] || r.source_type) + '</span>' +
             (r.published_at ? '<span class="rsum">' + plEsc(r.published_at) + '</span>' : '') +
             '<div class="rtitle">' + plEsc(r.title || '(제목 없음)') + '</div>' +
@@ -1405,6 +1460,78 @@ function plClosePanel() { document.getElementById('pl-panel').classList.remove('
 function plOpenArticle(url) {
     if (!url) return;
     window.open(url, 'plArticle', 'width=920,height=860,scrollbars=yes,resizable=yes,menubar=no,toolbar=no');
+}
+
+// ── 좌측 리스트용 네이버 평점·리뷰 한 줄 (⭐4.63 · 📝4,024) — attributes.naver 있을 때만 ──
+function plNaverLine(pr) {
+    var nv = pr.attributes && pr.attributes.naver;
+    if (!nv) return '';
+    var parts = [];
+    if (nv.score)  parts.push('<span class="li-nv-it">⭐ ' + plEsc(String(nv.score)) + '</span>');
+    if (nv.review) parts.push('<span class="li-nv-it">📝 ' + Number(nv.review || 0).toLocaleString() + '</span>');
+    if (!parts.length) return '';
+    return '<div class="li-nv">' + parts.join('<span class="li-nv-sep">·</span>') + '</div>';
+}
+
+// ── 네이버 플레이스 정보 블록(평점·리뷰·저장수·한줄평) — attributes.naver 가 있으면 표시 ──
+function plNaverHtml(pr) {
+    var nv = pr.attributes && pr.attributes.naver;
+    if (!nv) return '';
+    var fmt = function (n) { return Number(n || 0).toLocaleString(); };
+    var parts = [];
+    if (nv.score) parts.push('<span class="nv-it">⭐ ' + plEsc(String(nv.score)) + '</span>');
+    if (nv.review) {
+        var sub = (nv.visitor != null || nv.blog != null)
+            ? ' <small>(방문 ' + fmt(nv.visitor) + ' · 블로그 ' + fmt(nv.blog) + ')</small>' : '';
+        parts.push('<span class="nv-it">📝 리뷰 ' + fmt(nv.review) + sub + '</span>');
+    }
+    if (nv.save) parts.push('<span class="nv-it">🔖 저장 ' + plEsc(String(nv.save)) + '</span>');
+    var micro = nv.micro ? '<div class="nv-micro">“' + plEsc(nv.micro) + '”</div>' : '';
+    var link = nv.url ? '<a class="nv-link" href="' + plEsc(nv.url) + '" onclick="plOpenArticle(this.href); return false;">네이버 플레이스에서 보기 ↗</a>' : '';
+    // 전월 대비 추이 — nv.id 있으면 비동기로 채움(plLoadNaverTrend)
+    var trend = nv.id ? '<div class="nv-trend" id="nv-trend-' + plEsc(String(nv.id)) + '"></div>' : '';
+    if (!parts.length && !micro && !link && !trend) return '';
+    return '<div class="pl-nv">' + parts.join('') + micro + trend + link + '</div>';
+}
+
+// ── 전월 대비 추이 로드 (naver_trend_api series) → 상세패널 네이버 박스에 Δ 한 줄 ──
+function plLoadNaverTrend(nid) {
+    var box = document.getElementById('nv-trend-' + nid);
+    if (!box) return;
+    fetch('/naver_trend_api.php?action=series&nid=' + encodeURIComponent(nid))
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+            var s = (j && j.series) || [];
+            if (s.length < 2) return;                          // 비교할 직전 회차 없음
+            var cur = s[s.length - 1], prev = s[s.length - 2];
+            var d = function (label, a, b, isF) {
+                var x = Number(a || 0) - Number(b || 0);
+                if (!x) return '';
+                var v = isF ? Math.abs(x).toFixed(2) : Math.abs(x).toLocaleString();
+                var cls = x > 0 ? 'up' : 'down', ar = x > 0 ? '▲' : '▼';
+                return '<span class="nvt-it ' + cls + '">' + label + ' ' + ar + v + '</span>';
+            };
+            var parts = [
+                d('리뷰', cur.review, prev.review, false),
+                d('방문', cur.visitor, prev.visitor, false),
+                d('블로그', cur.blog, prev.blog, false),
+                d('저장', cur.save, prev.save, false),
+                d('평점', cur.score, prev.score, true)
+            ].filter(Boolean);
+            if (!parts.length) { box.innerHTML = '<div class="nvt-flat">전월 대비 변화 없음 (' + plEsc(prev.period) + '→' + plEsc(cur.period) + ')</div>'; return; }
+            box.innerHTML = '<div class="nvt-h">전월 대비 (' + plEsc(prev.period) + '→' + plEsc(cur.period) + ')</div>'
+                          + '<div class="nvt-row">' + parts.join('') + '</div>';
+        }).catch(function () {});
+}
+
+// ── 현재 상세패널 장소를 네이버 통합검색으로 팝업 (지도 대신 메인검색 — 장소 정보/지도 모두 노출) ──
+function plOpenNaverMap() {
+    var pr = plPanelPlace;
+    if (!pr) return;
+    var q = ((pr.name || '') + ' ' + (pr.address || '')).trim();
+    if (!q) return;
+    var url = 'https://search.naver.com/search.naver?query=' + encodeURIComponent(q);
+    window.open(url, 'plNaverSearch', 'width=980,height=900,scrollbars=yes,resizable=yes,menubar=no,toolbar=no');
 }
 
 // ── 장소 수정 모달 (이름/분류 변경 + 카카오로 좌표 직접 지정) ──

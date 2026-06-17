@@ -74,6 +74,7 @@ function mapPlaceRow(Place $place, array $CAT, array $r): array {
         'geocode_status' => $r['geocode_status'],
         'months' => $months, 'tags' => $themes,
         'reviewed' => !empty($attr['reviewed']),
+        'naver' => $attr['naver'] ?? null,
         'refs' => $refs,
     ];
 }
@@ -382,6 +383,31 @@ function ingestRefJob(PDO $pdo, Place $place, array $CAT, array $ALLOW, array $j
             'all_handled' => $allHandled, 'count' => count($results), 'results' => $results];
 }
 
+// ── 네이버 맛집 일괄 적재/보강 ────────────────────────────────────
+//  job = { region, period?, places:[ {name,lat,lng,road,addr,phone,ncat,score,vrev,brev,save,nid,micro,michelin,tv,r1,r2} ] }
+//  적재 로직은 NaverPlaceCollector::ingestOne 에 위임(크론과 공유). 어느 경로든 추이 스냅샷
+//  place_naver_stat 에 period(YYYY-MM, 기본=이번 달) 1행 기록.
+//   · 중복(좌표250m+이름, 보수 재검증) → 보강 / 신규 → upsert(category=restaurant)
+function naverIngestJob(PDO $pdo, Place $place, array $job, bool $write): array {
+    $region = trim((string)($job['region'] ?? ''));
+    $period = preg_match('/^\d{4}-\d{2}$/', (string)($job['period'] ?? '')) ? $job['period'] : date('Y-m');
+    $places = $job['places'] ?? [];
+
+    $col = new NaverPlaceCollector($pdo);
+    $col->ensureTables();
+
+    $res = [];
+    foreach ($places as $p) {
+        if (!is_array($p)) continue;
+        $regionLabel = $region !== '' ? $region : trim((string)($p['r2'] ?? ''));
+        $regionLv1   = trim((string)($p['r1'] ?? '')) ?: null;
+        $res[] = $col->ingestOne($p, $regionLabel, $regionLv1, $period, $write);
+    }
+    $sum = ['new' => 0, 'enrich' => 0, 'skip' => 0];
+    foreach ($res as $x) { $a = $x['action'] ?? ''; if (isset($sum[$a])) $sum[$a]++; }
+    return ['region' => $region, 'period' => $period, 'count' => count($res), 'summary' => $sum, 'results' => $res];
+}
+
 $action = $_GET['action'] ?? $_POST['action'] ?? 'view';
 
 // ============================================================
@@ -622,6 +648,21 @@ if ($action !== 'view') {
                     $r = ingestRefJob($pdo, $place, $CAT, $ALLOW, $job, $write);
                     foreach (($r['results'] ?? []) as $x) { $a = $x['action'] ?? ''; if (isset($sum[$a])) $sum[$a]++; }
                     if (($r['ref'] ?? '') === 'purged') $sum['purged']++;
+                    $out[] = $r;
+                }
+                echo json_encode(['ok' => true, 'mode' => $write ? 'apply' : 'preview', 'jobs' => count($out), 'summary' => $sum, 'results' => $out], JSON_UNESCAPED_UNICODE);
+                break;
+            }
+            case 'naver_ingest': {                          // 네이버 맛집 적재/보강. payload={region,places:[...]} 또는 [{...},...]
+                $write = (($_POST['mode'] ?? $_GET['mode'] ?? 'preview') === 'apply');
+                $data  = json_decode((string)($_POST['payload'] ?? $_GET['payload'] ?? ''), true);
+                if (!is_array($data)) { http_response_code(400); echo json_encode(['ok' => false, 'msg' => 'payload {region,places:[...]} 필요']); break; }
+                $jobs = isset($data['places']) ? [$data] : $data;   // 단건/배열 모두 허용
+                $out = []; $sum = ['new' => 0, 'enrich' => 0, 'skip' => 0];
+                foreach ($jobs as $job) {
+                    if (!is_array($job)) continue;
+                    $r = naverIngestJob($pdo, $place, $job, $write);
+                    foreach ($r['summary'] as $k => $v) $sum[$k] += $v;
                     $out[] = $r;
                 }
                 echo json_encode(['ok' => true, 'mode' => $write ? 'apply' : 'preview', 'jobs' => count($out), 'summary' => $sum, 'results' => $out], JSON_UNESCAPED_UNICODE);
