@@ -117,6 +117,13 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .dot.travel { background: #3498db; } .dot.stay { background: #8e44ad; }
 .dot.restaurant { background: #e74c3c; } .dot.etc { background: #7f8c8d; }
 
+/* 현재위치 버튼 (지도 우하단 플로팅, GPS 크로스헤어) */
+.pl-myloc { position: absolute; right: 12px; bottom: 12px; z-index: 6; width: 42px; height: 42px; border-radius: 50%; background: #fff; border: none; box-shadow: 0 2px 8px rgba(0,0,0,.25); cursor: pointer; display: flex; align-items: center; justify-content: center; color: #3498db; transition: .15s; }
+.pl-myloc:hover { background: #f0f7ff; }
+.pl-myloc.loading { pointer-events: none; opacity: .65; }
+.pl-myloc.loading svg { animation: pl-spin 1s linear infinite; }
+@keyframes pl-spin { to { transform: rotate(360deg); } }
+
 /* 번호 마커 (HTML 아이콘) — 흰 배경 + 카테고리색 테두리 + 빨간 번호로 잘 보이게 */
 .mk-pin { width: 28px; height: 28px; border-radius: 50% 50% 50% 0; transform: rotate(-45deg); background: #fff; border: 3px solid #3498db; box-shadow: 0 2px 5px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; }
 .mk-pin b { transform: rotate(45deg); color: #e74c3c; font-weight: 800; font-size: 13px; line-height: 1; }
@@ -560,6 +567,12 @@ a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
         <span><i class="dot etc"></i>기타</span>
         <span><i class="dot" style="background:#ff2d2d"></i>검색 위치</span>
     </div>
+    <button class="pl-myloc" id="myLocBtn" onclick="plMyLocation()" title="현재 위치로 이동">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3.4"></circle>
+            <path d="M12 2v3.2M12 18.8V22M2 12h3.2M18.8 12H22"></path>
+        </svg>
+    </button>
     <div id="pl-panel">
         <div class="panel-head" id="panelHead"></div>
         <div class="panel-refs" id="panelRefs"></div>
@@ -794,7 +807,7 @@ function plLoadNaver() {
         if (window.naver && window.naver.maps) return resolve();
         if (!PLACE_NAVER_KEY) return reject('no-key');
         var s = document.createElement('script');
-        s.src = 'https://oapi.map.naver.com/openapi/v3/maps.js?ncpKeyId=' + encodeURIComponent(PLACE_NAVER_KEY);
+        s.src = 'https://oapi.map.naver.com/openapi/v3/maps.js?ncpKeyId=' + encodeURIComponent(PLACE_NAVER_KEY) + '&submodules=geocoder';
         s.onload = function () { resolve(); };
         s.onerror = function () { reject('load-fail'); };
         document.head.appendChild(s);
@@ -1939,6 +1952,53 @@ function plGeocode() {
             plSearch(d.lat, d.lng, parseFloat(document.getElementById('radius').value)); // 선택 반경부터 자동 확장
         })
         .catch(function () { plHint('지오코딩 실패'); });
+}
+
+// ── 현재 위치 (브라우저 Geolocation → 그 좌표로 이동 + 주변 검색) ──
+//  네이버 역지오코딩으로 실제 주소를 검색창·검색마커 라벨에 표시(가능할 때).
+//  주의: Geolocation 은 HTTPS(보안 컨텍스트)에서만 동작한다.
+function plMyLocation() {
+    if (!plReady) return;
+    if (!navigator.geolocation) { plHint('이 브라우저는 현재위치를 지원하지 않습니다'); return; }
+    var btn = document.getElementById('myLocBtn');
+    if (btn) btn.classList.add('loading');
+    plHint('현재 위치를 확인하는 중…');
+    navigator.geolocation.getCurrentPosition(function (pos) {
+        if (btn) btn.classList.remove('loading');
+        var lat = pos.coords.latitude, lng = pos.coords.longitude;
+        var rad = parseFloat(document.getElementById('radius').value);
+        plMap.setCenter(new naver.maps.LatLng(lat, lng));
+        plMap.setZoom(plZoomForRadius(rad));
+        // 역지오코딩(주소)은 가능하면 표시하되, 실패해도 검색은 그대로 진행
+        plReverseGeocode(lat, lng, function (addr) {
+            plSetSearchMarker(lat, lng, addr || '현재 위치');
+            document.getElementById('addr').value = addr || '';
+            plSearch(lat, lng, rad);   // 선택 반경부터 자동 확장
+            plHint(addr ? ('📍 현재 위치: ' + addr) : '📍 현재 위치로 이동');
+        });
+    }, function (err) {
+        if (btn) btn.classList.remove('loading');
+        plHint(err && err.code === 1 ? '위치 권한이 거부되었습니다'
+             : err && err.code === 3 ? '위치 확인 시간이 초과되었습니다'
+             : '현재 위치를 가져올 수 없습니다');
+    }, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
+}
+
+// 좌표 → 주소 (네이버 reverseGeocode 서브모듈). 미지원/실패 시 빈 문자열로 콜백
+function plReverseGeocode(lat, lng, cb) {
+    if (!(window.naver && naver.maps && naver.maps.Service && naver.maps.Service.reverseGeocode)) { cb(''); return; }
+    naver.maps.Service.reverseGeocode({
+        coords: new naver.maps.LatLng(lat, lng),
+        orders: [naver.maps.Service.OrderType.ROAD_ADDR, naver.maps.Service.OrderType.ADDR].join(',')
+    }, function (status, response) {
+        if (status !== naver.maps.Service.Status.OK) { cb(''); return; }
+        var addr = '';
+        try {
+            var a = response.v2.address;
+            addr = (a.roadAddress || a.jibunAddress || '').trim();
+        } catch (e) {}
+        cb(addr);
+    });
 }
 
 // ── 검색창 자동완성 (카카오 키워드 장소검색) ──
