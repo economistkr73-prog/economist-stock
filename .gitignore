@@ -26,3 +26,6 @@ snoopy/
 # 런타임 업로드/생성 데이터 및 이미지
 dta/
 img/
+
+# 여행 썸네일 디스크 캐시 (travel_thumb.php 가 드라이브 썸네일을 받아 저장)
+cache/

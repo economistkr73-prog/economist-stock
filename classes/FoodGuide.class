@@ -1,0 +1,90 @@
+<?php
+/**
+ * FoodGuide.class — 맛집 가이드(중분류) 정의 단일소스
+ *
+ * place.category='restaurant' 장소에 부여하는 "가이드"(블루리본/미쉐린/기타)의 메타데이터.
+ * 가이드 = place_guide(place_id, guide) — 마커색·상단 가이드칩·필터의 근거(구조 필요).
+ * 등급(2리본·1스타…) = place_tag(kind='grade') 태그(#리본2 등) — 음식 칩줄에서 함께 다룸.
+ *   → 등급은 자유 태그라 여기 'grades' 는 입력 편의를 위한 '추천 등급 태그' 목록일 뿐.
+ *
+ * VARCHAR guide = controlled vocab → 새 가이드는 DEFS 한 줄만 추가(DB ALTER 불필요).
+ * 대표가이드 = 한 장소의 여러 guide 중 prio 최댓값(미쉐린 > 블루리본 > 기타) → 마커색.
+ */
+class FoodGuide
+{
+    const DEFS = [
+        'michelin' => [
+            'ko'    => '미쉐린가이드',
+            'color' => '#c8102e',   // 미쉐린 레드
+            'prio'  => 30,
+            'grades' => ['스타3', '스타2', '스타1', '그린스타', '빕구르망', '셀렉티드'],
+        ],
+        'bluer' => [
+            'ko'    => '블루리본',
+            'color' => '#1f3a93',   // 블루리본 네이비
+            'prio'  => 20,
+            'grades' => ['리본3', '리본2', '리본1'],
+        ],
+        'etc' => [
+            'ko'    => '기타',
+            'color' => '#03c75a',   // 네이버 그린
+            'prio'  => 10,
+            'grades' => [],
+        ],
+    ];
+
+    /** 정의된 가이드 키인가 */
+    public static function exists(string $g): bool
+    {
+        return isset(self::DEFS[$g]);
+    }
+
+    /** 가이드 한글명 */
+    public static function ko(string $g): string
+    {
+        return self::DEFS[$g]['ko'] ?? $g;
+    }
+
+    /** 가이드 마커/배지 색 */
+    public static function color(string $g): string
+    {
+        return self::DEFS[$g]['color'] ?? '#7f8c8d';
+    }
+
+    /** 가이드 우선순위(대표가이드 선정용) */
+    public static function prio(string $g): int
+    {
+        return (int)(self::DEFS[$g]['prio'] ?? 0);
+    }
+
+    /** 추천 등급 태그 목록(중복 제거, 모든 가이드 합집합) — 등급 입력 datalist 용 */
+    public static function gradeSuggestions(): array
+    {
+        $out = [];
+        foreach (self::DEFS as $d) {
+            foreach (($d['grades'] ?? []) as $g) $out[$g] = true;
+        }
+        return array_keys($out);
+    }
+
+    /**
+     * guides 배열 [{guide}, ...] 중 대표(prio 최댓값) 반환. 없으면 null.
+     * @return array|null {guide}
+     */
+    public static function primary(array $guides): ?array
+    {
+        $best = null; $bestPrio = -1;
+        foreach ($guides as $row) {
+            $g = (string)($row['guide'] ?? '');
+            $p = self::prio($g);
+            if ($p > $bestPrio) { $bestPrio = $p; $best = $row; }
+        }
+        return $best;
+    }
+
+    /** 클라이언트(JS)로 그대로 내려보낼 정의(한글명·색·prio·추천등급) */
+    public static function clientDefs(): array
+    {
+        return self::DEFS;
+    }
+}

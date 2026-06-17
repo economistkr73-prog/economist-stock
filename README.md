@@ -8,7 +8,7 @@
 - 일간 뉴스 수집 및 정리 (`daily_news.php`)
 - ETF/주식 분석 (`etf_stock.php`, `stock_analysis.php`)
 - 종목 테마 뉴스 (`stock_thema_news.php`)
-- AI 기반 조건 분석 (`condition_analysis.php`, `analysis_model.php`)
+- 분석 모델 / 증권 뉴스 리포트 (`analysis_model.php`)
 - RSS 피드 제공 (`rss_feed.php`)
 - 키워드 자동 수집 크론 (`cron_keyword_collector.php`)
 

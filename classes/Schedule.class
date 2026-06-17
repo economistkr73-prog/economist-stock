@@ -47,6 +47,7 @@ class Schedule {
         $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS lng      DECIMAL(10,7) DEFAULT NULL COMMENT '경도'");
         $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS provider   VARCHAR(10)  DEFAULT NULL COMMENT '지도 제공자 naver|google'");
         $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS place_name VARCHAR(100) DEFAULT NULL COMMENT '장소명/상호'");
+        $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS extra_attendees TEXT DEFAULT NULL COMMENT '주소록 외 참석자(이름 콤마구분)'");
 
         // ── 마이그레이션: 반복을 recur_rule 단일 경로로 통일 ──
         // 음력 기념일: is_lunar 컬럼 → recur_rule(JSON) 로 흡수
@@ -231,12 +232,12 @@ class Schedule {
                (event_type, title, start_dt, end_dt, due_dt,
                 category, color, priority, memo, is_done, is_allday, recur_rule,
                 is_lunar, lunar_month, lunar_day, icon, is_family, project_id,
-                address, lat, lng, provider, place_name)
+                address, lat, lng, provider, place_name, extra_attendees)
              VALUES
                (:event_type, :title, :start_dt, :end_dt, :due_dt,
                 :category, :color, :priority, :memo, :is_done, :is_allday, :recur_rule,
                 :is_lunar, :lunar_month, :lunar_day, :icon, :is_family, :project_id,
-                :address, :lat, :lng, :provider, :place_name)"
+                :address, :lat, :lng, :provider, :place_name, :extra_attendees)"
         );
         $stmt->execute($this->buildParams($d));
         $id = (int)$this->pdo->lastInsertId();
@@ -253,7 +254,7 @@ class Schedule {
                memo=:memo, is_allday=:is_allday, recur_rule=:recur_rule,
                is_lunar=:is_lunar, lunar_month=:lunar_month, lunar_day=:lunar_day,
                icon=:icon, is_family=:is_family, project_id=:project_id,
-               address=:address, lat=:lat, lng=:lng, provider=:provider, place_name=:place_name
+               address=:address, lat=:lat, lng=:lng, provider=:provider, place_name=:place_name, extra_attendees=:extra_attendees
              WHERE id=:id"
         );
         $params = $this->buildParams($d);
@@ -269,6 +270,69 @@ class Schedule {
         return $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
     }
 
+    // ── 활동 메모(타임스탬프 로그) ─────────────────────────────
+    // 일정 1건의 특정 발생일(occ_date)에 [HH:MM] 메모를 누적 기록한다.
+    // 반복 일정은 인스턴스 날짜별로, 단일 일정은 자기 날짜로 묶인다.
+    private function ensureLogTable(): void {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS tbl_schedule_log (
+                id          INT AUTO_INCREMENT PRIMARY KEY,
+                schedule_id INT  NOT NULL,
+                occ_date    DATE NOT NULL COMMENT '발생 회차 날짜(반복은 인스턴스 날짜)',
+                log_time    TIME NOT NULL COMMENT '메모 기록 시각',
+                note        TEXT,
+                created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (schedule_id) REFERENCES tbl_schedule(id) ON DELETE CASCADE,
+                INDEX idx_schlog (schedule_id, occ_date)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+    }
+
+    public function logList(int $scheduleId, string $occDate): array {
+        $this->ensureLogTable();
+        $st = $this->pdo->prepare(
+            "SELECT id, DATE_FORMAT(log_time,'%H:%i') AS t, note
+               FROM tbl_schedule_log
+              WHERE schedule_id=:sid AND occ_date=:od
+              ORDER BY log_time ASC, id ASC"
+        );
+        $st->execute([':sid' => $scheduleId, ':od' => $occDate]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    public function logAdd(int $scheduleId, string $occDate, string $note, ?string $time = null): array {
+        $this->ensureLogTable();
+        $t = ($time && preg_match('/^\d{2}:\d{2}$/', $time)) ? $time . ':00' : date('H:i:s');
+        $st = $this->pdo->prepare(
+            "INSERT INTO tbl_schedule_log (schedule_id, occ_date, log_time, note)
+             VALUES (:sid, :od, :t, :n)"
+        );
+        $st->execute([':sid' => $scheduleId, ':od' => $occDate, ':t' => $t, ':n' => $note]);
+        return ['id' => (int)$this->pdo->lastInsertId(), 't' => substr($t, 0, 5), 'note' => $note];
+    }
+
+    public function logDelete(int $logId): void {
+        $this->ensureLogTable();
+        $this->pdo->prepare("DELETE FROM tbl_schedule_log WHERE id=:id")
+                  ->execute([':id' => $logId]);
+    }
+
+    // 발생일별 메모 개수 맵: ["scheduleId|YYYY-MM-DD" => count]
+    public function logCountMap(string $start, string $end): array {
+        $this->ensureLogTable();
+        $st = $this->pdo->prepare(
+            "SELECT schedule_id, occ_date, COUNT(*) AS c
+               FROM tbl_schedule_log
+              WHERE occ_date BETWEEN :s AND :e
+              GROUP BY schedule_id, occ_date"
+        );
+        $st->execute([':s' => $start, ':e' => $end]);
+        $map = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $map[$r['schedule_id'] . '|' . $r['occ_date']] = (int)$r['c'];
+        }
+        return $map;
+    }
     public function toggleDone(int $id): void {
         $this->pdo->prepare("UPDATE tbl_schedule SET is_done=1-is_done WHERE id=:id")
                   ->execute([':id' => $id]);
@@ -325,10 +389,13 @@ class Schedule {
                 $d['recur_rule'] = null;
                 $d['_single']    = 1;   // 기념일 자동 반복 방지
                 // 단독 일정은 클릭한 그 날짜(originDt)에 고정
-                if (!empty($d['start_dt'])) {
-                    $d['start_dt'] = $originDt . substr($d['start_dt'], 10);
-                } else {
-                    $d['start_dt'] = $originDt . ' 00:00:00';
+                // todo는 due_dt(날짜) 자체를 변경할 수 있으므로 예외
+                if (($d['event_type'] ?? '') !== 'todo') {
+                    if (!empty($d['start_dt'])) {
+                        $d['start_dt'] = $originDt . substr($d['start_dt'], 10);
+                    } else {
+                        $d['start_dt'] = $originDt . ' 00:00:00';
+                    }
                 }
                 $this->create($d);
                 break;
@@ -355,8 +422,8 @@ class Schedule {
                 $orig = $this->pdo->prepare("SELECT start_dt, end_dt FROM tbl_schedule WHERE id=:id");
                 $orig->execute([':id' => $id]);
                 $origRow = $orig->fetch(PDO::FETCH_ASSOC);
-                if ($origRow) {
-                    // 날짜는 원본, 시간은 폼 값 유지
+                if ($origRow && ($d['event_type'] ?? '') !== 'todo') {
+                    // timed: 날짜는 원본, 시간은 폼 값 유지
                     $origDate = substr($origRow['start_dt'], 0, 10);
                     $newTime  = isset($d['start_dt']) ? substr($d['start_dt'], 10) : substr($origRow['start_dt'], 10);
                     $d['start_dt'] = $origDate . $newTime;
@@ -441,6 +508,7 @@ class Schedule {
             ':lng'         => isset($d['lng']) && $d['lng'] !== '' && $d['lng'] !== null ? (float)$d['lng'] : null,
             ':provider'    => !empty($d['provider']) ? $d['provider'] : null,
             ':place_name'  => isset($d['place_name']) && trim((string)$d['place_name']) !== '' ? trim((string)$d['place_name']) : null,
+            ':extra_attendees' => isset($d['extra_attendees']) && trim((string)$d['extra_attendees']) !== '' ? trim((string)$d['extra_attendees']) : null,
         ];
     }
 
@@ -606,6 +674,10 @@ class Schedule {
         $inst['start_dt']          = $startDt->format('Y-m-d H:i:s');
         $inst['origin_dt']         = $startDt->format('Y-m-d'); // 예외 처리용
         $inst['is_recur_instance'] = 1;
+        // todo: due_dt도 인스턴스 날짜에 맞춤 (원본 due_dt 유지 시 edit modal에서 날짜 오표시)
+        if (($ev['event_type'] ?? '') === 'todo') {
+            $inst['due_dt'] = $startDt->format('Y-m-d');
+        }
         if ($dur) { $e=clone $startDt; $e->add($dur); $inst['end_dt']=$e->format('Y-m-d H:i:s'); }
         return $inst;
     }

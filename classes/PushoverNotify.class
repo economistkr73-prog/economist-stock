@@ -1,0 +1,128 @@
+<?php
+/**
+ * PushoverNotify — Pushover 푸시 알림 (소리나는 폰 알림)
+ *
+ * 카카오톡 "나와의 채팅"은 본인이 보낸 메시지로 처리돼 알림음이 울리지 않는
+ * 구조적 한계가 있어, 확실히 소리나는 푸시를 위해 Pushover 로 교체한다.
+ *
+ * 사용법:
+ *   PushoverNotify::send("뉴스레터 본문", "https://링크", [
+ *       "title"    => "오늘의 뉴스레터",
+ *       "priority" => 1,            // 기본 PUSHOVER_DEFAULT_PRIORITY
+ *       "sound"    => "magic",
+ *   ]);
+ *
+ * 자격증명은 env/pushover.inc 상수(또는 환경변수)로 관리. 하드코딩 금지.
+ */
+class PushoverNotify
+{
+    const API_URL  = 'https://api.pushover.net/1/messages.json';
+    const MSG_MAX   = 1024;   // Pushover 본문 제한
+    const TITLE_MAX = 250;    // Pushover 제목 제한
+
+    /** env/pushover.inc 자동 로드 (autoloader 는 클래스만 로드하므로 설정은 여기서) */
+    private static function loadConfig(): void
+    {
+        if (defined('PUSHOVER_TOKEN')) return;
+        $f = __DIR__ . '/../env/pushover.inc';
+        if (is_file($f)) require_once $f;
+    }
+
+    /** 상수 우선, 없으면 환경변수에서 자격증명 조회 */
+    private static function cred(string $const, string $env): string
+    {
+        if (defined($const) && constant($const) !== '') return (string) constant($const);
+        $v = getenv($env);
+        return $v !== false ? (string) $v : '';
+    }
+
+    /**
+     * 푸시 알림 전송
+     *
+     * @param string $message 본문 (필수, 1024자 제한)
+     * @param string $link    클릭 시 이동할 URL (선택) → url 파라미터
+     * @param array  $opts    title, priority, sound, url_title, html(1), retry, expire, device
+     * @return bool 전송 성공 여부
+     */
+    public static function send(string $message, string $link = '', array $opts = []): bool
+    {
+        self::loadConfig();
+
+        $token = self::cred('PUSHOVER_TOKEN', 'PUSHOVER_TOKEN');
+        $user  = self::cred('PUSHOVER_USER',  'PUSHOVER_USER');
+        if ($token === '' || $user === '') {
+            error_log('[Pushover] 자격증명 미설정 (env/pushover.inc 의 PUSHOVER_TOKEN/PUSHOVER_USER)');
+            return false;
+        }
+
+        $message = mb_strcut(trim($message), 0, self::MSG_MAX);
+        $body = [
+            'token'   => $token,
+            'user'    => $user,
+            'message' => $message !== '' ? $message : '(빈 메시지)',
+        ];
+
+        if ($link !== '')               $body['url']       = $link;
+        if (!empty($opts['title']))     $body['title']     = mb_strcut((string) $opts['title'], 0, self::TITLE_MAX);
+        if (!empty($opts['url_title'])) $body['url_title'] = (string) $opts['url_title'];
+        if (!empty($opts['html']))      $body['html']      = 1;
+
+        // 알림 강도 (기본 PUSHOVER_DEFAULT_PRIORITY → 없으면 1=High)
+        $priority = array_key_exists('priority', $opts)
+            ? (int) $opts['priority']
+            : (defined('PUSHOVER_DEFAULT_PRIORITY') ? (int) PUSHOVER_DEFAULT_PRIORITY : 1);
+        $body['priority'] = $priority;
+
+        // 알림음
+        $sound = $opts['sound'] ?? (defined('PUSHOVER_DEFAULT_SOUND') ? PUSHOVER_DEFAULT_SOUND : '');
+        if ($sound !== '') $body['sound'] = $sound;
+
+        // priority 2(Emergency) → retry(최소 30초) / expire(최대 10800초) 필수
+        if ($priority === 2) {
+            $body['retry']  = max(30,   (int) ($opts['retry']  ?? 60));
+            $body['expire'] = min(10800, (int) ($opts['expire'] ?? 3600));
+        }
+
+        if (!empty($opts['device'])) $body['device'] = (string) $opts['device'];
+
+        return self::post($body);
+    }
+
+    /** 재시도 포함 POST. 200 + status==1 만 성공으로 본다. */
+    private static function post(array $body, int $maxTry = 3): bool
+    {
+        for ($attempt = 1; $attempt <= $maxTry; $attempt++) {
+            $ch = curl_init(self::API_URL);
+            curl_setopt_array($ch, [
+                CURLOPT_POST           => true,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT        => 15,
+                CURLOPT_POSTFIELDS     => http_build_query($body),
+            ]);
+            $res     = curl_exec($ch);
+            $code    = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $curlErr = curl_error($ch);
+            curl_close($ch);
+
+            $data   = json_decode((string) $res, true);
+            $status = (is_array($data) && isset($data['status'])) ? (int) $data['status'] : 0;
+
+            if ($code === 200 && $status === 1) {
+                error_log('[Pushover] 전송 성공 (시도 ' . $attempt . ')');
+                return true;
+            }
+
+            // 4xx = 요청 자체 오류(토큰/유저키/파라미터) → 재시도해도 동일하므로 즉시 중단
+            if ($code >= 400 && $code < 500) {
+                error_log("[Pushover] 전송 실패(요청오류 {$code}): " . $res);
+                return false;
+            }
+
+            // 5xx / 네트워크 오류 → 재시도
+            error_log("[Pushover] 전송 실패(시도 {$attempt}/{$maxTry}, code={$code}, curl={$curlErr}): " . $res);
+            if ($attempt < $maxTry) usleep(800000); // 0.8초 후 재시도
+        }
+        return false;
+    }
+}
+?>

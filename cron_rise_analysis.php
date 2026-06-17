@@ -34,8 +34,8 @@ try {
 
     // 휴장일/장 마감 전 — 저장 스킵
     if (!empty($res['skipped'])) {
-        if (class_exists('KakaoNotify')) {
-            KakaoNotify::send("[상승확률] {$res['date']} 스킵 — {$res['reason']}");
+        if (class_exists('Notify')) {
+            Notify::send("[상승확률] {$res['date']} 스킵 — {$res['reason']}");
         }
         exit;
     }
@@ -46,13 +46,13 @@ try {
          . "과거 채점: 3일 {$res['graded']} · 재테스트 {$res['retested']}\n"
          . "👉 https://economist.kr/rise_analysis.php";
 
-    if (class_exists('KakaoNotify')) {
-        KakaoNotify::send($msg, "https://economist.kr/rise_analysis.php");
+    if (class_exists('Notify')) {
+        Notify::send($msg, "https://economist.kr/rise_analysis.php");
     }
 
 } catch (Throwable $e) {
-    if (class_exists('KakaoNotify')) {
-        KakaoNotify::send("⚠️ 상승확률 분석 실패\n" . $e->getMessage());
+    if (class_exists('Notify')) {
+        Notify::send("⚠️ 상승확률 분석 실패\n" . $e->getMessage());
     }
 }
 ?>

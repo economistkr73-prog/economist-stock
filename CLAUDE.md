@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 프로젝트 개요
 
 **이코노미스트의 주식이야기** — PHP/MySQL 기반 개인 주식 분석 웹 애플리케이션.  
-로그인 인증 후 ETF/주식 분석, 일간 뉴스 수집, AI 조건 분석 기능을 제공한다.
+로그인 인증 후 ETF/주식 분석, 일간 뉴스 수집 기능을 제공한다.
 
 ## 기술 스택
 
@@ -54,8 +54,7 @@ require_login();                   // 미로그인 시 /lg.php 리다이렉트
 | 파일 | 설명 |
 |------|------|
 | `etf_stock.php` | ETF/주식 분석 메인. `?mode=` 파라미터로 내부 라우팅 (`ef`, `si`, `eshl`, `elbs`, `slbe`, `gsnb` 등) |
-| `stock_analysis.php` | 종목 차트·그래프 |
-| `condition_analysis.php` | AI 조건 분석 |
+| `stock_analysis.php` | 상승종목 분석 대시보드 (`?mode=updash`, `stock_analysis_api.php` 소비) |
 | `analysis_model.php` | 분석 모델 정의 |
 | `daily_news.php` | 일간 뉴스 수집 및 표시 |
 | `stock_thema_news.php` | 종목 테마 뉴스 |
@@ -97,8 +96,9 @@ require_login();                   // 미로그인 시 /lg.php 리다이렉트
 |------|------|
 | PHP | 8.4 |
 | DB | MariaDB 10.6.17 |
-| 서버 IP | 183.111.100.198 (uws7-006) |
-| SSH 접속 | `economist73@183.111.100.198` (키: `~/.ssh/economist73.pem`) |
+| 서버 IP | 220.73.160.47 (uws8-wpm-151) |
+| SSH/SFTP 접속 | `economist73@220.73.160.47` (port 22, 비밀번호 인증) |
+| 배포 | `.vscode/sftp.json` SFTP 자동업로드. remotePath는 chroot 경로 `/economist73/www` |
 
 ## 모바일 감지
 

@@ -311,7 +311,6 @@ function mode_display($pdo) {
     $UPLOAD_GROUPS = [
         'basic' => '📌 기본 정보 (부정기 업데이트)',
         'daily' => '📊 일일 시세 (매일 수시 업데이트)',
-        'cond'  => '🔎 조건 검색 ( 매일 장종료후 업데이트)',
     ];
 
     $UPLOAD_CONFIG = [
@@ -319,22 +318,6 @@ function mode_display($pdo) {
         'etf'      => ['group' => 'daily', 'title' => '📈 ETF 시세',       'table_name' => 'all_etf_price',  'auto_reset' => true,  'requires_date' => true],
         'stock'    => ['group' => 'daily', 'title' => '🏢 주식 시세',      'table_name' => 'all_stock_info', 'auto_reset' => true,  'requires_date' => false],
     ];
-
-    try {
-        $cond_meta_list = $pdo->query("SELECT * FROM condition_type_meta ORDER BY sort_order ASC")->fetchAll(PDO::FETCH_ASSOC);
-        foreach ($cond_meta_list as $meta) {
-            $UPLOAD_CONFIG['cond_' . $meta['type_code']] = [
-                'group'         => 'cond',
-                'title'         => '🎯 ' . $meta['type_title'],
-                'table_name'    => 'all_condition_analysis',
-                'analysis_type' => $meta['type_code'],
-                'auto_reset'    => (bool)$meta['auto_reset'],
-                'requires_date' => (bool)$meta['requires_date'],
-            ];
-        }
-    } catch (Exception $e) {
-        error_log("업로드 설정 로드 실패: " . $e->getMessage());
-    }
 
     $message = "";
     if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['csv_file'])) {
@@ -351,14 +334,10 @@ function mode_display($pdo) {
                     $is_reset  = $config['auto_reset'];
                     $success_count = 0;
 
-                    if (strpos($data_type, 'cond_') === 0) {
-                        $success_count = process_condition_csv($pdo, $handle, $ref_date, $config['analysis_type'], $test_on);
-                    } else {
-                        switch ($data_type) {
-                            case 'etf':      $success_count = process_etf_csv($pdo, $handle, $ref_date, $is_reset);      break;
-                            case 'etf_info': $success_count = process_etf_info_csv($pdo, $handle, $ref_date, $is_reset); break;
-                            case 'stock':    $success_count = process_stock_csv($pdo, $handle, $ref_date, $is_reset);    break;
-                        }
+                    switch ($data_type) {
+                        case 'etf':      $success_count = process_etf_csv($pdo, $handle, $ref_date, $is_reset);      break;
+                        case 'etf_info': $success_count = process_etf_info_csv($pdo, $handle, $ref_date, $is_reset); break;
+                        case 'stock':    $success_count = process_stock_csv($pdo, $handle, $ref_date, $is_reset);    break;
                     }
                     $pdo->commit();
                     $reset_msg = $is_reset ? "(기존 데이터 초기화 됨)" : "(기존 데이터에 누적 됨)";

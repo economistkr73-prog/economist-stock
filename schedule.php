@@ -394,6 +394,26 @@ function sch_calendar(PDO $pdo): void {
     box-shadow: 0 4px 14px rgba(52,152,219,.45);
 }
 #m-fab:active { background: #2176ae; }
+
+/* 참석자 자동완성 드롭다운 */
+.att-ac {
+    position: absolute; left: 0; right: 0; top: 100%; z-index: 50;
+    margin-top: 4px; max-height: 232px; overflow-y: auto;
+    background: #fff; border: 1px solid #e1e5ea; border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0,0,0,.12);
+}
+.att-ac-item {
+    display: flex; align-items: baseline; gap: 8px;
+    padding: 8px 12px; cursor: pointer; font-size: 13px; line-height: 1.3;
+    border-bottom: 1px solid #f2f4f7;
+}
+.att-ac-item:last-child { border-bottom: none; }
+.att-ac-item.active, .att-ac-item:hover { background: #eaf4ff; }
+.att-ac-item .nm { font-weight: 600; color: #2c3e50; white-space: nowrap; }
+.att-ac-item .grp { flex-shrink: 0; color: #2980b9; background: #eaf4ff; font-size: 11px; padding: 1px 7px; border-radius: 9px; white-space: nowrap; }
+.att-ac-item .org { color: #95a5a6; font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-ac-new { color: #7f8c9b; font-style: normal; }
+.att-ac-new b { color: #2980b9; font-style: normal; }
 </style>
 </head>
 <body class="<?= $mobile ? 'is-mobile' : '' ?>">
@@ -649,12 +669,12 @@ function sch_calendar(PDO $pdo): void {
         <div class="form-row" id="row-attendees">
             <label>참석자
                 <div style="display:flex;gap:6px;align-items:flex-start;">
-                    <div style="flex:1;">
+                    <div style="flex:1;position:relative;">
                         <div id="attendee-chips" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:5px;"></div>
-                        <input type="text" id="f-attendee-input" list="attendee-datalist"
-                               placeholder="이름 입력 후 Enter (주소록 연동)"
+                        <input type="text" id="f-attendee-input" autocomplete="off"
+                               placeholder="이름 입력 (주소록에 없으면 이름만 추가)"
                                style="width:100%;border:1px solid #dde;border-radius:6px;padding:7px 10px;font-size:13px;">
-                        <datalist id="attendee-datalist"></datalist>
+                        <div id="attendee-ac" class="att-ac" style="display:none;"></div>
                     </div>
                 </div>
             </label>
@@ -921,11 +941,12 @@ function projNumBadge(ev) {
     return `<span class="proj-num-badge" title="${esc(p.title)}">${ico} </span>`;
 }
 
-// 참석자 표시: 1명이면 (이름), 여러명이면 (이름+N)
+// 참석자 표시: 1명이면 (이름), 여러명이면 (이름+N) — 주소록 연락처 + 텍스트 참석자 합산
 function attendeeSuffix(ev) {
-    const a = ev.attendees || [];
-    if (!a.length) return '';
-    return a.length === 1 ? `(${a[0].name})` : `(${a[0].name}+${a.length - 1})`;
+    const names = (ev.attendees || []).map(a=>a.name)
+        .concat((ev.extra_attendees || '').split(',').map(s=>s.trim()).filter(Boolean));
+    if (!names.length) return '';
+    return names.length === 1 ? `(${names[0]})` : `(${names[0]}+${names.length - 1})`;
 }
 
 // 칩 제목 텍스트 (제목 + 참석자) — esc() 안에서 사용
@@ -996,10 +1017,10 @@ function projDday(end) {
 
 // 그룹/프로젝트 상세 목록용: 참석자 요약 (attendee_names 콤마문자열 기반)
 function pdpAtt(ev) {
-    const s = (ev.attendee_names || '').trim();
-    if (!s) return '';
-    const a = s.split(',').filter(Boolean);
-    return a.length <= 1 ? (a[0] || '') : `${a[0]}+${a.length - 1}`;
+    const a = (ev.attendee_names || '').split(',').map(s=>s.trim()).filter(Boolean)
+        .concat((ev.extra_attendees || '').split(',').map(s=>s.trim()).filter(Boolean));
+    if (!a.length) return '';
+    return a.length <= 1 ? a[0] : `${a[0]}+${a.length - 1}`;
 }
 // 그룹/프로젝트 상세 목록용: 주소 아이콘 (클릭 시 외부 지도)
 function pdpMapIcon(ev) {
@@ -1545,6 +1566,9 @@ function openNew(dt='', type='timed') {
     document.getElementById('f-icon').value = '';
     // 참석자 초기화
     SEL_ATTENDEES = [];
+    SEL_EXTRA = [];
+    document.getElementById('f-attendee-input').value = '';
+    if (typeof attAcClose === 'function') attAcClose();
     renderAttendeeChips();
     // 위치 초기화
     resetLocationForm();
@@ -1635,6 +1659,7 @@ function openEdit(ev) {
 
     // 참석자 복원
     SEL_ATTENDEES = (ev.attendees || []).map(a=>({id:a.id, name:a.name}));
+    SEL_EXTRA = (ev.extra_attendees || '').split(',').map(s=>s.trim()).filter(Boolean);
     renderAttendeeChips();
 
     // 위치 복원
@@ -1685,6 +1710,7 @@ async function saveEvent() {
         recur_rule: RECUR||null,
         alert_mins: [...document.querySelectorAll('.f-alert:checked')].map(cb=>+cb.value),
         attendees: SEL_ATTENDEES.map(a=>a.id),
+        extra_attendees: SEL_EXTRA.join(', '),
         icon: document.getElementById('f-icon').value || null,
         // 프로젝트 우선, 없으면 그룹 (둘 다 tbl_project 행 → project_id 단일 컬럼)
         project_id: document.getElementById('f-project-id').value
@@ -1828,12 +1854,14 @@ function openView(ev) {
         recurEl.style.display = 'none';
     }
 
-    // 참석자
+    // 참석자 (주소록 연락처 + 텍스트 참석자)
     const attEl = document.getElementById('view-attendees');
-    if (ev.attendees && ev.attendees.length) {
-        attEl.innerHTML = '👥 ' + ev.attendees.map(a=>
-            `<span style="display:inline-block;background:#eaf4ff;color:#2980b9;border-radius:10px;padding:2px 8px;margin:2px;font-size:12px;">${a.name}</span>`
-        ).join('');
+    const cChips = (ev.attendees || []).map(a=>
+        `<span style="display:inline-block;background:#eaf4ff;color:#2980b9;border-radius:10px;padding:2px 8px;margin:2px;font-size:12px;">${esc(a.name)}</span>`);
+    const eChips = (ev.extra_attendees || '').split(',').map(s=>s.trim()).filter(Boolean).map(n=>
+        `<span title="주소록에 없는 참석자" style="display:inline-block;background:#f0f1f4;color:#555;border:1px dashed #c4ccd4;border-radius:10px;padding:2px 8px;margin:2px;font-size:12px;">${esc(n)}</span>`);
+    if (cChips.length || eChips.length) {
+        attEl.innerHTML = '👥 ' + cChips.concat(eChips).join('');
         attEl.style.display = '';
     } else {
         attEl.style.display = 'none';
@@ -2087,13 +2115,93 @@ function goToday() {
 
 document.getElementById('f-allday').onchange  = e=>setAllday(e.target.checked);
 
-// 참석자 입력: Enter 또는 datalist 선택 시 추가
-document.getElementById('f-attendee-input').addEventListener('keydown', function(e){
-    if (e.key==='Enter'){ e.preventDefault(); addAttendeeByName(this.value); }
-});
-document.getElementById('f-attendee-input').addEventListener('change', function(){
-    if (this.value) addAttendeeByName(this.value);
-});
+// ━━━ 참석자 입력 자동완성 (입력한 글자로 주소록 필터) ━━━
+let _attAcList = [];   // 현재 표시중인 후보 [{id,name,org}]
+let _attAcIdx  = -1;   // 활성 항목 인덱스 (-1=없음)
+
+function attAcClose() {
+    const box = document.getElementById('attendee-ac');
+    box.style.display = 'none'; box.innerHTML = '';
+    _attAcList = []; _attAcIdx = -1;
+}
+function attAcOpen() {
+    const inp = document.getElementById('f-attendee-input');
+    const q = inp.value.trim().toLowerCase();
+    if (!q) { attAcClose(); return; }
+    // 이미 선택된 연락처는 제외, 이름·그룹·회사명 부분일치, 최대 8개
+    _attAcList = ALL_CONTACTS
+        .filter(c => !SEL_ATTENDEES.some(a=>a.id==c.id))
+        .filter(c => (c.name||'').toLowerCase().includes(q) ||
+                     (c.group_name||'').toLowerCase().includes(q) ||
+                     (c.organization||'').toLowerCase().includes(q))
+        .slice(0, 8)
+        .map(c => ({id:c.id, name:c.name, org:c.organization||'', grp:c.group_name||''}));
+    _attAcIdx = _attAcList.length ? 0 : -1;
+    attAcRender(inp.value.trim());
+}
+function attAcRender(rawQ) {
+    const box = document.getElementById('attendee-ac');
+    const rows = _attAcList.map((c,i)=>`
+        <div class="att-ac-item${i===_attAcIdx?' active':''}" data-i="${i}">
+            <span class="nm">${esc(c.name)}</span>
+            ${c.grp?`<span class="grp">${esc(c.grp)}</span>`:''}
+            ${c.org?`<span class="org">${esc(c.org)}</span>`:''}
+        </div>`);
+    // 정확히 일치하는 이름이 없으면 "이름만 추가" 안내 행
+    const exact = ALL_CONTACTS.some(c=>c.name===rawQ);
+    if (rawQ && !exact) {
+        rows.push(`<div class="att-ac-item att-ac-new" data-new="1">
+            <b>+ "${esc(rawQ)}"</b>&nbsp;주소록에 없는 참석자로 추가</div>`);
+    }
+    if (!rows.length) { attAcClose(); return; }
+    box.innerHTML = rows.join('');
+    box.style.display = 'block';
+}
+function attAcCommit() {
+    // 활성 항목이 후보면 그걸, 'new' 행이거나 후보 없으면 입력값 그대로 추가
+    const inp = document.getElementById('f-attendee-input');
+    if (_attAcIdx >= 0 && _attAcList[_attAcIdx]) {
+        addAttendeeByName(_attAcList[_attAcIdx].name);
+    } else {
+        addAttendeeByName(inp.value);
+    }
+    attAcClose();
+}
+
+(function(){
+    const inp = document.getElementById('f-attendee-input');
+    const box = document.getElementById('attendee-ac');
+    inp.addEventListener('input', attAcOpen);
+    inp.addEventListener('focus', function(){ if (this.value.trim()) attAcOpen(); });
+    inp.addEventListener('keydown', function(e){
+        const open = box.style.display !== 'none';
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            if (!open) { attAcOpen(); return; }
+            _attAcIdx = Math.min(_attAcIdx + 1, _attAcList.length - 1);
+            attAcRender(this.value.trim());
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            _attAcIdx = Math.max(_attAcIdx - 1, 0);
+            attAcRender(this.value.trim());
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            attAcCommit();
+        } else if (e.key === 'Escape') {
+            if (open) { e.preventDefault(); attAcClose(); }
+        }
+    });
+    // 마우스 클릭 선택 (mousedown으로 blur보다 먼저 처리)
+    box.addEventListener('mousedown', function(e){
+        const it = e.target.closest('.att-ac-item');
+        if (!it) return;
+        e.preventDefault();
+        if (it.dataset.new) addAttendeeByName(inp.value);
+        else addAttendeeByName(_attAcList[+it.dataset.i].name);
+        attAcClose();
+    });
+    inp.addEventListener('blur', function(){ setTimeout(attAcClose, 120); });
+})();
 
 // ━━━ 이모지 선택 ━━━
 const EMOJI_MAP = {
@@ -2263,39 +2371,56 @@ let RECUR = null; // 현재 반복 규칙
 
 // ━━━ 참석자 (주소록 연동) ━━━
 let ALL_CONTACTS = [];        // 전체 주소록
-let SEL_ATTENDEES = [];       // 선택된 참석자 [{id,name}]
+let SEL_ATTENDEES = [];       // 선택된 참석자(주소록 연락처) [{id,name}]
+let SEL_EXTRA = [];           // 주소록에 없는 참석자 (이름 텍스트만) [name]
 
 async function loadContactsForAttendee() {
     try {
         const r = await fetch('/schedule_api.php?module=contacts&action=list');
         const res = await r.json();
         ALL_CONTACTS = res.data || [];
-        document.getElementById('attendee-datalist').innerHTML =
-            ALL_CONTACTS.map(c=>`<option value="${c.name}">${c.organization||''}</option>`).join('');
     } catch(e){ ALL_CONTACTS=[]; }
 }
 
 function renderAttendeeChips() {
     const el = document.getElementById('attendee-chips');
-    el.innerHTML = SEL_ATTENDEES.map(a=>`
+    // 주소록 연락처 칩 (파란색)
+    const contactChips = SEL_ATTENDEES.map(a=>`
         <span style="display:inline-flex;align-items:center;gap:4px;background:#eaf4ff;color:#2980b9;border-radius:12px;padding:3px 8px;font-size:12px;font-weight:600;">
-            ${a.name}
+            ${esc(a.name)}
             <span style="cursor:pointer;color:#e74c3c;" onclick="removeAttendee(${a.id})">×</span>
-        </span>`).join('');
+        </span>`);
+    // 주소록에 없는 텍스트 참석자 칩 (회색 점선 — 주소록과 무관)
+    const extraChips = SEL_EXTRA.map((n,i)=>`
+        <span title="주소록에 없는 참석자" style="display:inline-flex;align-items:center;gap:4px;background:#f0f1f4;color:#555;border:1px dashed #c4ccd4;border-radius:12px;padding:3px 8px;font-size:12px;font-weight:600;">
+            ${esc(n)}
+            <span style="cursor:pointer;color:#e74c3c;" onclick="removeExtra(${i})">×</span>
+        </span>`);
+    el.innerHTML = contactChips.concat(extraChips).join('');
 }
 function removeAttendee(id) {
     SEL_ATTENDEES = SEL_ATTENDEES.filter(a=>a.id!=id);
     renderAttendeeChips();
 }
+function removeExtra(i) {
+    SEL_EXTRA.splice(i, 1);
+    renderAttendeeChips();
+}
 function addAttendeeByName(name) {
     name = name.trim();
     if (!name) return;
-    const c = ALL_CONTACTS.find(x=>x.name===name);
-    if (!c) { alert('주소록에 없는 이름입니다. 주소록에서 먼저 등록하세요.'); return; }
-    if (SEL_ATTENDEES.some(a=>a.id==c.id)) return; // 중복
-    SEL_ATTENDEES.push({id:c.id, name:c.name});
-    renderAttendeeChips();
     document.getElementById('f-attendee-input').value='';
+    const c = ALL_CONTACTS.find(x=>x.name===name);
+    if (c) {
+        // 주소록에 있는 사람 → 연락처로 연결
+        if (SEL_ATTENDEES.some(a=>a.id==c.id)) return; // 중복
+        SEL_ATTENDEES.push({id:c.id, name:c.name});
+    } else {
+        // 주소록에 없는 사람 → 이름만 텍스트로 추가 (주소록 안 건드림)
+        if (SEL_EXTRA.includes(name) || SEL_ATTENDEES.some(a=>a.name===name)) return; // 중복
+        SEL_EXTRA.push(name);
+    }
+    renderAttendeeChips();
 }
 const RECUR_LABEL = {daily:'매일', weekly:'매주', monthly:'매월', yearly:'매년'};
 

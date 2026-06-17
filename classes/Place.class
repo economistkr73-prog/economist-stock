@@ -93,6 +93,21 @@ class Place
                     REFERENCES place(id) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         ");
+        // 맛집 가이드(중분류)+등급 — place.category='restaurant' 전용. 한 장소가 여러
+        // 가이드(블루리본+미쉐린)에 동시 등재 가능(행 N개). 출처 URL 은 place_ref 에,
+        // 여기는 '어느 가이드 몇 등급'이라는 사실만. 정의/색/우선순위는 FoodGuide.class.
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS place_guide (
+                place_id   BIGINT UNSIGNED NOT NULL,
+                guide      VARCHAR(20)     NOT NULL,
+                grade      VARCHAR(20)     NULL,
+                created_at DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (place_id, guide),
+                KEY idx_guide (guide, grade),
+                CONSTRAINT fk_pguide_place FOREIGN KEY (place_id)
+                    REFERENCES place(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        ");
         // 한시적 공개 공유 링크 (페이지 전체를 토큰으로 읽기전용 공개). travel.php 패턴 재사용
         $this->pdo->exec("
             CREATE TABLE IF NOT EXISTS tbl_place_share (
@@ -261,7 +276,8 @@ class Place
      */
     public function searchNearby(
         float $lat, float $lng, float $radiusKm = 5.0,
-        ?string $category = null, ?string $keyword = null, int $limit = 300
+        ?string $category = null, ?string $keyword = null, int $limit = 300,
+        ?string $guide = null
     ): array {
         // 반경에 비례한 박스 (위도 1°≈111km, 경도 1°≈111*cos(위도)km)
         $latDelta = $radiusKm / 111.0;
@@ -277,7 +293,8 @@ class Place
                           SIN(RADIANS(:lat_s)) * SIN(RADIANS(p.lat))
                        ))) AS dist_km,
                        (SELECT COUNT(*) FROM place_ref r WHERE r.place_id = p.id) AS ref_count,
-                       (SELECT GROUP_CONCAT(t.tag ORDER BY t.tag SEPARATOR ',') FROM place_tag t WHERE t.place_id = p.id AND t.kind <> 'month') AS tags
+                       (SELECT GROUP_CONCAT(t.tag ORDER BY t.tag SEPARATOR ',') FROM place_tag t WHERE t.place_id = p.id AND t.kind <> 'month') AS tags,
+                       (SELECT GROUP_CONCAT(CONCAT(g.guide, ':', COALESCE(g.grade, '')) ORDER BY g.guide SEPARATOR ',') FROM place_guide g WHERE g.place_id = p.id) AS guides
                 FROM place p
                 WHERE p.is_active = 1
                   AND p.geocode_status = 'ok'
@@ -295,6 +312,10 @@ class Place
         if ($keyword !== null && $keyword !== '') {
             $sql .= " AND p.name LIKE :kw";
             $args[':kw'] = '%' . $keyword . '%';
+        }
+        if ($guide !== null && $guide !== '') {
+            $sql .= " AND EXISTS (SELECT 1 FROM place_guide g2 WHERE g2.place_id = p.id AND g2.guide = :guide)";
+            $args[':guide'] = $guide;
         }
         $sql .= " HAVING dist_km <= :radius
                   ORDER BY dist_km
@@ -326,6 +347,7 @@ class Place
                     'updated_at'   => $row['updated_at'],
                     'ref_count'    => (int)$row['ref_count'],
                     'tags'         => $row['tags'] ? explode(',', $row['tags']) : [],
+                    'guides'       => self::parseGuides($row['guides'] ?? null),
                     'dist_km'      => round((float)$row['dist_km'], 3),
                 ],
             ];
@@ -343,27 +365,42 @@ class Place
      * 여러 태그 AND 검색 → GeoJSON. 주어진 태그를 '모두' 가진 ok 장소만(반경 무관).
      * searchNearby 와 동일한 properties.
      */
-    public function searchByTags(array $tags, int $limit = 1500): array
+    public function searchByTags(array $tags, int $limit = 1500, ?string $guide = null, ?string $category = null): array
     {
-        $tags = array_values(array_unique(array_filter(array_map('trim', $tags), fn($t) => $t !== '')));
-        if (!$tags) return ['type' => 'FeatureCollection', 'features' => []];
-        $ph = []; $args = [];
-        foreach ($tags as $i => $t) { $ph[] = ":t{$i}"; $args[":t{$i}"] = $t; }
-        $inList = implode(',', $ph);
-        $need = count($tags);
-        $sql = "SELECT p.id, p.name, p.category, p.lat, p.lng, p.phone,
-                       p.address, p.region_lv1, p.region_lv2,
-                       p.period_start, p.period_end, p.attributes, p.updated_at,
-                       (SELECT COUNT(*) FROM place_ref r WHERE r.place_id = p.id) AS ref_count,
-                       (SELECT GROUP_CONCAT(t.tag ORDER BY t.tag SEPARATOR ',') FROM place_tag t WHERE t.place_id = p.id AND t.kind <> 'month') AS tags
-                  FROM place p
-                 WHERE p.is_active = 1 AND p.geocode_status = 'ok'
-                   AND p.id IN (
+        $tags  = array_values(array_unique(array_filter(array_map('trim', $tags), fn($t) => $t !== '')));
+        $guide = ($guide !== null && $guide !== '') ? $guide : null;
+        // 태그도 가이드도 없으면 검색 의미 없음
+        if (!$tags && $guide === null) return ['type' => 'FeatureCollection', 'features' => []];
+
+        $args  = [];
+        $where = ["p.is_active = 1", "p.geocode_status = 'ok'"];
+        if ($category !== null && $category !== '') {
+            $where[] = "p.category = :cat"; $args[':cat'] = $category;
+        }
+        if ($guide !== null) {
+            $where[] = "EXISTS (SELECT 1 FROM place_guide g2 WHERE g2.place_id = p.id AND g2.guide = :guide)";
+            $args[':guide'] = $guide;
+        }
+        if ($tags) {
+            $ph = [];
+            foreach ($tags as $i => $t) { $ph[] = ":t{$i}"; $args[":t{$i}"] = $t; }
+            $inList = implode(',', $ph);
+            $need   = count($tags);
+            $where[] = "p.id IN (
                        SELECT pt.place_id FROM place_tag pt
                         WHERE pt.tag IN ({$inList})
                         GROUP BY pt.place_id
                        HAVING COUNT(DISTINCT pt.tag) = {$need}
-                   )
+                   )";
+        }
+        $sql = "SELECT p.id, p.name, p.category, p.lat, p.lng, p.phone,
+                       p.address, p.region_lv1, p.region_lv2,
+                       p.period_start, p.period_end, p.attributes, p.updated_at,
+                       (SELECT COUNT(*) FROM place_ref r WHERE r.place_id = p.id) AS ref_count,
+                       (SELECT GROUP_CONCAT(t.tag ORDER BY t.tag SEPARATOR ',') FROM place_tag t WHERE t.place_id = p.id AND t.kind <> 'month') AS tags,
+                       (SELECT GROUP_CONCAT(CONCAT(g.guide, ':', COALESCE(g.grade, '')) ORDER BY g.guide SEPARATOR ',') FROM place_guide g WHERE g.place_id = p.id) AS guides
+                  FROM place p
+                 WHERE " . implode("\n                   AND ", $where) . "
                  ORDER BY p.region_lv1, p.region_lv2, p.name
                  LIMIT {$limit}";
         $st = $this->pdo->prepare($sql);
@@ -387,6 +424,7 @@ class Place
                     'updated_at'   => $row['updated_at'],
                     'ref_count'    => (int)$row['ref_count'],
                     'tags'         => $row['tags'] ? explode(',', $row['tags']) : [],
+                    'guides'       => self::parseGuides($row['guides'] ?? null),
                     'dist_km'      => null,
                 ],
             ];
@@ -789,6 +827,11 @@ class Place
                 "INSERT IGNORE INTO place_tag (place_id, kind, tag)
                  SELECT {$toId}, kind, tag FROM place_tag WHERE place_id IN ({$in})"
             );
+            // 맛집 가이드 이관 (대표에 같은 guide 있으면 기존 grade 유지 = IGNORE)
+            $this->pdo->exec(
+                "INSERT IGNORE INTO place_guide (place_id, guide, grade)
+                 SELECT {$toId}, guide, grade FROM place_guide WHERE place_id IN ({$in})"
+            );
             // 중복 장소 삭제 (남은 ref/tag 는 FK CASCADE)
             $del = $this->pdo->prepare("DELETE FROM place WHERE id IN ({$in})");
             $del->execute();
@@ -805,7 +848,7 @@ class Place
     // ======================================================
     //  태그 (place_tag) — 다중 라벨·검색용
     // ======================================================
-    private const TAG_KINDS = ['type', 'theme', 'month', 'facet'];
+    private const TAG_KINDS = ['type', 'theme', 'month', 'facet', 'cuisine', 'grade'];
 
     /** 한 장소의 태그 목록 [{kind, tag}] (월=숫자순, 그 외 종류·이름순) */
     public function getTags(int $placeId): array
@@ -858,17 +901,37 @@ class Place
      *   장소 기준 태그별 distinct 개수 → 클릭 시 searchByTags 결과와 카운트가 일치한다.
      *   false(기본): 자동완성·태그관리용 — (tag, kind)별 전체 행 수.
      */
-    public function listTags(int $limit = 500, bool $mappableOnly = false): array
+    public function listTags(int $limit = 500, bool $mappableOnly = false, ?string $kind = null): array
     {
         $limit = max(1, min(2000, $limit));
+        // kind 는 콤마로 여러 종류 허용(예: 'cuisine,grade' = 맛집 칩바)
+        $kinds = array_values(array_filter(array_map('trim', explode(',', (string)$kind)), fn($k) => $k !== ''));
+        $kindArgs = []; $kindIn = '';
+        if ($kinds) {
+            $ph = [];
+            foreach ($kinds as $i => $k) { $ph[] = ":k{$i}"; $kindArgs[":k{$i}"] = $k; }
+            $kindIn = implode(',', $ph);
+        }
         if ($mappableOnly) {
-            $st = $this->pdo->query(
+            // 여행 칩바(kind 미지정): 월·음식·등급 제외 / 맛집 칩바: 지정 kind IN
+            $kindCond = $kinds ? "pt.kind IN ({$kindIn})" : "pt.kind NOT IN ('month','cuisine','grade')";
+            $st = $this->pdo->prepare(
                 "SELECT pt.tag, MIN(pt.kind) kind, COUNT(DISTINCT pt.place_id) cnt
                    FROM place_tag pt
                    JOIN place p ON p.id = pt.place_id
-                  WHERE pt.kind <> 'month' AND p.is_active = 1 AND p.geocode_status = 'ok'
+                  WHERE {$kindCond} AND p.is_active = 1 AND p.geocode_status = 'ok'
                   GROUP BY pt.tag ORDER BY cnt DESC, pt.tag LIMIT {$limit}"
             );
+            $st->execute($kindArgs);
+            return $st->fetchAll(PDO::FETCH_ASSOC);
+        }
+        if ($kinds) {
+            $st = $this->pdo->prepare(
+                "SELECT tag, kind, COUNT(*) cnt FROM place_tag
+                  WHERE kind IN ({$kindIn})
+                  GROUP BY tag, kind ORDER BY cnt DESC, tag LIMIT {$limit}"
+            );
+            $st->execute($kindArgs);
             return $st->fetchAll(PDO::FETCH_ASSOC);
         }
         $st = $this->pdo->query(
@@ -933,5 +996,95 @@ class Place
             $n += $ins->rowCount();
         }
         return $n;
+    }
+
+    // ======================================================
+    //  맛집 가이드 (place_guide) — 중분류(블루리본/미쉐린)+등급
+    //  정의·색·우선순위·등급라벨은 FoodGuide.class. 여기는 저장/조회 전담.
+    // ======================================================
+
+    /** "guide:grade,guide2:grade2" 문자열(GROUP_CONCAT) → [{guide, grade}] */
+    public static function parseGuides(?string $s): array
+    {
+        if ($s === null || $s === '') return [];
+        $out = [];
+        foreach (explode(',', $s) as $pair) {
+            if ($pair === '') continue;
+            $p = explode(':', $pair, 2);
+            $g = trim($p[0]);
+            if ($g === '') continue;
+            $out[] = ['guide' => $g, 'grade' => (isset($p[1]) && $p[1] !== '') ? $p[1] : null];
+        }
+        return $out;
+    }
+
+    /** 한 장소의 가이드 목록 [{guide, grade}] */
+    public function getGuides(int $placeId): array
+    {
+        if ($placeId <= 0) return [];
+        $st = $this->pdo->prepare("SELECT guide, grade FROM place_guide WHERE place_id = ? ORDER BY guide");
+        $st->execute([$placeId]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * 한 장소의 가이드 전체 교체 (수정모달). $guides = [{guide, grade}, ...].
+     * 빈 guide 스킵, 같은 guide 중복은 마지막 값, 최대 10개.
+     */
+    public function setGuides(int $placeId, array $guides): void
+    {
+        if ($placeId <= 0) return;
+        $clean = [];
+        foreach ($guides as $g) {
+            $guide = trim((string)($g['guide'] ?? ''));
+            if ($guide === '') continue;
+            $grade = trim((string)($g['grade'] ?? ''));
+            $clean[mb_substr($guide, 0, 20)] = $grade !== '' ? mb_substr($grade, 0, 20) : null;
+            if (count($clean) >= 10) break;
+        }
+        $this->pdo->beginTransaction();
+        try {
+            $this->pdo->prepare("DELETE FROM place_guide WHERE place_id = ?")->execute([$placeId]);
+            if ($clean) {
+                $ins = $this->pdo->prepare("INSERT INTO place_guide (place_id, guide, grade) VALUES (?, ?, ?)");
+                foreach ($clean as $guide => $grade) $ins->execute([$placeId, $guide, $grade]);
+            }
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+    }
+
+    /** 가이드 1건 추가(기존 유지) — 적재/백필용. 이미 있으면 grade 갱신. @return bool */
+    public function addGuide(int $placeId, string $guide, ?string $grade = null): bool
+    {
+        $guide = trim($guide);
+        if ($placeId <= 0 || $guide === '') return false;
+        $st = $this->pdo->prepare(
+            "INSERT INTO place_guide (place_id, guide, grade) VALUES (?, ?, ?)
+             ON DUPLICATE KEY UPDATE grade = COALESCE(VALUES(grade), grade)"
+        );
+        $st->execute([
+            $placeId, mb_substr($guide, 0, 20),
+            ($grade !== null && $grade !== '') ? mb_substr($grade, 0, 20) : null,
+        ]);
+        return true;
+    }
+
+    /**
+     * 가이드별 장소 수(상단 칩바용). 지도에 뜨는(ok·활성) 맛집 기준 distinct.
+     * @return array [{guide, cnt}] cnt 내림차순
+     */
+    public function guideCounts(): array
+    {
+        $st = $this->pdo->query(
+            "SELECT g.guide, COUNT(DISTINCT g.place_id) cnt
+               FROM place_guide g
+               JOIN place p ON p.id = g.place_id
+              WHERE p.is_active = 1 AND p.geocode_status = 'ok' AND p.category = 'restaurant'
+              GROUP BY g.guide ORDER BY cnt DESC, g.guide"
+        );
+        return $st->fetchAll(PDO::FETCH_ASSOC);
     }
 }

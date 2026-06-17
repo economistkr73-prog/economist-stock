@@ -290,7 +290,7 @@ echo <<<'PAGE'
       </div>
       <div class="charts">
         <div class="chart-block">
-          <div class="chart-bar"><span class="lbl">일봉</span><button type="button" id="toggleHighLine" class="cline-chip on" title="신호일 전고점(돌파레벨) 수평선 표시/숨김">전고점선</button><button type="button" id="toggleCurPrice" class="cline-chip" title="현재가격선 표시/숨김">현재가</button><span class="seg dseg"><button type="button" id="dayb160" class="on">160</button><button type="button" id="dayb240">240</button></span><span class="px">OHLC + 거래량 &nbsp; 흰칩 ▲N.Nx=신고가+대량거래·아래숫자=승률 · 금색=거래량5배+</span></div>
+          <div class="chart-bar"><span class="lbl">일봉</span><button type="button" id="toggleHighLine" class="cline-chip on" title="신호일 전고점(돌파레벨) 수평선 표시/숨김">전고점선</button><button type="button" id="toggleTodayHigh" class="cline-chip on" title="당일 기준 전고점(직전 60일 최고가=현 돌파레벨) 수평선">당일전고</button><button type="button" id="toggleCurPrice" class="cline-chip" title="현재가격선 표시/숨김">현재가</button><span class="seg dseg"><button type="button" id="dayb160" class="on">160</button><button type="button" id="dayb240">240</button></span><span class="px">OHLC + 거래량 &nbsp; 흰칩 ▲N.Nx=신고가+대량거래·아래숫자=승률 · 금색=거래량5배+</span></div>
           <div class="chart-host" id="dailyChart"></div>
         </div>
         <div class="chart-block bottom">
@@ -423,6 +423,34 @@ $('toggleHighLine').onclick=function(){
   SHOW_HIGH_LINES=!SHOW_HIGH_LINES;
   this.classList.toggle('on', SHOW_HIGH_LINES);
   drawSignalPriceLines();
+};
+// 당일 기준 전고점선: 직전 60영업일(최신봉 제외) 최고가 = 현재 돌파 기준레벨. 단일 수평선
+let TODAY_HIGH_LINE=null;
+let SHOW_TODAY_HIGH=true;    // 기본 ON. '당일전고' 칩으로 토글
+function todayPriorHigh(){
+  const n=DAILY_FULL.length;
+  if(n<2) return null;
+  const end=n-1;                       // 최신봉(당일) 제외
+  let ph=-Infinity;
+  for(let k=Math.max(0,end-60);k<end;k++){ if(DAILY_FULL[k].high>ph)ph=DAILY_FULL[k].high; }
+  return ph>-Infinity?ph:null;
+}
+function drawTodayHighLine(){
+  if(TODAY_HIGH_LINE){ daily.candle.removePriceLine(TODAY_HIGH_LINE); TODAY_HIGH_LINE=null; }
+  if(!SHOW_TODAY_HIGH) return;
+  const ph=todayPriorHigh(); if(ph==null) return;
+  TODAY_HIGH_LINE=daily.candle.createPriceLine({
+    price:ph,                          // 직전 60일 전고점(현 돌파레벨)
+    color:'#22d3ee',                   // 시안 — 신호별 전고선(흰/금)과 구분
+    lineWidth:1, lineStyle:LWC.LineStyle.Solid,
+    axisLabelVisible:false,            // 우측 축 라벨·제목 없이 선만 표시
+  });
+}
+// '당일전고' 칩 토글 (기본 ON)
+$('toggleTodayHigh').onclick=function(){
+  SHOW_TODAY_HIGH=!SHOW_TODAY_HIGH;
+  this.classList.toggle('on', SHOW_TODAY_HIGH);
+  drawTodayHighLine();
 };
 // 일봉 '현재가' 칩 토글 (기본 OFF, 실선)
 $('toggleCurPrice').onclick=function(){
@@ -614,6 +642,7 @@ function repaintDaily(){
   const view = DAILY_DAYS===160 ? DAILY_FULL.slice(-160) : DAILY_FULL;
   paint(daily, view);
   drawSignalPriceLines();                       // DAILY_SIGNALS(240 기준) → 화면 밖 신호 종가선도 표시
+  drawTodayHighLine();                           // 당일 기준 전고점 단일 수평선
   setTimeout(renderDailyChips,0);               // 흰칩은 화면 안 신호만(좌표 null이면 skip)
 }
 // 일봉 데이터 적용: 240 원본 보관 + 신호 240 기준 계산 후 화면 그림

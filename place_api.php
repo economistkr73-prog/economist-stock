@@ -48,7 +48,7 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
     $place = new Place($pdo);
 
     // 게스트(공유 링크)는 읽기전용 — 검색/출처/지오코딩/자동완성/태그검색만 허용
-    if ($isGuest && !in_array($action, ['search', 'refs', 'geocode', 'suggest', 'place_name_search', 'tag_list', 'tag_search'], true)) {
+    if ($isGuest && !in_array($action, ['search', 'refs', 'geocode', 'suggest', 'place_name_search', 'tag_list', 'tag_search', 'guide_list', 'place_guides'], true)) {
         http_response_code(403);
         echo json_encode(['ok' => false, 'msg' => 'forbidden']);
         return;
@@ -68,16 +68,20 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
             $radius   = max(0.1, min(50.0, $radius));          // 0.1~50km 클램프
             $category = trim((string)($_GET['category'] ?? ''));
             $keyword  = trim((string)($_GET['keyword'] ?? ''));
+            $guide    = trim((string)($_GET['guide'] ?? ''));
 
             $allowed = ['travel', 'stay', 'restaurant', 'etc'];
             if ($category !== '' && !in_array($category, $allowed, true)) {
                 $category = '';
             }
+            if ($guide !== '' && !FoodGuide::exists($guide)) $guide = '';
 
             $geojson = $place->searchNearby(
                 $lat, $lng, $radius,
                 $category !== '' ? $category : null,
-                $keyword  !== '' ? $keyword  : null
+                $keyword  !== '' ? $keyword  : null,
+                300,
+                $guide !== '' ? $guide : null
             );
             echo json_encode($geojson, JSON_UNESCAPED_UNICODE);
             break;
@@ -242,16 +246,60 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
             break;
         }
         case 'tag_list': {              // 태그 목록. {tag,kind,cnt} 빈도순
-            // bar=1: 상단 칩바용 — kind 무시·월 제외·지도표시(ok·활성) 장소 기준 distinct
+            // bar=1: 상단 칩바용 — kind 무시·월/음식 제외·지도표시(ok·활성) 장소 기준 distinct
             //        → 칩 카운트가 클릭 시 tag_search 결과와 일치. 그 외: 자동완성·태그관리용 전체
-            $bar = ((int)($_GET['bar'] ?? 0) === 1);
-            echo json_encode(['ok' => true, 'items' => $place->listTags(500, $bar)], JSON_UNESCAPED_UNICODE);
+            // kind=cuisine: 맛집 음식 칩바용(음식 종류 태그만)
+            $bar  = ((int)($_GET['bar'] ?? 0) === 1);
+            $kind = trim((string)($_GET['kind'] ?? ''));
+            echo json_encode(['ok' => true, 'items' => $place->listTags(500, $bar, $kind !== '' ? $kind : null)], JSON_UNESCAPED_UNICODE);
             break;
         }
         case 'tag_search': {            // 태그(들) AND 검색 → GeoJSON. tags=콤마구분, 또는 단일 tag
-            $raw  = (string)($_GET['tags'] ?? $_POST['tags'] ?? $_GET['tag'] ?? $_POST['tag'] ?? '');
-            $tags = array_filter(array_map('trim', explode(',', $raw)), fn($t) => $t !== '');
-            echo json_encode($place->searchByTags($tags), JSON_UNESCAPED_UNICODE);
+            //  맛집 칩바는 guide(+category) 와 음식 태그를 함께 AND. tags 없이 guide 만도 가능
+            $raw   = (string)($_GET['tags'] ?? $_POST['tags'] ?? $_GET['tag'] ?? $_POST['tag'] ?? '');
+            $tags  = array_filter(array_map('trim', explode(',', $raw)), fn($t) => $t !== '');
+            $guide = trim((string)($_GET['guide'] ?? $_POST['guide'] ?? ''));
+            $cat   = trim((string)($_GET['category'] ?? $_POST['category'] ?? ''));
+            $allowed = ['travel', 'stay', 'restaurant', 'etc'];
+            if ($guide !== '' && !FoodGuide::exists($guide)) $guide = '';
+            if ($cat !== '' && !in_array($cat, $allowed, true)) $cat = '';
+            echo json_encode($place->searchByTags(
+                $tags, 1500,
+                $guide !== '' ? $guide : null,
+                $cat   !== '' ? $cat   : null
+            ), JSON_UNESCAPED_UNICODE);
+            break;
+        }
+
+        // ── 맛집 가이드(중분류) ──────────────────────────
+        case 'guide_list': {            // 가이드별 장소 수(맛집 칩바). [{guide,cnt}]
+            echo json_encode(['ok' => true, 'items' => $place->guideCounts(), 'defs' => FoodGuide::clientDefs()], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+        case 'place_guides': {          // 한 장소의 가이드 [{guide,grade}]
+            $id = (int)($_GET['id'] ?? $_POST['id'] ?? 0);
+            echo json_encode(['ok' => true, 'items' => $place->getGuides($id)], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+        case 'guide_set': {             // 장소 가이드 전체 교체(소유자). guides=JSON [{guide,grade}]
+            $id = (int)($_GET['id'] ?? $_POST['id'] ?? 0);
+            if ($id <= 0) {
+                http_response_code(400);
+                echo json_encode(['ok' => false, 'msg' => 'id 가 필요합니다.']);
+                return;
+            }
+            $raw    = (string)($_POST['guides'] ?? $_GET['guides'] ?? '[]');
+            $guides = json_decode($raw, true);
+            if (!is_array($guides)) $guides = [];
+            // FoodGuide 정의에 있는 guide 만(등급은 place_tag kind=grade 태그로 별도 관리)
+            $clean = [];
+            foreach ($guides as $g) {
+                $gk = trim((string)($g['guide'] ?? ''));
+                if (!FoodGuide::exists($gk)) continue;
+                $clean[] = ['guide' => $gk];
+            }
+            $place->setGuides($id, $clean);
+            echo json_encode(['ok' => true, 'items' => $place->getGuides($id)], JSON_UNESCAPED_UNICODE);
             break;
         }
         case 'tag_rename': {            // 태그 이름변경=병합. from → to

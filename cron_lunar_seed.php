@@ -25,28 +25,6 @@ if (($_GET['key'] ?? '') !== $TOKEN) {
     exit('forbidden: ?key=' . $TOKEN . ' 필요');
 }
 
-// ── 디버그: 단건 호출 원시 응답 확인 (?debug=1) ──────────────
-if (($_GET['debug'] ?? '') === '1') {
-    $apiKey   = defined('HOLIDAY_API_KEY') ? HOLIDAY_API_KEY : '';
-    $endpoint = 'https://apis.data.go.kr/B090041/openapi/service/LrsrCldInfoService/getLunCalInfo';
-    $params = http_build_query(['solYear'=>'2024','solMonth'=>'09','solDay'=>'17','_type'=>'json']);
-    $url = sprintf('%s?ServiceKey=%s&%s', $endpoint, $apiKey, $params);
-    $ch = curl_init($url);
-    curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER=>true, CURLOPT_TIMEOUT=>10, CURLOPT_SSL_VERIFYPEER=>false, CURLOPT_FOLLOWLOCATION=>true]);
-    $raw = curl_exec($ch);
-    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $err = curl_error($ch);
-    curl_close($ch);
-    header('Content-Type: text/plain; charset=utf-8');
-    echo "HTTP CODE : {$code}\n";
-    echo "CURL ERR  : {$err}\n";
-    echo "KEY(앞12) : " . substr($apiKey,0,12) . "...(" . strlen($apiKey) . "자)\n";
-    echo "URL       : " . preg_replace('/ServiceKey=[^&]+/','ServiceKey=***',$url) . "\n";
-    echo "─── RAW RESPONSE ───\n";
-    echo $raw === false ? "(false)" : $raw;
-    exit;
-}
-
 @set_time_limit(0);          // 실행시간 제한 해제 시도
 $TIME_BUDGET = 20;           // 1회 요청당 최대 처리 시간(초) — 프록시 타임아웃 회피
 $START_TS    = microtime(true);

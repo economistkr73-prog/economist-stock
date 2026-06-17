@@ -501,5 +501,96 @@ class NaverFinanceAPI {
         return ['success' => $all_stocks];
     }
 
+    /**
+     * 일봉 OHLC 수집 — 네이버 fchart siseJson (timeframe=day)
+     * 반환: ['success'=>[ ['t'=>'YYYY-MM-DD','o','h','l','c','v'], ... ]] | ['error'=>msg]
+     * (영업일 100개 확보 위해 달력일 기준 넉넉히 받음; 정렬은 과거→현재 오름차순)
+     */
+    public function getDailyOhlc(string $stockCode, int $days = 160): array {
+        $code = preg_replace('/[^0-9A-Za-z]/', '', $stockCode);
+        if ($code === '') return ['error' => '종목코드 누락'];
+
+        $end   = date('Ymd');
+        $start = date('Ymd', strtotime("-{$days} days"));
+        $url = "https://fchart.stock.naver.com/siseJson.nhn?symbol={$code}"
+             . "&requestType=1&startTime={$start}&endTime={$end}&timeframe=day";
+
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_USERAGENT, $this->pcUserAgent);
+        curl_setopt($ch, CURLOPT_REFERER, "https://finance.naver.com/item/main.naver?code={$code}");
+        $raw  = curl_exec($ch);
+        $http = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err  = curl_error($ch);
+        curl_close($ch);
+
+        if ($raw === false) return ['error' => "cURL 에러: {$err}"];
+        if ($http !== 200)  return ['error' => "HTTP 에러: {$http}"];
+
+        // siseJson 은 비표준 JSON(헤더행이 작은따옴표) → 따옴표 정규화 후 디코드
+        $rows = json_decode(str_replace("'", '"', trim($raw)), true);
+        if (!is_array($rows)) return ['error' => 'fchart 파싱 실패'];
+
+        $out = [];
+        foreach ($rows as $i => $r) {
+            if ($i === 0) continue;                 // 헤더 [날짜,시가,고가,저가,종가,거래량,외국인소진율]
+            if (!is_array($r) || !isset($r[0], $r[4])) continue;
+            $d = (string) $r[0];                    // YYYYMMDD
+            if (strlen($d) !== 8) continue;
+            $out[] = [
+                't' => substr($d, 0, 4) . '-' . substr($d, 4, 2) . '-' . substr($d, 6, 2),
+                'o' => (float) $r[1],
+                'h' => (float) $r[2],
+                'l' => (float) $r[3],
+                'c' => (float) $r[4],
+                'v' => (int)   ($r[5] ?? 0),
+            ];
+        }
+        return ['success' => $out];
+    }
+    /**
+     * 당일 1분봉 OHLC 수집 — 네이버 모바일차트 API (정상 OHLC + 분당 거래량 제공)
+     *   api.stock.naver.com/chart/domestic/item/{code}/minute?count=400
+     * 반환: ['success'=>[ ['t'=>'YYYY-MM-DD HH:MM','o','h','l','c','v'], ... ]] | ['error'=>msg]
+     * count=400 이면 당일 09:00~15:30 전 구간 커버. 가장 최근 거래일(당일)만 오름차순 반환.
+     */
+    public function getMinuteOhlc(string $stockCode, int $count = 400): array {
+        $code = preg_replace('/[^0-9A-Za-z]/', '', $stockCode);
+        if ($code === '') return ['error' => '종목코드 누락'];
+
+        $url = "https://api.stock.naver.com/chart/domestic/item/{$code}/minute?count={$count}";
+        $headers = ['User-Agent: ' . $this->mobileUserAgent, 'Referer: https://m.stock.naver.com/'];
+        $res = $this->fetch($url, $headers);          // 클린 JSON → 기존 fetch() 재사용
+        if (isset($res['error'])) return $res;
+        $data = $res['success'] ?? [];
+        if (!is_array($data) || empty($data)) return ['success' => []];
+
+        // 가장 최근 거래일만 = 당일 (순서 무관하게 max 날짜 기준 필터)
+        $maxDay = '';
+        foreach ($data as $r) {
+            $d = substr((string)($r['localDateTime'] ?? ''), 0, 8);
+            if ($d > $maxDay) $maxDay = $d;
+        }
+
+        $out = [];
+        foreach ($data as $r) {
+            $dt = (string)($r['localDateTime'] ?? '');   // YYYYMMDDHHmmss
+            if (strlen($dt) < 12) continue;
+            if (substr($dt, 0, 8) !== $maxDay) continue; // 당일만
+            $out[] = [
+                't' => substr($dt,0,4).'-'.substr($dt,4,2).'-'.substr($dt,6,2).' '.substr($dt,8,2).':'.substr($dt,10,2),
+                'o' => (float)($r['openPrice']    ?? 0),
+                'h' => (float)($r['highPrice']    ?? 0),
+                'l' => (float)($r['lowPrice']     ?? 0),
+                'c' => (float)($r['currentPrice'] ?? 0),
+                'v' => (int)  ($r['accumulatedTradingVolume'] ?? 0),
+            ];
+        }
+        usort($out, static fn($a, $b) => strcmp($a['t'], $b['t'])); // 오름차순 보장
+        return ['success' => $out];
+    }
 } # end of class
 ?>

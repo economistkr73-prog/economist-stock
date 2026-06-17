@@ -53,7 +53,7 @@ function send_daily_summary(Schedule $sch): void {
     $dateStr = date('Y년 m월 d일') . " ({$dow})";
 
     if (empty($events)) {
-        KakaoNotify::send(
+        Notify::send(
             "📅 {$dateStr}\n오늘 등록된 일정이 없습니다.",
             "https://economist.kr/schedule.php?mode=calendar"
         );
@@ -93,7 +93,7 @@ function send_daily_summary(Schedule $sch): void {
     $msg  .= "\n" . str_repeat('―', 18);
     $msg  .= "\n총 {$total}개 일정";
 
-    KakaoNotify::send($msg, "https://economist.kr/schedule.php?mode=calendar");
+    Notify::send($msg, "https://economist.kr/schedule.php?mode=calendar");
 }
 
 // =============================================================
@@ -119,7 +119,7 @@ function check_and_send_alerts(Schedule $sch): void {
             $msg .= "\n🏷 {$alert['category']}";
         }
 
-        $ok = KakaoNotify::send($msg, "https://economist.kr/schedule.php?mode=calendar");
+        $ok = Notify::send($msg, "https://economist.kr/schedule.php?mode=calendar");
         if ($ok) {
             $sch->markAlertSent((int)$alert['alert_id']);
         }
@@ -156,7 +156,7 @@ function sync_holidays(PDO $pdo): void {
     $msg = "📅 공휴일 동기화 완료\n"
          . implode(', ', array_map(fn($y)=>"{$y}년", $years))
          . "\n총 {$totalSuccess}건 저장";
-    KakaoNotify::send($msg, "https://economist.kr/schedule.php?mode=calendar");
+    Notify::send($msg, "https://economist.kr/schedule.php?mode=calendar");
 }
 
 function format_alert_label(int $min): string {

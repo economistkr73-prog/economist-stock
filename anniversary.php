@@ -1,6 +1,7 @@
 <?php
 require_once "./env/cnt.inc";
 require_once "./env/auth_fnc.php";
+require_once "./env/nav.inc";
 require_login();
 
 (new Schedule($pdo))->ensureTable();
@@ -22,15 +23,6 @@ require_login();
 }
 html, body { overflow-x: hidden; }
 body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5; color: #2c3e50; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
-/* ── nav ── */
-.top-nav-bar { background: #2c3e50; color: #fff; height: 60px; display: flex; justify-content: space-between; align-items: center; padding: 0 20px; box-shadow: 0 2px 8px rgba(0,0,0,.15); flex-shrink: 0; }
-.nav-burger { display: none; background: none; border: none; color: #fff; font-size: 22px; cursor: pointer; padding: 4px 8px; line-height: 1; }
-.nav-menu { display: flex; gap: 10px; }
-.nav-menu a { color: #ecf0f1; text-decoration: none; font-size: 16px; font-weight: 600; padding: 10px 16px; border-radius: 6px; }
-.nav-menu a:hover, .nav-menu a.active { background: #34495e; color: #f1c40f; }
-.nav-user-info { display: flex; align-items: center; gap: 15px; font-size: 14px; color: #bdc3c7; }
-.nav-user-info .user-name { color: #f1c40f; font-weight: bold; }
-.btn-logout { background: #e74c3c; color: #fff; text-decoration: none; padding: 6px 14px; border-radius: 4px; font-size: 13px; font-weight: bold; }
 /* ── layout ── */
 #wrap { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 16px; gap: 12px; }
 .toolbar { display: flex; align-items: center; gap: 10px; }
@@ -109,46 +101,12 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .field-block { display: flex; flex-direction: column; }
 input[type=text].f-title { border: 1px solid #ddd; border-radius: 6px; padding: 9px 12px; font-size: 14px; width: 100%; }
 textarea.f-memo { border: 1px solid #ddd; border-radius: 6px; padding: 8px 12px; font-size: 13px; width: 100%; resize: vertical; min-height: 64px; }
-/* ── 모바일 (≤768px): 햄버거 헤더 ── */
-@media (max-width:768px) {
-    .top-nav-bar { height:48px; padding:0 8px; }
-    .nav-burger { display:block; }
-    .nav-menu {
-        position:absolute; top:48px; left:0; right:0; flex-direction:column;
-        background:#2c3e50; gap:0; display:none; z-index:1501;
-        box-shadow:0 6px 16px rgba(0,0,0,.25); max-height:70vh; overflow-y:auto;
-    }
-    body.nav-open .nav-menu { display:flex; }
-    .nav-menu a { padding:13px 18px; border-bottom:1px solid rgba(255,255,255,.08); border-radius:0; }
-    .nav-menu a[href*="condition_analysis"],
-    .nav-menu a[href*="stock_analysis"],
-    .nav-menu a[href*="data_upload"] { display:none; }
-    .nav-user-info > span { display:none; }   /* 환영문구·자동연장 숨김, 로그아웃만 */
-}
+/* (모바일 햄버거 헤더 CSS는 nav.inc 의 nav_css() 로 통합됨) */
 </style>
+<?php nav_css(); ?>
 </head>
 <body>
-
-<div class="top-nav-bar">
-    <button class="nav-burger" onclick="document.body.classList.toggle('nav-open')" aria-label="메뉴">☰</button>
-    <div class="nav-menu">
-        <a href="/etf_stock.php?mode=ef">주식ETF분석</a>
-        <a href="/condition_analysis.php?mode=cf">조건검색분석</a>
-        <a href="/stock_analysis.php?mode=si">주식그래프</a>
-        <a href="/schedule.php?mode=calendar">스케줄러</a>
-        <a href="/contacts.php">주소록</a>
-        <a href="/anniversary.php" class="active">기념일</a>
-    </div>
-    <div class="nav-user-info">
-        <span>환영합니다, <span class="user-name"><?php echo htmlspecialchars($current_user); ?></span>님</span>
-        <span style="font-size:12px;opacity:.7">(자동연장: <?php echo $expire_date; ?>)</span>
-        <a href="logout.php" class="btn-logout">로그아웃</a>
-    </div>
-</div>
-<script>
-(function(){ if (matchMedia('(max-width:768px)').matches || document.body.classList.contains('is-mobile')) {
-    document.querySelectorAll('.nav-menu a[href*="etf_stock.php"]').forEach(a=>a.href='/etf_stock.php?mode=m'); } })();
-</script>
+<?php render_nav('anniversary'); ?>
 
 <div id="wrap">
     <div class="toolbar">

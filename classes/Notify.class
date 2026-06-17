@@ -1,0 +1,55 @@
+<?php
+/**
+ * Notify — 알림 발송 파사드 (기존 KakaoNotify::send 대체)
+ *
+ *   ① Pushover  : 소리나는 폰 푸시 알림 (필수)
+ *   ② Notion    : 본문을 노션 DB 에 보관 (선택, env/notion.inc 설정 시)
+ *
+ * 두 동작은 독립적으로 묶여 한쪽 실패가 다른 쪽을 막지 않는다.
+ * 반환값은 "알림(Pushover) 성공 여부" — 보관은 부가 기능이라 반환값에 미반영.
+ *
+ * 사용법 (KakaoNotify 와 시그니처 호환):
+ *   Notify::send("본문", "https://링크");
+ *   Notify::send("본문", "https://링크", ["title"=>"오늘의 뉴스레터", "priority"=>1]);
+ */
+class Notify
+{
+    /**
+     * @param string $text 알림 본문
+     * @param string $link 클릭 시 이동할 URL (선택)
+     * @param array  $opts title, priority, sound, html / notion(false 면 보관 생략), date
+     * @return bool Pushover 알림 성공 여부
+     */
+    public static function send(string $text, string $link = '', array $opts = []): bool
+    {
+        // ── ① Pushover 푸시(알림) ──────────────────────────────
+        $ok = false;
+        try {
+            $ok = PushoverNotify::send($text, $link, $opts);
+        } catch (\Throwable $e) {
+            error_log('[Notify] Pushover 예외: ' . $e->getMessage());
+        }
+
+        // ── ② Notion 보관(선택, 독립) ─────────────────────────
+        $wantNotion = !array_key_exists('notion', $opts) || $opts['notion'] !== false;
+        if ($wantNotion && class_exists('NotionArchive') && NotionArchive::enabled()) {
+            try {
+                $title = !empty($opts['title']) ? $opts['title'] : self::firstLine($text);
+                $date  = $opts['date'] ?? date('Y-m-d');
+                NotionArchive::add($title, $text, $date);
+            } catch (\Throwable $e) {
+                error_log('[Notify] Notion 보관 예외: ' . $e->getMessage());
+            }
+        }
+
+        return $ok;
+    }
+
+    /** 제목 미지정 시 본문 첫 줄을 제목으로 사용 */
+    private static function firstLine(string $text): string
+    {
+        $line = strtok(trim($text), "\n");
+        return mb_strcut($line !== false ? $line : '알림', 0, 120);
+    }
+}
+?>

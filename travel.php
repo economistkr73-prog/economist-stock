@@ -184,8 +184,9 @@ body.tv-edit-on .dm-edit { display:inline-block; }
 .place-head .ph-addr { font-size:15px; font-weight:700; color:#34495e; word-break:keep-all; }
 .place-head .ph-time { font-size:13px; color:#7f8c8d; }
 .place-head .ph-count { font-size:12px; font-weight:600; color:#e67e22; background:#fdebd0; padding:1px 9px; border-radius:20px; white-space:nowrap; }
-.place-head .ph-setloc { margin-left:auto; background:#eaf4ff; border:1px solid #b9dcff; color:#1a73c2; font-size:12px; font-weight:600; padding:3px 10px; border-radius:14px; cursor:pointer; white-space:nowrap; transition:.15s; }
+.place-head .ph-setloc { display:none; margin-left:auto; background:#eaf4ff; border:1px solid #b9dcff; color:#1a73c2; font-size:12px; font-weight:600; padding:3px 10px; border-radius:14px; cursor:pointer; white-space:nowrap; transition:.15s; }
 .place-head .ph-setloc:hover { background:#1a73c2; color:#fff; border-color:#1a73c2; }
+body.tv-edit-on .place-head .ph-setloc { display:inline-block; }
 /* 위치 지정 모달 (위치 미상 사진에 좌표 수동 등록) */
 .tv-locmodal { display:none; position:fixed; inset:0; z-index:2100; background:rgba(0,0,0,.55); align-items:center; justify-content:center; padding:16px; }
 .tv-locmodal.on { display:flex; }
@@ -237,7 +238,6 @@ body.tv-edit-on .ps-memo-add { display:block; }
 /* 사진 1장 위치 지정 버튼(썸네일 하단 좌측). GPS 없는 사진엔 항상, 그 외엔 편집모드에서 노출 */
 .ps-loc { display:none; position:absolute; bottom:5px; left:5px; z-index:3; height:22px; padding:0 8px; border:none; border-radius:12px; background:rgba(26,115,194,.9); color:#fff; font-size:11px; font-weight:600; line-height:22px; cursor:pointer; transition:.15s; }
 .ps-loc:hover { background:#1a73c2; transform:scale(1.06); }
-.pshot[data-nogps="1"] .ps-loc, .ps-chip[data-nogps="1"] .ps-loc { display:block; }
 body.tv-edit-on .ps-loc { display:block; }
 /* 칩 인라인 메모 편집기 (저장 시 풀 카드로 재배치되도록 reload) */
 .ps-chip-editor { flex:0 0 100%; }
@@ -303,8 +303,8 @@ body.tv-edit-on .ps-loc { display:block; }
     .place-map  { height:190px; min-height:0; align-self:auto; }
     .pshot { grid-template-columns:96px 1fr; gap:12px; }
     .ps-thumb { width:96px; }
-    /* 세로폰: 공유·새로고침·편집 버튼 모두 숨김 */
-    .tv-subrow .tv-head-btns { display:none; }
+    /* 세로폰: 공유·새로고침 버튼 숨김 (편집 버튼은 유지 — 좌표 지정 관문) */
+    .tv-subrow .tv-share-btn, .tv-subrow #tv-rf-btn { display:none; }
 }
 </style>
 <?php nav_css(); ?>

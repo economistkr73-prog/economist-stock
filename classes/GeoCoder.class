@@ -92,7 +92,16 @@ class GeoCoder {
     // ── 역지오코딩: 좌표 → 주소 (카카오 coord2address, 여행 사진 위치 표시용) ─
     // 네이버 Reverse Geocoding 은 별도 구독 필요(미신청 시 401)이라 이미 쓰는 카카오 키 재활용.
     // 반환: ['ok'=>bool, 'address'=>str, 'msg'=>str]
+    public static function isKorea(float $lat, float $lng): bool {
+        // 한국 육지+근해 대략 bounding box (국내/해외 지도·주소 provider 분기용)
+        return $lat >= 33.0 && $lat <= 39.0 && $lng >= 124.0 && $lng <= 132.0;
+    }
+
     public static function reverseGeocode(float $lat, float $lng): array {
+        // 해외 좌표는 카카오가 주소를 못 주므로 구글 Geocoding 으로 (키 없으면 실패 반환)
+        if (!self::isKorea($lat, $lng)) {
+            return self::reverseGeocodeGoogle($lat, $lng);
+        }
         $key = defined('KAKAO_REST_API_KEY') ? KAKAO_REST_API_KEY : '';
         if ($key === '') {
             return ['ok' => false, 'msg' => '카카오 REST 키 미설정 (env/kakao.inc)'];
@@ -110,6 +119,29 @@ class GeoCoder {
         $addr = $doc['road_address']['address_name'] ?? '';
         if ($addr === '' || $addr === null) $addr = $doc['address']['address_name'] ?? '';
         if ($addr === '' || $addr === null) return ['ok' => false, 'msg' => '주소를 찾을 수 없습니다.'];
+        return ['ok' => true, 'address' => $addr, 'msg' => ''];
+    }
+
+    // ── 해외 역지오코딩: 좌표 → 주소 (구글 Maps Geocoding, reverseGeocode 가 한국 밖일 때 호출) ─
+    private static function reverseGeocodeGoogle(float $lat, float $lng): array {
+        $key = defined('GOOGLE_MAPS_SERVER_KEY') ? GOOGLE_MAPS_SERVER_KEY : '';
+        if ($key === '') {
+            return ['ok' => false, 'msg' => '구글 지도 서버 키 미설정 (env/maps.inc) — 해외 주소 변환 불가'];
+        }
+        $url = 'https://maps.googleapis.com/maps/api/geocode/json'
+             . '?latlng='   . $lat . ',' . $lng
+             . '&language=ko'
+             . '&key='      . rawurlencode($key);
+        [$body, $err] = self::httpGet($url, ['Accept: application/json']);
+        if ($err !== '') return ['ok' => false, 'msg' => '구글 역지오코딩 호출 실패: ' . $err];
+
+        $json   = json_decode($body, true);
+        $status = $json['status'] ?? '';
+        if ($status !== 'OK' || empty($json['results'])) {
+            return ['ok' => false, 'msg' => ($json['error_message'] ?? "구글 역지오코딩 실패 ({$status})")];
+        }
+        $addr = $json['results'][0]['formatted_address'] ?? '';
+        if ($addr === '') return ['ok' => false, 'msg' => '주소를 찾을 수 없습니다.'];
         return ['ok' => true, 'address' => $addr, 'msg' => ''];
     }
 

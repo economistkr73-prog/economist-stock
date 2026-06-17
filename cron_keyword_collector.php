@@ -30,7 +30,7 @@ $mode = $_GET['mode'] ?? 'stock_etf_news';
  */
 function kakao_etf_notify(int $updatedCount, array $newEtfList): void
 {
-    if (!class_exists('KakaoNotify')) return; // kakao.inc 미설치 시 조용히 패스
+    if (!class_exists('Notify')) return; // kakao.inc 미설치 시 조용히 패스
 
     $msg = "[성공] ETF {$updatedCount}개 편입종목 업데이트 완료.\n\n";
 
@@ -53,7 +53,7 @@ function kakao_etf_notify(int $updatedCount, array $newEtfList): void
         }
     }
 
-    KakaoNotify::send($msg, "https://economist.kr/etf_stock.php");
+    Notify::send($msg, "https://economist.kr/etf_stock.php");
 }
 
 // 즉시 200 OK 전송 후 연결 종료 (cron-job.org 타임아웃 회피)
@@ -248,7 +248,7 @@ if ($mode === 'stock_etf_news' || $mode === '') {
            . "키워드 " . count($keywords) . "개 저장 (기준시간: {$since_label} → {$max_article_time})\n";
 
         // 카카오톡 알림
-        if (class_exists('KakaoNotify')) {
+        if (class_exists('Notify')) {
             $kw_slice = array_slice($keywords, 0, 10, true);
             $kw_str   = implode("\n", array_map(fn($k, $v) => "#{$k}({$v})", array_keys($kw_slice), $kw_slice));
             $msg = "[뉴스 키워드 업데이트]\n"
@@ -256,7 +256,7 @@ if ($mode === 'stock_etf_news' || $mode === '') {
                  . "기사 {$cnt_new}건 → 키워드 " . count($keywords) . "개\n\n"
                  . $kw_str . "\n\n"
                  . "http://economist.kr/analysis_model.php?mode=daily&date={$today_date}";
-            KakaoNotify::send($msg);
+            Notify::send($msg);
         }
 
     } catch (Exception $e) {
@@ -319,8 +319,8 @@ if ($mode === 'stock_etf_news' || $mode === '') {
 
     } catch (Exception $e) {
         echo "[실패] " . $e->getMessage() . "\n";
-        if (class_exists('KakaoNotify')) {
-            KakaoNotify::send("⚠️ ETF 편입종목 업데이트 실패\n" . $e->getMessage());
+        if (class_exists('Notify')) {
+            Notify::send("⚠️ ETF 편입종목 업데이트 실패\n" . $e->getMessage());
         }
     }
 

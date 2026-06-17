@@ -537,10 +537,75 @@ public function getStocksInSpecificEtf(string $etfCode, string $sortType = 'rati
 
 
 // 🚀 최근 본 종목 리스트 불러오기 (최대 10개)
-    public function getRecentStocks(int $limit = 10): array {
-        $sql = "SELECT stock_code, stock_name 
-                FROM etf_recent_view_stocks 
-                ORDER BY created_at DESC 
+// 🚀 최근 본 ETF 저장 (종목 최근조회와 동일 패턴 / etf_code UNIQUE, 20개 제한)
+    public function saveRecentEtf(string $etfCode, string $etfName): void {
+        if (empty($etfCode) || empty($etfName)) return;
+        try {
+            // 테이블이 없으면 최초 1회 자동 생성 (수동 마이그레이션 불필요)
+            $this->pdo->exec("CREATE TABLE IF NOT EXISTS etf_recent_view_etfs (
+                etf_code VARCHAR(20) NOT NULL,
+                etf_name VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uniq_etf_code (etf_code)
+            ) DEFAULT CHARSET=utf8mb4");
+
+            $sqlInsert = "INSERT INTO etf_recent_view_etfs (etf_code, etf_name)
+                          VALUES (:code, :name1)
+                          ON DUPLICATE KEY UPDATE
+                              etf_name = :name2,
+                              created_at = CURRENT_TIMESTAMP";
+            $stmt = $this->pdo->prepare($sqlInsert);
+            $stmt->execute([
+                ':code'  => $etfCode,
+                ':name1' => $etfName,
+                ':name2' => $etfName
+            ]);
+
+            // 20개 초과분 정리
+            $this->pdo->exec("DELETE FROM etf_recent_view_etfs
+                          WHERE etf_code NOT IN (
+                              SELECT etf_code FROM (
+                                  SELECT etf_code
+                                  FROM etf_recent_view_etfs
+                                  ORDER BY created_at DESC
+                                  LIMIT 20
+                              ) AS tmp
+                          )");
+        } catch (PDOException $e) {
+            error_log("saveRecentEtf Error: " . $e->getMessage());
+        }
+    }
+
+    // 🚀 최근 본 ETF 리스트 (etf_name 기준 최신 1건, 최대 N개)
+    public function getRecentEtfs(int $limit = 5): array {
+        try {
+            $sql = "SELECT r.etf_code, r.etf_name
+                    FROM etf_recent_view_etfs r
+                    JOIN (
+                        SELECT etf_name, MAX(created_at) AS mx
+                        FROM etf_recent_view_etfs
+                        GROUP BY etf_name
+                    ) g ON g.etf_name = r.etf_name AND g.mx = r.created_at
+                    ORDER BY r.created_at DESC
+                    LIMIT :limit";
+            $stmt = $this->pdo->prepare($sql);
+            $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+            $stmt->execute();
+            return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch (PDOException $e) {
+            return [];   // 테이블 미생성(최초) 시 빈 배열
+        }
+    }
+
+        public function getRecentStocks(int $limit = 10): array {
+        $sql = "SELECT r.stock_code, r.stock_name 
+                FROM etf_recent_view_stocks r 
+                JOIN ( 
+                    SELECT stock_name, MAX(created_at) AS mx 
+                    FROM etf_recent_view_stocks 
+                    GROUP BY stock_name 
+                ) g ON g.stock_name = r.stock_name AND g.mx = r.created_at 
+                ORDER BY r.created_at DESC 
                 LIMIT :limit";
         $stmt = $this->pdo->prepare($sql);
         $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);

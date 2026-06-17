@@ -174,15 +174,19 @@ function etf_iFrame() {
    require_once "./env/header.php";
     global $mobile;
 
-    $tot_width = 3710;
-    $left_width = 3000;
-    $right_width = $tot_width - $left_width;
-
+    // 비율 기반(fr) 그리드 레이아웃: 화면 해상도/배율과 무관하게 항상 뷰포트 폭의 100%에 맞춤.
+    // (기존 table-layout:fixed + px 고정폭은 컬럼 합계가 화면보다 넓어지면 오른쪽이 잘리는 문제가 있었음)
     echo "
     <style>
-        .dashboard-container { flex: 1; padding: 12px; overflow: auto; }
-        .dashboard-table { width: 100%; height: 100%; border-collapse: separate; border-spacing: 12px; table-layout: fixed; margin-top: -12px; }
-        .card { background: #ffffff; border-radius: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); border: 1px solid #e2e8f0; height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+        .dashboard-container { flex: 1; min-height: 0; padding: 12px; box-sizing: border-box; overflow: hidden; }
+        .dashboard-grid {
+            width: 100%; height: 100%;
+            display: grid;
+            grid-template-columns: 900fr 700fr 850fr 720fr 230fr;
+            grid-template-rows: 3fr 7fr;
+            gap: 12px;
+        }
+        .card { background: #ffffff; border-radius: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); border: 1px solid #e2e8f0; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
         iframe { width: 100%; height: 100%; border: none; display: block; }
     </style>";
 
@@ -190,32 +194,26 @@ function etf_iFrame() {
     // 2. 하단 대시보드 아이프레임 영역 출력
     echo "
     <div class='dashboard-container'>
-        <table class='dashboard-table'>
-            <tr valign='top'>
-                <td width='900px' height='30%'>
-                    <div class='card'><iframe src='" . CUR_PHP . "?mode=eshl' name='etf_t1' scrolling='no'></iframe></div>
-                </td>
-                <td rowspan='2' width='700px'>
-                    <div class='card'>
-                        <iframe name='etf_d2' scrolling='no' style='width:100%; height:100%; overflow:auto;'></iframe>
-                    </div>
-                </td>
-                <td rowspan='2' width='850px'>
-                    <div class='card'><iframe src='analysis_model.php?mode=ar' name='etf_d3'></iframe></div>
-                </td>
-                <td rowspan='2' width='720px'>
-                    <div class='card'><iframe src='analysis_model.php?mode=daily&embed=1' name='etf_d4'></iframe></div>
-                </td>
-                <td rowspan='2' width='230px'>
-                    <div class='card'><iframe src='' name='etf_d5'></iframe></div>
-                </td>
-            </tr>
-            <tr valign='top' height='70%'>
-                <td>
-                    <div class='card'><iframe src='" . CUR_PHP . "?mode=elbs' name='etf_d1' scrolling='no'></iframe></div>
-                </td>
-            </tr>
-        </table>
+        <div class='dashboard-grid'>
+            <div class='card' style='grid-column:1; grid-row:1;'>
+                <iframe src='" . CUR_PHP . "?mode=eshl' name='etf_t1' scrolling='no'></iframe>
+            </div>
+            <div class='card' style='grid-column:1; grid-row:2;'>
+                <iframe src='" . CUR_PHP . "?mode=elbs' name='etf_d1' scrolling='no'></iframe>
+            </div>
+            <div class='card' style='grid-column:2; grid-row:1 / span 2;'>
+                <iframe name='etf_d2' scrolling='no'></iframe>
+            </div>
+            <div class='card' style='grid-column:3; grid-row:1 / span 2;'>
+                <iframe src='analysis_model.php?mode=ar' name='etf_d3'></iframe>
+            </div>
+            <div class='card' style='grid-column:4; grid-row:1 / span 2;'>
+                <iframe src='analysis_model.php?mode=daily&embed=1' name='etf_d4'></iframe>
+            </div>
+            <div class='card' style='grid-column:5; grid-row:1 / span 2;'>
+                <iframe src='' name='etf_d5'></iframe>
+            </div>
+        </div>
     </div>
     </body>
     </html>";
