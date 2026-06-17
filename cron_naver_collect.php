@@ -158,6 +158,27 @@ echo str_repeat('─', 52) . "\n";
 echo "회차 진행: 전체 {$totalReg} = ✅done {$stat['done']} / ⏳pending {$stat['pending']} / ✗error {$stat['error']}\n";
 if ($stat['pending'] === 0 && $stat['error'] === 0) {
     echo "✅ 회차 {$period} 완료 — 모든 지역 수집됨.\n";
+
+    // ── 회차 전체 완료 알림(Pushover) ───────────────────────────────
+    // 이번 호출이 마지막 pending 지역을 실제로 처리($done>0)해 "완료"가 된
+    // 순간에만 1회 발송한다. 완료 후의 no-op 호출($done=0)에서는 보내지 않아
+    // 매월 1일 30회 호출에도 알림은 단 한 번만 간다. (Notify 미설치 시 조용히 패스)
+    if (!$dry && $done > 0 && class_exists('Notify')) {
+        $sum = $pdo->prepare(
+            "SELECT COUNT(*) AS regions, COALESCE(SUM(ingested), 0) AS picks
+               FROM naver_collect_log WHERE period = :p AND status = 'done'"
+        );
+        $sum->execute([':p' => $period]);
+        $agg = $sum->fetch(PDO::FETCH_ASSOC);
+
+        $msg = "🍜 네이버 맛집 수집 완료 — 회차 {$period}\n"
+             . "전국 {$agg['regions']}개 지역 / 선정 적재 {$agg['picks']}곳\n"
+             . "추이 대시보드에서 확인하세요.";
+        Notify::send($msg, "https://economist.kr/naver_trend.php", [
+            "title" => "네이버 맛집 수집 완료 ({$period})",
+        ]);
+        echo "📲 완료 알림(Pushover) 발송함.\n";
+    }
 } elseif ($stat['pending'] > 0) {
     echo "↻ pending {$stat['pending']}개 남음. 같은 URL 을 다시 호출해 이어서 처리하세요.\n";
 } elseif ($stat['error'] > 0) {
