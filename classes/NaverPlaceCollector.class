@@ -347,9 +347,9 @@ class NaverPlaceCollector
         ], fn($v) => $v !== null && $v !== '');
 
         $tags = [];
-        if ($ncat !== '')          $tags[] = ['kind' => 'theme', 'tag' => $ncat];
-        if (!empty($p['michelin'])) $tags[] = ['kind' => 'theme', 'tag' => '미쉐린'];
-        if (!empty($p['tv']))       $tags[] = ['kind' => 'theme', 'tag' => 'TV방영'];
+        if ($ncat !== '')          $tags[] = ['kind' => 'cuisine', 'tag' => $ncat];
+        if (!empty($p['michelin'])) $tags[] = ['kind' => 'cuisine', 'tag' => '미쉐린'];
+        if (!empty($p['tv']))       $tags[] = ['kind' => 'cuisine', 'tag' => 'TV방영'];
 
         $statM = [
             'score' => $score, 'review' => $review, 'visitor' => $visitor,

@@ -102,6 +102,8 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .mb-chip { flex-shrink: 0; min-width: 34px; text-align: center; font-size: 12px; font-weight: 600; padding: 5px 10px; border-radius: 14px; background: #fff; border: 1px solid #ecdcc6; color: #b9712a; cursor: pointer; transition: .12s; }
 .mb-chip:hover { background: #fdf3e7; }
 .mb-chip.active { background: #e67e22; border-color: #d35400; color: #fff; }
+/* 맛집 바(3행) — 가이드칩 + 음식종류 + 등급칩 */
+#pl-foodbar { display: flex; align-items: center; gap: 6px; padding: 6px 12px; background: #fff; border-top: 1px solid #f5f6f8; flex-shrink: 0; }
 
 /* 본문: 지도 + 우측 패널 */
 #pl-main { flex: 1; min-height: 0; position: relative; overflow: hidden; }
@@ -469,7 +471,11 @@ a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
 .tm-top { padding: 12px 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #eee; flex-shrink: 0; }
 .tm-top .pem-inp { flex: 1; }
 .tm-count { font-size: 12px; color: #95a5a6; white-space: nowrap; }
-.tm-grid { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-wrap: wrap; align-content: flex-start; gap: 8px; }
+.tm-grid { flex: 1; overflow-y: auto; padding: 12px 16px; }
+.tm-sec-h { font-size: 12px; font-weight: 700; color: #8a97a3; margin: 12px 2px 8px; display: flex; align-items: center; gap: 6px; }
+.tm-sec-h:first-child { margin-top: 0; }
+.tm-sec-h span { background: #eef2f6; color: #5b6b7b; border-radius: 10px; padding: 1px 8px; font-size: 11px; font-weight: 700; }
+.tm-sec { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 8px; margin-bottom: 6px; }
 .tm-empty { width: 100%; padding: 24px; text-align: center; color: #aab3bc; font-size: 13px; }
 .tm-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 5px 11px; border-radius: 16px; border: 1px solid #dde3e9; background: #f6f8fa; color: #2c3e50; cursor: pointer; user-select: none; }
 .tm-chip:hover { border-color: #b6d7f2; background: #eef6ff; }
@@ -570,6 +576,11 @@ a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
 <div id="pl-monthbar">
     <span class="mb-lbl" id="mbLbl">🌸 방문하기 좋은 달</span>
     <div id="mbChips" class="mb-chips"></div>
+</div>
+<div id="pl-foodbar">
+    <span class="mb-lbl">🍜 맛집</span>
+    <div id="foodChips" class="mb-chips"></div>
+    <button id="foodMore" class="tb-more" onclick="plFoodToggleMore()" style="display:none"></button>
 </div>
 
 <div id="pl-main">
@@ -880,70 +891,45 @@ function plInit() {
 }
 plInit();
 
-// ── 상단 칩 바 (context-aware) ──
-//  여행지/전체 모드: 1행 테마 태그칩(최대3 AND) + 2행 🌸방문 좋은 달
-//  맛집 모드        : 1행 가이드칩(블루리본/미쉐린/기타, 단일선택) + 2행 🍜음식 종류 태그(최대3 AND)
+// ── 상단 칩 바 (3행 동시 표시) ──
+//  1행 #tbChips   : 여행/숙소/기타 테마 태그칩(최대3 AND)
+//  2행 #mbChips   : 🌸 방문하기 좋은 달(1~12)
+//  3행 #foodChips : 🍜 맛집 — 가이드칩(블루리본/미쉐린, 단일선택) + 음식종류·등급칩(최대3 AND)
+//  여행(테마·달)과 맛집(가이드·음식)은 검색 도메인이 달라, 한쪽을 선택하면 다른쪽 선택은 자동 해제.
 var plTagBarAll = [], plTagBarExpanded = false, plSelTags = [], plSelMonth = null;
-var plBarGuides = [], plBarCuisines = [], plSelGuide = null;   // 맛집 모드 데이터/선택
+var plBarGuides = [], plBarCuisines = [], plSelGuide = null, plSelFood = [], plFoodExpanded = false;   // 맛집 데이터/선택
 var PL_TAG_MAX = 3;   // 태그 동시 선택 최대 개수(AND)
-var PL_TAGBAR_TOP = 14;
-// 현재 칩바 모드 = 분류 select 가 '맛집'이면 food
-function plBarMode() {
-    var c = document.getElementById('category');
-    return (c && c.value === 'restaurant') ? 'food' : 'travel';
-}
+var PL_TAGBAR_TOP = 14, PL_FOODBAR_TOP = 14;
 function plTagBarInit() {
-    if (plBarMode() === 'food') {
-        // 1행: 가이드별 곳수
-        fetch(plApiUrl({ module: 'place', action: 'guide_list' }))
-            .then(function (r) { return r.json(); })
-            .then(function (d) { plBarGuides = (d && d.items) || []; plTagBarRender(); })
-            .catch(function () {});
-        // 2행: 음식 종류(cuisine) + 등급(grade) 태그 (지도표시 기준 distinct)
-        fetch(plApiUrl({ module: 'place', action: 'tag_list', bar: 1, kind: 'cuisine,grade' }))
-            .then(function (r) { return r.json(); })
-            .then(function (d) { plBarCuisines = (d && d.items) || []; plMonthBarRender(); })
-            .catch(function () {});
-    } else {
-        // bar=1: 지도에 뜨는(ok·활성) 장소 기준 distinct → 칩 숫자 = 클릭 시 리스트 곳수
-        fetch(plApiUrl({ module: 'place', action: 'tag_list', bar: 1 }))
-            .then(function (r) { return r.json(); })
-            .then(function (d) {
-                plTagBarAll = ((d && d.items) || []).filter(function (t) { return t.kind !== 'month'; }); // 월 제외
-                plTagBarRender();
-            })
-            .catch(function () {});
-        plMonthBarRender();   // 월 바(1~12)는 정적
-    }
+    // 1행: 여행 테마 태그(서버 tag_list 기본이 월·음식·등급 제외) — bar=1: 지도에 뜨는 장소 기준 distinct
+    fetch(plApiUrl({ module: 'place', action: 'tag_list', bar: 1 }))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            plTagBarAll = ((d && d.items) || []).filter(function (t) { return t.kind !== 'month'; }); // 월 제외
+            plTagBarRender();
+        })
+        .catch(function () {});
+    // 2행: 방문 좋은 달(1~12 정적)
+    plMonthBarRender();
+    // 3행: 가이드별 곳수 + 음식종류(cuisine)·등급(grade) 태그
+    fetch(plApiUrl({ module: 'place', action: 'guide_list' }))
+        .then(function (r) { return r.json(); })
+        .then(function (d) { plBarGuides = (d && d.items) || []; plFoodBarRender(); })
+        .catch(function () {});
+    fetch(plApiUrl({ module: 'place', action: 'tag_list', bar: 1, kind: 'cuisine,grade' }))
+        .then(function (r) { return r.json(); })
+        .then(function (d) { plBarCuisines = (d && d.items) || []; plFoodBarRender(); })
+        .catch(function () {});
 }
-// 분류 변경: 칩바 모드 전환 + 선택 초기화 + 지역 재검색
-function plCategoryChange() {
-    plSelTags = []; plSelMonth = null; plSelGuide = null;
-    plTagBarExpanded = false;
-    plTagBarInit();
-    plSearchHere();
-}
-// 2행 렌더 (여행=월 / 맛집=음식 태그)
+// 분류 변경 = 반경검색 필터만 변경(칩바는 항상 3행 유지)
+function plCategoryChange() { plSearchHere(); }
+// 도메인 분리: 한쪽 선택 시 다른쪽 해제
+function plFoodDeselect()   { if (plSelGuide || plSelFood.length) { plSelGuide = null; plSelFood = []; plFoodBarRender(); } }
+function plTravelDeselect() { if (plSelTags.length || plSelMonth) { plSelTags = []; plSelMonth = null; plTagBarRender(); plMonthBarRender(); } }
+// 2행 렌더 (방문하기 좋은 달 1~12)
 function plMonthBarRender() {
     var box = document.getElementById('mbChips');
-    var lbl = document.getElementById('mbLbl');
-    var bar = document.getElementById('pl-monthbar');
     if (!box) return;
-    if (plBarMode() === 'food') {
-        if (lbl) lbl.textContent = '🍜 음식 종류 · 등급';
-        if (!plBarCuisines.length) { if (bar) bar.style.display = 'none'; box.innerHTML = ''; return; }
-        if (bar) bar.style.display = '';
-        box.innerHTML = plBarCuisines.map(function (t) {
-            var tg = t.tag.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-            var on = (plSelTags.indexOf(t.tag) >= 0) ? ' active' : '';
-            var gk = (t.kind === 'grade') ? ' grade' : '';   // 등급 태그는 색으로 구분
-            return '<button class="mb-chip food' + gk + on + '" onclick="plTagBarClick(\'' + tg + '\')">' +
-                plEsc(t.tag) + '<span class="tb-cnt">' + t.cnt + '</span></button>';
-        }).join('');
-        return;
-    }
-    if (lbl) lbl.textContent = '🌸 방문하기 좋은 달';
-    if (bar) bar.style.display = '';
     var html = '';
     for (var i = 1; i <= 12; i++) {
         var onM = (plSelMonth === (i + '월')) ? ' active' : '';
@@ -951,26 +937,49 @@ function plMonthBarRender() {
     }
     box.innerHTML = html;
 }
+// 3행 렌더 (맛집: 가이드칩 + 음식종류·등급칩) — 가이드는 항상, 음식칩은 상위 N + 더보기로 화면 안에 가둠
+function plFoodBarRender() {
+    var box = document.getElementById('foodChips');
+    var more = document.getElementById('foodMore');
+    var bar = document.getElementById('pl-foodbar');
+    if (!box) return;
+    var guides = plBarGuides.map(function (g) {
+        var d = PL_GUIDES[g.guide]; if (!d) return '';
+        var on = (plSelGuide === g.guide) ? ' active' : '';
+        return '<button class="tb-chip guide' + on + '" style="--gc:' + d.color + '" onclick="plGuideClick(\'' +
+            g.guide + '\')">' + plEsc(d.ko) + '<span class="tb-cnt">' + g.cnt + '</span></button>';
+    }).join('');
+    // 선택된 음식칩은 접혀도 보이도록 상위 N 과 합집합
+    var flist = plFoodExpanded ? plBarCuisines : plBarCuisines.filter(function (t, i) {
+        return i < PL_FOODBAR_TOP || plSelFood.indexOf(t.tag) >= 0;
+    });
+    var foods = flist.map(function (t) {
+        var tg = t.tag.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        var on = (plSelFood.indexOf(t.tag) >= 0) ? ' active' : '';
+        var gk = (t.kind === 'grade') ? ' grade' : '';   // 등급 태그는 색으로 구분
+        return '<button class="mb-chip food' + gk + on + '" onclick="plFoodClick(\'' + tg + '\')">' +
+            plEsc(t.tag) + '<span class="tb-cnt">' + t.cnt + '</span></button>';
+    }).join('');
+    box.innerHTML = guides + foods;
+    var hidden = plBarCuisines.length - PL_FOODBAR_TOP;
+    if (more) {
+        if (hidden > 0) { more.style.display = ''; more.textContent = plFoodExpanded ? '접기' : ('+' + hidden + ' 더보기'); }
+        else more.style.display = 'none';
+    }
+    if (bar) bar.style.display = (guides || foods) ? '' : 'none';
+}
+function plFoodToggleMore() { plFoodExpanded = !plFoodExpanded; plFoodBarRender(); }
 function plMonthClick(i) {
     var tag = i + '월';
-    plSelMonth = (plSelMonth === tag) ? null : tag;   // 재클릭=해제, 태그 선택과 독립
+    plSelMonth = (plSelMonth === tag) ? null : tag;   // 재클릭=해제
+    plFoodDeselect();                                  // 맛집 선택 해제(검색 도메인 분리)
     plMonthBarRender();
     plRunTagSearch();
 }
-// 1행 렌더 (여행=테마칩 / 맛집=가이드칩)
+// 1행 렌더 (여행/숙소/기타 테마칩 — 최대 14개 + 더보기)
 function plTagBarRender() {
     var box = document.getElementById('tbChips');
     var more = document.getElementById('tbMore');
-    if (plBarMode() === 'food') {
-        box.innerHTML = plBarGuides.map(function (g) {
-            var d = PL_GUIDES[g.guide]; if (!d) return '';
-            var on = (plSelGuide === g.guide) ? ' active' : '';
-            return '<button class="tb-chip guide' + on + '" style="--gc:' + d.color + '" onclick="plGuideClick(\'' +
-                g.guide + '\')">' + plEsc(d.ko) + '<span class="tb-cnt">' + g.cnt + '</span></button>';
-        }).join('');
-        if (more) more.style.display = 'none';
-        return;
-    }
     var list = plTagBarExpanded ? plTagBarAll : plTagBarAll.slice(0, PL_TAGBAR_TOP);
     box.innerHTML = list.map(function (t) {
         var tg = t.tag.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
@@ -990,10 +999,11 @@ function plTagBarToggleMore() { plTagBarExpanded = !plTagBarExpanded; plTagBarRe
 // 가이드 칩 클릭 = 단일 선택(재클릭 해제)
 function plGuideClick(g) {
     plSelGuide = (plSelGuide === g) ? null : g;
-    plTagBarRender();
+    plTravelDeselect();                                // 여행 선택 해제(도메인 분리)
+    plFoodBarRender();
     plRunTagSearch();
 }
-// 태그/음식 칩 클릭 = 다중 AND 선택(재클릭 해제)
+// 여행 테마칩 클릭 = 다중 AND 선택(재클릭 해제)
 function plTagBarClick(tag) {
     var i = plSelTags.indexOf(tag);
     if (i >= 0) { plSelTags.splice(i, 1); }            // 재클릭=해제
@@ -1001,22 +1011,33 @@ function plTagBarClick(tag) {
         if (plSelTags.length >= PL_TAG_MAX) { plHint('태그는 최대 ' + PL_TAG_MAX + '개까지 선택할 수 있습니다'); return; }
         plSelTags.push(tag);                           // 추가(최대 3개 AND)
     }
-    plTagBarRender(); plMonthBarRender();
+    plFoodDeselect();                                  // 맛집 선택 해제(도메인 분리)
+    plTagBarRender();
+    plRunTagSearch();
+}
+// 맛집 음식종류·등급칩 클릭 = 다중 AND 선택(재클릭 해제)
+function plFoodClick(tag) {
+    var i = plSelFood.indexOf(tag);
+    if (i >= 0) { plSelFood.splice(i, 1); }            // 재클릭=해제
+    else {
+        if (plSelFood.length >= PL_TAG_MAX) { plHint('태그는 최대 ' + PL_TAG_MAX + '개까지 선택할 수 있습니다'); return; }
+        plSelFood.push(tag);                           // 추가(최대 3개 AND)
+    }
+    plTravelDeselect();                                // 여행 선택 해제(도메인 분리)
+    plFoodBarRender();
     plRunTagSearch();
 }
 function plClearTagSel() {
-    plSelTags = []; plSelMonth = null; plSelGuide = null;
-    plTagBarRender(); plMonthBarRender();
+    plSelTags = []; plSelMonth = null; plSelGuide = null; plSelFood = [];
+    plTagBarRender(); plMonthBarRender(); plFoodBarRender();
 }
-// 선택된 칩들을 AND 로 검색 (없으면 해제). 맛집 모드는 가이드+음식 AND
+// 선택된 칩 AND 검색. 맛집(가이드·음식) 선택이 있으면 맛집 검색, 아니면 여행(테마·달).
 function plRunTagSearch() {
-    if (plBarMode() === 'food') {
-        var ct = plSelTags.slice();
-        if (!ct.length && !plSelGuide) { plTagClear(); return; }
-        plTagSearch(ct, { guide: plSelGuide, category: 'restaurant' });
+    if (plSelGuide || plSelFood.length) {              // 맛집 도메인
+        plTagSearch(plSelFood.slice(), { guide: plSelGuide, category: 'restaurant' });
         return;
     }
-    var tags = plSelTags.slice();
+    var tags = plSelTags.slice();                      // 여행 도메인
     if (plSelMonth) tags.push(plSelMonth);
     if (!tags.length) { plTagClear(); return; }
     plTagSearch(tags);
@@ -1963,20 +1984,27 @@ function plTagMgrLoad() {
 }
 function plTagCnt(tag) { for (var i = 0; i < plTagAll.length; i++) { if (plTagAll[i].tag === tag) return plTagAll[i].cnt; } return 0; }
 function plTagJs(t) { return t.replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+function plTagIsFood(t) { return t.kind === 'cuisine' || t.kind === 'grade'; }   // 맛집 태그
 function plTagMgrRender() {
     var q = (document.getElementById('tmSearch').value || '').trim().toLowerCase();
     var list = q ? plTagAll.filter(function (t) { return t.tag.toLowerCase().indexOf(q) >= 0; }) : plTagAll;
     document.getElementById('tmCount').textContent = '총 ' + plTagAll.length + '개' + (q ? (' · ' + list.length + ' 일치') : '');
     var grid = document.getElementById('tmGrid');
-    if (!plTagAll.length) { grid.innerHTML = '<div class="tm-empty">아직 태그가 없습니다</div>'; }
-    else if (!list.length) { grid.innerHTML = '<div class="tm-empty">일치하는 태그 없음</div>'; }
-    else {
-        grid.innerHTML = list.map(function (t) {
-            var sel = plTagSel.indexOf(t.tag) >= 0 ? ' sel' : '';
-            return '<button class="tm-chip' + sel + '" onclick="plTagChip(\'' + plTagJs(t.tag) + '\')">' +
-                plEsc(t.tag) + '<span class="tm-c">' + t.cnt + '</span></button>';
-        }).join('');
+    if (!plTagAll.length) { grid.innerHTML = '<div class="tm-empty">아직 태그가 없습니다</div>'; plTagActionRender(); return; }
+    if (!list.length) { grid.innerHTML = '<div class="tm-empty">일치하는 태그 없음</div>'; plTagActionRender(); return; }
+    function chip(t) {
+        var sel = plTagSel.indexOf(t.tag) >= 0 ? ' sel' : '';
+        return '<button class="tm-chip' + sel + '" onclick="plTagChip(\'' + plTagJs(t.tag) + '\')">' +
+            plEsc(t.tag) + '<span class="tm-c">' + t.cnt + '</span></button>';
     }
+    function section(title, arr) {
+        if (!arr.length) return '';
+        return '<div class="tm-sec-h">' + title + ' <span>' + arr.length + '</span></div>' +
+               '<div class="tm-sec">' + arr.map(chip).join('') + '</div>';
+    }
+    var travel = list.filter(function (t) { return !plTagIsFood(t); });
+    var food   = list.filter(plTagIsFood);
+    grid.innerHTML = section('🗺️ 여행지 태그', travel) + section('🍜 맛집 태그', food);
     plTagActionRender();
 }
 function plTagChip(tag) {
