@@ -117,7 +117,7 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .pl-legend span { display: inline-flex; align-items: center; gap: 5px; }
 .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
 .dot.travel { background: #3498db; } .dot.stay { background: #8e44ad; }
-.dot.restaurant { background: #e74c3c; } .dot.etc { background: #7f8c8d; }
+.dot.restaurant { background: #e74c3c; } .dot.camping { background: #27ae60; } .dot.etc { background: #7f8c8d; }
 
 /* 현재위치 버튼 (지도 좌상단 플로팅, GPS 크로스헤어) */
 .pl-myloc { position: absolute; left: 12px; top: 12px; z-index: 6; width: 42px; height: 42px; border-radius: 50%; background: #fff; border: none; box-shadow: 0 2px 8px rgba(0,0,0,.25); cursor: pointer; display: flex; align-items: center; justify-content: center; color: #3498db; transition: .15s; }
@@ -130,7 +130,7 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 /* 번호 마커 (HTML 아이콘) — 흰 배경 + 카테고리색 테두리 + 빨간 번호로 잘 보이게 */
 .mk-pin { width: 28px; height: 28px; border-radius: 50% 50% 50% 0; transform: rotate(-45deg); background: #fff; border: 3px solid #3498db; box-shadow: 0 2px 5px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; }
 .mk-pin b { transform: rotate(45deg); color: #e74c3c; font-weight: 800; font-size: 13px; line-height: 1; }
-.mk-pin.cat-stay { border-color: #8e44ad; } .mk-pin.cat-restaurant { border-color: #e74c3c; } .mk-pin.cat-etc { border-color: #7f8c8d; }
+.mk-pin.cat-stay { border-color: #8e44ad; } .mk-pin.cat-restaurant { border-color: #e74c3c; } .mk-pin.cat-camping { border-color: #27ae60; } .mk-pin.cat-etc { border-color: #7f8c8d; }
 .mk-pin.active { background: #e74c3c; border-color: #c0392b; transform: rotate(-45deg) scale(1.28); }
 .mk-pin.active b { color: #fff; }
 /* 맛집 마커 — 가이드색 원형 + 흰 포크·나이프 + 우상단 숫자 배지 */
@@ -149,6 +149,11 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .mk-food.active .mk-fnum { background: #2c3e50; border-color: #2c3e50; }
 .mk-food.active .mk-fnum .mk-rb { fill: #9ec3f5; }
 .mk-food.active .mk-fnum .mk-gstar { color: #6ee29b; }
+/* 숙소·캠핑 마커 — 맛집과 같은 분류색 원형 + 흰 아이콘(숙소=침대 / 캠핑=텐트)으로 번호핀과 구분 */
+.mk-place { position: relative; width: 30px; height: 30px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 2px 6px rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; box-sizing: border-box; transition: transform .1s; }
+.mk-place .mk-fk { width: 18px; height: 18px; fill: #fff; }
+.mk-place.cat-stay { background: #8e44ad; } .mk-place.cat-camping { background: #27ae60; }
+.mk-place.active { transform: scale(1.38); background: #2979ff !important; border-color: #fff; z-index: 1000; animation: pl-food-glow 1.7s ease-in-out infinite; }
 
 /* 검색 위치 마커 — 여행지 핀과 확연히 구분(보라 솔리드 + 흰 별, 더 큼) */
 .mk-search { width: 34px; height: 34px; border-radius: 50% 50% 50% 0; transform: rotate(-45deg); background: #ff2d2d; border: 3px solid #fff; box-shadow: 0 3px 9px rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; }
@@ -165,7 +170,7 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .pl-li:hover { background: #f7fbff; }
 .pl-li.active { background: #fdecea; }
 .li-no { flex-shrink: 0; width: 26px; height: 26px; border-radius: 50%; background: #fff; border: 2px solid #3498db; color: #e74c3c; font-weight: 800; font-size: 13px; display: flex; align-items: center; justify-content: center; }
-.li-no.cat-stay { border-color: #8e44ad; } .li-no.cat-restaurant { border-color: #e74c3c; } .li-no.cat-etc { border-color: #7f8c8d; }
+.li-no.cat-stay { border-color: #8e44ad; } .li-no.cat-restaurant { border-color: #e74c3c; } .li-no.cat-camping { border-color: #27ae60; } .li-no.cat-etc { border-color: #7f8c8d; }
 .pl-li.active .li-no { background: #e74c3c; border-color: #c0392b; color: #fff; }
 .li-body { min-width: 0; flex: 1; }
 .li-name { font-size: 13.5px; display: flex; align-items: center; gap: 5px; }
@@ -238,7 +243,7 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .panel-head { padding: 16px 18px 12px; border-bottom: 1px solid #eee; }
 .panel-head .cat-badge { font-size: 11px; font-weight: 700; color: #fff; padding: 2px 8px; border-radius: 10px; }
 .cat-badge.travel { background: #3498db; } .cat-badge.stay { background: #8e44ad; }
-.cat-badge.restaurant { background: #e74c3c; } .cat-badge.etc { background: #7f8c8d; }
+.cat-badge.restaurant { background: #e74c3c; } .cat-badge.camping { background: #27ae60; } .cat-badge.etc { background: #7f8c8d; }
 .panel-head h3 { font-size: 19px; margin: 8px 0 6px; }
 .panel-head .meta { font-size: 13px; color: #5b6b7b; line-height: 1.7; }
 .panel-head .meta .nv-map-btn { display: inline-flex; align-items: center; vertical-align: middle; background: #03c75a; border: none; color: #fff; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 10px; cursor: pointer; margin-left: 6px; line-height: 1.4; }
@@ -523,19 +528,13 @@ a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
     <select id="category" onchange="plCategoryChange()">
         <option value="">전체</option>
         <option value="travel">여행지</option>
-        <option value="stay">숙소</option>
         <option value="restaurant">맛집</option>
+        <option value="stay">숙소</option>
+        <option value="camping">캠핑장</option>
         <option value="etc">기타</option>
     </select>
-    <select id="radius" onchange="plRadiusChange()">
-        <option value="3">3km</option>
-        <option value="5" selected>5km</option>
-        <option value="10">10km</option>
-        <option value="15">15km</option>
-        <option value="20">20km</option>
-        <option value="30">30km</option>
-        <option value="50">50km</option>
-    </select>
+    <!-- 반경 선택 UI 제거(줌인/아웃으로 영역 조절). 주소검색·자동확장 등 내부 로직용 기본값만 숨김 보관 -->
+    <input type="hidden" id="radius" value="5">
     <label class="pl-autochk" title="체크하면 지도를 옮길 때마다 그 지역 장소를 자동으로 표시합니다">
         <input type="checkbox" id="autoSearch" onchange="plAutoToggle()"> 이동 시 주변검색
     </label>
@@ -600,6 +599,7 @@ a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
         <span><i class="dot travel"></i>여행지</span>
         <span><i class="dot stay"></i>숙소</span>
         <span><i class="dot restaurant"></i>맛집</span>
+        <span><i class="dot camping"></i>캠핑장</span>
         <span><i class="dot etc"></i>기타</span>
         <span><i class="dot" style="background:#ff2d2d"></i>검색 위치</span>
     </div>
@@ -811,6 +811,7 @@ var plMap = null, plMarkers = [], plReady = false;
 var plFeatures = [], plActive = -1;
 var plPendingFocusId = null;          // 통합검색에서 우리 DB 장소 선택 시, 검색결과 렌더 후 그 마커 강조
 var plIdleTimer = null, plLastSearchAt = 0;   // 지도 멈춤(idle) 자동검색 디바운스 + 중복방지
+var plLastSearchZoom = null;                  // 마지막 검색 시 줌(줌 변경 감지 → 티어 재검색용)
 var plMergeSel = [];                  // 편집모드 병합 선택 장소 id 목록
 var plSearchMarker = null; // 검색으로 이동한 위치 마커(여행지 마커와 별개로 유지)
 
@@ -827,6 +828,108 @@ function plSetSearchMarker(lat, lng, label) {
             anchor: new naver.maps.Point(17, 34)
         }
     });
+}
+// ── 줌 기반 주변 오버레이 ─────────────────────────────────────
+//  베이스(필터 결과, 예: 호수)는 그대로 두고, 줌인하면 화면 안의 전 분류(맛집·숙소·명소)를
+//  자동으로 위에 얹는다. 줌아웃(임계 미만)하면 오버레이만 사라지고 베이스는 남음(전체 현황 유지).
+//  ※ 필터(칩) 모드에서만 동작. 일반 뷰포트 모드는 기존 줌 티어링이 이미 전 분류를 보여줌.
+var PL_DETAIL_ZOOM = 14;       // 이 줌 이상이면 주변 오버레이 표시(네이버 스케일 ≈ 300m. 100m=16/200m=15/300m=14/500m=13/1km=12)
+var plOv = [];                 // 현재 오버레이 마커들
+var plOvFeats = [];            // 현재 오버레이 장소(좌측 '주변' 목록용)
+var plListMode = 'base';       // 'base'=필터/뷰포트 목록 / 'overlay'=주변 목록
+var plBaseTitle = '';          // 베이스 목록 제목(줌아웃 복원용)
+function plClearOverlay() { plOv.forEach(function (m) { m.setMap(null); }); plOv = []; }
+// 오버레이 종료(줌아웃) → 마커 제거 + 좌측 목록을 베이스(필터)로 복원
+function plExitOverlay() {
+    plClearOverlay();
+    if (plListMode === 'overlay') {
+        plListMode = 'base';
+        plRenderList(plFeatures);
+        if (plBaseTitle) document.getElementById('plListTitle').textContent = plBaseTitle;
+        plToggleList(plFeatures.length > 0);
+    }
+}
+// 좌측에 '이 화면 주변' 목록 렌더(클릭=그 장소로 이동+상세). 베이스 마커는 지도에 그대로.
+function plRenderNearbyList(feats) {
+    plOvFeats = feats;
+    var title = document.getElementById('plListTitle');
+    var body  = document.getElementById('plListBody');
+    title.textContent = '📍 이 화면 주변 ' + feats.length + '곳';
+    body.innerHTML = feats.length
+        ? feats.map(function (f, i) { return plLiHtml(f, i, { prefix: 'pl-ov-li-', onclickFn: 'plProxPick', num: false }); }).join('')
+        : '<div class="pl-list-empty">이 화면에 주변 장소가 없습니다</div>';
+    plToggleList(true);
+}
+function plProxPick(i) {
+    var f = plOvFeats[i]; if (!f) return;
+    var co = f.geometry.coordinates;
+    plMap.panTo(new naver.maps.LatLng(co[1], co[0]));
+    var items = document.querySelectorAll('.pl-li');
+    for (var k = 0; k < items.length; k++) items[k].classList.remove('active');
+    var li = document.getElementById('pl-ov-li-' + i);
+    if (li) { li.classList.add('active'); li.scrollIntoView({ block: 'nearest' }); }
+    f.properties.lat = co[1]; f.properties.lng = co[0];
+    plOpenPanel(f.properties);
+}
+// 중심 (lat,lng) 기준 ±km 박스로 지도를 맞춤 → 화면 크기와 무관하게 '중심·반경 km'가 보임
+function plFitRadius(lat, lng, km) {
+    var dLat = km / 111;
+    var dLng = km / (111 * Math.cos(lat * Math.PI / 180));
+    var b = new naver.maps.LatLngBounds(
+        new naver.maps.LatLng(lat - dLat, lng - dLng),
+        new naver.maps.LatLng(lat + dLat, lng + dLng));
+    try { plMap.fitBounds(b); } catch (e) {}
+}
+// ±km 박스가 현재 지도 뷰포트에 딱 맞을 때의 줌(정수) — fitBounds 가 갈 줌을 미리 계산(웹 메르카토르)
+function plFitZoom(lat, km) {
+    var el = document.getElementById('map');
+    var W = (el && el.clientWidth) || 800, H = (el && el.clientHeight) || 600;
+    var dLat = km / 111, dLng = km / (111 * Math.cos(lat * Math.PI / 180));
+    function mercY(d) { var s = Math.max(-0.9999, Math.min(0.9999, Math.sin(d * Math.PI / 180)));
+                        return 0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI); }
+    var zLng = Math.log(W * 360 / (256 * 2 * dLng)) / Math.LN2;
+    var zLat = Math.log(H / (256 * Math.abs(mercY(lat + dLat) - mercY(lat - dLat)))) / Math.LN2;
+    return Math.floor(Math.min(zLng, zLat));
+}
+// 주변 오버레이 마커 = 베이스와 동일한 일반 지도 핀(맛집=빨강 원+포크 / 그 외=분류색 물방울 핀).
+//  번호만 비워 베이스(번호핀)와 구분. 줌아웃하면 사라짐.
+function plProxIcon(pr) {
+    return plMarkerIcon(pr.category, '', false, plMkColor(pr), plMkBadge(pr));
+}
+// 줌/뷰포트에 맞춰 오버레이 갱신 — idle 마다 호출. 조건 미충족이면 제거.
+function plUpdateOverlay() {
+    if (!plReady) return;
+    // 필터 모드(베이스가 좁은 필터)이고 충분히 줌인했을 때만 주변을 덧댄다.
+    if (!plChipActive() || plMap.getZoom() < PL_DETAIL_ZOOM) { plExitOverlay(); return; }
+    var c = plMap.getCenter(), rad = plViewportRadiusKm();
+    var sp = { module: 'place', action: 'search', lat: c.lat(), lng: c.lng(), radius: rad,
+               limit: 400, mr_restaurant: 0, mr_stay: 0, mr_camping: 0 };   // 전 분류·다 표시
+    fetch(plApiUrl(sp))
+        .then(function (r) { return r.json(); })
+        .then(function (geo) {
+            plClearOverlay();
+            if (!plChipActive() || plMap.getZoom() < PL_DETAIL_ZOOM) { plExitOverlay(); return; }   // 응답 사이 줌아웃
+            var baseIds = {};
+            plFeatures.forEach(function (f) { baseIds[f.properties.id] = 1; });
+            // 베이스 중복 제외 → 맛집 리뷰순/거리순 정렬 → 그 순서로 마커·목록(인덱스 일치)
+            var ovFeats = plSortFeatures(((geo && geo.features) || []).filter(function (f) {
+                return !baseIds[f.properties.id];
+            }));
+            ovFeats.forEach(function (f, i) {
+                var co = f.geometry.coordinates, pr = f.properties;
+                var mk = new naver.maps.Marker({
+                    position: new naver.maps.LatLng(co[1], co[0]), map: plMap,
+                    title: pr.name, zIndex: 90, icon: plProxIcon(pr)
+                });
+                naver.maps.Event.addListener(mk, 'click', (function (idx) {
+                    return function () { plProxPick(idx); };
+                })(i));
+                plOv.push(mk);
+            });
+            plListMode = 'overlay';
+            plRenderNearbyList(ovFeats);          // 좌측을 '이 화면 주변' 목록으로
+        })
+        .catch(function () {});
 }
 var PL_RADII = [3, 5, 10, 15, 20, 30, 50]; // 자동 확장 사다리
 
@@ -864,14 +967,25 @@ function plInit() {
         plReady = true;
         plTagBarInit();   // 상단 태그 칩 바 로드
 
+        // 추이 페이지에서 저장한 분류별 지도 기준(localStorage 'pl_map_filter') 로드.
+        //  기본 분류='전체' → 맛집·스테이·캠핑을 각 기준으로 함께 표시.
+        plLoadCatFilter();
+
+        // 지도 열면 현재 화면의 마커를 바로 표시(뷰포트 + 최소리뷰 기준) — 바운드 준비 후 1회
+        setTimeout(function () { if (plReady && !plChipActive()) plSearchHere(); }, 600);
+
         // 지도 멈추면(이동·줌 종료) 그 지역 자동 검색 — 별도 '이 지역 검색' 버튼 대체
         naver.maps.Event.addListener(plMap, 'idle', function () {
             clearTimeout(plIdleTimer);
             plIdleTimer = setTimeout(function () {
-                var chk = document.getElementById('autoSearch');
-                if (!chk || !chk.checked) return;                  // 옵션 꺼져 있으면 이동 자동검색 안 함(기본)
-                if (plSelTags.length || plSelMonth) return;        // 태그 검색 중이면 자동검색 안 함
+                plUpdateOverlay();                                 // 줌인=주변(전 분류) 오버레이 표시 / 줌아웃=제거(베이스 유지)
+                if (plChipActive()) return;                        // 칩(여행·맛집) 검색 중이면 자동검색 안 함(전국 결과 보호)
                 if (Date.now() - plLastSearchAt < 800) return;     // 방금 검색했으면(프로그램 이동) 중복 방지
+                // 줌이 바뀌면 품질 티어가 달라지므로 자동검색 옵션과 무관하게 재검색.
+                // 단순 이동(pan)은 '이동 시 주변검색' 옵션이 켜졌을 때만(기본 off).
+                var zoomed = (plLastSearchZoom !== null && plMap.getZoom() !== plLastSearchZoom);
+                var chk = document.getElementById('autoSearch');
+                if (!zoomed && !(chk && chk.checked)) return;
                 plSearchHere();
             }, 450);
         });
@@ -921,8 +1035,27 @@ function plTagBarInit() {
         .then(function (d) { plBarCuisines = (d && d.items) || []; plFoodBarRender(); })
         .catch(function () {});
 }
-// 분류 변경 = 반경검색 필터만 변경(칩바는 항상 3행 유지)
-function plCategoryChange() { plSearchHere(); }
+// ── 분류(1차 축) ↔ 칩(하위필터) 연동 ──────────────────────────
+//  분류가 주인: 선택 분류의 칩 행만 표시. '전체'면 모두 보임(칩 클릭 시 그 분류로 자동 전환).
+//  여행지=테마·달 / 맛집=가이드·음식 / 숙소·캠핑·기타=세부칩 없음(리뷰기준만).
+function plChipActive() { return !!(plSelTags.length || plSelMonth || plSelFood.length || plSelGuide); }
+function plSetDisp(id, on) { var el = document.getElementById(id); if (el) el.style.display = on ? '' : 'none'; }
+function plChipContext() {
+    var cat = (document.getElementById('category') || {}).value || '';
+    var showTravel = (cat === '' || cat === 'travel');
+    var showFood   = (cat === '' || cat === 'restaurant');
+    var tb = document.getElementById('tbChips'), fb = document.getElementById('foodChips');
+    plSetDisp('pl-tagbar',   showTravel && !!(tb && tb.innerHTML));
+    plSetDisp('pl-monthbar', showTravel);
+    plSetDisp('pl-foodbar',  showFood && !!(fb && fb.innerHTML));
+}
+// 칩 클릭 시 드롭다운을 그 분류로 명시적으로 맞춤(숨은 전환 방지 — 증상1 해소)
+function plEnsureCat(cat) {
+    var sel = document.getElementById('category');
+    if (sel && sel.value !== cat) { sel.value = cat; plChipContext(); }
+}
+// 분류 변경 = 칩 선택 초기화 + 칩바 재구성 + 이 화면(뷰포트) 기준 재검색
+function plCategoryChange() { plClearTagSel(); plChipContext(); plSearchHere(); }
 // 도메인 분리: 한쪽 선택 시 다른쪽 해제
 function plFoodDeselect()   { if (plSelGuide || plSelFood.length) { plSelGuide = null; plSelFood = []; plFoodBarRender(); } }
 function plTravelDeselect() { if (plSelTags.length || plSelMonth) { plSelTags = []; plSelMonth = null; plTagBarRender(); plMonthBarRender(); } }
@@ -966,13 +1099,14 @@ function plFoodBarRender() {
         if (hidden > 0) { more.style.display = ''; more.textContent = plFoodExpanded ? '접기' : ('+' + hidden + ' 더보기'); }
         else more.style.display = 'none';
     }
-    if (bar) bar.style.display = (guides || foods) ? '' : 'none';
+    plChipContext();   // 분류·내용에 맞춰 맛집 칩 행 표시/숨김
 }
 function plFoodToggleMore() { plFoodExpanded = !plFoodExpanded; plFoodBarRender(); }
 function plMonthClick(i) {
     var tag = i + '월';
     plSelMonth = (plSelMonth === tag) ? null : tag;   // 재클릭=해제
     plFoodDeselect();                                  // 맛집 선택 해제(검색 도메인 분리)
+    if (plSelMonth) plEnsureCat('travel');             // 달은 여행 하위필터 → 분류=여행지
     plMonthBarRender();
     plRunTagSearch();
 }
@@ -994,12 +1128,14 @@ function plTagBarRender() {
     } else {
         more.style.display = 'none';
     }
+    plChipContext();   // 분류에 맞춰 칩 행 표시/숨김
 }
 function plTagBarToggleMore() { plTagBarExpanded = !plTagBarExpanded; plTagBarRender(); }
 // 가이드 칩 클릭 = 단일 선택(재클릭 해제)
 function plGuideClick(g) {
     plSelGuide = (plSelGuide === g) ? null : g;
     plTravelDeselect();                                // 여행 선택 해제(도메인 분리)
+    if (plSelGuide) plEnsureCat('restaurant');         // 가이드는 맛집 하위필터 → 분류=맛집
     plFoodBarRender();
     plRunTagSearch();
 }
@@ -1012,6 +1148,7 @@ function plTagBarClick(tag) {
         plSelTags.push(tag);                           // 추가(최대 3개 AND)
     }
     plFoodDeselect();                                  // 맛집 선택 해제(도메인 분리)
+    if (plSelTags.length) plEnsureCat('travel');       // 테마는 여행 하위필터 → 분류=여행지
     plTagBarRender();
     plRunTagSearch();
 }
@@ -1024,6 +1161,7 @@ function plFoodClick(tag) {
         plSelFood.push(tag);                           // 추가(최대 3개 AND)
     }
     plTravelDeselect();                                // 여행 선택 해제(도메인 분리)
+    if (plSelFood.length) plEnsureCat('restaurant');   // 음식종류는 맛집 하위필터 → 분류=맛집
     plFoodBarRender();
     plRunTagSearch();
 }
@@ -1039,8 +1177,8 @@ function plRunTagSearch() {
     }
     var tags = plSelTags.slice();                      // 여행 도메인
     if (plSelMonth) tags.push(plSelMonth);
-    if (!tags.length) { plTagClear(); return; }
-    plTagSearch(tags);
+    if (!tags.length) { plSearchHere(); return; }      // 칩 모두 해제 → 이 화면(현 분류) 기준으로 복귀
+    plTagSearch(tags, { category: 'travel' });         // 테마/달은 여행지로 한정(맛집 잔여태그 오염 차단)
 }
 function plTagClear() {
     plClearMarkers(); plFeatures = []; plActive = -1;
@@ -1049,6 +1187,7 @@ function plTagClear() {
 }
 function plTagSearch(tags, opts) {
     if (!plReady) return;
+    plClearOverlay();              // 베이스 재검색 → 주변 오버레이 해제(idle이 조건 맞으면 다시 표시)
     opts = opts || {};
     var parts = [];
     if (opts.guide && PL_GUIDES[opts.guide]) parts.push(PL_GUIDES[opts.guide].ko);
@@ -1066,10 +1205,12 @@ function plTagSearch(tags, opts) {
             feats.forEach(plAddMarker);
             plRenderList(feats);
             plRefreshCurrent = function () { plTagSearch(tags, opts); };   // 수정 후 목록 갱신용
-            document.getElementById('plListTitle').textContent = '🏷 ' + label + ' ' + feats.length + '곳';
+            plListMode = 'base';
+            plBaseTitle = '🏷 ' + label + ' · 전국 ' + feats.length + '곳';   // 줌아웃 복원용
+            document.getElementById('plListTitle').textContent = plBaseTitle;
             plToggleList(feats.length > 0);
             if (feats.length) plFitToFeatures(feats);
-            plHint(feats.length ? ('🏷 ' + label + ' ' + feats.length + '곳')
+            plHint(feats.length ? ('🏷 ' + label + ' · 전국 ' + feats.length + '곳')
                                 : ('“' + label + '” 해당 장소가 없습니다'));
         })
         .catch(function () { plHint('검색 실패'); });
@@ -1130,7 +1271,7 @@ function plZoomForRadius(rad) {
 function plSearchHere() {
     if (!plReady) return;
     var c = plMap.getCenter();
-    plSearch(c.lat(), c.lng(), parseFloat(document.getElementById('radius').value));
+    plSearch(c.lat(), c.lng(), plViewportRadiusKm(), true);   // 뷰포트 반경 + 상위 N개
 }
 
 // '이동 시 주변검색' 토글: 켜면 지금 화면을 즉시 한 번 검색(이후 이동마다 자동)
@@ -1152,25 +1293,91 @@ function plNextRadius(cur) {
     return null;
 }
 
+// 줌 티어링: 넓게(줌아웃) 볼수록 리뷰 많은 맛집만 노출(여행지·숙소·가이드 맛집은 항상 표시).
+//  네이버 줌: 작을수록 광역. 줌아웃=리뷰 최상위만 / 줌인=전체.
+//  (서버 searchNearby 가 restaurant 에만 적용·LIMIT 도 리뷰순이라 '좋은 곳'이 남음)
+// 분류별 줌 티어링 기준 — 스테이·캠핑은 리뷰가 적어 낮은 단계.
+function plZoomTier(cat, z) {
+    z = z || (plMap ? plMap.getZoom() : 12);
+    if (cat === 'stay' || cat === 'camping') {
+        if (z <= 9)  return 500;
+        if (z <= 11) return 200;
+        if (z <= 13) return 50;
+        return 0;
+    }
+    if (z <= 9)  return 10000;
+    if (z <= 11) return 5000;
+    if (z <= 13) return 2000;
+    return 0;
+}
+
+// 추이 페이지에서 저장한 분류별 지도 기준(localStorage 'pl_map_filter' = {restaurant,stay,camping}).
+var plCatFilter = null;
+function plLoadCatFilter() {
+    try { var o = JSON.parse(localStorage.getItem('pl_map_filter') || 'null'); plCatFilter = (o && typeof o === 'object') ? o : null; }
+    catch (e) { plCatFilter = null; }
+}
+// 분류별 효과 기준: 저장값 우선, 없으면 줌 티어링 기본.
+function plEffCatMr() {
+    var f = plCatFilter || {};
+    return {
+        restaurant: (f.restaurant != null) ? f.restaurant : plZoomTier('restaurant'),
+        stay:       (f.stay       != null) ? f.stay       : plZoomTier('stay'),
+        camping:    (f.camping    != null) ? f.camping    : plZoomTier('camping')
+    };
+}
+// 단일 분류의 효과 기준
+function plCatMr(cat) {
+    var f = plCatFilter || {};
+    return (f[cat] != null) ? f[cat] : plZoomTier(cat);
+}
+// 현재 표시 기준 요약(지도 하단 안내용)
+function plCritSummary() {
+    function t(n){ return n > 0 ? Number(n).toLocaleString() + '+' : '전체'; }
+    var cat = document.getElementById('category').value;
+    if (cat === '') {
+        var e = plEffCatMr();
+        return '맛집 ' + t(e.restaurant) + ' · 스테이 ' + t(e.stay) + ' · 캠핑 ' + t(e.camping);
+    }
+    var ko = { travel:'여행지', restaurant:'맛집', stay:'스테이', camping:'캠핑장', etc:'기타' }[cat] || cat;
+    return ko + ' ' + t(plCatMr(cat));
+}
+var PL_MAP_LIMIT = 800;   // 렌더 안전 한도(과밀·성능 방지) — 사용자 비노출
+// 현재 화면(뷰포트) 반경 km = 중심→북동 모서리. 보이는 영역을 덮는 반경(전국 보면 전국).
+function plViewportRadiusKm() {
+    if (!plMap) return parseFloat(document.getElementById('radius').value) || 5;
+    try {
+        var b = plMap.getBounds(), c = plMap.getCenter(), ne = b.getNE();
+        return Math.max(0.3, Math.min(500, rtHaversine(c.lat(), c.lng(), ne.lat(), ne.lng())));
+    } catch (e) {
+        return parseFloat(document.getElementById('radius').value) || 5;
+    }
+}
+
 // 좌표 기준 검색 → GeoJSON → 마커 렌더
-//  expandFrom 가 숫자면: 결과 0곳일 때 다음 반경으로 자동 확장(데이터 나올 때까지, 최대 50km)
-function plSearch(lat, lng, expandFrom) {
-    if (plSelTags.length || plSelMonth) plClearTagSel();   // 지역 검색 시 태그·월 선택 해제
+//  expandFrom 숫자면 그 반경 사용(결과 0이면 자동확장). viewport=true 면 뷰포트 반경·확장/드롭다운 갱신 안 함.
+function plSearch(lat, lng, expandFrom, viewport) {
+    plClearOverlay();                      // 베이스(필터) 재검색 → 주변 오버레이 해제
+    if (plChipActive()) plClearTagSel();   // 지역(뷰포트) 검색 시 칩(여행·맛집) 선택 모두 해제
     plMergeSel = [];                                       // 새 검색 시 병합 선택 초기화
     plLastSearchAt = Date.now();                           // idle 자동검색 중복 방지용 타임스탬프
+    if (plMap) plLastSearchZoom = plMap.getZoom();         // 줌 변경 감지 기준 갱신
     var rad = (expandFrom != null) ? expandFrom : parseFloat(document.getElementById('radius').value);
-    fetch(plApiUrl({
-        module: 'place', action: 'search',
-        lat: lat, lng: lng,
-        radius: rad,
-        category: document.getElementById('category').value
-    }))
+    var cat = document.getElementById('category').value;
+    var sp = { module: 'place', action: 'search', lat: lat, lng: lng, radius: rad, limit: PL_MAP_LIMIT };
+    if (cat === '') {           // 전체: 맛집·스테이·캠핑을 각 기준으로 함께 표시(여행지는 항상)
+        var eff = plEffCatMr();
+        sp.mr_restaurant = eff.restaurant; sp.mr_stay = eff.stay; sp.mr_camping = eff.camping;
+    } else {                    // 단일 분류 선택
+        sp.category = cat; sp.min_review = plCatMr(cat);
+    }
+    fetch(plApiUrl(sp))
         .then(function (r) { return r.json(); })
         .then(function (geo) {
             var feats = (geo && geo.features) || [];
 
-            // 자동 확장: 결과 없고 더 넓힐 수 있으면 다음 반경으로 재검색
-            if (!feats.length && expandFrom != null) {
+            // 자동 확장: 결과 0곳이고 더 넓힐 수 있으면 다음 반경으로(뷰포트 모드는 제외)
+            if (!feats.length && expandFrom != null && !viewport) {
                 var nxt = plNextRadius(rad);
                 if (nxt) {
                     document.getElementById('radius').value = String(nxt); // 실제 사용 반경 반영
@@ -1187,11 +1394,14 @@ function plSearch(lat, lng, expandFrom) {
             plFeatures = feats;
             feats.forEach(plAddMarker);   // (f, idx) — forEach 2번째 인자가 번호
             plRenderList(feats);
-            plRefreshCurrent = function () { plSearch(lat, lng); };   // 수정 후 목록 갱신용
+            plListMode = 'base';
+            plBaseTitle = document.getElementById('plListTitle').textContent;   // '이 화면 N곳' (줌아웃 복원용)
+            plRefreshCurrent = function () { plSearch(lat, lng, viewport ? plViewportRadiusKm() : null, viewport); };
             plToggleList(feats.length > 0);
-            if (expandFrom != null) document.getElementById('radius').value = String(rad);
-            plHint(feats.length ? (rad + 'km 반경 ' + feats.length + '곳')
-                                : ('최대 ' + rad + 'km까지 데이터가 없습니다'));
+            if (expandFrom != null && !viewport) document.getElementById('radius').value = String(rad);
+            var scope = viewport ? '이 화면' : ('반경 ' + Math.round(rad) + 'km');
+            plHint(feats.length ? (scope + ' · ' + plCritSummary() + ' · ' + feats.length + '곳')
+                                : (scope + ' · ' + plCritSummary() + ' · 표시할 곳 없음'));
         })
         .catch(function () { plHint('검색 실패'); });
 }
@@ -1213,8 +1423,13 @@ function plAddMarker(f, idx) {
 var PL_FORK_SVG = '<svg class="mk-fk" viewBox="0 0 24 24"><path d="M8.1 2v6.5c0 .8-.7 1.5-1.5 1.5S5 9.3 5 8.5V2H3.5v6.5C3.5 10.4 5 12 6.6 12v10h1.5V12c1.6 0 3.1-1.6 3.1-3.5V2H8.1zM16.5 2c-1.7 0-3 2-3 4.5 0 2.2 1 4 2.3 4.4V22h1.5V2h-.8z"/></svg>';
 // 리본(메달) SVG — 블루리본 등급용
 var PL_RIBBON_SVG = '<svg class="mk-rb" viewBox="0 0 24 24"><circle cx="12" cy="8" r="6"/><path d="M8.6 12.7L6 22l3-1.6L12 22l-3.4-9.3zm6.8 0L12 22l3-1.6L18 22l-2.6-9.3z"/></svg>';
+// 침대 SVG(흰색) — 숙소 마커용
+var PL_BED_SVG = '<svg class="mk-fk" viewBox="0 0 24 24"><path d="M4 8c-1.1 0-2 .9-2 2v3h1.2l.5 2h1.5l-.5-2H19.3l-.5 2h1.5l.5-2H22v-3c0-1.7-1.3-3-3-3H4zm2 1.5h3.6c.5 0 1 .4 1 1V12H5v-1.5c0-.6.4-1 1-1zm6.4 0H19c.6 0 1 .4 1 1V12h-7.6v-1.5c0-.6.4-1 1-1z"/></svg>';
+// 텐트 SVG(흰색) — 캠핑장 마커용
+var PL_TENT_SVG = '<svg class="mk-fk" viewBox="0 0 24 24" fill-rule="evenodd"><path d="M12 3L1 20h22L12 3zm0 4.5l6.6 10.5h-4.4L12 14.2 9.8 18H5.4L12 7.5z"/></svg>';
 // 마커 아이콘 HTML
-//  맛집      = 가이드색 원형 + 흰 포크·나이프 + 우상단 숫자 배지(여행지와 모양부터 다름)
+//  맛집       = 가이드색 원형 + 흰 포크·나이프 + 우상단 숫자 배지(여행지와 모양부터 다름)
+//  숙소·캠핑  = 분류색 원형 + 흰 침대/텐트 아이콘(맛집과 같은 원형 계열, 분류로 구분)
 //  그 외 분류 = 흰바탕 물방울 핀 + 색테두리 + 빨강 숫자(active 시 빨강 강조)
 function plMarkerIcon(cat, num, active, color, gradeHtml) {
     if (cat === 'restaurant') {
@@ -1226,12 +1441,46 @@ function plMarkerIcon(cat, num, active, color, gradeHtml) {
             anchor: new naver.maps.Point(15, 15)
         };
     }
+    if (cat === 'stay' || cat === 'camping') {
+        return {
+            content: '<div class="mk-place cat-' + cat + (active ? ' active' : '') + '">' +
+                (cat === 'camping' ? PL_TENT_SVG : PL_BED_SVG) + '</div>',
+            anchor: new naver.maps.Point(15, 15)
+        };
+    }
     var c = cat || 'etc';
     var st = (color && !active) ? ' style="border-color:' + color + '"' : '';
     return {
         content: '<div class="mk-pin cat-' + c + (active ? ' active' : '') + '"' + st + '><b>' + num + '</b></div>',
         anchor: new naver.maps.Point(14, 28)
     };
+}
+
+// 리스트 항목 1개 HTML (베이스 목록 plFocus / 주변 오버레이 목록 plProxPick 공용)
+//  opts = { prefix, onclickFn, num(번호표시 여부) }
+function plLiHtml(f, i, opts) {
+    var pr = f.properties, c = pr.category || 'etc';
+    var dist = (pr.dist_km != null) ? '<span class="li-dist">~' + plFmtDist(pr.dist_km) + '</span>' : '';
+    var refs = (pr.ref_count > 0)
+        ? '<span class="li-refs" title="연결된 기사 ' + pr.ref_count + '건">' + pr.ref_count + '</span>' : '';
+    var gb = plGuideBadges(pr.guides);                       // 맛집 가이드 배지
+    var gbLine = gb ? '<div class="li-guides">' + gb + '</div>' : '';
+    var nvLine = plNaverLine(pr);                            // 네이버 평점·리뷰
+    var sub = (pr.tags && pr.tags.length)
+        ? '<div class="li-tags">' + pr.tags.slice(0, 6).map(function (t) {
+              return '<span class="li-tag">#' + plEsc(t) + '</span>'; }).join('') + '</div>'
+        : (gb ? '' : '<div class="li-sub">' + plEsc(CAT_KO[c] || '기타') + '</div>');
+    var edit = (!PL_SHARE && pr.id) ? '<button class="li-edit" title="수정" onclick="event.stopPropagation();plEditOpen(' + pr.id + ',\'list\')">✏️</button>' : '';
+    var selCls = (pr.id && plMergeSel.indexOf(pr.id) >= 0) ? ' mc-sel' : '';
+    var noClick = (!PL_SHARE && pr.id) ? ' onclick="plNoClick(event,' + pr.id + ')"' : '';
+    var label = opts.num ? (i + 1) : '';                     // 베이스=번호 / 주변=빈 색원
+    return '<div class="pl-li' + selCls + '" id="' + opts.prefix + i + '" data-pid="' + (pr.id || 0) + '" onclick="' + opts.onclickFn + '(' + i + ')">' +
+        '<span class="li-no cat-' + c + '"' + noClick + '>' + label + '</span>' +
+        '<div class="li-body">' +
+            '<div class="li-name"><span class="nm">' + plEsc(pr.name) + '</span>' + refs +
+                '<span class="li-meta">' + dist + '</span></div>' +
+            gbLine + nvLine + sub +
+        '</div>' + edit + '</div>';
 }
 
 // 좌측 결과 리스트 렌더 (번호=마커 번호와 동일)
@@ -1243,32 +1492,9 @@ function plRenderList(feats) {
         body.innerHTML = '<div class="pl-list-empty">이 반경에 데이터가 없습니다</div>';
         return;
     }
-    title.textContent = '이 지역 ' + feats.length + '곳';
+    title.textContent = '이 화면 ' + feats.length + '곳';   // 칩 검색은 plTagSearch가 '전국'으로 덮어씀
     body.innerHTML = feats.map(function (f, i) {
-        var pr = f.properties, c = pr.category || 'etc';
-        var dist = (pr.dist_km != null) ? '<span class="li-dist">~' + plFmtDist(pr.dist_km) + '</span>' : '';
-        var refs = (pr.ref_count > 0)
-            ? '<span class="li-refs" title="연결된 기사 ' + pr.ref_count + '건">' + pr.ref_count + '</span>' : '';
-        // 맛집이면 가이드 배지(블루리본·미쉐린 등급)
-        var gb = plGuideBadges(pr.guides);
-        var gbLine = gb ? '<div class="li-guides">' + gb + '</div>' : '';
-        // 네이버 평점·리뷰 (attributes.naver 있을 때만)
-        var nvLine = plNaverLine(pr);
-        // 주소 대신 태그(#둘레길 #호수). 태그 없으면 분류명으로 폴백(빈 줄 방지)
-        var sub = (pr.tags && pr.tags.length)
-            ? '<div class="li-tags">' + pr.tags.slice(0, 6).map(function (t) {
-                  return '<span class="li-tag">#' + plEsc(t) + '</span>'; }).join('') + '</div>'
-            : (gb ? '' : '<div class="li-sub">' + plEsc(CAT_KO[c] || '기타') + '</div>');
-        var edit = (!PL_SHARE && pr.id) ? '<button class="li-edit" title="수정" onclick="event.stopPropagation();plEditOpen(' + pr.id + ',\'list\')">✏️</button>' : '';
-        var selCls = (pr.id && plMergeSel.indexOf(pr.id) >= 0) ? ' mc-sel' : '';
-        var noClick = (!PL_SHARE && pr.id) ? ' onclick="plNoClick(event,' + pr.id + ')"' : '';
-        return '<div class="pl-li' + selCls + '" id="pl-li-' + i + '" data-pid="' + (pr.id || 0) + '" onclick="plFocus(' + i + ')">' +
-            '<span class="li-no cat-' + c + '"' + noClick + '>' + (i + 1) + '</span>' +
-            '<div class="li-body">' +
-                '<div class="li-name"><span class="nm">' + plEsc(pr.name) + '</span>' + refs +
-                    '<span class="li-meta">' + dist + '</span></div>' +
-                gbLine + nvLine + sub +
-            '</div>' + edit + '</div>';
+        return plLiHtml(f, i, { prefix: 'pl-li-', onclickFn: 'plFocus', num: true });
     }).join('');
     // 통합검색에서 우리 DB 장소를 골랐으면, 그 마커를 강조 + 상세패널 표시
     if (plPendingFocusId != null) {
@@ -1398,7 +1624,6 @@ function plFocus(idx) {
     var f = plFeatures[idx]; if (!f) return;
     if (typeof rtMode !== 'undefined' && rtMode) { rtAddFromFeature(f); return; }
     var co = f.geometry.coordinates;
-    plMap.panTo(new naver.maps.LatLng(co[1], co[0]));
 
     // 이전 active 마커 원복
     if (plActive >= 0 && plMarkers[plActive] && plFeatures[plActive]) {
@@ -1414,10 +1639,19 @@ function plFocus(idx) {
     var li = document.getElementById('pl-li-' + idx);
     if (li) { li.classList.add('active'); li.scrollIntoView({ block: 'nearest' }); }
 
+    // 좌표는 geometry 에만 있고 properties 엔 없음 → 패널 버튼·주변검색용으로 주입
+    f.properties.lat = co[1];
+    f.properties.lng = co[0];
     plOpenPanel(f.properties);
+
+    // 선택 → 반경 3km 지도로 포커스(클릭한 곳이 중심).
+    //  단, 이미 그보다 더 확대(줌인)된 상태면 줌아웃하지 않고 현재 줌 유지 + 중심만 이동.
+    //  (포커스 목표 줌 ≤ 현재 줌 이면 자동 줌아웃이 일어나므로 panTo 만)
+    if (plMap.getZoom() < plFitZoom(co[1], 3)) plFitRadius(co[1], co[0], 3);   // 더 넓게 보던 중 → 줌인 포커스
+    else plMap.panTo(new naver.maps.LatLng(co[1], co[0]));                      // 이미 더 확대 → 줌 유지, 중심만
 }
 
-var CAT_KO = { travel: '여행지', stay: '숙소', restaurant: '맛집', etc: '기타' };
+var CAT_KO = { travel: '여행지', stay: '숙소', restaurant: '맛집', camping: '캠핑장', etc: '기타' };
 
 var plPanelPlace = null;   // 현재 상세패널에 띄운 장소(경로 추가 버튼용)
 function plOpenPanel(pr) {
@@ -1435,7 +1669,6 @@ function plOpenPanel(pr) {
     // 경로 모드 + 좌표가 있으면 '경로에 추가' 버튼 노출
     var addBtn = (typeof rtMode !== 'undefined' && rtMode && pr.lat != null && pr.lng != null)
         ? '<button class="rt-addcur" onclick="rtAddCurrent()">➕ 경로에 추가</button>' : '';
-
     head.innerHTML =
         '<button class="panel-close" onclick="plClosePanel()">×</button>' +
         '<span class="cat-badge ' + (pr.category || 'etc') + '">' + (CAT_KO[pr.category] || '기타') + '</span>' +
@@ -1627,7 +1860,7 @@ function plEditAddRef() {
 }
 
 // 분류 옵션(수정 모달 select 와 동일). 추가 장소 행의 <select> 생성에 재사용
-var PL_CAT_OPTS = [['travel', '여행지'], ['stay', '숙소'], ['restaurant', '맛집'], ['etc', '기타']];
+var PL_CAT_OPTS = [['travel', '여행지'], ['restaurant', '맛집'], ['stay', '숙소'], ['camping', '캠핑장'], ['etc', '기타']];
 function plCatSelectHtml(sel, onchange) {
     var opts = PL_CAT_OPTS.map(function (o) {
         return '<option value="' + o[0] + '"' + (o[0] === sel ? ' selected' : '') + '>' + o[1] + '</option>';
@@ -2101,6 +2334,7 @@ function plGeocode() {
         .then(function (r) { return r.json(); })
         .then(function (d) {
             if (!d.ok) { plHint(d.msg || '주소를 찾을 수 없습니다'); return; }
+            plClearOverlay();   // 새 장소로 이동 → 주변 오버레이 해제
             plMap.setCenter(new naver.maps.LatLng(d.lat, d.lng));
             plMap.setZoom(plZoomForRadius(document.getElementById('radius').value));
             plSetSearchMarker(d.lat, d.lng, d.address || addr);
@@ -2122,6 +2356,7 @@ function plMyLocation() {
         if (btn) btn.classList.remove('loading');
         var lat = pos.coords.latitude, lng = pos.coords.longitude;
         var rad = parseFloat(document.getElementById('radius').value);
+        plClearOverlay();   // 현재 위치로 이동 → 주변 오버레이 해제
         plMap.setCenter(new naver.maps.LatLng(lat, lng));
         plMap.setZoom(plZoomForRadius(rad));
         // 역지오코딩(주소)은 가능하면 표시하되, 실패해도 검색은 그대로 진행

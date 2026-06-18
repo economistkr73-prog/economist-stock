@@ -65,12 +65,22 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
             $lat      = (float)$_GET['lat'];
             $lng      = (float)$_GET['lng'];
             $radius   = (float)($_GET['radius'] ?? 5);
-            $radius   = max(0.1, min(50.0, $radius));          // 0.1~50km 클램프
+            $radius   = max(0.1, min(600.0, $radius));         // 0.1~600km(뷰포트 전국 커버) 클램프
             $category = trim((string)($_GET['category'] ?? ''));
             $keyword  = trim((string)($_GET['keyword'] ?? ''));
             $guide    = trim((string)($_GET['guide'] ?? ''));
+            $minReview = max(0, (int)($_GET['min_review'] ?? 0));   // 단일 분류 최소 리뷰수(0=전체)
+            // 뷰포트 top-N: 지도에 표시할 상위 N개(리뷰순). 기본 500, 50~3000 클램프.
+            $limit = max(50, min(3000, (int)($_GET['limit'] ?? 500)));
+            // 분류별 기준('전체' 모드): mr_restaurant/mr_stay/mr_camping → 함께 노출.
+            $catMinReview = [];
+            foreach (['restaurant', 'stay', 'camping'] as $c) {
+                if (isset($_GET['mr_' . $c]) && $_GET['mr_' . $c] !== '') {
+                    $catMinReview[$c] = max(0, (int)$_GET['mr_' . $c]);
+                }
+            }
 
-            $allowed = ['travel', 'stay', 'restaurant', 'etc'];
+            $allowed = ['travel', 'stay', 'restaurant', 'camping', 'etc'];
             if ($category !== '' && !in_array($category, $allowed, true)) {
                 $category = '';
             }
@@ -80,8 +90,10 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
                 $lat, $lng, $radius,
                 $category !== '' ? $category : null,
                 $keyword  !== '' ? $keyword  : null,
-                300,
-                $guide !== '' ? $guide : null
+                $limit,
+                $guide !== '' ? $guide : null,
+                $minReview,
+                $catMinReview ?: null
             );
             echo json_encode($geojson, JSON_UNESCAPED_UNICODE);
             break;

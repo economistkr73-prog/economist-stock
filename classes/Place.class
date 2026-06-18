@@ -30,7 +30,7 @@ class Place
             CREATE TABLE IF NOT EXISTS place (
                 id             BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
                 name           VARCHAR(255)    NOT NULL,
-                category       ENUM('travel','stay','restaurant','etc')
+                category       ENUM('travel','event','stay','restaurant','camping','etc')
                                                NOT NULL DEFAULT 'travel',
                 address        VARCHAR(500)    NULL,
                 region_lv1     VARCHAR(40)     NULL,
@@ -43,7 +43,11 @@ class Place
                 period_start   DATE            NULL,
                 period_end     DATE            NULL,
                 phone          VARCHAR(40)     NULL,
+                naver_id       VARCHAR(32)     NULL,
                 attributes     JSON            NULL,
+                review_count   INT             NULL,
+                score          DECIMAL(3,2)    NULL,
+                save_count     INT             NULL,
                 dedup_key      VARCHAR(120)    NULL,
                 is_active      TINYINT(1)      NOT NULL DEFAULT 1,
                 created_at     DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -53,6 +57,8 @@ class Place
                 KEY idx_geo      (lat, lng),
                 KEY idx_region   (region_lv1, region_lv2),
                 KEY idx_category (category),
+                KEY idx_review   (review_count),
+                KEY idx_naver    (naver_id),
                 KEY idx_period   (period_start, period_end),
                 UNIQUE KEY uq_dedup (dedup_key)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -119,6 +125,36 @@ class Place
                 UNIQUE KEY uq_place_share_token (token)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         ");
+
+        // 체인(프랜차이즈) 브랜드 목록 — '맛집' 마커에서 제외할 대상.
+        //  brand = 이름 첫 토큰(스타벅스 강남점→스타벅스). kind=auto(자동탐지)/manual(수동).
+        //  채움/삭제는 1회용 _mig 스크립트, 수집기(selectByRule)가 이 목록으로 식별.
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS place_chain_brand (
+                brand     VARCHAR(60)  NOT NULL,
+                kind      VARCHAR(10)  NOT NULL DEFAULT 'auto',
+                cnt       INT          NULL,
+                added_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (brand)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        ");
+
+        // ── 품질 컬럼(리뷰수·평점·저장수) 멱등 업그레이드 ──────────────────
+        // 맛집 마커의 품질 정렬/줌 티어링용. 기존 설치(컬럼 도입 전)도 자동 반영.
+        // 데이터 백필은 1회용 _mig 스크립트로 처리(여기선 스키마만 보장).
+        foreach ([
+            "ALTER TABLE place ADD COLUMN IF NOT EXISTS review_count INT NULL AFTER attributes",
+            "ALTER TABLE place ADD COLUMN IF NOT EXISTS score DECIMAL(3,2) NULL AFTER review_count",
+            "ALTER TABLE place ADD COLUMN IF NOT EXISTS save_count INT NULL AFTER score",
+            "ALTER TABLE place ADD KEY IF NOT EXISTS idx_review (review_count)",
+            // 단일 마스터 통합(2026-06): 캠핑 분류 + 네이버 업소ID 컬럼(추이 연결·네이버지도 링크용).
+            // 'event'(전국여행지 도메인 옛 축제 분류)는 기존 행 보존을 위해 enum에 유지.
+            "ALTER TABLE place MODIFY COLUMN category ENUM('travel','event','stay','restaurant','camping','etc') NOT NULL DEFAULT 'travel'",
+            "ALTER TABLE place ADD COLUMN IF NOT EXISTS naver_id VARCHAR(32) NULL AFTER phone",
+            "ALTER TABLE place ADD KEY IF NOT EXISTS idx_naver (naver_id)",
+        ] as $ddl) {
+            try { $this->pdo->exec($ddl); } catch (\Throwable $e) { /* 이미 적용됨 */ }
+        }
     }
 
     // ======================================================
@@ -156,6 +192,15 @@ class Place
             ? json_encode($p['attributes'], JSON_UNESCAPED_UNICODE)
             : null;
 
+        // 품질 컬럼(리뷰수·평점·저장수): 명시값 우선, 없으면 attributes.naver 에서 파생.
+        // 정렬/줌 티어링용 비정규화 캐시. 맛집(네이버 수집)만 값이 차고 그 외는 NULL.
+        $nvA = (isset($p['attributes']['naver']) && is_array($p['attributes']['naver'])) ? $p['attributes']['naver'] : [];
+        $reviewCount = $p['review_count'] ?? (isset($nvA['review']) ? (int)$nvA['review'] : null);
+        $scoreVal    = $p['score']        ?? (isset($nvA['score'])  ? (float)$nvA['score'] : null);
+        $saveVal     = $p['save_count']   ?? (isset($nvA['save'])   ? (int)preg_replace('/[^0-9]/', '', (string)$nvA['save']) : null);
+        // 네이버 업소ID: 명시값 우선, 없으면 attributes.naver.id. (추이 연결·네이버지도 링크용)
+        $naverId     = $p['naver_id'] ?? (isset($nvA['id']) && $nvA['id'] !== '' ? (string)$nvA['id'] : null);
+
         // category 는 명시적으로 들어왔을 때만 갱신(미지정 재적재가 기존 분류를 'travel' 로 덮는 것 방지).
         // INSERT 에는 항상 값이 필요하므로 기본 'travel' 을 넣되, UPDATE 절에서만 조건부 반영.
         $catProvided = array_key_exists('category', $p) && $p['category'] !== null && $p['category'] !== '';
@@ -164,11 +209,11 @@ class Place
         $sql = "INSERT INTO place
                   (name, category, address, region_lv1, region_lv2, region_lv3,
                    lat, lng, geocode_status, period_start, period_end,
-                   phone, attributes, dedup_key)
+                   phone, naver_id, attributes, review_count, score, save_count, dedup_key)
                 VALUES
                   (:name, :category, :address, :r1, :r2, :r3,
                    :lat, :lng, :status, :pstart, :pend,
-                   :phone, :attr, :dedup)
+                   :phone, :nid, :attr, :rc, :sc, :sv, :dedup)
                 ON DUPLICATE KEY UPDATE
                    id             = LAST_INSERT_ID(id),  -- UPDATE 시에도 lastInsertId()가 올바른 id 반환
                    name           = VALUES(name),
@@ -185,7 +230,11 @@ class Place
                    period_start   = COALESCE(VALUES(period_start), period_start),
                    period_end     = COALESCE(VALUES(period_end), period_end),
                    phone          = COALESCE(VALUES(phone), phone),
+                   naver_id       = COALESCE(VALUES(naver_id), naver_id),
                    attributes     = COALESCE(VALUES(attributes), attributes),
+                   review_count   = COALESCE(VALUES(review_count), review_count),
+                   score          = COALESCE(VALUES(score), score),
+                   save_count     = COALESCE(VALUES(save_count), save_count),
                    updated_at     = CURRENT_TIMESTAMP";
         $st = $this->pdo->prepare($sql);
         $st->execute([
@@ -201,7 +250,11 @@ class Place
             ':pstart'   => $p['period_start'] ?? null,
             ':pend'     => $p['period_end'] ?? null,
             ':phone'    => $p['phone'] ?? null,
+            ':nid'      => $naverId,
             ':attr'     => $attr,
+            ':rc'       => $reviewCount,
+            ':sc'       => $scoreVal,
+            ':sv'       => $saveVal,
             ':dedup'    => $dedup,
         ]);
 
@@ -277,7 +330,7 @@ class Place
     public function searchNearby(
         float $lat, float $lng, float $radiusKm = 5.0,
         ?string $category = null, ?string $keyword = null, int $limit = 300,
-        ?string $guide = null
+        ?string $guide = null, int $minReview = 0, ?array $catMinReview = null
     ): array {
         // 반경에 비례한 박스 (위도 1°≈111km, 경도 1°≈111*cos(위도)km)
         $latDelta = $radiusKm / 111.0;
@@ -287,6 +340,7 @@ class Place
         $sql = "SELECT p.id, p.name, p.category, p.lat, p.lng, p.phone,
                        p.address, p.region_lv1, p.region_lv2,
                        p.period_start, p.period_end, p.attributes, p.updated_at,
+                       p.review_count, p.score, p.save_count,
                        (6371 * ACOS(LEAST(1.0,
                           COS(RADIANS(:lat_c)) * COS(RADIANS(p.lat)) *
                           COS(RADIANS(p.lng) - RADIANS(:lng_c)) +
@@ -317,8 +371,35 @@ class Place
             $sql .= " AND EXISTS (SELECT 1 FROM place_guide g2 WHERE g2.place_id = p.id AND g2.guide = :guide)";
             $args[':guide'] = $guide;
         }
+        // 최소 리뷰수 필터.
+        //  · $catMinReview(분류별 기준) 가 오면 = '전체' 모드: 맛집·스테이·캠핑을 각 기준으로 함께 노출.
+        //    여행지 등 리뷰 없는(review_count NULL) 분류와 가이드 등재는 항상 노출.
+        //  · 아니면 단일 $minReview 를 리뷰 보유 분류 전체에 적용(단일 카테고리 검색용).
+        if ($catMinReview !== null && $catMinReview) {
+            $ors = ["p.review_count IS NULL",
+                    "EXISTS (SELECT 1 FROM place_guide g3 WHERE g3.place_id = p.id)"];
+            $i = 0;
+            foreach ($catMinReview as $cat => $mr) {
+                $mr = (int)$mr; $cp = ":cmc{$i}";
+                if ($mr > 0) { $vp = ":cmv{$i}"; $ors[] = "(p.category = {$cp} AND p.review_count >= {$vp})"; $args[$vp] = $mr; }
+                else         { $ors[] = "p.category = {$cp}"; }   // 0 = 전체(그 분류 모두)
+                $args[$cp] = $cat; $i++;
+            }
+            $sql .= " AND (" . implode(' OR ', $ors) . ")";
+        } elseif ($minReview > 0) {
+            $sql .= " AND (p.review_count IS NULL
+                           OR p.review_count >= :minrev
+                           OR EXISTS (SELECT 1 FROM place_guide g3 WHERE g3.place_id = p.id))";
+            $args[':minrev'] = $minReview;
+        }
+        // 정렬: 비맛집(여행지·숙소) 우선 노출 → 맛집은 품질순(리뷰수→평점→저장수) → 거리 동률처리.
+        // LIMIT 에 잘려도 '좋은 곳'이 남도록(기존 거리순은 가까운 동네집이 남던 문제).
         $sql .= " HAVING dist_km <= :radius
-                  ORDER BY dist_km
+                  ORDER BY (p.category = 'restaurant') ASC,
+                           p.review_count DESC,
+                           p.score DESC,
+                           p.save_count DESC,
+                           dist_km ASC
                   LIMIT {$limit}";
         $args[':radius'] = $radiusKm;
 
@@ -401,7 +482,9 @@ class Place
                        (SELECT GROUP_CONCAT(CONCAT(g.guide, ':', COALESCE(g.grade, '')) ORDER BY g.guide SEPARATOR ',') FROM place_guide g WHERE g.place_id = p.id) AS guides
                   FROM place p
                  WHERE " . implode("\n                   AND ", $where) . "
-                 ORDER BY p.region_lv1, p.region_lv2, p.name
+                 ORDER BY (p.category = 'restaurant') ASC,
+                          p.review_count DESC, p.score DESC, p.save_count DESC,
+                          p.name
                  LIMIT {$limit}";
         $st = $this->pdo->prepare($sql);
         $st->execute($args);

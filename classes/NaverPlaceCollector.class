@@ -1,33 +1,92 @@
 <?php
 /**
- * NaverPlaceCollector — 네이버 지도 "OO 맛집" 검색 결과 수집 + 추이 스냅샷.
+ * NaverPlaceCollector — 네이버 지도 "OO {카테고리}" 검색 결과 수집 + 추이 스냅샷.
  *
- *  · fetchRegion(query)  : pcmap.place.naver.com 검색 페이지를 완전 브라우저 헤더로 받아
- *                          window.__APOLLO_STATE__ 의 PlaceListBusinessesItem 들을 표준 레코드로 파싱.
- *  · selectByRule(items) : 수집 규칙(리뷰순). N=리뷰>=1000 곳 수. N>20 -> 임계1000/최대100,
- *                          N<=20 -> 임계500/최대50. 리뷰순이라 임계 미만 만나면 중단.
+ *  · 카테고리(CATS)       : food(맛집)/stay(스테이)/camping(캠핑장). 검색 접미사·요청 경로·
+ *                          place.category·수집 임계가 카테고리마다 다르다.
+ *  · fetchRegion(q,cat)  : pcmap.place.naver.com 검색 페이지를 완전 브라우저 헤더로 받아
+ *                          window.__APOLLO_STATE__ 의 항목들을 표준 레코드로 파싱.
+ *                          맛집=restaurant/list, 그 외=place/list(네이버가 업종 판단해 302 리다이렉트,
+ *                          캠핑장→accommodation/list 로 자동 전환. FOLLOWLOCATION 으로 따라감).
+ *  · parseApollo(html)   : PlaceListBusinessesItem(맛집·일반) + AccommodationSearchItem(숙박·캠핑)
+ *                          두 typename 모두 수집. normalizeItem 이 필드 폴백으로 한 형태로 통일.
+ *  · selectByRule(items,cat): 리뷰순. 카테고리별 임계(food=1000/500, stay·camping=낮춤).
  *  · ingestOne(rec,...)  : findDuplicate(좌표250m+이름, 보수 재검증) -> 중복=보강 / 신규=upsert.
- *                          어느 경로든 recordStat() 로 period(YYYY-MM) 스냅샷 1행 적재(멱등).
+ *                          어느 경로든 recordStat() 로 (naver_id,period,category) 스냅샷 1행 적재(멱등).
  *  · 추이 조회           : periods()/trendList()/series() — MariaDB 윈도우함수 LAG 로 전월 대비 델타.
+ *                          category 필터 지원(맛집/캠핑장/스테이 탭).
  *
- *  cron_naver_collect.php(전국 250 시군구 월1회)와 place_review.php(수동 적재)가 공유한다.
+ *  cron_naver_collect.php(전국 시군구 월1회·cat별)와 place_review.php(수동 적재)가 공유한다.
  *
  *  ※ 테이블: place_naver_stat(추이) / naver_collect_region(지역 마스터) / naver_collect_log(회차 진행).
  *  ※ place/place_ref/place_tag 적재는 Place 클래스 재사용.
  */
 class NaverPlaceCollector
 {
-    private PDO   $pdo;
-    private Place $place;
+    private PDO    $pdo;
+    private Place  $place;
+    private ?array $chainSet = null;   // 체인 브랜드 집합(lazy, place_chain_brand)
 
-    const LIST_URL = 'https://pcmap.place.naver.com/restaurant/list';
+    const BASE_URL = 'https://pcmap.place.naver.com';
     const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+    /**
+     * 수집 카테고리 정의. key = 내부 식별자(=place.category, =stat.category).
+     *   suffix    : 검색어 접미사("OO {suffix}")
+     *   path      : pcmap 요청 경로. 'place' 면 네이버가 업종 판단해 적절히 302 리다이렉트.
+     *   label     : 사람용 라벨(대시보드 탭)
+     *   thr/max   : 수집 임계·최대. big = 리뷰>=thr_big 곳이 big_n 초과(큰 지역) 시, 아니면 sm.
+     *   map       : true 면 place 테이블(단일 마스터)에 적재 → 지도 마커 후보. 캠핑·스테이도
+     *               2026-06 통합으로 모두 true(과밀은 지도쪽 '뷰포트 상위 N개' 표시로 통제).
+     *               false 면 place 미적재·추이 스냅샷만(현재 사용 안 함).
+     */
+    /**
+     * 숙박 업종 화이트리스트(ncat 부분일치).
+     * '스테이'·'캠핑장'은 키워드 검색이라 이름에 접미사가 든 비숙박(식당·카페·바·스튜디오·
+     * 스터디카페·도서관 등)이 섞임 → 네이버 업종이 숙박류일 때만 통과시킨다.
+     * (2026-06-18 종로구 스테이·가평 캠핑장 실측으로 업종 어휘 확정)
+     */
+    const LODGE_RE = '/숙박|숙소|호텔|모텔|여관|여인숙|펜션|게스트하우스|민박|리조트|콘도|레지던스|템플스테이|글램핑|캠핑|카라반|풀빌라|호스텔|료칸|비앤비|야영/u';
+
+    const CATS = [
+        'food'    => ['suffix' => '맛집',   'path' => 'restaurant', 'label' => '맛집', 'map' => true,
+                      'thr_big' => 1000, 'max_big' => 100, 'thr_sm' => 500, 'max_sm' => 50, 'big_n' => 20],
+        'stay'    => ['suffix' => '스테이', 'path' => 'place',      'label' => '스테이', 'map' => true,
+                      'thr_big' => 10,   'max_big' => 60,  'thr_sm' => 10,  'max_sm' => 40, 'big_n' => 15,
+                      'ncat_re' => self::LODGE_RE],
+        'camping' => ['suffix' => '캠핑장', 'path' => 'place',      'label' => '캠핑장', 'map' => true,
+                      'thr_big' => 200,  'max_big' => 60,  'thr_sm' => 50,  'max_sm' => 40, 'big_n' => 15,
+                      'ncat_re' => self::LODGE_RE],
+    ];
+
+    /** 유효 카테고리 키인지(미정의면 food). */
+    public static function cat(string $c): string { return isset(self::CATS[$c]) ? $c : 'food'; }
+    public static function catLabel(string $c): string { return self::CATS[self::cat($c)]['label']; }
 
     public function __construct(PDO $pdo)
     {
         $this->pdo   = $pdo;
         $this->place = new Place($pdo);
         $this->place->ensureTable();
+    }
+
+    /** 이름의 브랜드 키 = 첫 공백 토큰(스타벅스 강남점 → 스타벅스). */
+    public static function brandKey(string $name): string
+    {
+        $t = preg_split('/\s+/u', trim($name));
+        return $t[0] ?? '';
+    }
+
+    /** 체인 브랜드 집합(lazy). place_chain_brand → [brand => true]. 테이블 없으면 빈 배열. */
+    private function chainBrands(): array
+    {
+        if ($this->chainSet !== null) return $this->chainSet;
+        $this->chainSet = [];
+        try {
+            $rows = $this->pdo->query("SELECT brand FROM place_chain_brand")->fetchAll(PDO::FETCH_COLUMN);
+            foreach ($rows as $b) $this->chainSet[(string)$b] = true;
+        } catch (\Throwable $e) { /* 테이블 미존재 → 필터 없음 */ }
+        return $this->chainSet;
     }
 
     public function place(): Place { return $this->place; }
@@ -40,9 +99,10 @@ class NaverPlaceCollector
         $this->pdo->exec(
             "CREATE TABLE IF NOT EXISTS place_naver_stat (
                 id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                naver_id    VARCHAR(32)     NOT NULL,
+                place_id    BIGINT UNSIGNED NOT NULL,
+                naver_id    VARCHAR(32)     NULL,
                 period      CHAR(7)         NOT NULL,
-                place_id    BIGINT UNSIGNED NULL,
+                category    VARCHAR(16)     NOT NULL DEFAULT 'food',
                 score       DECIMAL(3,2)    NULL,
                 review      INT             NULL,
                 visitor     INT             NULL,
@@ -52,21 +112,25 @@ class NaverPlaceCollector
                 region      VARCHAR(80)     NULL,
                 captured_at DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (id),
-                UNIQUE KEY uq_nid_period (naver_id, period),
+                UNIQUE KEY uq_place_period (place_id, period),
                 KEY idx_period (period),
-                KEY idx_place  (place_id)
+                KEY idx_cat_period (category, period),
+                KEY idx_naver  (naver_id),
+                CONSTRAINT fk_stat_place FOREIGN KEY (place_id)
+                    REFERENCES place(id) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
         );
         $this->pdo->exec(
             "CREATE TABLE IF NOT EXISTS naver_collect_region (
                 id         INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                category   VARCHAR(16)  NOT NULL DEFAULT 'food',
                 region_lv1 VARCHAR(20)  NOT NULL,
                 region_lv2 VARCHAR(40)  NOT NULL,
                 query      VARCHAR(80)  NOT NULL,
                 sort_order INT          NOT NULL DEFAULT 0,
                 active     TINYINT      NOT NULL DEFAULT 1,
                 PRIMARY KEY (id),
-                UNIQUE KEY uq_region (region_lv1, region_lv2)
+                UNIQUE KEY uq_region_cat (category, region_lv1, region_lv2)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
         );
         $this->pdo->exec(
@@ -85,24 +149,68 @@ class NaverPlaceCollector
                 KEY idx_status (period, status)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
         );
+        // 한시적 공개 공유 링크 (랜덤 토큰 + 만료시각). 외부인은 이 토큰으로만 읽기전용 접근. cat=공유한 분류.
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS naver_trend_share (
+                id         INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                cat        VARCHAR(16)  NOT NULL DEFAULT 'food',
+                region     VARCHAR(80)  NULL,
+                min_review INT          NOT NULL DEFAULT 0,
+                sort       VARCHAR(20)  NOT NULL DEFAULT 'total_score',
+                token      VARCHAR(64)  NOT NULL,
+                expires_at DATETIME     NOT NULL,
+                revoked    TINYINT(1)   NOT NULL DEFAULT 0,
+                created_at DATETIME     DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY uq_nts_token (token),
+                KEY idx_nts_cat (cat)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
+
+        // ── 기존 설치(category 도입 전) 업그레이드: 멱등 ALTER (MariaDB IF [NOT] EXISTS) ──
+        // 기존 행은 전부 맛집이므로 DEFAULT 'food' 로 채워진다.
+        $alters = [
+            "ALTER TABLE place_naver_stat     ADD COLUMN IF NOT EXISTS category VARCHAR(16) NOT NULL DEFAULT 'food' AFTER period",
+            "ALTER TABLE place_naver_stat     ADD KEY IF NOT EXISTS idx_cat_period (category, period)",
+            "ALTER TABLE naver_collect_region ADD COLUMN IF NOT EXISTS category VARCHAR(16) NOT NULL DEFAULT 'food' AFTER id",
+            // region UNIQUE 재구성: (lv1,lv2) → (category,lv1,lv2). 안 하면 동일 시군구의
+            // 다른 카테고리 시드가 옛 UNIQUE 와 충돌한다.
+            "ALTER TABLE naver_collect_region DROP INDEX IF EXISTS uq_region",
+            "ALTER TABLE naver_collect_region ADD UNIQUE KEY IF NOT EXISTS uq_region_cat (category, region_lv1, region_lv2)",
+            // 공유 테이블에 공유시점 필터(지역·최소리뷰·정렬) 컬럼 추가(기존 설치 업그레이드)
+            "ALTER TABLE naver_trend_share ADD COLUMN IF NOT EXISTS region VARCHAR(80) NULL AFTER cat",
+            "ALTER TABLE naver_trend_share ADD COLUMN IF NOT EXISTS min_review INT NOT NULL DEFAULT 0 AFTER region",
+            "ALTER TABLE naver_trend_share ADD COLUMN IF NOT EXISTS sort VARCHAR(20) NOT NULL DEFAULT 'total_score' AFTER min_review",
+        ];
+        foreach ($alters as $sql) {
+            try { $this->pdo->exec($sql); } catch (\PDOException $e) { /* 이미 적용됨 등 — 무시 */ }
+        }
     }
 
     // ============================================================
     //  지역 마스터 (전국 시군구 약 229개) — INSERT IGNORE 시드
     // ============================================================
-    /** 표준 시군구 목록을 naver_collect_region 에 시드. 반환=신규 삽입 건수. */
-    public function seedRegions(): int
+    /**
+     * 표준 시군구 목록을 naver_collect_region 에 시드. 반환=신규 삽입 건수.
+     * @param string|null $only 특정 카테고리만 시드(null = CATS 전체)
+     */
+    public function seedRegions(?string $only = null): int
     {
         $ins = $this->pdo->prepare(
-            "INSERT IGNORE INTO naver_collect_region (region_lv1, region_lv2, query, sort_order)
-             VALUES (?,?,?,?)"
+            "INSERT IGNORE INTO naver_collect_region (category, region_lv1, region_lv2, query, sort_order)
+             VALUES (?,?,?,?,?)"
         );
-        $n = 0; $order = 0;
-        foreach (self::regionSeed() as $row) {
-            [$lv1, $lv2, $short] = $row;
-            $query = trim($short . ' ' . $lv2 . ' 맛집');
-            $ins->execute([$lv1, $lv2, $query, $order++]);
-            $n += $ins->rowCount();
+        $cats = $only !== null ? [self::cat($only)] : array_keys(self::CATS);
+        $n = 0;
+        foreach ($cats as $category) {
+            $suffix = self::CATS[$category]['suffix'];
+            $order = 0;
+            foreach (self::regionSeed() as $row) {
+                [$lv1, $lv2, $short] = $row;
+                $query = trim($short . ' ' . $lv2 . ' ' . $suffix);
+                $ins->execute([$category, $lv1, $lv2, $query, $order++]);
+                $n += $ins->rowCount();
+            }
         }
         return $n;
     }
@@ -144,9 +252,10 @@ class NaverPlaceCollector
      * 한 검색어("OO 맛집")의 1페이지를 받아 표준 레코드 배열로 반환.
      * @return array ['ok'=>bool, 'http'=>int, 'items'=>[rec...], 'msg'=>string]
      */
-    public function fetchRegion(string $query): array
+    public function fetchRegion(string $query, string $category = 'food'): array
     {
-        $url = self::LIST_URL . '?query=' . rawurlencode($query)
+        $path = self::CATS[self::cat($category)]['path'];
+        $url = self::BASE_URL . '/' . $path . '/list?query=' . rawurlencode($query)
              . '&display=100&sortingOrder=reviewTotalCount';
         $ch = curl_init($url);
         curl_setopt_array($ch, [
@@ -202,11 +311,15 @@ class NaverPlaceCollector
         $state = json_decode($json, true);
         if (!is_array($state)) return [];
 
+        // 맛집·일반 = PlaceListBusinessesItem / 숙박·캠핑 = AccommodationSearchItem
         $out = [];
         foreach ($state as $key => $val) {
             if (!is_array($val)) continue;
-            $type = $val['__typename'] ?? '';
-            if (strpos((string)$key, 'PlaceListBusinessesItem') !== 0 && $type !== 'PlaceListBusinessesItem') continue;
+            $type = (string)($val['__typename'] ?? '');
+            $isItem = $type === 'PlaceListBusinessesItem' || $type === 'AccommodationSearchItem'
+                   || strpos((string)$key, 'PlaceListBusinessesItem') === 0
+                   || strpos((string)$key, 'AccommodationSearchItem') === 0;
+            if (!$isItem) continue;
             $rec = $this->normalizeItem($val);
             if ($rec !== null) $out[] = $rec;
         }
@@ -241,8 +354,13 @@ class NaverPlaceCollector
         $lat  = isset($v['y']) && $v['y'] !== '' ? (float)$v['y'] : null;   // 위도
         if ($name === '' || $lat === null || $lng === null) return null;
 
-        $vrev = self::num($v['visitorReviewCount']  ?? null);
-        $brev = self::num($v['blogCafeReviewCount']  ?? null);
+        // 방문자 리뷰 수: 맛집·스테이=visitorReviewCount / 캠핑(AccommodationSearchItem)=placeReviewCount 폴백
+        $vrev = self::num($v['visitorReviewCount'] ?? ($v['placeReviewCount'] ?? null));
+        $brev = self::num($v['blogCafeReviewCount'] ?? null);
+        // 평점: visitorReviewScore 우선, 없으면 placeReviewScore. 0/빈값은 "평점 없음"(null).
+        $sc = $v['visitorReviewScore'] ?? null;
+        if ($sc === null || $sc === '') $sc = $v['placeReviewScore'] ?? null;
+        $score = ($sc !== null && $sc !== '' && (float)$sc > 0) ? (float)$sc : null;
         $micro = '';
         if (isset($v['microReview'])) {
             if (is_string($v['microReview'])) $micro = trim($v['microReview']);
@@ -258,7 +376,7 @@ class NaverPlaceCollector
             'addr'     => trim((string)($v['fullAddress'] ?? ($v['commonAddress'] ?? ($v['address'] ?? '')))),
             'phone'    => trim((string)($v['phone'] ?? ($v['virtualPhone'] ?? ''))),
             'ncat'     => $cat,
-            'score'    => isset($v['visitorReviewScore']) && $v['visitorReviewScore'] !== '' ? (float)$v['visitorReviewScore'] : null,
+            'score'    => $score,
             'vrev'     => $vrev,
             'brev'     => $brev,
             'save'     => isset($v['saveCount']) && $v['saveCount'] !== '' ? (string)$v['saveCount'] : '',
@@ -280,20 +398,42 @@ class NaverPlaceCollector
     //  수집 규칙
     // ============================================================
     /**
-     * 리뷰순 정렬 가정. 리뷰=vrev+brev.
-     *   N = 리뷰>=1000 곳 수.  N>20 -> 임계1000/최대100,  N<=20 -> 임계500/최대50.
+     * 리뷰순 정렬 가정. 리뷰=vrev+brev. 임계·최대는 카테고리별(CATS).
+     *   N = 리뷰>=thr_big 곳 수.  N>big_n -> (thr_big/max_big),  아니면 (thr_sm/max_sm).
      * 리뷰 내림차순으로 임계 이상만, 최대 개수까지.
      */
-    public function selectByRule(array $items): array
+    public function selectByRule(array $items, string $category = 'food'): array
     {
+        $category = self::cat($category);
+        $c = self::CATS[$category];
+
+        // 업종 필터(숙박 카테고리): 네이버 업종(ncat)이 숙박류일 때만 통과 → 비숙박 제거.
+        if (!empty($c['ncat_re'])) {
+            $re = $c['ncat_re'];
+            $items = array_values(array_filter($items, static function ($it) use ($re) {
+                $nc = (string)($it['ncat'] ?? '');
+                return $nc !== '' && preg_match($re, $nc) === 1;
+            }));
+        }
+
+        // 체인(프랜차이즈) 제외(맛집만): 이름 첫 토큰이 체인 브랜드면 '맛집'이 아니므로 버린다.
+        if ($category === 'food') {
+            $chain = $this->chainBrands();
+            if ($chain) {
+                $items = array_values(array_filter($items, function ($it) use ($chain) {
+                    return !isset($chain[self::brandKey((string)($it['name'] ?? ''))]);
+                }));
+            }
+        }
+
         foreach ($items as &$it) { $it['_review'] = (int)$it['vrev'] + (int)$it['brev']; }
         unset($it);
         usort($items, fn($a, $b) => $b['_review'] <=> $a['_review']);
 
-        $n1000 = 0;
-        foreach ($items as $it) if ($it['_review'] >= 1000) $n1000++;
-        if ($n1000 > 20) { $thr = 1000; $max = 100; }
-        else             { $thr = 500;  $max = 50;  }
+        $nBig = 0;
+        foreach ($items as $it) if ($it['_review'] >= $c['thr_big']) $nBig++;
+        if ($nBig > $c['big_n']) { $thr = $c['thr_big']; $max = $c['max_big']; }
+        else                     { $thr = $c['thr_sm'];  $max = $c['max_sm'];  }
 
         $sel = [];
         foreach ($items as $it) {
@@ -311,8 +451,11 @@ class NaverPlaceCollector
      * 한 레코드 적재. $regionLabel=시군구 라벨, $regionLv1=시도, $period='YYYY-MM'.
      * @return array ['name','action'=>new|enrich|skip, 'id'?, ...]
      */
-    public function ingestOne(array $p, string $regionLabel, ?string $regionLv1, string $period, bool $write): array
+    public function ingestOne(array $p, string $regionLabel, ?string $regionLv1, string $period, bool $write, string $category = 'food'): array
     {
+        $category = self::cat($category);
+        // place.category(마커 주분류): food=restaurant / stay=stay / camping=camping
+        $placeCat = ['food' => 'restaurant', 'stay' => 'stay', 'camping' => 'camping'][$category] ?? 'restaurant';
         $name = trim((string)($p['name'] ?? ''));
         $lat  = isset($p['lat']) ? (float)$p['lat'] : null;
         $lng  = isset($p['lng']) ? (float)$p['lng'] : null;
@@ -354,10 +497,11 @@ class NaverPlaceCollector
         $statM = [
             'score' => $score, 'review' => $review, 'visitor' => $visitor,
             'blog'  => $blog,  'save'   => $saveN,  'name'    => $name,
-            'region' => trim((string)$regionLabel),
+            'region' => trim((string)$regionLabel), 'category' => $category,
         ];
 
-        $dup = $this->findDuplicate($name, $lat, $lng);
+        // 같은 카테고리 안에서만 중복 판정(캠핑↔맛집 동명 오병합 방지).
+        $dup = $this->findDuplicate($name, $lat, $lng, $placeCat);
 
         if ($dup) {
             if (!$write) {
@@ -365,20 +509,28 @@ class NaverPlaceCollector
             }
             $this->pdo->prepare(
                 "UPDATE place SET
-                    address    = IF(address IS NULL OR address = '', :addr, address),
-                    phone      = IF(phone IS NULL OR phone = '', :phone, phone),
-                    attributes = JSON_SET(COALESCE(attributes, JSON_OBJECT()), '$.naver', JSON_EXTRACT(:nv, '$')),
-                    updated_at = NOW()
+                    address      = IF(address IS NULL OR address = '', :addr, address),
+                    phone        = IF(phone IS NULL OR phone = '', :phone, phone),
+                    naver_id     = COALESCE(naver_id, :nid2),
+                    attributes   = JSON_SET(COALESCE(attributes, JSON_OBJECT()), '$.naver', JSON_EXTRACT(:nv, '$')),
+                    review_count = :rc,
+                    score        = COALESCE(:sc, score),
+                    save_count   = :sv,
+                    updated_at   = NOW()
                  WHERE id = :id"
             )->execute([
                 ':addr'  => $best !== '' ? mb_substr($best, 0, 500) : null,
                 ':phone' => $phone !== '' ? mb_substr($phone, 0, 40) : null,
+                ':nid2'  => $nid !== '' ? mb_substr($nid, 0, 32) : null,
                 ':nv'    => json_encode($nv, JSON_UNESCAPED_UNICODE),
+                ':rc'    => $review,
+                ':sc'    => $score,
+                ':sv'    => $saveN,
                 ':id'    => $dup['id'],
             ]);
             if ($url !== '') $this->place->addRef($dup['id'], ['source_type' => 'official', 'title' => $name, 'url' => $url, 'summary' => $micro]);
             $this->place->addTags($dup['id'], $tags);
-            if ($nid !== '') $this->recordStat($nid, $period, (int)$dup['id'], $statM);
+            $this->recordStat($nid, $period, (int)$dup['id'], $statM);
             return ['name' => $name, 'action' => 'enrich', 'id' => $dup['id'], 'match' => $dup['name']];
         }
 
@@ -387,7 +539,7 @@ class NaverPlaceCollector
         }
         $pid = $this->place->upsertPlace([
             'name'       => $name,
-            'category'   => 'restaurant',
+            'category'   => $placeCat,
             'address'    => $best !== '' ? $best : null,
             'region_lv1' => ($regionLv1 !== null && $regionLv1 !== '') ? $regionLv1 : null,
             'region_lv2' => $regionLabel !== '' ? $regionLabel : null,
@@ -398,42 +550,43 @@ class NaverPlaceCollector
         ]);
         if ($pid > 0 && $url !== '') $this->place->addRef($pid, ['source_type' => 'official', 'title' => $name, 'url' => $url, 'summary' => $micro]);
         if ($pid > 0) $this->place->addTags($pid, $tags);
-        if ($pid > 0 && $nid !== '') $this->recordStat($nid, $period, $pid, $statM);
+        if ($pid > 0) $this->recordStat($nid, $period, $pid, $statM);
         return ['name' => $name, 'action' => 'new', 'id' => $pid];
     }
 
-    /** 추이 스냅샷 1행 (naver_id+period 멱등). */
+    /** 추이 스냅샷 1행 (place_id+period 멱등). naver_id 는 정보용(어느 네이버 업소였는지). */
     public function recordStat(string $nid, string $period, int $placeId, array $m): void
     {
-        if ($nid === '' || $period === '') return;
+        if ($placeId <= 0 || $period === '') return;
         $st = $this->pdo->prepare(
-            "INSERT INTO place_naver_stat (naver_id, period, place_id, score, review, visitor, blog, save, name, region)
-             VALUES (:nid,:period,:pid,:score,:review,:visitor,:blog,:save,:name,:region)
+            "INSERT INTO place_naver_stat (place_id, naver_id, period, category, score, review, visitor, blog, save, name, region)
+             VALUES (:pid,:nid,:period,:category,:score,:review,:visitor,:blog,:save,:name,:region)
              ON DUPLICATE KEY UPDATE
-                place_id=VALUES(place_id), score=VALUES(score), review=VALUES(review),
+                naver_id=VALUES(naver_id), category=VALUES(category), score=VALUES(score), review=VALUES(review),
                 visitor=VALUES(visitor), blog=VALUES(blog), save=VALUES(save),
                 name=VALUES(name), region=VALUES(region), captured_at=NOW()"
         );
         $st->execute([
-            ':nid'     => mb_substr($nid, 0, 32),
-            ':period'  => $period,
-            ':pid'     => $placeId ?: null,
-            ':score'   => isset($m['score']) && $m['score'] !== null ? (float)$m['score'] : null,
-            ':review'  => isset($m['review'])  ? (int)$m['review']  : null,
-            ':visitor' => isset($m['visitor']) ? (int)$m['visitor'] : null,
-            ':blog'    => isset($m['blog'])    ? (int)$m['blog']    : null,
-            ':save'    => isset($m['save'])    ? (int)$m['save']    : null,
-            ':name'    => isset($m['name'])   ? mb_substr((string)$m['name'], 0, 160) : null,
-            ':region'  => isset($m['region']) ? mb_substr((string)$m['region'], 0, 80) : null,
+            ':pid'      => $placeId,
+            ':nid'      => $nid !== '' ? mb_substr($nid, 0, 32) : null,
+            ':period'   => $period,
+            ':category' => self::cat((string)($m['category'] ?? 'food')),
+            ':score'    => isset($m['score']) && $m['score'] !== null ? (float)$m['score'] : null,
+            ':review'   => isset($m['review'])  ? (int)$m['review']  : null,
+            ':visitor'  => isset($m['visitor']) ? (int)$m['visitor'] : null,
+            ':blog'     => isset($m['blog'])    ? (int)$m['blog']    : null,
+            ':save'     => isset($m['save'])    ? (int)$m['save']    : null,
+            ':name'     => isset($m['name'])   ? mb_substr((string)$m['name'], 0, 160) : null,
+            ':region'   => isset($m['region']) ? mb_substr((string)$m['region'], 0, 80) : null,
         ]);
     }
 
     // ── 중복 판정 (place_review.php 의 findDuplicate + 보수 재검증과 동일 규칙) ──
-    private function findDuplicate(string $name, float $lat, float $lng): ?array
+    private function findDuplicate(string $name, float $lat, float $lng, ?string $category = null): ?array
     {
         $tn = self::dupNorm($name);
         if ($tn === '') return null;
-        $fc = $this->place->searchNearby($lat, $lng, 0.3);
+        $fc = $this->place->searchNearby($lat, $lng, 0.3, $category);
         $best = null;
         foreach (($fc['features'] ?? []) as $f) {
             $p = $f['properties'];
@@ -465,44 +618,169 @@ class NaverPlaceCollector
     // ============================================================
     //  추이 조회 (LAG 윈도우함수)
     // ============================================================
-    /** 수집된 회차(period) 목록 — 최신순. */
-    public function periods(): array
+    /** 수집된 회차(period) 목록 — 최신순. category 지정 시 그 카테고리만. */
+    public function periods(?string $category = null): array
     {
+        if ($category !== null) {
+            $st = $this->pdo->prepare(
+                "SELECT DISTINCT period FROM place_naver_stat WHERE category = ? ORDER BY period DESC"
+            );
+            $st->execute([self::cat($category)]);
+            return $st->fetchAll(PDO::FETCH_COLUMN);
+        }
         return $this->pdo->query("SELECT DISTINCT period FROM place_naver_stat ORDER BY period DESC")
                          ->fetchAll(PDO::FETCH_COLUMN);
     }
 
+    /** 수집된 지역(region·시군구) 목록 — 가나다순. 지역창 자동완성용. category 지정 시 그 카테고리만. */
+    public function regions(?string $category = null): array
+    {
+        if ($category !== null) {
+            $st = $this->pdo->prepare(
+                "SELECT DISTINCT region FROM place_naver_stat
+                  WHERE category = ? AND region IS NOT NULL AND region <> '' ORDER BY region"
+            );
+            $st->execute([self::cat($category)]);
+            return $st->fetchAll(PDO::FETCH_COLUMN);
+        }
+        return $this->pdo->query(
+            "SELECT DISTINCT region FROM place_naver_stat
+              WHERE region IS NOT NULL AND region <> '' ORDER BY region"
+        )->fetchAll(PDO::FETCH_COLUMN);
+    }
+
+    // ============================================================
+    //  한시적 공개 공유 (랜덤 토큰 + 만료/취소) — travel.php 패턴
+    //   분류(cat)별 활성 링크 1개. 게스트는 ?share=token 으로 그 분류만 읽기전용.
+    // ============================================================
     /**
-     * 한 회차의 맛집 목록 + 직전 회차 대비 델타.
-     * @param array $opt period(필수), region(LIKE), min_review, sort(d_review|d_score|d_save|d_visitor|d_blog|review|score), dir(desc|asc), limit, offset
+     * 공유 링크 생성(기존 활성 링크는 무효화하고 새 토큰 1개 발급). 공유시점 필터(지역·최소리뷰·정렬)를 함께 고정.
+     * @param array $opt region, min_review, sort
+     * @return [token, expires_at, cat, region, min_review, sort]
+     */
+    public function createShare(string $cat, int $ttlSeconds, array $opt = []): array
+    {
+        $cat    = self::cat($cat);
+        $ttl    = max(60, min($ttlSeconds, 90 * 24 * 3600));  // 1분~90일로 클램프
+        $token  = bin2hex(random_bytes(16));                  // 추측 불가 32자리
+        $region = isset($opt['region']) ? mb_substr(trim((string)$opt['region']), 0, 80) : '';
+        $minr   = max(0, (int)($opt['min_review'] ?? 0));
+        $sort   = mb_substr((string)($opt['sort'] ?? 'total_score'), 0, 20);
+        // 같은 (분류, 지역) 의 기존 링크만 무효화 → 다른 지역(예: 관악구·성동구)은 동시 공유 유지
+        $this->revokeShares($cat, $region);
+        $this->pdo->prepare(
+            "INSERT INTO naver_trend_share (cat, region, min_review, sort, token, expires_at)
+             VALUES (?, ?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL ? SECOND))"
+        )->execute([$cat, $region, $minr, $sort, $token, $ttl]);
+        $row = $this->getShareByToken($token);
+        return ['token' => $token, 'expires_at' => $row['expires_at'] ?? null,
+                'cat' => $cat, 'region' => $region, 'min_review' => $minr, 'sort' => $sort];
+    }
+
+    /** 토큰으로 유효한(미만료·미취소) 공유 조회 — 게스트 접근 검증용 */
+    public function getValidShare(string $token): ?array
+    {
+        if ($token === '') return null;
+        $st = $this->pdo->prepare(
+            "SELECT * FROM naver_trend_share
+              WHERE token = ? AND revoked = 0 AND expires_at > NOW() LIMIT 1"
+        );
+        $st->execute([$token]);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    /**
+     * 현재 활성 공유 1건 (소유자 화면에 기존 링크 표시용).
+     * region 을 주면 그 (분류,지역) 의 활성 링크, null 이면 분류 통틀어 최신 1건.
+     */
+    public function getActiveShare(string $cat, ?string $region = null): ?array
+    {
+        $sql  = "SELECT * FROM naver_trend_share WHERE cat = ? AND revoked = 0 AND expires_at > NOW()";
+        $args = [self::cat($cat)];
+        if ($region !== null) { $sql .= " AND region = ?"; $args[] = mb_substr(trim($region), 0, 80); }
+        $sql .= " ORDER BY id DESC LIMIT 1";
+        $st = $this->pdo->prepare($sql);
+        $st->execute($args);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    /**
+     * 활성 공유 즉시 차단. region 을 주면 그 (분류,지역) 만, null 이면 분류 전체.
+     */
+    public function revokeShares(string $cat, ?string $region = null): void
+    {
+        $sql  = "UPDATE naver_trend_share SET revoked = 1 WHERE cat = ?";
+        $args = [self::cat($cat)];
+        if ($region !== null) { $sql .= " AND region = ?"; $args[] = mb_substr(trim($region), 0, 80); }
+        $this->pdo->prepare($sql)->execute($args);
+    }
+
+    private function getShareByToken(string $token): ?array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM naver_trend_share WHERE token = ? LIMIT 1");
+        $st->execute([$token]);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    /**
+     * 한 회차의 (카테고리별) 목록 + 직전 회차 대비 델타.
+     * @param array $opt period(필수), category(food|stay|camping), region(LIKE), min_review,
+     *                    sort(d_review|d_score|d_save|d_visitor|d_blog|review|score), dir(desc|asc), limit, offset
      */
     public function trendList(array $opt): array
     {
         $period = (string)($opt['period'] ?? '');
         if ($period === '') return ['period' => '', 'rows' => [], 'total' => 0];
 
-        $sortable = ['d_review','d_score','d_save','d_visitor','d_blog','review','score','save'];
-        $sort = in_array(($opt['sort'] ?? ''), $sortable, true) ? $opt['sort'] : 'd_review';
+        $sortable = ['d_review','d_score','d_save','d_visitor','d_blog',
+                     'review','score','save','visitor','blog','total_score'];
+        $sort = in_array(($opt['sort'] ?? ''), $sortable, true) ? $opt['sort'] : 'total_score';
         $dir  = (strtolower((string)($opt['dir'] ?? 'desc')) === 'asc') ? 'ASC' : 'DESC';
         $limit  = max(1, min(500, (int)($opt['limit'] ?? 100)));
         $offset = max(0, (int)($opt['offset'] ?? 0));
 
         $where = ['period = :period'];
         $args  = [':period' => $period];
+        if (!empty($opt['category'])) { $where[] = 'category = :category'; $args[':category'] = self::cat((string)$opt['category']); }
         if (!empty($opt['region'])) { $where[] = 'region LIKE :region'; $args[':region'] = '%' . $opt['region'] . '%'; }
         if (!empty($opt['min_review'])) { $where[] = 'review >= :minr'; $args[':minr'] = (int)$opt['min_review']; }
         $whereSql = implode(' AND ', $where);
 
+        // 종합점수(0~100): 평점·리뷰·저장·방문·블로그를 가중 합산.
+        //   카운트는 스케일 차가 커서 LOG10 로 압축(레퍼런스: 리뷰/방문 1e5, 저장 4e5, 블로그 5e4)·LEAST(1,..)로 상한.
+        //   가중치 = 평점8 + 리뷰30 + 저장10 + 방문17 + 블로그35 = 100.
+        //   ★평점은 리뷰가 비슷할 때의 변별력 보조 정도라 비중을 낮춤(리뷰/블로그 비중 상향).
+        //   ★평점은 NULL(미평가)이 많다 → 0점 처리하면 리뷰 많은 곳이 부당하게 낮아짐.
+        //     평점이 없으면 평점 항목을 분모에서도 제외하고 나머지(합 92)로 재정규화(×100/92).
+        //     단, 카운트(리뷰·저장 등)의 0/NULL 은 진짜 '적음'이므로 그대로 0점 반영.
+        $comp = function (string $sc, string $rv, string $vi, string $bl, string $sv): string {
+            $counts = "30*LEAST(1, LOG10(COALESCE($rv,0)+1)/5)"
+                    . " + 10*LEAST(1, LOG10(COALESCE($sv,0)+1)/5.6)"
+                    . " + 17*LEAST(1, LOG10(COALESCE($vi,0)+1)/5)"
+                    . " + 35*LEAST(1, LOG10(COALESCE($bl,0)+1)/4.7)";
+            // 평점 있음: 8*평점 + 카운트 / 평점 없음: 카운트/92*100
+            return "ROUND(CASE WHEN $sc IS NULL"
+                 . " THEN ($counts) / 92 * 100"
+                 . " ELSE 8*($sc/5) + ($counts) END, 1)";
+        };
+        $curComp  = $comp('score', 'review', 'visitor', 'blog', 'save');
+        $prevComp = $comp('prev_score', 'prev_review', 'prev_visitor', 'prev_blog', 'prev_save');
+
         $base =
-           "SELECT naver_id, period, place_id, name, region, score, review, visitor, blog, save,
+           "SELECT naver_id, period, category, place_id, name, region, score, review, visitor, blog, save,
                    prev_period,
                    score   - prev_score   AS d_score,
                    review  - prev_review  AS d_review,
                    visitor - prev_visitor AS d_visitor,
                    blog    - prev_blog    AS d_blog,
-                   save    - prev_save    AS d_save
+                   save    - prev_save    AS d_save,
+                   {$curComp} AS total_score,
+                   CASE WHEN prev_period IS NULL THEN NULL ELSE {$prevComp} END AS prev_total,
+                   (SELECT p.address FROM place p WHERE p.id = t.place_id) AS address,
+                   (SELECT p.lat FROM place p WHERE p.id = t.place_id) AS lat,
+                   (SELECT p.lng FROM place p WHERE p.id = t.place_id) AS lng
             FROM (
-                SELECT naver_id, period, place_id, name, region, score, review, visitor, blog, save,
+                SELECT naver_id, period, category, place_id, name, region, score, review, visitor, blog, save,
                        LAG(period)  OVER w AS prev_period,
                        LAG(score)   OVER w AS prev_score,
                        LAG(review)  OVER w AS prev_review,
@@ -510,7 +788,7 @@ class NaverPlaceCollector
                        LAG(blog)    OVER w AS prev_blog,
                        LAG(save)    OVER w AS prev_save
                 FROM place_naver_stat
-                WINDOW w AS (PARTITION BY naver_id ORDER BY period)
+                WINDOW w AS (PARTITION BY place_id ORDER BY period)
             ) t
             WHERE {$whereSql}";
 
@@ -521,14 +799,14 @@ class NaverPlaceCollector
         return ['period' => $period, 'rows' => $rows, 'total' => $total];
     }
 
-    /** 한 맛집(naver_id)의 전 회차 시계열 — 오래된 순. */
-    public function series(string $nid): array
+    /** 한 곳(place_id)의 전 회차 시계열 — 오래된 순. */
+    public function series(int $placeId): array
     {
         $st = $this->pdo->prepare(
-            "SELECT period, score, review, visitor, blog, save, name, region
-               FROM place_naver_stat WHERE naver_id = ? ORDER BY period ASC"
+            "SELECT period, category, score, review, visitor, blog, save, name, region
+               FROM place_naver_stat WHERE place_id = ? ORDER BY period ASC"
         );
-        $st->execute([$nid]);
+        $st->execute([$placeId]);
         return $st->fetchAll(PDO::FETCH_ASSOC);
     }
 
