@@ -10,11 +10,13 @@
  *    카테고리별로 일자를 나눠 3개 등록(IP 부하 분산):
  *      매월 1일: /cron_naver_collect.php?key=econ-naver-9x2k&cat=food&bg=1&max=10&delay=4&max_sec=120
  *      매월 2일: /cron_naver_collect.php?key=econ-naver-9x2k&cat=stay&bg=1&max=10&delay=4&max_sec=120
- *      매월 3일: /cron_naver_collect.php?key=econ-naver-9x2k&cat=camping&bg=1&max=10&delay=4&max_sec=120
+ *      매월 3일: /cron_naver_collect.php?key=econ-naver-9x2k&cat=camping&bg=1&max=8&delay=4&max_sec=180
  *    각 스케줄(해당 일·10분 간격·새벽):
  *        분 0,10,20,30,40,50 / 시 3-7 / 일 1(또는 2·3) / 월·요일 매번  → 30회 fire
- *    → bg=1 이라 크론은 즉시 OK 받고(타임아웃 무관), 백그라운드에서 회당 10지역×4초
- *      딜레이(≈50초·max_sec 120초 내) 수집. 10×30=300 ≥ 229 커버, 완료 후 fire 는 no-op.
+ *    → bg=1 이라 크론은 즉시 OK 받고(타임아웃 무관), 백그라운드에서 회당 max 지역×4초
+ *      딜레이로 수집. 회당 지역수×30회 ≥ 229 면 커버, 완료 후 fire 는 no-op.
+ *    ※ camping 은 지역마다 '캠핑장'·'오토캠핑' 2회 fetch(합집합) → 지역당 시간 ≈2배.
+ *      그래서 max 를 낮추고(8) max_sec 을 늘려(180) 회당 처리량을 맞춘다(8×30=240 ≥ 229).
  *    ※ 각 지역은 처리 즉시 done 커밋 → 호출이 끊겨도 진행분 보존(resume).
  *    ※ 네이버 안티봇은 IP당 누적 예산형. 회당 10건+10분 휴식이면 429 회피.
  *      몰아치기(연속 호출·짧은 휴식)는 IP 일시차단 위험 → max_sec 로 회당 시간 제한 필수.
@@ -203,21 +205,59 @@ $done = 0; $errc = 0; $totNew = 0; $totEnrich = 0; $totStat = 0; $budgetHit = fa
 $mapCat = NaverPlaceCollector::CATS[$category]['map'] ?? true;   // false=추이 전용(place 미적재)
 $lines = [];
 
+// 카테고리의 검색 접미사 목록(camping = ['캠핑장','오토캠핑'], 그 외 1개).
+// 둘 이상이면 지역마다 각 접미사로 fetch 해 naver_id 기준 합집합(중복제거) 후 선정·적재한다.
+$suffixes = NaverPlaceCollector::suffixes($category);
+$primary  = $suffixes[0];
+
 foreach ($queue as $q) {
     $label = $q['region_lv2'];
-    $res = $col->fetchRegion($q['query'], $category);
-    if (!$res['ok']) {
-        $markDone->execute([':s' => 'error', ':f' => 0, ':i' => 0, ':h' => $res['http'], ':m' => mb_substr($res['msg'], 0, 255), ':id' => $q['log_id']]);
+
+    $union = [];        // key(naver_id 우선) => 표준 레코드 — 먼저 본 접미사 우선
+    $httpLast = 0;
+    $rate = false;      // 429 발생 여부
+    $fetchErr = [];     // 비치명적 실패(접미사별)
+
+    foreach ($suffixes as $si => $sfx) {
+        // 기본 접미사는 시드 쿼리 그대로, 보조 접미사는 끝의 기본접미사만 교체
+        $query = ($si === 0) ? $q['query'] : NaverPlaceCollector::altQuery($q['query'], $primary, $sfx);
+        $res = $col->fetchRegion($query, $category);
+        $httpLast = $res['http'];
+
+        if (!$res['ok']) {
+            if ((int)$res['http'] === 429) { $rate = true; break; }   // 더 두드리지 말고 중단
+            $fetchErr[] = "{$sfx}:http{$res['http']}";
+        } else {
+            foreach ($res['items'] as $it) {
+                $nid = trim((string)($it['nid'] ?? ''));
+                $key = $nid !== ''
+                    ? 'n:' . $nid
+                    : 'c:' . ($it['name'] ?? '') . '@' . round((float)($it['lat'] ?? 0), 5) . ',' . round((float)($it['lng'] ?? 0), 5);
+                if (!isset($union[$key])) $union[$key] = $it;
+            }
+        }
+        // 같은 지역 내 접미사 사이에도 휴식(429 회피)
+        if ($si < count($suffixes) - 1 && $delaySec > 0) sleep($delaySec);
+    }
+
+    // 429 → 이 지역은 미완료(pending 유지)로 두고 이번 호출 종료(다음 fire 에서 자동 재시도)
+    if ($rate) {
+        $lines[] = sprintf("  ⚠️ %-10s 429 감지 — 이번 호출 중단(다음 호출에서 재시도)", $label);
+        break;
+    }
+
+    // 모든 접미사 fetch 실패(수집 0) → error
+    if (!$union && $fetchErr) {
+        $markDone->execute([':s' => 'error', ':f' => 0, ':i' => 0, ':h' => $httpLast, ':m' => mb_substr(implode(',', $fetchErr), 0, 255), ':id' => $q['log_id']]);
         $errc++;
-        $lines[] = sprintf("  ✗ %-10s %s [http %d] %s", $label, $q['query'], $res['http'], $res['msg']);
-        // 429 면 더 두드리지 말고 이번 호출 종료(다음 fire 에서 이어받기)
-        if ($res['http'] === 429) { $lines[] = "  ⚠️ 429 감지 — 이번 호출 중단(다음 호출에서 재시도)"; break; }
+        $lines[] = sprintf("  ✗ %-10s %s", $label, implode(',', $fetchErr));
         if ($delaySec > 0) sleep($delaySec);
         if (microtime(true) - $START > $maxSec) { $budgetHit = true; break; }
         continue;
     }
 
-    $sel = $col->selectByRule($res['items'], $category);
+    $items = array_values($union);
+    $sel   = $col->selectByRule($items, $category);
     $cNew = 0; $cEnr = 0; $cStat = 0;
     foreach ($sel as $rec) {
         $r = $col->ingestOne($rec, $label, $q['region_lv1'], $period, !$dry, $category);
@@ -228,14 +268,16 @@ foreach ($queue as $q) {
     }
     $totNew += $cNew; $totEnrich += $cEnr; $totStat += $cStat;
     $msg = $mapCat ? "new {$cNew} / enrich {$cEnr}" : "stat {$cStat}";
+    if ($fetchErr) $msg .= " (부분실패: " . implode(',', $fetchErr) . ")";
     $markDone->execute([
-        ':s' => $dry ? 'pending' : 'done', ':f' => count($res['items']), ':i' => count($sel),
-        ':h' => $res['http'], ':m' => $msg, ':id' => $q['log_id'],
+        ':s' => $dry ? 'pending' : 'done', ':f' => count($items), ':i' => count($sel),
+        ':h' => $httpLast, ':m' => mb_substr($msg, 0, 255), ':id' => $q['log_id'],
     ]);
     $done++;
+    $sfxNote = count($suffixes) > 1 ? ' [' . implode('+', $suffixes) . ' 합집합]' : '';
     $lines[] = $mapCat
-        ? sprintf("  ✓ %-10s 후보 %3d → 선정 %3d (신규 %d / 보강 %d)", $label, count($res['items']), count($sel), $cNew, $cEnr)
-        : sprintf("  ✓ %-10s 후보 %3d → 선정 %3d (추이 기록 %d)", $label, count($res['items']), count($sel), $cStat);
+        ? sprintf("  ✓ %-10s 후보 %3d → 선정 %3d (신규 %d / 보강 %d)%s", $label, count($items), count($sel), $cNew, $cEnr, $sfxNote)
+        : sprintf("  ✓ %-10s 후보 %3d → 선정 %3d (추이 기록 %d)%s", $label, count($items), count($sel), $cStat, $sfxNote);
 
     if ($delaySec > 0) sleep($delaySec);
     if (microtime(true) - $START > $maxSec) { $budgetHit = true; break; }

@@ -56,12 +56,34 @@ class NaverPlaceCollector
                       'ncat_re' => self::LODGE_RE],
         'camping' => ['suffix' => '캠핑장', 'path' => 'place',      'label' => '캠핑장', 'map' => true,
                       'thr_big' => 200,  'max_big' => 60,  'thr_sm' => 50,  'max_sm' => 40, 'big_n' => 15,
-                      'ncat_re' => self::LODGE_RE],
+                      'ncat_re' => self::LODGE_RE,
+                      // 보조 검색어: "OO 캠핑장" 과 "OO 오토캠핑" 은 결과가 절반만 겹치는 다른 슬라이스
+                      // (각 100개 컷·랭킹 상이)라, 둘 다 훑어 합집합(naver_id 중복제거)으로 적재해야
+                      // 글램핑·카라반·야영장 + 오토캠핑장을 모두 포괄한다. (2026-06-18 실측)
+                      'alt_suffixes' => ['오토캠핑']],
     ];
 
     /** 유효 카테고리 키인지(미정의면 food). */
     public static function cat(string $c): string { return isset(self::CATS[$c]) ? $c : 'food'; }
     public static function catLabel(string $c): string { return self::CATS[self::cat($c)]['label']; }
+
+    /** 카테고리의 검색 접미사 목록(기본 + 보조). camping = ['캠핑장','오토캠핑'], 그 외 1개. */
+    public static function suffixes(string $c): array
+    {
+        $cc = self::CATS[self::cat($c)];
+        return array_merge([$cc['suffix']], $cc['alt_suffixes'] ?? []);
+    }
+
+    /**
+     * 시드 쿼리("프리픽스 기본접미사")의 접미사를 다른 접미사로 교체.
+     *   altQuery('강원 평창군 캠핑장', '캠핑장', '오토캠핑') → '강원 평창군 오토캠핑'
+     * (접미사는 항상 끝에 붙으므로 끝의 기본접미사만 떼어내고 교체)
+     */
+    public static function altQuery(string $baseQuery, string $primarySuffix, string $altSuffix): string
+    {
+        $prefix = preg_replace('/\s*' . preg_quote($primarySuffix, '/') . '\s*$/u', '', $baseQuery);
+        return trim($prefix . ' ' . $altSuffix);
+    }
 
     public function __construct(PDO $pdo)
     {
