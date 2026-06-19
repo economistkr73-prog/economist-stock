@@ -86,6 +86,23 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
             }
             if ($guide !== '' && !FoodGuide::exists($guide)) $guide = '';
 
+            // region: 시도 고정 필터(주소 접두 목록, 콤마구분). 오면 반경 무시·그 시도 전역.
+            $regionIn = [];
+            if (isset($_GET['region']) && $_GET['region'] !== '') {
+                foreach (explode(',', (string)$_GET['region']) as $rv) {
+                    $rv = trim($rv);
+                    if ($rv !== '') $regionIn[] = $rv;
+                }
+            }
+            // categories: 분류 멀티선택(콤마구분) → category IN. 단일 category 보다 우선.
+            $categoriesIn = [];
+            if (isset($_GET['categories']) && $_GET['categories'] !== '') {
+                foreach (explode(',', (string)$_GET['categories']) as $cv) {
+                    $cv = trim($cv);
+                    if ($cv !== '' && in_array($cv, $allowed, true)) $categoriesIn[] = $cv;
+                }
+            }
+
             $geojson = $place->searchNearby(
                 $lat, $lng, $radius,
                 $category !== '' ? $category : null,
@@ -93,7 +110,9 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
                 $limit,
                 $guide !== '' ? $guide : null,
                 $minReview,
-                $catMinReview ?: null
+                $catMinReview ?: null,
+                $regionIn ?: null,
+                $categoriesIn ?: null
             );
             echo json_encode($geojson, JSON_UNESCAPED_UNICODE);
             break;
@@ -275,10 +294,19 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
             $allowed = ['travel', 'stay', 'restaurant', 'etc'];
             if ($guide !== '' && !FoodGuide::exists($guide)) $guide = '';
             if ($cat !== '' && !in_array($cat, $allowed, true)) $cat = '';
+            // region: 시도 고정 시 태그 검색을 그 시도로 한정(주소 접두 목록).
+            $regionIn = [];
+            if (isset($_GET['region']) && $_GET['region'] !== '') {
+                foreach (explode(',', (string)$_GET['region']) as $rv) {
+                    $rv = trim($rv);
+                    if ($rv !== '') $regionIn[] = $rv;
+                }
+            }
             echo json_encode($place->searchByTags(
                 $tags, 1500,
                 $guide !== '' ? $guide : null,
-                $cat   !== '' ? $cat   : null
+                $cat   !== '' ? $cat   : null,
+                $regionIn ?: null
             ), JSON_UNESCAPED_UNICODE);
             break;
         }

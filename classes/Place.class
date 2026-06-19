@@ -330,13 +330,10 @@ class Place
     public function searchNearby(
         float $lat, float $lng, float $radiusKm = 5.0,
         ?string $category = null, ?string $keyword = null, int $limit = 300,
-        ?string $guide = null, int $minReview = 0, ?array $catMinReview = null
+        ?string $guide = null, int $minReview = 0, ?array $catMinReview = null,
+        ?array $regionIn = null, ?array $categoriesIn = null
     ): array {
-        // 반경에 비례한 박스 (위도 1°≈111km, 경도 1°≈111*cos(위도)km)
-        $latDelta = $radiusKm / 111.0;
-        $cos      = max(cos(deg2rad($lat)), 0.01); // 극지 방어
-        $lngDelta = $radiusKm / (111.0 * $cos);
-
+        $useRegion = ($regionIn !== null && count($regionIn) > 0);
         $sql = "SELECT p.id, p.name, p.category, p.lat, p.lng, p.phone,
                        p.address, p.region_lv1, p.region_lv2,
                        p.period_start, p.period_end, p.attributes, p.updated_at,
@@ -351,17 +348,35 @@ class Place
                        (SELECT GROUP_CONCAT(CONCAT(g.guide, ':', COALESCE(g.grade, '')) ORDER BY g.guide SEPARATOR ',') FROM place_guide g WHERE g.place_id = p.id) AS guides
                 FROM place p
                 WHERE p.is_active = 1
-                  AND p.geocode_status = 'ok'
-                  AND p.lat BETWEEN :lat_min AND :lat_max
-                  AND p.lng BETWEEN :lng_min AND :lng_max";
-        $args = [
-            ':lat_c'   => $lat, ':lng_c' => $lng, ':lat_s' => $lat,
-            ':lat_min' => $lat - $latDelta, ':lat_max' => $lat + $latDelta,
-            ':lng_min' => $lng - $lngDelta, ':lng_max' => $lng + $lngDelta,
-        ];
+                  AND p.geocode_status = 'ok'";
+        // dist_km 계산(정렬 tie-break)용 중심좌표는 항상 바인딩
+        $args = [':lat_c' => $lat, ':lng_c' => $lng, ':lat_s' => $lat];
+        if ($useRegion) {
+            // 시도 고정 필터 — 반경 무시, 그 시도 전역.
+            //  ★실제 주소(address) 접두 매칭. region_lv1 은 '수집 시드값'(어느 검색어로 잡혔는지)이라
+            //    경계 장소가 어긋남(예: "강원 원주 캠핑장" 검색에 딸려온 충북 제천 캠핑장이 region_lv1=강원).
+            //    address 가 진짜 위치. $regionIn = 시도 주소접두 목록(충북·충청북도 등, 풀/단축형 혼재 대응).
+            $ors = [];
+            foreach (array_values($regionIn) as $k => $rr) { $pp = ":r1_{$k}"; $ors[] = "p.address LIKE {$pp}"; $args[$pp] = $rr . '%'; }
+            $sql .= " AND (" . implode(' OR ', $ors) . ")";
+        } else {
+            // 반경에 비례한 박스 (위도 1°≈111km, 경도 1°≈111*cos(위도)km)
+            $latDelta = $radiusKm / 111.0;
+            $cos      = max(cos(deg2rad($lat)), 0.01); // 극지 방어
+            $lngDelta = $radiusKm / (111.0 * $cos);
+            $sql .= " AND p.lat BETWEEN :lat_min AND :lat_max
+                      AND p.lng BETWEEN :lng_min AND :lng_max";
+            $args[':lat_min'] = $lat - $latDelta; $args[':lat_max'] = $lat + $latDelta;
+            $args[':lng_min'] = $lng - $lngDelta; $args[':lng_max'] = $lng + $lngDelta;
+        }
         if ($category !== null && $category !== '') {
             $sql .= " AND p.category = :category";
             $args[':category'] = $category;
+        } elseif ($categoriesIn !== null && count($categoriesIn) > 0) {
+            // 분류 멀티선택 → category IN
+            $cph = [];
+            foreach (array_values($categoriesIn) as $k => $cc) { $cp = ":cin{$k}"; $cph[] = $cp; $args[$cp] = $cc; }
+            $sql .= " AND p.category IN (" . implode(',', $cph) . ")";
         }
         if ($keyword !== null && $keyword !== '') {
             $sql .= " AND p.name LIKE :kw";
@@ -394,14 +409,14 @@ class Place
         }
         // 정렬: 비맛집(여행지·숙소) 우선 노출 → 맛집은 품질순(리뷰수→평점→저장수) → 거리 동률처리.
         // LIMIT 에 잘려도 '좋은 곳'이 남도록(기존 거리순은 가까운 동네집이 남던 문제).
-        $sql .= " HAVING dist_km <= :radius
-                  ORDER BY (p.category = 'restaurant') ASC,
+        if (!$useRegion) $sql .= " HAVING dist_km <= :radius";   // 시도 고정 모드는 반경 제한 없음(그 시도 전역)
+        $sql .= " ORDER BY (p.category = 'restaurant') ASC,
                            p.review_count DESC,
                            p.score DESC,
                            p.save_count DESC,
                            dist_km ASC
                   LIMIT {$limit}";
-        $args[':radius'] = $radiusKm;
+        if (!$useRegion) $args[':radius'] = $radiusKm;
 
         $st = $this->pdo->prepare($sql);
         $st->execute($args);
@@ -446,7 +461,7 @@ class Place
      * 여러 태그 AND 검색 → GeoJSON. 주어진 태그를 '모두' 가진 ok 장소만(반경 무관).
      * searchNearby 와 동일한 properties.
      */
-    public function searchByTags(array $tags, int $limit = 1500, ?string $guide = null, ?string $category = null): array
+    public function searchByTags(array $tags, int $limit = 1500, ?string $guide = null, ?string $category = null, ?array $regionIn = null): array
     {
         $tags  = array_values(array_unique(array_filter(array_map('trim', $tags), fn($t) => $t !== '')));
         $guide = ($guide !== null && $guide !== '') ? $guide : null;
@@ -457,6 +472,12 @@ class Place
         $where = ["p.is_active = 1", "p.geocode_status = 'ok'"];
         if ($category !== null && $category !== '') {
             $where[] = "p.category = :cat"; $args[':cat'] = $category;
+        }
+        // 시도 고정 필터(주소 접두) — 태그 검색을 그 시도로 한정(예: 강원 벚꽃).
+        if ($regionIn !== null && count($regionIn) > 0) {
+            $ors = [];
+            foreach (array_values($regionIn) as $i => $rr) { $rp = ":r1_{$i}"; $ors[] = "p.address LIKE {$rp}"; $args[$rp] = $rr . '%'; }
+            $where[] = "(" . implode(' OR ', $ors) . ")";
         }
         if ($guide !== null) {
             $where[] = "EXISTS (SELECT 1 FROM place_guide g2 WHERE g2.place_id = p.id AND g2.guide = :guide)";

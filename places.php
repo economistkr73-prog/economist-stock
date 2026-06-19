@@ -93,6 +93,33 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .tb-chip.active .tb-cnt { opacity: .9; }
 .tb-more { flex-shrink: 0; font-size: 12px; font-weight: 600; padding: 6px 11px; border-radius: 14px; background: #fff; border: 1px dashed #cdd6de; color: #7b8794; cursor: pointer; white-space: nowrap; }
 .tb-more:hover { background: #f4f6f8; }
+/* 분류 칩바 — 멀티선택(전체 = 전체선택/해제 토글, 개별 = on/off). active 는 그 분류 색. */
+#pl-catbar { display: flex; align-items: center; gap: 6px; padding: 8px 12px; background: #fff; border-top: 1px solid #f0f2f5; flex-shrink: 0; }
+.cb-lbl { font-size: 11.5px; color: #8b97a2; flex-shrink: 0; margin-right: 2px; }
+.cb-chips { display: flex; gap: 6px; overflow-x: auto; flex: 1; scrollbar-width: thin; }
+.cb-chips::-webkit-scrollbar { height: 5px; }
+.cb-chips::-webkit-scrollbar-thumb { background: #d8dde3; border-radius: 3px; }
+.cb-chip { flex-shrink: 0; white-space: nowrap; font-size: 13px; font-weight: 700; padding: 6px 14px; border-radius: 18px; background: #f1f3f5; border: 1px solid #e2e7ec; color: #5a6b7b; cursor: pointer; transition: .12s; }
+.cb-chip:hover { filter: brightness(.97); }
+.cb-chip.active { color: #fff; border-color: transparent; }
+.cb-chip.cat-travel.active     { background: #3498db; }
+.cb-chip.cat-restaurant.active { background: #e74c3c; }
+.cb-chip.cat-stay.active       { background: #8e44ad; }
+.cb-chip.cat-camping.active    { background: #27ae60; }
+.cb-chip.cat-etc.active        { background: #7f8c8d; }
+.cb-chip.cb-all.active         { background: #34495e; }
+/* 지역(시도) 선택 바 — 2단계: 권역 칩 → 시도 칩 */
+#pl-regionbar { display: flex; align-items: center; gap: 6px; padding: 7px 12px; background: #fbfdfc; border-top: 1px solid #f0f2f5; flex-shrink: 0; }
+.rb-lbl { font-size: 11.5px; color: #8b97a2; flex-shrink: 0; margin-right: 2px; }
+.rb-chips { display: flex; gap: 6px; overflow-x: auto; flex: 1; scrollbar-width: thin; }
+.rb-chips::-webkit-scrollbar { height: 5px; }
+.rb-chips::-webkit-scrollbar-thumb { background: #d8dde3; border-radius: 3px; }
+.rb-chip { flex-shrink: 0; white-space: nowrap; font-size: 12.5px; font-weight: 600; padding: 6px 13px; border-radius: 16px; background: #eef6f2; border: 1px solid #d6e8df; color: #2c7a57; cursor: pointer; transition: .12s; }
+.rb-chip:hover { background: #e1f1e9; border-color: #b9dcc8; }
+.rb-chip.active { background: #16a085; border-color: #138d75; color: #fff; }
+.rb-chip.rb-all { background: #fff; border-color: #dfe4e8; color: #7b8794; }
+.rb-chip.rb-all.active { background: #16a085; border-color: #138d75; color: #fff; }
+.rb-chip.rb-back { background: #fff; border-color: #cdd6de; color: #5a6b7b; }
 /* 월(방문시기) 바 */
 #pl-monthbar { display: flex; align-items: center; gap: 6px; padding: 6px 12px; background: #fff; border-top: 1px solid #f5f6f8; flex-shrink: 0; }
 .mb-lbl { font-size: 11.5px; color: #aab3bc; flex-shrink: 0; margin-right: 2px; }
@@ -525,14 +552,8 @@ a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
         <div id="pl-ac" class="pl-ac"></div>
     </div>
     <button class="btn btn-primary" onclick="plGeocode()">검색</button>
-    <select id="category" onchange="plCategoryChange()">
-        <option value="">전체</option>
-        <option value="travel">여행지</option>
-        <option value="restaurant">맛집</option>
-        <option value="stay">숙소</option>
-        <option value="camping">캠핑장</option>
-        <option value="etc">기타</option>
-    </select>
+    <!-- 분류는 아래 칩바(#pl-catbar)로 멀티선택. 이 hidden 은 칩컨텍스트/태그검색용 거울(1개만 선택=그 값 / 그외='') -->
+    <input type="hidden" id="category" value="">
     <!-- 반경 선택 UI 제거(줌인/아웃으로 영역 조절). 주소검색·자동확장 등 내부 로직용 기본값만 숨김 보관 -->
     <input type="hidden" id="radius" value="5">
     <label class="pl-autochk" title="체크하면 지도를 옮길 때마다 그 지역 장소를 자동으로 표시합니다">
@@ -568,6 +589,14 @@ a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
 <?php endif; ?>
 </div>
 
+<div id="pl-catbar">
+    <span class="cb-lbl">🗂 분류</span>
+    <div id="cbChips" class="cb-chips"></div>
+</div>
+<div id="pl-regionbar">
+    <span class="rb-lbl">📍 지역</span>
+    <div id="rbChips" class="rb-chips"></div>
+</div>
 <div id="pl-tagbar">
     <div id="tbChips" class="tb-chips"></div>
     <button id="tbMore" class="tb-more" onclick="plTagBarToggleMore()" style="display:none"></button>
@@ -979,6 +1008,7 @@ function plInit() {
             clearTimeout(plIdleTimer);
             plIdleTimer = setTimeout(function () {
                 plUpdateOverlay();                                 // 줌인=주변(전 분류) 오버레이 표시 / 줌아웃=제거(베이스 유지)
+                if (plRegionLock) return;                          // 시도 고정 중: 베이스(그 시도) 유지, 줌/이동에 재검색 안 함
                 if (plChipActive()) return;                        // 칩(여행·맛집) 검색 중이면 자동검색 안 함(전국 결과 보호)
                 if (Date.now() - plLastSearchAt < 800) return;     // 방금 검색했으면(프로그램 이동) 중복 방지
                 // 줌이 바뀌면 품질 티어가 달라지므로 자동검색 옵션과 무관하게 재검색.
@@ -1004,6 +1034,146 @@ function plInit() {
     });
 }
 plInit();
+
+// ── 분류 칩바 — 멀티선택 ──
+//  전체 = 전체선택/전체해제 토글. 개별(여행지·맛집·숙소·캠핑장·기타) = on/off, 여러 개 동시 선택 가능.
+//  필터: 전부선택=전체(category 무필터) / 부분선택=그 분류들만(category IN) / 전부해제=표시 안 함.
+//  #category(hidden) 거울: 정확히 1개만 선택=그 값(칩컨텍스트가 그 분류 하위칩 노출) / 그외=''.
+var PL_CATS_ALL = ['travel', 'restaurant', 'stay', 'camping', 'etc'];
+var PL_CAT_KO   = { travel: '여행지', restaurant: '맛집', stay: '숙소', camping: '캠핑장', etc: '기타' };
+var plCatSel    = PL_CATS_ALL.slice();   // 기본 = 전체
+
+function plCatBarRender() {
+    var box = document.getElementById('cbChips'); if (!box) return;
+    var all = (plCatSel.length === PL_CATS_ALL.length);
+    var h = '<button class="cb-chip cb-all' + (all ? ' active' : '') + '" onclick="plCatAllClick()">전체</button>';
+    PL_CATS_ALL.forEach(function (c) {
+        var on = plCatSel.indexOf(c) >= 0;
+        h += '<button class="cb-chip cat-' + c + (on ? ' active' : '') + '" onclick="plCatChipClick(\'' + c + '\')">'
+           + PL_CAT_KO[c] + '</button>';
+    });
+    box.innerHTML = h;
+}
+function plCatSyncHidden() {   // 칩컨텍스트/태그검색용 거울
+    var sel = document.getElementById('category');
+    if (sel) sel.value = (plCatSel.length === 1) ? plCatSel[0] : '';
+}
+function plCatApply() {        // 칩 상태 → 거울·칩컨텍스트·재검색
+    plCatBarRender(); plCatSyncHidden(); plClearTagSel(); plChipContext(); plSearchHere();
+}
+function plCatAllClick() {
+    plCatSel = (plCatSel.length === PL_CATS_ALL.length) ? [] : PL_CATS_ALL.slice();  // 전체선택 ↔ 전체해제
+    plCatApply();
+}
+function plCatChipClick(c) {
+    var i = plCatSel.indexOf(c);
+    if (i >= 0) plCatSel.splice(i, 1); else plCatSel.push(c);   // 개별 on/off
+    plCatApply();
+}
+plCatBarRender(); plCatSyncHidden();
+
+// ── 지역(시도) 선택 바 — 2단계: 권역 칩 → 시도 칩 ──
+//  지도 마커는 '보이는 화면' 기준이라, 시도를 고르면 그 시도로 지도를 이동(setCenter+줌)하고
+//  plSearch(반경) 로 마커를 다시 불러온다(plGeocode 와 동일 패턴). 칩 필터는 plSearch 가 자동 해제.
+//  km = 시도 중심에서 가장자리까지 대략 반경(검색 반경 겸 화면에 들어올 줌 계산용).
+//  r1 = 그 시도 '실제 주소(address)' 접두 매칭 목록. 백엔드가 address LIKE 'r1%' 로 거름.
+//   region_lv1 은 수집 시드값이라 경계 장소가 어긋나(예: 강원검색에 딸려온 충북 제천) → 진짜 위치인 주소로 필터.
+//   단축형이 풀형을 접두로 덮음(강원→강원도/강원특별자치도, 충남→충남만이라 충청남도 별도). 도 명칭개정(전북특별자치도)도 포함.
+var PL_REGIONS = [
+    { name: '수도권', sido: [
+        { name: '서울', lat: 37.5665, lng: 126.9780, km: 20, r1: ['서울'] },
+        { name: '인천', lat: 37.4563, lng: 126.7052, km: 28, r1: ['인천'] },
+        { name: '경기', lat: 37.4138, lng: 127.5183, km: 60, r1: ['경기'] }
+    ] },
+    { name: '강원', sido: [
+        { name: '강원', lat: 37.8228, lng: 128.1555, km: 80, r1: ['강원'] }
+    ] },
+    { name: '충청', sido: [
+        { name: '대전', lat: 36.3504, lng: 127.3845, km: 14, r1: ['대전'] },
+        { name: '세종', lat: 36.4801, lng: 127.2890, km: 12, r1: ['세종'] },
+        { name: '충북', lat: 36.8000, lng: 127.7000, km: 55, r1: ['충북', '충청북도'] },
+        { name: '충남', lat: 36.5184, lng: 126.8000, km: 55, r1: ['충남', '충청남도'] }
+    ] },
+    { name: '호남', sido: [
+        { name: '광주', lat: 35.1595, lng: 126.8526, km: 14, r1: ['광주'] },
+        { name: '전북', lat: 35.7175, lng: 127.1530, km: 55, r1: ['전북', '전라북도'] },
+        { name: '전남', lat: 34.8679, lng: 126.9910, km: 70, r1: ['전남', '전라남도'] }
+    ] },
+    { name: '영남', sido: [
+        { name: '부산', lat: 35.1796, lng: 129.0756, km: 20, r1: ['부산'] },
+        { name: '대구', lat: 35.8714, lng: 128.6014, km: 22, r1: ['대구'] },
+        { name: '울산', lat: 35.5384, lng: 129.3114, km: 22, r1: ['울산'] },
+        { name: '경북', lat: 36.3500, lng: 128.8000, km: 80, r1: ['경북', '경상북도'] },
+        { name: '경남', lat: 35.3500, lng: 128.2132, km: 65, r1: ['경남', '경상남도'] }
+    ] },
+    { name: '제주', sido: [
+        { name: '제주', lat: 33.4996, lng: 126.5312, km: 35, r1: ['제주'] }
+    ] }
+];
+var plRegionOpen = -1;     // -1=권역 목록 / 그 외=PL_REGIONS 인덱스(그 권역의 시도 펼침)
+var plActiveSido = null;   // 현재 선택된 시도 이름(칩 active 표시용)
+var plRegionLock = null;   // 시도 고정 필터 ON일 때 region_lv1 매칭 목록(plSearch 가 region 파라미터로 전송)
+
+function plRegionSidoOf(name) {   // 시도이름 → 속한 권역 인덱스(active 표시용)
+    for (var i = 0; i < PL_REGIONS.length; i++)
+        for (var j = 0; j < PL_REGIONS[i].sido.length; j++)
+            if (PL_REGIONS[i].sido[j].name === name) return i;
+    return -1;
+}
+function plRegionBarRender() {
+    var box = document.getElementById('rbChips');
+    if (!box) return;
+    var h = '';
+    if (plRegionOpen < 0) {   // 권역 목록(+전국 리셋)
+        h += '<button class="rb-chip rb-all' + (plActiveSido ? '' : ' active') +
+             '" onclick="plRegionReset()">🇰🇷 전국</button>';
+        var actReg = plActiveSido != null ? plRegionSidoOf(plActiveSido) : -1;
+        PL_REGIONS.forEach(function (r, i) {
+            h += '<button class="rb-chip' + (i === actReg ? ' active' : '') +
+                 '" onclick="plRegionPick(' + i + ')">' + r.name + '</button>';
+        });
+    } else {                  // 선택 권역의 시도 목록(+뒤로)
+        var r = PL_REGIONS[plRegionOpen];
+        h += '<button class="rb-chip rb-back" onclick="plRegionBack()">‹ ' + r.name + '</button>';
+        r.sido.forEach(function (s, j) {
+            h += '<button class="rb-chip' + (plActiveSido === s.name ? ' active' : '') +
+                 '" onclick="plSidoGo(' + plRegionOpen + ',' + j + ')">' + s.name + '</button>';
+        });
+    }
+    box.innerHTML = h;
+}
+function plRegionPick(i) {
+    if (PL_REGIONS[i].sido.length === 1) { plSidoGo(i, 0); return; }   // 강원·제주(시도 1개) = 바로 이동
+    plRegionOpen = i;
+    plRegionBarRender();
+}
+function plRegionBack() { plRegionOpen = -1; plRegionBarRender(); }
+function plRegionReset() {           // 전국 조망으로 복귀(시도 잠금 해제)
+    plActiveSido = null; plRegionLock = null; plRegionOpen = -1; plRegionBarRender();
+    if (!plReady) return;
+    plClearOverlay();
+    plMap.setCenter(new naver.maps.LatLng(36.5, 127.8));
+    plMap.setZoom(7);
+    plSearchHere();
+}
+function plSidoGo(i, j) {             // 시도 선택 → 그 시도로 이동 + 그 시도만 고정 표시
+    var s = PL_REGIONS[i].sido[j];
+    plActiveSido = s.name;
+    plRegionLock = s.r1;             // 시도 고정 ON → plSearch 가 region 필터 전송(반경 무시·줌 무관)
+    plRegionBarRender();
+    if (!plReady) return;
+    plClearOverlay();
+    plMap.setCenter(new naver.maps.LatLng(s.lat, s.lng));
+    plMap.setZoom(plFitZoom(s.lat, s.km));   // 시도 전체가 화면에 들어오는 줌
+    if (plChipActive()) plRunTagSearch();    // 태그 선택 중이면 그 시도로 태그 재검색(강원 벚꽃 → 충남 벚꽃)
+    else plSearch(s.lat, s.lng, s.km);       // region 잠금 상태라 backend 가 반경 무시·시도 전역 반환
+}
+// 시도 잠금 해제(주소검색·현재위치 등 다른 곳으로 이동할 때 호출)
+function plRegionClear() {
+    if (!plRegionLock && plActiveSido == null) return;
+    plRegionLock = null; plActiveSido = null; plRegionOpen = -1; plRegionBarRender();
+}
+plRegionBarRender();
 
 // ── 상단 칩 바 (3행 동시 표시) ──
 //  1행 #tbChips   : 여행/숙소/기타 테마 태그칩(최대3 AND)
@@ -1049,10 +1219,14 @@ function plChipContext() {
     plSetDisp('pl-monthbar', showTravel);
     plSetDisp('pl-foodbar',  showFood && !!(fb && fb.innerHTML));
 }
-// 칩 클릭 시 드롭다운을 그 분류로 명시적으로 맞춤(숨은 전환 방지 — 증상1 해소)
+// 하위칩(테마·달·가이드·음식) 선택 시 분류를 그 분류 단일로 맞춤(숨은 전환 방지 — 증상1 해소)
 function plEnsureCat(cat) {
+    var changed = !(plCatSel.length === 1 && plCatSel[0] === cat);
+    plCatSel = [cat];
+    plCatBarRender();
     var sel = document.getElementById('category');
-    if (sel && sel.value !== cat) { sel.value = cat; plChipContext(); }
+    if (sel) sel.value = cat;
+    if (changed) plChipContext();
 }
 // 분류 변경 = 칩 선택 초기화 + 칩바 재구성 + 이 화면(뷰포트) 기준 재검색
 function plCategoryChange() { plClearTagSel(); plChipContext(); plSearchHere(); }
@@ -1193,10 +1367,12 @@ function plTagSearch(tags, opts) {
     if (opts.guide && PL_GUIDES[opts.guide]) parts.push(PL_GUIDES[opts.guide].ko);
     parts = parts.concat(tags);
     var label = parts.join(' · ');
+    var scope = plRegionLock ? (plActiveSido || '지역') : '전국';   // 시도 고정 중이면 그 시도로 한정(예: 강원 벚꽃)
     plHint('“' + label + '” 불러오는 중…');
     var params = { module: 'place', action: 'tag_search', tags: tags.join(',') };
     if (opts.guide)    params.guide    = opts.guide;
     if (opts.category) params.category = opts.category;
+    if (plRegionLock)  params.region   = plRegionLock.join(',');    // 지역 잠금 시 그 시도로 한정
     fetch(plApiUrl(params))
         .then(function (r) { return r.json(); })
         .then(function (geo) {
@@ -1206,12 +1382,12 @@ function plTagSearch(tags, opts) {
             plRenderList(feats);
             plRefreshCurrent = function () { plTagSearch(tags, opts); };   // 수정 후 목록 갱신용
             plListMode = 'base';
-            plBaseTitle = '🏷 ' + label + ' · 전국 ' + feats.length + '곳';   // 줌아웃 복원용
+            plBaseTitle = '🏷 ' + label + ' · ' + scope + ' ' + feats.length + '곳';   // 줌아웃 복원용
             document.getElementById('plListTitle').textContent = plBaseTitle;
             plToggleList(feats.length > 0);
             if (feats.length) plFitToFeatures(feats);
-            plHint(feats.length ? ('🏷 ' + label + ' · 전국 ' + feats.length + '곳')
-                                : ('“' + label + '” 해당 장소가 없습니다'));
+            plHint(feats.length ? ('🏷 ' + label + ' · ' + scope + ' ' + feats.length + '곳')
+                                : ('“' + label + '” ' + scope + '에 해당 장소가 없습니다'));
         })
         .catch(function () { plHint('검색 실패'); });
 }
@@ -1362,14 +1538,22 @@ function plSearch(lat, lng, expandFrom, viewport) {
     plMergeSel = [];                                       // 새 검색 시 병합 선택 초기화
     plLastSearchAt = Date.now();                           // idle 자동검색 중복 방지용 타임스탬프
     if (plMap) plLastSearchZoom = plMap.getZoom();         // 줌 변경 감지 기준 갱신
+    if (!plCatSel.length) {     // 분류 전부 해제 = 표시 안 함
+        plClearMarkers(); plActive = -1; plFeatures = [];
+        plRenderList([]); plListMode = 'base'; plToggleList(false);
+        plHint('표시할 분류를 선택하세요'); return;
+    }
     var rad = (expandFrom != null) ? expandFrom : parseFloat(document.getElementById('radius').value);
-    var cat = document.getElementById('category').value;
     var sp = { module: 'place', action: 'search', lat: lat, lng: lng, radius: rad, limit: PL_MAP_LIMIT };
-    if (cat === '') {           // 전체: 맛집·스테이·캠핑을 각 기준으로 함께 표시(여행지는 항상)
-        var eff = plEffCatMr();
-        sp.mr_restaurant = eff.restaurant; sp.mr_stay = eff.stay; sp.mr_camping = eff.camping;
-    } else {                    // 단일 분류 선택
-        sp.category = cat; sp.min_review = plCatMr(cat);
+    // 최소리뷰(줌 티어·분류별) — 전체/부분 공통. 여행지·기타는 리뷰필터 없이 항상 노출.
+    var eff = plEffCatMr();
+    sp.mr_restaurant = eff.restaurant; sp.mr_stay = eff.stay; sp.mr_camping = eff.camping;
+    // 부분선택이면 그 분류들만(category IN). 전부선택이면 무필터(전체).
+    if (plCatSel.length < PL_CATS_ALL.length) sp.categories = plCatSel.join(',');
+    if (plRegionLock) {         // 시도 고정: 반경 무시·그 시도 전역(품질순 상위 limit). 줌/이동 무관 고정.
+        sp.region = plRegionLock.join(',');
+        sp.min_review = 0;
+        delete sp.mr_restaurant; delete sp.mr_stay; delete sp.mr_camping;
     }
     fetch(plApiUrl(sp))
         .then(function (r) { return r.json(); })
@@ -2330,6 +2514,7 @@ function plTagMergeApply() {
 function plGeocode() {
     var addr = document.getElementById('addr').value.trim();
     if (!addr || !plReady) return;
+    plRegionClear();               // 주소 검색 → 다른 위치로 이동하므로 시도 고정 해제
     fetch(plApiUrl({ module: 'place', action: 'geocode', address: addr }))
         .then(function (r) { return r.json(); })
         .then(function (d) {
@@ -2349,6 +2534,7 @@ function plGeocode() {
 function plMyLocation() {
     if (!plReady) return;
     if (!navigator.geolocation) { plHint('이 브라우저는 현재위치를 지원하지 않습니다'); return; }
+    plRegionClear();               // 현재위치로 이동 → 시도 고정 해제
     var btn = document.getElementById('myLocBtn');
     if (btn) btn.classList.add('loading');
     plHint('현재 위치를 확인하는 중…');
