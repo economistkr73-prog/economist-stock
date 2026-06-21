@@ -451,6 +451,145 @@ class Place
         return ['type' => 'FeatureCollection', 'features' => $features];
     }
 
+    /**
+     * ★통합 검색 — 분류(멀티) × 공간(뷰포트/지역/전국) × 도메인별 태그(독립 누적)를 한 쿼리로.
+     *  결과 = 선택 분류들의 '합집합'. 각 도메인은 자기 태그로만 좁혀지고, 서로·분류를 초기화하지 않는다.
+     *  예) 강원 + [여행지,맛집] + 여행태그:계곡 + 맛집태그:생선회
+     *      → (강원 여행지 중 계곡) ∪ (강원 맛집 중 생선회). 한쪽 태그 미선택이면 그 분류는 전체.
+     *  $opts:
+     *   - mode         : 'viewport'|'region'|'nation'
+     *   - lat,lng,radiusKm : 뷰포트(mode=viewport) 중심·반경
+     *   - regionIn     : array  주소접두 목록(mode=region)
+     *   - categories   : array  표시할 분류(비면 전체 5종)
+     *   - travelTags   : array  여행지(theme/month)를 AND 로 좁힘
+     *   - foodTags     : array  맛집(cuisine/grade)을 AND 로 좁힘
+     *   - guide        : string 맛집 가이드 EXISTS
+     *   - catMinReview : map    {restaurant,stay,camping} 분류별 최소 리뷰(뷰포트 줌 티어)
+     *   - limit        : int
+     */
+    public function searchUnified(array $opts): array
+    {
+        $allCats = ['travel', 'restaurant', 'stay', 'camping', 'etc'];
+        $mode    = in_array($opts['mode'] ?? 'viewport', ['viewport', 'region', 'nation'], true) ? $opts['mode'] : 'viewport';
+        $lat     = (float)($opts['lat'] ?? 0);
+        $lng     = (float)($opts['lng'] ?? 0);
+        $radius  = max(0.1, min(600.0, (float)($opts['radiusKm'] ?? 5)));
+        $regionIn = array_values(array_filter(array_map('trim', (array)($opts['regionIn'] ?? [])), fn($r) => $r !== ''));
+        $cats    = array_values(array_intersect($allCats, (array)($opts['categories'] ?? [])));
+        if (!$cats) $cats = $allCats;   // 미지정 = 전체(오버레이 등 하위호환)
+        $travelTags = array_values(array_unique(array_filter(array_map('trim', (array)($opts['travelTags'] ?? [])), fn($t) => $t !== '')));
+        $foodTags   = array_values(array_unique(array_filter(array_map('trim', (array)($opts['foodTags']   ?? [])), fn($t) => $t !== '')));
+        $stayTags   = array_values(array_unique(array_filter(array_map('trim', (array)($opts['stayTags']   ?? [])), fn($t) => $t !== '')));
+        $campTags   = array_values(array_unique(array_filter(array_map('trim', (array)($opts['campingTags'] ?? [])), fn($t) => $t !== '')));
+        $guide   = trim((string)($opts['guide'] ?? '')); $guide = ($guide !== '' && FoodGuide::exists($guide)) ? $guide : null;
+        $catMr   = (array)($opts['catMinReview'] ?? []);
+        $limit   = max(50, min(3000, (int)($opts['limit'] ?? 500)));
+        if ($mode === 'region' && !$regionIn) $mode = 'nation';   // 지역 모드인데 접두 없음 → 전국
+
+        $args = [':lat_c' => $lat, ':lng_c' => $lng, ':lat_s' => $lat];
+        $sql  = "SELECT p.id, p.name, p.category, p.lat, p.lng, p.phone,
+                        p.address, p.region_lv1, p.region_lv2,
+                        p.period_start, p.period_end, p.attributes, p.updated_at,
+                        p.review_count, p.score, p.save_count,
+                        (6371 * ACOS(LEAST(1.0,
+                           COS(RADIANS(:lat_c)) * COS(RADIANS(p.lat)) *
+                           COS(RADIANS(p.lng) - RADIANS(:lng_c)) +
+                           SIN(RADIANS(:lat_s)) * SIN(RADIANS(p.lat))
+                        ))) AS dist_km,
+                        (SELECT COUNT(*) FROM place_ref r WHERE r.place_id = p.id) AS ref_count,
+                        (SELECT GROUP_CONCAT(t.tag ORDER BY t.tag SEPARATOR ',') FROM place_tag t WHERE t.place_id = p.id AND t.kind <> 'month') AS tags,
+                        (SELECT GROUP_CONCAT(CONCAT(g.guide, ':', COALESCE(g.grade, '')) ORDER BY g.guide SEPARATOR ',') FROM place_guide g WHERE g.place_id = p.id) AS guides
+                 FROM place p
+                 WHERE p.is_active = 1 AND p.geocode_status = 'ok'";
+
+        // ── 공간 범위
+        if ($mode === 'region') {
+            $ors = [];
+            foreach ($regionIn as $k => $rr) { $pp = ":r1_{$k}"; $ors[] = "p.address LIKE {$pp}"; $args[$pp] = $rr . '%'; }
+            $sql .= " AND (" . implode(' OR ', $ors) . ")";
+        } elseif ($mode === 'viewport') {
+            $latDelta = $radius / 111.0;
+            $cos      = max(cos(deg2rad($lat)), 0.01);
+            $lngDelta = $radius / (111.0 * $cos);
+            $sql .= " AND p.lat BETWEEN :lat_min AND :lat_max AND p.lng BETWEEN :lng_min AND :lng_max";
+            $args[':lat_min'] = $lat - $latDelta; $args[':lat_max'] = $lat + $latDelta;
+            $args[':lng_min'] = $lng - $lngDelta; $args[':lng_max'] = $lng + $lngDelta;
+        }   // mode==='nation' → 공간 필터 없음(전국)
+
+        // ── 도메인별 태그 서브쿼리(있을 때만 — 모든 태그를 보유한 장소만)
+        $mkTagClause = function (array $tags, string $pfx) use (&$args) {
+            if (!$tags) return '';
+            $ph = [];
+            foreach ($tags as $i => $t) { $pp = ":{$pfx}{$i}"; $ph[] = $pp; $args[$pp] = $t; }
+            return " AND p.id IN (SELECT pt.place_id FROM place_tag pt WHERE pt.tag IN (" . implode(',', $ph) . ")
+                     GROUP BY pt.place_id HAVING COUNT(DISTINCT pt.tag) = " . count($tags) . ")";
+        };
+        $travelClause = $mkTagClause($travelTags, 'tt');
+        $foodClause   = $mkTagClause($foodTags, 'ft');
+        $stayClause   = $mkTagClause($stayTags, 'sg');
+        $campClause   = $mkTagClause($campTags, 'cg');
+        $guideClause  = '';
+        if ($guide !== null) { $guideClause = " AND EXISTS (SELECT 1 FROM place_guide g2 WHERE g2.place_id = p.id AND g2.guide = :guide)"; $args[':guide'] = $guide; }
+
+        // ── 분류별 OR 절(선택 분류들의 합집합). 각 도메인은 자기 태그/리뷰티어로만 좁힘.
+        $reviewTier = function (string $c, string $vp) use ($catMr, &$args) {
+            $mr = (int)($catMr[$c] ?? 0);
+            if ($mr <= 0) return '';
+            $args[$vp] = $mr;
+            // 리뷰 없는(NULL) 곳·가이드 등재는 항상 노출, 그 외엔 리뷰 기준 이상.
+            return " AND (p.review_count IS NULL OR p.review_count >= {$vp} OR EXISTS (SELECT 1 FROM place_guide g3 WHERE g3.place_id = p.id))";
+        };
+        $catClauses = [];
+        foreach ($cats as $c) {
+            if ($c === 'travel') {
+                $catClauses[] = "(p.category = 'travel'{$travelClause})";
+            } elseif ($c === 'restaurant') {
+                $catClauses[] = "(p.category = 'restaurant'{$foodClause}{$guideClause}" . $reviewTier('restaurant', ':mr_r') . ")";
+            } elseif ($c === 'stay') {
+                $catClauses[] = "(p.category = 'stay'{$stayClause}" . $reviewTier('stay', ':mr_s') . ")";
+            } elseif ($c === 'camping') {
+                $catClauses[] = "(p.category = 'camping'{$campClause}" . $reviewTier('camping', ':mr_c') . ")";
+            } else {
+                $catClauses[] = "(p.category = 'etc')";
+            }
+        }
+        $sql .= " AND (" . implode(' OR ', $catClauses) . ")";
+
+        if ($mode === 'viewport') { $sql .= " HAVING dist_km <= :radius"; $args[':radius'] = $radius; }
+        $sql .= " ORDER BY (p.category = 'restaurant') ASC,
+                           p.review_count DESC, p.score DESC, p.save_count DESC,
+                           dist_km ASC
+                  LIMIT {$limit}";
+
+        $st = $this->pdo->prepare($sql);
+        $st->execute($args);
+        $features = [];
+        while ($row = $st->fetch(PDO::FETCH_ASSOC)) {
+            $features[] = [
+                'type' => 'Feature',
+                'geometry' => ['type' => 'Point', 'coordinates' => [(float)$row['lng'], (float)$row['lat']]],
+                'properties' => [
+                    'id'           => (int)$row['id'],
+                    'name'         => $row['name'],
+                    'category'     => $row['category'],
+                    'phone'        => $row['phone'],
+                    'address'      => $row['address'],
+                    'region_lv1'   => $row['region_lv1'],
+                    'region_lv2'   => $row['region_lv2'],
+                    'period_start' => $row['period_start'],
+                    'period_end'   => $row['period_end'],
+                    'attributes'   => $row['attributes'] ? json_decode($row['attributes'], true) : null,
+                    'updated_at'   => $row['updated_at'],
+                    'ref_count'    => (int)$row['ref_count'],
+                    'tags'         => $row['tags'] ? explode(',', $row['tags']) : [],
+                    'guides'       => self::parseGuides($row['guides'] ?? null),
+                    'dist_km'      => ($mode === 'viewport') ? round((float)$row['dist_km'], 3) : null,
+                ],
+            ];
+        }
+        return ['type' => 'FeatureCollection', 'features' => $features];
+    }
+
     /** 단일 태그 검색(편의 래퍼) */
     public function searchByTag(string $tag, int $limit = 1500): array
     {
@@ -1005,7 +1144,7 @@ class Place
      *   장소 기준 태그별 distinct 개수 → 클릭 시 searchByTags 결과와 카운트가 일치한다.
      *   false(기본): 자동완성·태그관리용 — (tag, kind)별 전체 행 수.
      */
-    public function listTags(int $limit = 500, bool $mappableOnly = false, ?string $kind = null): array
+    public function listTags(int $limit = 500, bool $mappableOnly = false, ?string $kind = null, ?string $category = null, ?array $regionIn = null): array
     {
         $limit = max(1, min(2000, $limit));
         // kind 는 콤마로 여러 종류 허용(예: 'cuisine,grade' = 맛집 칩바)
@@ -1016,6 +1155,19 @@ class Place
             foreach ($kinds as $i => $k) { $ph[] = ":k{$i}"; $kindArgs[":k{$i}"] = $k; }
             $kindIn = implode(',', $ph);
         }
+        // 분류 스코프(칩바 분류별 분리용): 그 분류 장소에 달린 태그만.
+        //  예) 같은 kind=cuisine 이라도 category=restaurant=음식종류 / category=stay=숙박유형 / camping=캠핑유형 으로 분리.
+        $allowedCat = ['travel', 'restaurant', 'stay', 'camping', 'etc'];
+        $catCond = ''; $catArg = [];
+        if ($category !== null && in_array($category, $allowedCat, true)) { $catCond = " AND p.category = :pcat"; $catArg[':pcat'] = $category; }
+        // 지역 스코프(시도 고정 시): 그 지역 장소의 태그·카운트만(예: 강원 뷔페 5). 주소 접두 매칭.
+        $regCond = ''; $regArg = [];
+        $regs = array_values(array_filter(array_map('trim', (array)($regionIn ?? [])), fn($r) => $r !== ''));
+        if ($regs) {
+            $ors = [];
+            foreach ($regs as $i => $rr) { $rp = ":tlr{$i}"; $ors[] = "p.address LIKE {$rp}"; $regArg[$rp] = $rr . '%'; }
+            $regCond = " AND (" . implode(' OR ', $ors) . ")";
+        }
         if ($mappableOnly) {
             // 여행 칩바(kind 미지정): 월·음식·등급 제외 / 맛집 칩바: 지정 kind IN
             $kindCond = $kinds ? "pt.kind IN ({$kindIn})" : "pt.kind NOT IN ('month','cuisine','grade')";
@@ -1023,15 +1175,19 @@ class Place
                 "SELECT pt.tag, MIN(pt.kind) kind, COUNT(DISTINCT pt.place_id) cnt
                    FROM place_tag pt
                    JOIN place p ON p.id = pt.place_id
-                  WHERE {$kindCond} AND p.is_active = 1 AND p.geocode_status = 'ok'
+                  WHERE {$kindCond} AND p.is_active = 1 AND p.geocode_status = 'ok'{$catCond}{$regCond}
                   GROUP BY pt.tag ORDER BY cnt DESC, pt.tag LIMIT {$limit}"
             );
-            $st->execute($kindArgs);
+            $st->execute($kindArgs + $catArg + $regArg);
             return $st->fetchAll(PDO::FETCH_ASSOC);
         }
+        // cat = 그 태그가 가장 많이 달린 장소 분류(대표 분류). 태그 관리 모달이 분류별로 묶는 데 사용.
+        //  → 같은 kind=cuisine 이라도 한식=restaurant / 펜션=stay / 캠핑=camping 으로 정확히 분리됨.
+        $catSub = "(SELECT p2.category FROM place_tag x JOIN place p2 ON p2.id = x.place_id
+                     WHERE x.tag = place_tag.tag GROUP BY p2.category ORDER BY COUNT(*) DESC LIMIT 1)";
         if ($kinds) {
             $st = $this->pdo->prepare(
-                "SELECT tag, kind, COUNT(*) cnt FROM place_tag
+                "SELECT tag, kind, COUNT(*) cnt, {$catSub} AS cat FROM place_tag
                   WHERE kind IN ({$kindIn})
                   GROUP BY tag, kind ORDER BY cnt DESC, tag LIMIT {$limit}"
             );
@@ -1039,7 +1195,7 @@ class Place
             return $st->fetchAll(PDO::FETCH_ASSOC);
         }
         $st = $this->pdo->query(
-            "SELECT tag, kind, COUNT(*) cnt FROM place_tag
+            "SELECT tag, kind, COUNT(*) cnt, {$catSub} AS cat FROM place_tag
               GROUP BY tag, kind ORDER BY cnt DESC, tag LIMIT {$limit}"
         );
         return $st->fetchAll(PDO::FETCH_ASSOC);
@@ -1180,15 +1336,23 @@ class Place
      * 가이드별 장소 수(상단 칩바용). 지도에 뜨는(ok·활성) 맛집 기준 distinct.
      * @return array [{guide, cnt}] cnt 내림차순
      */
-    public function guideCounts(): array
+    public function guideCounts(?array $regionIn = null): array
     {
-        $st = $this->pdo->query(
+        $regCond = ''; $args = [];
+        $regs = array_values(array_filter(array_map('trim', (array)($regionIn ?? [])), fn($r) => $r !== ''));
+        if ($regs) {
+            $ors = [];
+            foreach ($regs as $i => $rr) { $rp = ":gr{$i}"; $ors[] = "p.address LIKE {$rp}"; $args[$rp] = $rr . '%'; }
+            $regCond = " AND (" . implode(' OR ', $ors) . ")";
+        }
+        $st = $this->pdo->prepare(
             "SELECT g.guide, COUNT(DISTINCT g.place_id) cnt
                FROM place_guide g
                JOIN place p ON p.id = g.place_id
-              WHERE p.is_active = 1 AND p.geocode_status = 'ok' AND p.category = 'restaurant'
+              WHERE p.is_active = 1 AND p.geocode_status = 'ok' AND p.category = 'restaurant'{$regCond}
               GROUP BY g.guide ORDER BY cnt DESC, g.guide"
         );
+        $st->execute($args);
         return $st->fetchAll(PDO::FETCH_ASSOC);
     }
 }

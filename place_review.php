@@ -119,6 +119,14 @@ function dupNorm(string $s): string {
     return preg_replace('/[\s\-·,()\[\]]+/u', '', mb_strtolower(trim($s)));
 }
 
+// 두 좌표 간 거리(m) — Haversine
+function haversineM(float $lat1, float $lng1, float $lat2, float $lng2): float {
+    $R = 6371000.0;
+    $dLat = deg2rad($lat2 - $lat1); $dLng = deg2rad($lng2 - $lng1);
+    $a = sin($dLat / 2) ** 2 + cos(deg2rad($lat1)) * cos(deg2rad($lat2)) * sin($dLng / 2) ** 2;
+    return $R * 2 * atan2(sqrt($a), sqrt(1 - $a));
+}
+
 // 좌표 근접 + 이름 유사로 '기존 중복 장소' 탐지(가장 가까운 것 반환, 없으면 null).
 //   매칭 = 250m 이내 AND 이름이 같거나 한쪽이 다른쪽을 포함(3글자↑). 보수적(애매하면 신규로 추가)
 function findDuplicate(Place $place, string $name, float $lat, float $lng): ?array {
@@ -417,6 +425,49 @@ if ($action !== 'view') {
     header('Content-Type: application/json; charset=utf-8');
     try {
         switch ($action) {
+            case 'cat_probe': {                             // 진단(읽기): 분류별 cuisine 태그·네이버카테고리 분포 + 이름 샘플
+                $c = preg_replace('/[^a-z]/', '', (string)($_GET['cat'] ?? 'camping'));
+                $t = $pdo->prepare("SELECT pt.tag, COUNT(*) cnt FROM place_tag pt JOIN place p ON p.id = pt.place_id
+                                    WHERE p.category = ? AND pt.kind = 'cuisine' GROUP BY pt.tag ORDER BY cnt DESC");
+                $t->execute([$c]); $tags = $t->fetchAll(PDO::FETCH_ASSOC);
+                $n = $pdo->prepare("SELECT JSON_UNQUOTE(JSON_EXTRACT(attributes, '$.naver.cat')) ncat, COUNT(*) cnt
+                                    FROM place WHERE category = ? AND geocode_status = 'ok'
+                                    GROUP BY ncat ORDER BY cnt DESC LIMIT 80");
+                $n->execute([$c]); $ncats = $n->fetchAll(PDO::FETCH_ASSOC);
+                $s = $pdo->prepare("SELECT id, name, JSON_UNQUOTE(JSON_EXTRACT(attributes, '$.naver.cat')) ncat
+                                    FROM place WHERE category = ? AND geocode_status = 'ok' ORDER BY RAND() LIMIT 40");
+                $s->execute([$c]); $sample = $s->fetchAll(PDO::FETCH_ASSOC);
+                $tot = $pdo->prepare("SELECT COUNT(*) FROM place WHERE category = ? AND geocode_status = 'ok'");
+                $tot->execute([$c]);
+                echo json_encode(['ok' => true, 'cat' => $c, 'total' => (int)$tot->fetchColumn(),
+                                  'cuisine_tags' => $tags, 'naver_cats' => $ncats, 'sample' => $sample], JSON_UNESCAPED_UNICODE);
+                break;
+            }
+            case 'camp_classify': {                         // 캠핑장 이름 키워드 → 유형 태그(kind=cuisine). apply=1 일 때만 적재
+                $apply = !empty($_GET['apply']);
+                $RULES = [
+                    '글램핑'   => ['글램핑', '글램 핑', 'glamping', '글램 핑'],
+                    '오토캠핑' => ['오토캠핑', '오토 캠핑', '오토캠프', '자동차야영'],
+                    '카라반'   => ['카라반', '캠핑카', 'caravan'],
+                ];
+                $rows = $pdo->query("SELECT id, name FROM place WHERE category = 'camping' AND is_active = 1")->fetchAll(PDO::FETCH_ASSOC);
+                $cnt = ['글램핑' => 0, '오토캠핑' => 0, '카라반' => 0];
+                $tagged = 0; $multi = 0; $none = 0; $added = 0; $examples = [];
+                $ins = $pdo->prepare("INSERT IGNORE INTO place_tag (place_id, kind, tag) VALUES (?, 'cuisine', ?)");
+                foreach ($rows as $r) {
+                    $name = (string)$r['name']; $hits = [];
+                    foreach ($RULES as $canon => $kws) {
+                        foreach ($kws as $kw) { if (mb_stripos($name, $kw) !== false) { $hits[] = $canon; break; } }
+                    }
+                    if (!$hits) { $none++; continue; }
+                    $tagged++; if (count($hits) > 1) { $multi++; if (count($examples) < 12) $examples[] = $name . ' → ' . implode('+', $hits); }
+                    foreach ($hits as $h) { $cnt[$h]++; if ($apply) { $ins->execute([(int)$r['id'], $h]); $added += $ins->rowCount(); } }
+                }
+                echo json_encode(['ok' => true, 'apply' => $apply, 'total' => count($rows),
+                                  'by_type' => $cnt, 'tagged_places' => $tagged, 'multi_type' => $multi,
+                                  'no_keyword' => $none, 'tags_added' => $added, 'multi_examples' => $examples], JSON_UNESCAPED_UNICODE);
+                break;
+            }
             case 'fetch': {                                 // 커서 방식: start_id 이상에서 limit 개(빈 구간 건너뜀)
                 $start = max(1, (int)($_GET['start_id'] ?? 1));
                 $limit = (int)($_GET['limit'] ?? 100);
@@ -666,6 +717,92 @@ if ($action !== 'view') {
                     $out[] = $r;
                 }
                 echo json_encode(['ok' => true, 'mode' => $write ? 'apply' : 'preview', 'jobs' => count($out), 'summary' => $sum, 'results' => $out], JSON_UNESCAPED_UNICODE);
+                break;
+            }
+            case 'dup_groups': {   // 진단(읽기): 정규화이름 동일 + 좌표근접 = 중복 후보 그룹
+                $distM    = max(10, min(2000, (int)($_GET['dist'] ?? 250)));
+                $limit    = max(1, min(500, (int)($_GET['limit'] ?? 100)));
+                $offset   = max(0, (int)($_GET['offset'] ?? 0));
+                $catF     = preg_replace('/[^a-z]/', '', (string)($_GET['cat'] ?? ''));
+                $crossCat = !empty($_GET['cross_cat']);
+                $minLen   = max(1, (int)($_GET['min_len'] ?? 2));   // 정규화이름 최소 길이(짧은 일반명 제외)
+                $minRefs  = (int)($_GET['min_refs'] ?? 0);          // 그룹 대표 ref 최소(영향 큰 것만)
+
+                $where = "p.is_active=1 AND p.lat IS NOT NULL AND p.geocode_status='ok'";
+                $params = [];
+                if ($catF !== '') { $where .= " AND p.category = ?"; $params[] = $catF; }
+                $st = $pdo->prepare(
+                    "SELECT p.id, p.name, p.category, p.lat, p.lng, p.address, COUNT(r.id) ref_cnt
+                       FROM place p LEFT JOIN place_ref r ON r.place_id = p.id
+                      WHERE {$where}
+                      GROUP BY p.id"
+                );
+                $st->execute($params);
+                // 정규화이름(+분류) 키로 버킷팅
+                $buckets = [];
+                foreach ($st as $r) {
+                    $nk = dupNorm((string)$r['name']);
+                    if (mb_strlen($nk) < $minLen) continue;
+                    $key = $crossCat ? $nk : ($nk . '|' . $r['category']);
+                    $buckets[$key][] = $r;
+                }
+                // 각 버킷 내 좌표 근접 클러스터링(클러스터의 어느 멤버와도 근접하면 합류)
+                $groups = [];
+                foreach ($buckets as $bk => $items) {
+                    if (count($items) < 2) continue;
+                    $n = count($items); $used = [];
+                    for ($i = 0; $i < $n; $i++) {
+                        if (isset($used[$i])) continue;
+                        $cluster = [$items[$i]]; $used[$i] = true;
+                        for ($j = $i + 1; $j < $n; $j++) {
+                            if (isset($used[$j])) continue;
+                            foreach ($cluster as $cm) {
+                                if (haversineM((float)$cm['lat'], (float)$cm['lng'], (float)$items[$j]['lat'], (float)$items[$j]['lng']) <= $distM) {
+                                    $cluster[] = $items[$j]; $used[$j] = true; break;
+                                }
+                            }
+                        }
+                        if (count($cluster) < 2) continue;
+                        // 대표 = ref 최다, 동률이면 가장 낮은 id
+                        usort($cluster, fn($a, $b) => ((int)$b['ref_cnt'] <=> (int)$a['ref_cnt']) ?: ((int)$a['id'] <=> (int)$b['id']));
+                        $to = $cluster[0];
+                        if ((int)$to['ref_cnt'] < $minRefs) continue;
+                        $groups[] = [
+                            'key'      => $bk,
+                            'to_id'    => (int)$to['id'],
+                            'to_name'  => $to['name'],
+                            'to_refs'  => (int)$to['ref_cnt'],
+                            'category' => $to['category'],
+                            'from_ids' => array_map(fn($x) => (int)$x['id'], array_slice($cluster, 1)),
+                            'members'  => array_map(fn($x) => [
+                                'id' => (int)$x['id'], 'name' => $x['name'], 'cat' => $x['category'],
+                                'lat' => (float)$x['lat'], 'lng' => (float)$x['lng'], 'addr' => $x['address'], 'refs' => (int)$x['ref_cnt'],
+                            ], $cluster),
+                        ];
+                    }
+                }
+                // 멤버 많은(=영향 큰) 그룹 먼저, 그다음 ref 많은 순
+                usort($groups, fn($a, $b) => (count($b['members']) <=> count($a['members'])) ?: ($b['to_refs'] <=> $a['to_refs']));
+                $totalGroups = count($groups);
+                $totalExtra  = array_sum(array_map(fn($g) => count($g['from_ids']), $groups));
+                echo json_encode([
+                    'ok' => true, 'dist_m' => $distM, 'cross_cat' => $crossCat, 'min_len' => $minLen, 'cat' => $catF ?: null,
+                    'total_groups' => $totalGroups, 'total_removable' => $totalExtra,
+                    'offset' => $offset, 'limit' => $limit,
+                    'groups' => array_slice($groups, $offset, $limit),
+                ], JSON_UNESCAPED_UNICODE);
+                break;
+            }
+            case 'dup_merge': {   // 쓰기: jobs=[{to_id,from_ids:[...]}] 병합(mergePlaces 재사용)
+                $jobs = json_decode((string)($_POST['jobs'] ?? $_GET['jobs'] ?? ''), true);
+                if (!is_array($jobs) || !$jobs) { http_response_code(400); echo json_encode(['ok' => false, 'msg' => 'jobs=[{to_id,from_ids}] 필요']); break; }
+                $results = []; $merged = 0; $failed = 0;
+                foreach ($jobs as $j) {
+                    $r = $place->mergePlaces((int)($j['to_id'] ?? 0), array_map('intval', (array)($j['from_ids'] ?? [])));
+                    if (!empty($r['ok'])) $merged += (int)($r['merged'] ?? 0); else $failed++;
+                    $results[] = $r;
+                }
+                echo json_encode(['ok' => true, 'jobs' => count($jobs), 'merged' => $merged, 'failed' => $failed, 'results' => $results], JSON_UNESCAPED_UNICODE);
                 break;
             }
             default:

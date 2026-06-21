@@ -48,7 +48,7 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
     $place = new Place($pdo);
 
     // 게스트(공유 링크)는 읽기전용 — 검색/출처/지오코딩/자동완성/태그검색만 허용
-    if ($isGuest && !in_array($action, ['search', 'refs', 'geocode', 'suggest', 'place_name_search', 'tag_list', 'tag_search', 'guide_list', 'place_guides'], true)) {
+    if ($isGuest && !in_array($action, ['search', 'refs', 'geocode', 'route', 'suggest', 'place_name_search', 'tag_list', 'tag_search', 'guide_list', 'place_guides'], true)) {
         http_response_code(403);
         echo json_encode(['ok' => false, 'msg' => 'forbidden']);
         return;
@@ -57,63 +57,61 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
     switch ($action) {
         // ── 반경 검색 → GeoJSON ──────────────────────────
         case 'search': {
+            // ★통합 검색: 분류(멀티) × 공간(뷰포트/지역/전국) × 도메인별 태그(여행/맛집 독립 누적).
+            //  결과 = 선택 분류들의 합집합. 각 도메인은 자기 태그로만 좁힘(서로·분류 초기화 없음).
             if (!isset($_GET['lat'], $_GET['lng'])) {
                 http_response_code(400);
                 echo json_encode(['ok' => false, 'msg' => 'lat, lng 가 필요합니다.']);
                 return;
             }
-            $lat      = (float)$_GET['lat'];
-            $lng      = (float)$_GET['lng'];
-            $radius   = (float)($_GET['radius'] ?? 5);
-            $radius   = max(0.1, min(600.0, $radius));         // 0.1~600km(뷰포트 전국 커버) 클램프
-            $category = trim((string)($_GET['category'] ?? ''));
-            $keyword  = trim((string)($_GET['keyword'] ?? ''));
-            $guide    = trim((string)($_GET['guide'] ?? ''));
-            $minReview = max(0, (int)($_GET['min_review'] ?? 0));   // 단일 분류 최소 리뷰수(0=전체)
-            // 뷰포트 top-N: 지도에 표시할 상위 N개(리뷰순). 기본 500, 50~3000 클램프.
-            $limit = max(50, min(3000, (int)($_GET['limit'] ?? 500)));
-            // 분류별 기준('전체' 모드): mr_restaurant/mr_stay/mr_camping → 함께 노출.
-            $catMinReview = [];
-            foreach (['restaurant', 'stay', 'camping'] as $c) {
-                if (isset($_GET['mr_' . $c]) && $_GET['mr_' . $c] !== '') {
-                    $catMinReview[$c] = max(0, (int)$_GET['mr_' . $c]);
-                }
-            }
-
+            $lat    = (float)$_GET['lat'];
+            $lng    = (float)$_GET['lng'];
+            $radius = max(0.1, min(600.0, (float)($_GET['radius'] ?? 5)));
+            $limit  = max(50, min(3000, (int)($_GET['limit'] ?? 500)));
             $allowed = ['travel', 'stay', 'restaurant', 'camping', 'etc'];
-            if ($category !== '' && !in_array($category, $allowed, true)) {
-                $category = '';
-            }
-            if ($guide !== '' && !FoodGuide::exists($guide)) $guide = '';
 
-            // region: 시도 고정 필터(주소 접두 목록, 콤마구분). 오면 반경 무시·그 시도 전역.
+            // 분류 멀티선택(콤마구분) — 미지정이면 전체(오버레이 등)
+            $cats = [];
+            foreach (explode(',', (string)($_GET['categories'] ?? '')) as $cv) {
+                $cv = trim($cv);
+                if ($cv !== '' && in_array($cv, $allowed, true)) $cats[] = $cv;
+            }
+            // 지역 주소접두 목록(콤마구분) — 오면 지역 모드
             $regionIn = [];
-            if (isset($_GET['region']) && $_GET['region'] !== '') {
-                foreach (explode(',', (string)$_GET['region']) as $rv) {
-                    $rv = trim($rv);
-                    if ($rv !== '') $regionIn[] = $rv;
-                }
+            foreach (explode(',', (string)($_GET['region'] ?? '')) as $rv) {
+                $rv = trim($rv);
+                if ($rv !== '') $regionIn[] = $rv;
             }
-            // categories: 분류 멀티선택(콤마구분) → category IN. 단일 category 보다 우선.
-            $categoriesIn = [];
-            if (isset($_GET['categories']) && $_GET['categories'] !== '') {
-                foreach (explode(',', (string)$_GET['categories']) as $cv) {
-                    $cv = trim($cv);
-                    if ($cv !== '' && in_array($cv, $allowed, true)) $categoriesIn[] = $cv;
-                }
+            // 도메인별 태그(콤마구분): 여행지(theme/month) / 맛집(cuisine/grade) / 숙소·캠핑(분류별 유형)
+            $travelTags = array_values(array_filter(array_map('trim', explode(',', (string)($_GET['travel_tags']  ?? ''))), fn($t) => $t !== ''));
+            $foodTags   = array_values(array_filter(array_map('trim', explode(',', (string)($_GET['food_tags']    ?? ''))), fn($t) => $t !== ''));
+            $stayTags   = array_values(array_filter(array_map('trim', explode(',', (string)($_GET['stay_tags']    ?? ''))), fn($t) => $t !== ''));
+            $campTags   = array_values(array_filter(array_map('trim', explode(',', (string)($_GET['camping_tags'] ?? ''))), fn($t) => $t !== ''));
+            $guide = trim((string)($_GET['guide'] ?? ''));
+            // 분류별 최소리뷰(줌 티어): mr_restaurant/mr_stay/mr_camping
+            $catMr = [];
+            foreach (['restaurant', 'stay', 'camping'] as $c) {
+                if (isset($_GET['mr_' . $c]) && $_GET['mr_' . $c] !== '') $catMr[$c] = max(0, (int)$_GET['mr_' . $c]);
             }
+            // 공간 모드: region 우선 → scope=nation → 뷰포트
+            $scope = trim((string)($_GET['scope'] ?? ''));
+            $mode  = $regionIn ? 'region' : ($scope === 'nation' ? 'nation' : 'viewport');
 
-            $geojson = $place->searchNearby(
-                $lat, $lng, $radius,
-                $category !== '' ? $category : null,
-                $keyword  !== '' ? $keyword  : null,
-                $limit,
-                $guide !== '' ? $guide : null,
-                $minReview,
-                $catMinReview ?: null,
-                $regionIn ?: null,
-                $categoriesIn ?: null
-            );
+            $geojson = $place->searchUnified([
+                'mode'         => $mode,
+                'lat'          => $lat,
+                'lng'          => $lng,
+                'radiusKm'     => $radius,
+                'regionIn'     => $regionIn,
+                'categories'   => $cats,
+                'travelTags'   => $travelTags,
+                'foodTags'     => $foodTags,
+                'stayTags'     => $stayTags,
+                'campingTags'  => $campTags,
+                'guide'        => $guide,
+                'catMinReview' => $catMr,
+                'limit'        => $limit,
+            ]);
             echo json_encode($geojson, JSON_UNESCAPED_UNICODE);
             break;
         }
@@ -280,9 +278,13 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
             // bar=1: 상단 칩바용 — kind 무시·월/음식 제외·지도표시(ok·활성) 장소 기준 distinct
             //        → 칩 카운트가 클릭 시 tag_search 결과와 일치. 그 외: 자동완성·태그관리용 전체
             // kind=cuisine: 맛집 음식 칩바용(음식 종류 태그만)
+            // category=restaurant/stay/camping: 그 분류 장소의 태그만(맛집 음식 / 숙소 숙박유형 / 캠핑 유형 분리)
+            // region=주소접두,…: 시도 고정 시 그 지역 태그·카운트만(예: 강원 뷔페 5)
             $bar  = ((int)($_GET['bar'] ?? 0) === 1);
             $kind = trim((string)($_GET['kind'] ?? ''));
-            echo json_encode(['ok' => true, 'items' => $place->listTags(500, $bar, $kind !== '' ? $kind : null)], JSON_UNESCAPED_UNICODE);
+            $tlCat = trim((string)($_GET['category'] ?? ''));
+            $tlReg = array_values(array_filter(array_map('trim', explode(',', (string)($_GET['region'] ?? ''))), fn($r) => $r !== ''));
+            echo json_encode(['ok' => true, 'items' => $place->listTags(500, $bar, $kind !== '' ? $kind : null, $tlCat !== '' ? $tlCat : null, $tlReg ?: null)], JSON_UNESCAPED_UNICODE);
             break;
         }
         case 'tag_search': {            // 태그(들) AND 검색 → GeoJSON. tags=콤마구분, 또는 단일 tag
@@ -312,8 +314,9 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
         }
 
         // ── 맛집 가이드(중분류) ──────────────────────────
-        case 'guide_list': {            // 가이드별 장소 수(맛집 칩바). [{guide,cnt}]
-            echo json_encode(['ok' => true, 'items' => $place->guideCounts(), 'defs' => FoodGuide::clientDefs()], JSON_UNESCAPED_UNICODE);
+        case 'guide_list': {            // 가이드별 장소 수(맛집 칩바). [{guide,cnt}]. region 으로 지역 스코프.
+            $glReg = array_values(array_filter(array_map('trim', explode(',', (string)($_GET['region'] ?? ''))), fn($r) => $r !== ''));
+            echo json_encode(['ok' => true, 'items' => $place->guideCounts($glReg ?: null), 'defs' => FoodGuide::clientDefs()], JSON_UNESCAPED_UNICODE);
             break;
         }
         case 'place_guides': {          // 한 장소의 가이드 [{guide,grade}]
@@ -412,6 +415,29 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
                 }
             }
             echo json_encode($r, JSON_UNESCAPED_UNICODE);
+            break;
+        }
+
+        // ── 자동차 길찾기(네이버 Directions) — start/goal = "경도,위도" ─
+        case 'route': {
+            $start = trim((string)($_GET['start'] ?? $_POST['start'] ?? ''));
+            $goal  = trim((string)($_GET['goal']  ?? $_POST['goal']  ?? ''));
+            if (!preg_match('/^-?\d+(\.\d+)?,-?\d+(\.\d+)?$/', $start) ||
+                !preg_match('/^-?\d+(\.\d+)?,-?\d+(\.\d+)?$/', $goal)) {
+                http_response_code(400);
+                echo json_encode(['ok' => false, 'msg' => 'start, goal(=경도,위도) 형식이 필요합니다.']);
+                return;
+            }
+            $option = preg_replace('/[^a-z]/', '', (string)($_GET['option'] ?? $_POST['option'] ?? 'trafast'));
+            // 경유지: "경도,위도|경도,위도" (최대 5 = Directions 5). 형식 안 맞는 토큰은 버림
+            $wpRaw = trim((string)($_GET['waypoints'] ?? $_POST['waypoints'] ?? ''));
+            $waypoints = '';
+            if ($wpRaw !== '') {
+                $valid = array_filter(array_map('trim', explode('|', $wpRaw)),
+                    fn($w) => preg_match('/^-?\d+(\.\d+)?,-?\d+(\.\d+)?$/', $w));
+                $waypoints = implode('|', array_slice(array_values($valid), 0, 5));
+            }
+            echo json_encode(naver_directions($start, $goal, $option, $waypoints), JSON_UNESCAPED_UNICODE);
             break;
         }
 
@@ -569,5 +595,70 @@ function seed_pending(Place $place): array
     }
     return ['ok' => true, 'msg' => "pending 더미 적재 완료 (좌표X) — cron_place_geocode.php 로 좌표화하세요",
             'places' => $cnt];
+}
+
+// ==========================================================
+// 네이버 클라우드 플랫폼 Directions(자동차 길찾기)
+//   GeoCoder 의 NCP 호출 패턴 재사용(maps.apigw.ntruss.com + X-NCP 헤더).
+//   $start/$goal = "경도,위도"(네이버 순서). 반환 = {ok, duration(ms), distance(m), toll, fuel, path:[[경도,위도]...]}
+// ==========================================================
+function naver_directions(string $start, string $goal, string $option = 'trafast', string $waypoints = ''): array
+{
+    $keyId  = defined('NAVER_MAPS_KEY_ID')     ? NAVER_MAPS_KEY_ID     : '';
+    $secret = defined('NAVER_MAPS_KEY_SECRET') ? NAVER_MAPS_KEY_SECRET : '';
+    if ($keyId === '' || $secret === '') {
+        return ['ok' => false, 'msg' => '네이버 지도 API 키가 설정되지 않았습니다. (env/maps.inc)'];
+    }
+    $opt = in_array($option, ['trafast', 'tracomfort', 'traoptimal', 'traavoidtoll', 'traavoidcaronly'], true) ? $option : 'trafast';
+
+    $url = 'https://maps.apigw.ntruss.com/map-direction/v1/driving'   // Directions 5 (경유지 5개·구독됨). 15는 미구독
+         . '?start='  . rawurlencode($start)
+         . '&goal='   . rawurlencode($goal)
+         . '&option=' . $opt;
+    if ($waypoints !== '') $url .= '&waypoints=' . rawurlencode($waypoints);
+
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 15,
+        CURLOPT_CONNECTTIMEOUT => 8,
+        CURLOPT_ENCODING       => '',
+        CURLOPT_HTTPHEADER     => [
+            'X-NCP-APIGW-API-KEY-ID: ' . $keyId,
+            'X-NCP-APIGW-API-KEY: '    . $secret,
+            'Accept: application/json',
+        ],
+    ]);
+    $body = curl_exec($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $cerr = curl_error($ch);
+    curl_close($ch);
+
+    if ($body === false) return ['ok' => false, 'msg' => '길찾기 호출 실패: ' . $cerr];
+    $json = json_decode($body, true);
+    if (!is_array($json)) return ['ok' => false, 'msg' => '길찾기 응답 파싱 실패 (HTTP ' . $code . ')'];
+    if ($code !== 200) {
+        $m = $json['error']['message'] ?? $json['message'] ?? ('HTTP ' . $code);
+        return ['ok' => false, 'msg' => '길찾기 API 오류: ' . $m . ' (Directions 상품이 콘솔에서 켜져 있는지 확인)'];
+    }
+    // code 0 = 정상. 그 외(1=출발==도착, 2=출발지근처도로없음 ...) 는 메시지 반환
+    if ((int)($json['code'] ?? -1) !== 0) {
+        return ['ok' => false, 'msg' => '경로를 찾지 못했습니다: ' . ($json['message'] ?? 'code ' . ($json['code'] ?? '?'))];
+    }
+    $routeObj = $json['route'] ?? [];
+    $leg = $routeObj[$opt][0] ?? null;
+    if (!$leg) { foreach ($routeObj as $arr) { if (!empty($arr[0])) { $leg = $arr[0]; break; } } }
+    if (!$leg) return ['ok' => false, 'msg' => '경로 데이터가 비어 있습니다.'];
+
+    $s = $leg['summary'] ?? [];
+    return [
+        'ok'       => true,
+        'option'   => $opt,
+        'duration' => (int)($s['duration'] ?? 0),   // ms
+        'distance' => (int)($s['distance'] ?? 0),   // m
+        'toll'     => (int)($s['tollFare'] ?? 0),   // 원
+        'fuel'     => (int)($s['fuelPrice'] ?? 0),  // 원
+        'path'     => $leg['path'] ?? [],           // [[경도,위도], ...]
+    ];
 }
 ?>
