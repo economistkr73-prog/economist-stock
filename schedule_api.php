@@ -252,6 +252,40 @@ function api_calendar(string $action, PDO $pdo): void {
             echo json_encode(['ok' => true]);
             break;
 
+        // 음성 명령 해석: 발화 텍스트 → Claude로 {intent, 날짜/시간/제목/검색어} 파싱
+        // intent=find|delete 이면 후보 일정도 함께 조회해 반환 (실행은 프론트에서 사용자 확인 후)
+        case 'voice':
+            $d    = json_decode(file_get_contents('php://input'), true);
+            $text = trim((string)($d['text'] ?? ''));
+            if ($text === '') { echo json_encode(['ok' => false, 'msg' => '인식된 음성이 없습니다.']); break; }
+
+            $parsed = voice_parse_claude($text);
+            if (empty($parsed['ok'])) {
+                echo json_encode(['ok' => false, 'msg' => $parsed['msg'] ?? '음성 해석 실패']);
+                break;
+            }
+            $p = $parsed['parsed'];
+
+            // find/delete: 후보 일정 조회 (제목 키워드 + 기간)
+            $candidates = [];
+            if (in_array($p['intent'] ?? '', ['find', 'delete'], true)) {
+                $from = (!empty($p['date_from']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $p['date_from']))
+                        ? $p['date_from'] : date('Y-m-d', strtotime('-31 days'));
+                $to   = (!empty($p['date_to']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $p['date_to']))
+                        ? $p['date_to'] : date('Y-m-d', strtotime('+366 days'));
+                $kw   = trim((string)($p['keyword'] ?? ''));
+                $events = $sch->listByRange($from, $to, null);
+                foreach ($events as $ev) {
+                    if (($ev['event_type'] ?? '') === 'holiday' || ($ev['is_holiday'] ?? '') == '1') continue;
+                    if ($kw !== '' && mb_stripos((string)($ev['title'] ?? ''), $kw) === false) continue;
+                    $candidates[] = $ev;
+                    if (count($candidates) >= 50) break;
+                }
+            }
+            echo json_encode(['ok' => true, 'parsed' => $p, 'candidates' => $candidates, 'heard' => $text],
+                             JSON_UNESCAPED_UNICODE);
+            break;
+
         default:
             http_response_code(400);
             echo json_encode(['ok' => false, 'msg' => "unknown action: {$action}"]);
@@ -264,6 +298,90 @@ function api_calendar(string $action, PDO $pdo): void {
 // - 鍮꾨컲蹂? start_dt/end_dt 吏곸젒 UPDATE
 // - 諛섎났:   ?뱀씪 exception ?깅줉 + ?뱀씪 ?⑤룆 ?대깽???앹꽦
 // ==========================================================
+// ==========================================================
+// 음성 명령 해석 — Claude(Haiku)로 발화 텍스트를 구조화 JSON으로 변환
+//   반환: ['ok'=>true,'parsed'=>['intent'=>..., 'title'=>..., 'date'=>..., ...]]
+//        ['ok'=>false,'msg'=>'...']  (키 미설정/호출 실패/파싱 실패)
+// ==========================================================
+function voice_parse_claude(string $text): array {
+    if (file_exists("./env/anthropic.inc")) require_once "./env/anthropic.inc";
+    $apiKey = getenv('ANTHROPIC_API_KEY') ?: (defined('ANTHROPIC_API_KEY') ? ANTHROPIC_API_KEY : '');
+    if ($apiKey === '') {
+        return ['ok' => false, 'msg' => 'AI 음성 해석 키(ANTHROPIC_API_KEY)가 설정되지 않았습니다.'];
+    }
+
+    // 기준 시각(Asia/Seoul)
+    try { $now = new DateTime('now', new DateTimeZone('Asia/Seoul')); }
+    catch (Throwable $e) { $now = new DateTime(); }
+    $dow   = ['일','월','화','수','목','금','토'][(int)$now->format('w')];
+    $today = $now->format('Y-m-d');
+    $hhmm  = $now->format('H:i');
+
+    $system =
+        "당신은 한국어 음성 일정 비서입니다. 사용자의 발화를 분석해 아래 JSON 객체 하나만 출력하세요. "
+        . "설명·인사·마크다운·코드블록 없이 순수 JSON만 출력합니다.\n"
+        . "오늘은 {$today} ({$dow}요일), 현재 시각 {$hhmm}, 시간대 Asia/Seoul.\n\n"
+        . "필드:\n"
+        . "{\n"
+        . "  \"intent\": \"create|find|delete|unknown\",   // 등록 / 조회·검색 / 삭제 / 판단불가\n"
+        . "  \"title\": \"일정 제목(create용. '등록/추가/잡아줘/만들어' 같은 동작어는 빼고 핵심만)\",\n"
+        . "  \"date\": \"YYYY-MM-DD (create의 날짜. '내일/모레/다음주 월요일' 등 상대표현은 오늘 기준 절대날짜로 변환. 없으면 오늘)\",\n"
+        . "  \"start_time\": \"HH:MM 또는 null (시간 미지정·종일이면 null)\",\n"
+        . "  \"end_time\": \"HH:MM 또는 null\",\n"
+        . "  \"is_allday\": true/false,\n"
+        . "  \"keyword\": \"find/delete 검색어(제목 일부). 없으면 빈 문자열\",\n"
+        . "  \"date_from\": \"YYYY-MM-DD 또는 null (find/delete 기간 시작)\",\n"
+        . "  \"date_to\": \"YYYY-MM-DD 또는 null (find/delete 기간 끝)\"\n"
+        . "}\n\n"
+        . "규칙:\n"
+        . "- '오전/오후' 없는 시간은 한국어 일상 맥락으로 추론('3시'=15:00, '아침 8시'=08:00, '점심'=12:00, '저녁'=18:00).\n"
+        . "- 종료시간 명시 없으면 end_time=null.\n"
+        . "- find에서 '오늘/내일/이번주/다음주/이번달'이면 date_from~date_to 범위로 채움. 특정 키워드만 있으면 date_from/date_to는 null.\n"
+        . "- 반드시 JSON 한 개만 출력.";
+
+    $payload = json_encode([
+        'model'      => 'claude-haiku-4-5-20251001',
+        'max_tokens' => 400,
+        'system'     => $system,
+        'messages'   => [['role' => 'user', 'content' => $text]],
+    ], JSON_UNESCAPED_UNICODE);
+
+    $ch = curl_init('https://api.anthropic.com/v1/messages');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true, CURLOPT_POSTFIELDS => $payload, CURLOPT_TIMEOUT => 30,
+        CURLOPT_HTTPHEADER => ['x-api-key: ' . $apiKey, 'anthropic-version: 2023-06-01', 'content-type: application/json'],
+    ]);
+    $resp = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $cerr = curl_error($ch);
+    curl_close($ch);
+
+    if ($resp === false)            return ['ok' => false, 'msg' => 'AI 호출 실패: ' . $cerr];
+    $j = json_decode($resp, true);
+    if ($code !== 200 || !is_array($j)) {
+        return ['ok' => false, 'msg' => 'AI 오류: ' . ($j['error']['message'] ?? ('HTTP ' . $code))];
+    }
+    $out = '';
+    foreach (($j['content'] ?? []) as $b) { if (($b['type'] ?? '') === 'text') $out .= $b['text']; }
+
+    // 코드블록/잡텍스트 방어 후 첫 JSON 객체 추출
+    $out = trim($out);
+    if (preg_match('/\{.*\}/s', $out, $m)) $out = $m[0];
+    $p = json_decode($out, true);
+    if (!is_array($p) || empty($p['intent'])) {
+        return ['ok' => false, 'msg' => '음성 명령을 이해하지 못했습니다.'];
+    }
+    // 정규화
+    $p['intent']    = in_array($p['intent'], ['create','find','delete'], true) ? $p['intent'] : 'unknown';
+    $p['title']     = trim((string)($p['title'] ?? ''));
+    $p['keyword']   = trim((string)($p['keyword'] ?? ''));
+    $p['is_allday'] = !empty($p['is_allday']);
+    foreach (['date','start_time','end_time','date_from','date_to'] as $k) {
+        if (!isset($p[$k]) || $p[$k] === '' || $p[$k] === 'null') $p[$k] = null;
+    }
+    return ['ok' => true, 'parsed' => $p];
+}
+
 function adjust_overlaps(PDO $pdo, int $newId, string $newStart, string $newEnd): array {
     $date       = substr($newStart, 0, 10);
     $newStartTs = strtotime($newStart);

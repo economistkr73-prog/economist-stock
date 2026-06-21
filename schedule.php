@@ -369,6 +369,7 @@ function sch_calendar(PDO $pdo): void {
 :is(body.is-mobile, body.w-narrow) .cal-grid { overflow: visible !important; }
 :is(body.is-mobile, body.w-narrow) .cal-cell { cursor: default; }
 :is(body.is-mobile, body.w-narrow) #btn-new { display: none; }   /* 상단 추가버튼 숨김 → FAB 사용 */
+:is(body.is-mobile, body.w-narrow) #btn-voice { display: none; }  /* 모바일은 플로팅 🎤 사용 */
 /* 하단 상세 패널 (기본 숨김, 모바일만 표시) */
 #m-day-detail { display: none; }
 :is(body.is-mobile, body.w-narrow) #m-day-detail {
@@ -394,6 +395,37 @@ function sch_calendar(PDO $pdo): void {
     box-shadow: 0 4px 14px rgba(52,152,219,.45);
 }
 #m-fab:active { background: #2176ae; }
+
+/* 🎤 음성 명령 버튼 (모바일 플로팅, + 위) */
+#m-mic { display: none; }
+:is(body.is-mobile, body.w-narrow) #m-mic {
+    display: flex; align-items: center; justify-content: center;
+    position: fixed; right: 18px; bottom: 88px; width: 56px; height: 56px;
+    border-radius: 50%; border: none; background: #9b59b6; color: #fff;
+    font-size: 26px; line-height: 1; cursor: pointer; z-index: 1000;
+    box-shadow: 0 4px 14px rgba(155,89,182,.45);
+}
+#m-mic:active, #btn-voice.listening, #m-mic.listening { background: #e74c3c; }
+#btn-voice.listening { color:#fff; border-color:#c0392b; }
+@keyframes micPulse { 0%,100%{ box-shadow:0 4px 14px rgba(231,76,60,.5);} 50%{ box-shadow:0 4px 22px rgba(231,76,60,.9);} }
+.listening { animation: micPulse 1s ease-in-out infinite; }
+
+/* 음성 결과 오버레이 */
+.vo-heard { background:#f3f0f8; border:1px solid #e0d5ef; color:#6c3483; border-radius:8px;
+    padding:9px 12px; font-size:14px; margin-bottom:12px; }
+.vo-heard b { color:#9b59b6; }
+.vo-sub { font-size:12.5px; color:#7f8c8d; margin-bottom:8px; }
+.vo-loading, .vo-empty { color:#7f8c8d; font-size:14px; padding:16px 4px; text-align:center; }
+.vo-err { color:#c0392b; font-size:14px; padding:14px 4px; line-height:1.6; }
+.vo-item { display:flex; align-items:center; gap:10px; padding:10px 12px; border:1px solid #eef1f4;
+    border-radius:8px; margin-bottom:7px; cursor:pointer; background:#fff; }
+.vo-item:hover { background:#f7f9fb; }
+.vo-it-main { flex:1; min-width:0; }
+.vo-it-main b { font-size:14.5px; color:#2c3e50; }
+.vo-it-sub { font-size:12px; color:#8a97a3; margin-top:2px; }
+.vo-del { flex-shrink:0; border:1px solid #e74c3c; color:#e74c3c; background:#fff;
+    border-radius:6px; padding:6px 12px; font-size:13px; font-weight:700; cursor:pointer; }
+.vo-del:hover { background:#e74c3c; color:#fff; }
 
 /* 참석자 자동완성 드롭다운 */
 .att-ac {
@@ -432,6 +464,7 @@ function sch_calendar(PDO $pdo): void {
             <button data-view="day">일</button>
             <button data-view="list">목록</button>
         </div>
+        <button class="btn" id="btn-voice" onclick="voiceStart()" title="음성으로 일정 등록·조회·삭제">🎤 음성</button>
         <button class="btn btn-primary" id="btn-new">+ 일정 추가</button>
     </div>
 
@@ -468,8 +501,22 @@ function sch_calendar(PDO $pdo): void {
             <div id="m-day-detail"></div>
         </div>
     </div>
+    <!-- 모바일 전용: 음성 명령 플로팅 버튼 -->
+    <button id="m-mic" onclick="voiceStart()" title="음성 명령">🎤</button>
     <!-- 모바일 전용: 일정 추가 플로팅 버튼 -->
     <button id="m-fab" onclick="fabAdd()" title="일정 추가">＋</button>
+</div>
+
+<!-- 🎤 음성 명령 결과 오버레이 -->
+<div class="modal-overlay" id="voice-overlay">
+    <div class="modal" style="max-width:440px">
+        <h3 id="vo-title" style="margin:14px 0 12px;font-size:16px;">🎤 음성 명령</h3>
+        <div id="vo-heard" class="vo-heard" style="display:none"></div>
+        <div id="vo-body"></div>
+        <div class="modal-footer" style="margin-top:14px;text-align:right;">
+            <button class="btn" onclick="voiceClose()">닫기</button>
+        </div>
+    </div>
 </div>
 
 <div class="modal-overlay" id="modal-overlay">
@@ -1081,6 +1128,147 @@ function showDayDetail(ds){
 function fabAdd(){
     const ds = _selDay || ymd(TODAY);
     openNew(ds+'T09:00');
+}
+
+// ━━━ 🎤 음성 명령 (Web Speech API → Claude 해석 → 등록/조회/삭제) ━━━
+let _recog = null, _recBusy = false;
+function voiceSupported(){ return ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window); }
+
+function voiceSetListening(on){
+    _recBusy = on;
+    document.getElementById('btn-voice')?.classList.toggle('listening', on);
+    document.getElementById('m-mic')?.classList.toggle('listening', on);
+}
+
+function voiceStart(){
+    if (!voiceSupported()){
+        alert('이 브라우저는 음성 인식을 지원하지 않습니다.\n안드로이드 크롬 브라우저에서 사용해 주세요.');
+        return;
+    }
+    if (_recBusy){ try{ _recog && _recog.stop(); }catch(_){} return; }
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const r = new SR();
+    _recog = r;
+    r.lang = 'ko-KR'; r.interimResults = false; r.maxAlternatives = 1;
+    r.onresult = e => { const t = (e.results[0][0].transcript || '').trim(); if (t) voiceHandle(t); };
+    r.onerror  = e => {
+        voiceSetListening(false);
+        if (e.error === 'not-allowed' || e.error === 'service-not-allowed')
+            alert('마이크 권한이 필요합니다. 브라우저 설정에서 마이크를 허용해 주세요.');
+        else if (e.error === 'no-speech') showToast('음성이 인식되지 않았습니다. 다시 시도해 주세요.');
+        else if (e.error !== 'aborted') showToast('음성 인식 오류: ' + e.error);
+    };
+    r.onend = () => voiceSetListening(false);
+    try { r.start(); voiceSetListening(true); showToast('🎤 듣고 있어요… 말씀하세요'); }
+    catch(_){ voiceSetListening(false); }
+}
+
+function voiceShow(heard, bodyHtml){
+    const ov = document.getElementById('voice-overlay');
+    const hd = document.getElementById('vo-heard');
+    if (heard){ hd.style.display=''; hd.innerHTML = '들은 내용: <b>' + esc(heard) + '</b>'; }
+    else hd.style.display='none';
+    document.getElementById('vo-title').textContent = '🎤 음성 명령';
+    document.getElementById('vo-body').innerHTML = bodyHtml || '';
+    ov.classList.add('open');
+}
+function voiceBody(html){ document.getElementById('vo-body').innerHTML = html; }
+function voiceClose(){ document.getElementById('voice-overlay').classList.remove('open'); }
+
+async function voiceHandle(text){
+    voiceShow(text, '<div class="vo-loading">🤖 명령을 분석하는 중…</div>');
+    const res = await api('voice', { text }, 'POST');
+    if (!res || !res.ok){
+        voiceBody('<div class="vo-err">' + esc((res && res.msg) || '분석에 실패했습니다.') + '</div>');
+        return;
+    }
+    const p = res.parsed || {};
+    if (p.intent === 'create'){
+        voiceClose();
+        voiceFillCreate(p);
+        showToast('🎤 인식: ' + text);
+    } else if (p.intent === 'find'){
+        voiceRenderList('find', res.candidates || [], p);
+    } else if (p.intent === 'delete'){
+        voiceRenderList('delete', res.candidates || [], p);
+    } else {
+        voiceBody('<div class="vo-err">무슨 작업인지 이해하지 못했어요.<br>'
+            + '예) "내일 오후 3시 치과 예약 등록", "이번 주 일정 찾아줘", "금요일 회의 삭제"</div>');
+    }
+}
+
+// 등록: 기존 일정 모달에 값 채워 열기 → 사용자가 확인·수정 후 저장
+function voiceFillCreate(p){
+    const date  = (p.date && /^\d{4}-\d{2}-\d{2}$/.test(p.date)) ? p.date : ymd(new Date());
+    const isAll = !!p.is_allday || !p.start_time;
+    const st    = (p.start_time && /^\d{1,2}:\d{2}$/.test(p.start_time)) ? p.start_time : '09:00';
+    openNew(date + 'T' + st, 'timed');
+    document.getElementById('f-title').value = p.title || '';
+    setAllday(isAll);
+    if (!isAll){
+        document.getElementById('f-start').value = date + 'T' + st;
+        if (p.end_time && /^\d{1,2}:\d{2}$/.test(p.end_time)){
+            document.getElementById('f-end').value = date + 'T' + p.end_time;
+        } else {
+            const d = new Date(date + 'T' + st); d.setHours(d.getHours() + 1);
+            document.getElementById('f-end').value = ymdhm(d);
+        }
+    }
+    document.getElementById('f-title').focus();
+}
+
+// 조회/삭제: 후보 일정 목록 표시 (탭→상세, 삭제버튼→확인 후 삭제)
+function voiceRenderList(mode, list, p){
+    document.getElementById('vo-title').textContent = mode === 'find' ? '🔍 검색 결과' : '🗑 삭제할 일정 선택';
+    const kw = (p.keyword || '').trim();
+    if (!list.length){
+        voiceBody('<div class="vo-empty">해당하는 일정이 없습니다.' + (kw ? ' (검색어: ' + esc(kw) + ')' : '') + '</div>');
+        return;
+    }
+    let h = '<div class="vo-sub">' + (kw ? '"' + esc(kw) + '" ' : '') + list.length + '건' + '</div>';
+    h += list.map((ev, i) => {
+        const ds = (ev.start_dt || ev.due_dt || '').slice(0, 10);
+        const tr = fmtTimeRange(ev).trim();
+        return '<div class="vo-item" data-idx="' + i + '">'
+            +   '<div class="vo-it-main"><b>' + esc((ev.icon ? ev.icon + ' ' : '') + (ev.title || '(제목없음)')) + '</b>'
+            +     '<div class="vo-it-sub">' + ds + (tr ? ' · ' + esc(tr) : '') + (ev.is_recur_instance == '1' ? ' · 🔁반복' : '') + '</div></div>'
+            +   (mode === 'delete' ? '<button class="vo-del" data-idx="' + i + '">삭제</button>' : '')
+            + '</div>';
+    }).join('');
+    voiceBody(h);
+
+    const box = document.getElementById('vo-body');
+    box.querySelectorAll('.vo-item').forEach(el => {
+        el.addEventListener('click', e => {
+            if (e.target.classList.contains('vo-del')) return;
+            const ev = list[+el.dataset.idx];
+            if (ev){ voiceClose(); openView(ev); }
+        });
+    });
+    box.querySelectorAll('.vo-del').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const ev = list[+btn.dataset.idx];
+            if (ev) await voiceDelete(ev, btn);
+        });
+    });
+}
+
+async function voiceDelete(ev, btn){
+    const ds = (ev.start_dt || ev.due_dt || '').slice(0, 10);
+    let scope = null;
+    if (ev.is_recur_instance == '1'){
+        // 반복 일정: 이 날짜만 vs 전체 시리즈 선택
+        scope = confirm('"' + ev.title + '"은(는) 반복 일정입니다.\n\n확인 = 이 날짜(' + ds + ') 하나만 삭제\n취소 = 전체 반복 일정 삭제') ? 'one' : 'all';
+    } else {
+        if (!confirm('"' + ev.title + '" (' + ds + ') 일정을 삭제할까요?')) return;
+    }
+    let res;
+    if (scope) res = await api('delete_scoped', { id: ev.id, scope, origin_dt: ds }, 'POST');
+    else       res = await api('delete', { id: ev.id });
+    if (res && !res.ok){ alert('삭제 실패: ' + (res.msg || '')); return; }
+    btn.closest('.vo-item')?.remove();
+    loadEvents();
+    showToast('🗑 삭제되었습니다.');
 }
 
 function pad(n) { return String(n).padStart(2,'0'); }
