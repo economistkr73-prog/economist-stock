@@ -760,6 +760,20 @@ class Place
             'picks' => $r['picks_json'] ? json_decode($r['picks_json'], true) : [],
         ];
     }
+    /** 영구 공유 토큰 발급/갱신(본인 소유만) — 만료 없음(share_expires=2099). 캘린더 일정에 연결해 항상 열람.
+     *  @return array|null {token, name} */
+    public function tripSharePerm(string $owner, int $id): ?array {
+        $this->ensureTripTable();
+        $st = $this->pdo->prepare("SELECT share_token, name FROM travel_trip WHERE id = :i AND owner = :o LIMIT 1");
+        $st->execute([':i' => $id, ':o' => $owner]);
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$row) return null;
+        $token = $row['share_token'] ?: bin2hex(random_bytes(16));
+        $u = $this->pdo->prepare("UPDATE travel_trip SET share_token = :t, share_expires = '2099-12-31 23:59:59'
+                                  WHERE id = :i AND owner = :o");
+        $u->execute([':t' => $token, ':i' => $id, ':o' => $owner]);
+        return ['token' => $token, 'name' => $row['name']];
+    }
 
     /**
      * ★통합 검색 — 분류(멀티) × 공간(뷰포트/지역/전국) × 도메인별 태그(독립 누적)를 한 쿼리로.

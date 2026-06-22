@@ -179,7 +179,8 @@ function api_calendar(string $action, PDO $pdo): void {
             echo json_encode(['ok' => true]);
             break;
 
-        // ?묐젰 ???뚮젰 蹂??        case 'solar_to_lunar':
+        // ?묐젰 ???뚮젰 蹂??
+        case 'solar_to_lunar':
             $date   = $_GET['date'] ?? date('Y-m-d');
             $result = LunarCalendar::solarToLunar($date);
             echo json_encode(['ok' => true, 'data' => $result]);

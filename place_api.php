@@ -528,6 +528,14 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
             echo json_encode(['ok' => true, 'token' => $res['token'], 'expires_at' => $res['expires_at']], JSON_UNESCAPED_UNICODE);
             break;
         }
+        case 'trip_share_perm': {   // 소유자: 만료 없는 영구 공유 토큰(캘린더 일정 연결용)
+            $id = (int)($_GET['id'] ?? $_POST['id'] ?? 0);
+            $owner = (string)($_SESSION['usr_name'] ?? '');
+            $res = $place->tripSharePerm($owner, $id);
+            if ($res === null) { http_response_code(404); echo json_encode(['ok' => false, 'msg' => '트립을 찾을 수 없습니다.']); return; }
+            echo json_encode(['ok' => true, 'token' => $res['token'], 'name' => $res['name']], JSON_UNESCAPED_UNICODE);
+            break;
+        }
         case 'trip_view': {    // 공개: 공유 토큰으로 그 여행지도 열람(게스트 허용)
             $token = trim((string)($_GET['trip'] ?? $_POST['trip'] ?? ''));
             $trip = $place->tripByToken($token);

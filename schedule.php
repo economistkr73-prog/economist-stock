@@ -253,6 +253,12 @@ function sch_calendar(PDO $pdo): void {
 .color-swatches { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
 .color-swatch { width: 24px; height: 24px; border-radius: 50%; cursor: pointer; border: 3px solid transparent; transition: .1s; }
 .color-swatch.selected { border-color: #2c3e50; }
+.color-custom { display: flex; align-items: center; justify-content: center; font-size: 12px; line-height: 1; background: #f6f8fa; border: 1px solid #cfd6dd; box-sizing: border-box; }
+.color-edit { display: flex; align-items: center; justify-content: center; font-size: 12px; line-height: 1; background: #f6f8fa; border: 1px solid #cfd6dd; box-sizing: border-box; color: #7f8c8d; }
+.color-edit.editing { background: #e67e22; border-color: #e67e22; color: #fff; }
+.color-swatches.edit-mode .color-swatch:not(.color-edit):not(.color-custom) { box-shadow: 0 0 0 2px #fff, 0 0 0 3px #e67e22; }
+.cc-cell { width: 100%; aspect-ratio: 1/1; border-radius: 2px; cursor: pointer; transition: transform .05s; }
+.cc-cell:hover { transform: scale(1.25); outline: 2px solid #2c3e50; position: relative; z-index: 1; }
 .modal-footer { display: flex; gap: 8px; margin-top: 18px; justify-content: flex-end; }
 /* 기념일 분류/카테고리 버튼 */
 .anniv-class-btn { border:1px solid #dde; background:#f8f9fa; color:#555; border-radius:6px; padding:7px 18px; font-size:13px; font-weight:600; cursor:pointer; transition:.15s; }
@@ -301,6 +307,8 @@ function sch_calendar(PDO $pdo): void {
 .view-map-fallback { font-size: 13px; color: #555; background: #f8f9fa; border-radius: 6px; padding: 10px; }
 .chip-map-mark { cursor: pointer; }
 .chip-map-mark:hover { text-decoration: underline; }
+.chip-trip-mark { cursor: pointer; }
+.chip-trip-mark:hover { filter: brightness(1.15); }
 .chip-log-mark { font-size: .7em; opacity: .85; white-space: nowrap; }
 .pdp-dday { display:inline-block; background:#fdecea; color:#c0392b; font-size:11px; font-weight:700; padding:1px 8px; border-radius:10px; margin-left:6px; }
 .proj-bar, .travel-bar { font-size: var(--fs-xs); line-height: 16px; height: 16px; color:#fff; padding: 0 4px; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; font-weight: 600; }
@@ -336,6 +344,84 @@ function sch_calendar(PDO $pdo): void {
     border-top: 1px solid #eee;
     margin: 0;
 }
+/* ===================================================================
+   일정/기념일/할일 입력 폼 리디자인 (디자인 톤: 토큰·칩·세그먼트·필드·카드)
+   적용 범위: #modal-overlay 한정 (다른 페이지·모달 영향 없음)
+=================================================================== */
+#modal-overlay{
+  --m-ink:#1f2433; --m-muted:#7b8294;
+  --m-line:#e4e8f0; --m-line2:#d4dae6; --m-field:#f7f9fc;
+  --m-acc:#3b68f5; --m-acc-soft:#eaf0ff; --m-acc-ink:#264bd6;
+}
+#modal-overlay .modal{
+  padding:0; border-radius:22px; color:var(--m-ink);
+  box-shadow:0 1px 2px rgba(22,30,55,.05), 0 18px 40px -16px rgba(22,30,55,.22);
+}
+/* 상단 탭 */
+#modal-overlay .type-tabs{ padding:14px 16px 0; gap:6px; border-bottom:1px solid var(--m-line); }
+#modal-overlay .type-tab{
+  flex:1; border:none; background:transparent; color:var(--m-muted);
+  border-radius:12px 12px 0 0; padding:12px 10px 13px; font-size:14.5px; font-weight:600;
+}
+#modal-overlay .type-tab:hover{ background:transparent; color:var(--m-ink); border:none; }
+#modal-overlay .type-tab.active{ background:var(--m-acc-soft); color:var(--m-acc); border:none; }
+/* 본문·제목 */
+#modal-overlay #modal-form-body{ padding:20px 22px 6px; }
+#modal-overlay #modal-title{ font-size:20px; font-weight:700; letter-spacing:-.3px; margin:4px 0 18px; }
+/* 라벨 */
+#modal-overlay .form-row label{ color:#4a5160; }
+/* 입력 필드 + 포커스 */
+#modal-overlay input:not([type=checkbox]):not([type=radio]),
+#modal-overlay select,
+#modal-overlay textarea{
+  border:1px solid var(--m-line) !important; background:var(--m-field) !important;
+  border-radius:10px !important; color:var(--m-ink); transition:.15s;
+}
+#modal-overlay input:not([type=checkbox]):not([type=radio]):focus,
+#modal-overlay select:focus,
+#modal-overlay textarea:focus{
+  border-color:var(--m-acc) !important; background:#fff !important;
+  box-shadow:0 0 0 3px rgba(59,104,245,.14);
+}
+/* 칩: 반복(소프트) */
+#modal-overlay .recur-type-btn{
+  border:1px solid var(--m-line2); background:#fff; color:#5a6173;
+  border-radius:11px; padding:9px 15px; font-size:13.5px; font-weight:600;
+}
+#modal-overlay .recur-type-btn:hover{ border-color:var(--m-acc); color:var(--m-acc); background:#fff; }
+#modal-overlay .recur-type-btn.active{ background:var(--m-acc-soft); color:var(--m-acc-ink); border-color:transparent; }
+/* 칩: 기념일 분류·카테고리(채움) */
+#modal-overlay .anniv-class-btn, #modal-overlay .anniv-cat-btn{
+  border:1px solid var(--m-line2); background:#fff; color:#5a6173;
+  border-radius:11px; padding:9px 15px; font-size:13.5px; font-weight:600;
+}
+#modal-overlay .anniv-class-btn:hover, #modal-overlay .anniv-cat-btn:hover{ border-color:var(--m-acc); color:var(--m-acc); background:#fff; }
+#modal-overlay .anniv-class-btn.active, #modal-overlay .anniv-cat-btn.active{
+  background:var(--m-acc); border-color:var(--m-acc); color:#fff; box-shadow:0 2px 6px rgba(59,104,245,.20);
+}
+/* 세그먼트(국내/해외) */
+#modal-overlay .loc-region-btn.active{ background:var(--m-acc); }
+/* 색상 스와치 선택 링 */
+#modal-overlay .color-swatch.selected{ border-color:transparent; box-shadow:0 0 0 2px #fff, 0 0 0 4px var(--m-acc); }
+/* 알림: 체크박스 → 알약 칩 */
+#modal-overlay .alarms > label{
+  flex:1; min-width:0;
+  display:flex !important; flex-direction:row; align-items:center; justify-content:center; gap:5px;
+  border:1px solid var(--m-line2); background:#fff; border-radius:9px;
+  padding:7px 4px !important; color:#5a6173; font-weight:600 !important;
+  font-size:12px !important; white-space:nowrap;
+}
+#modal-overlay .alarms > label:has(input:checked){ border-color:var(--m-acc); color:var(--m-acc-ink); background:var(--m-acc-soft); }
+#modal-overlay .alarms .f-alert{ accent-color:var(--m-acc); }
+/* 푸터 + 버튼 */
+#modal-overlay .modal-footer{ padding:16px 22px 20px; border-top:1px solid var(--m-line); margin-top:6px; }
+#modal-overlay .modal-footer .btn{ border-radius:12px; padding:12px 24px; font-weight:700; }
+#modal-overlay .modal-footer .btn-primary{ background:var(--m-acc); box-shadow:0 2px 6px rgba(59,104,245,.22); }
+#modal-overlay .modal-footer .btn-primary:hover{ background:#2f59e0; }
+#modal-overlay .modal-footer .btn-outline{ background:var(--m-field); border-color:var(--m-line); color:#5a6173; }
+/* 보조 버튼(주소확인/보기 등) */
+#modal-overlay .btn-outline{ border-color:var(--m-line2); color:#4a5160; }
+#modal-overlay .btn-outline:hover{ border-color:var(--m-acc); color:var(--m-acc); background:#fff; }
 /* ── 모바일 월간 캘린더 ──
    UA 기반 body.is-mobile(실기기) + 좁은 폭(max-width:820px) 양쪽에서 적용.
    두 셀렉터가 같은 규칙을 공유하도록 :is()로 묶음.
@@ -446,6 +532,61 @@ function sch_calendar(PDO $pdo): void {
 .att-ac-item .org { color: #95a5a6; font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .att-ac-new { color: #7f8c9b; font-style: normal; }
 .att-ac-new b { color: #2980b9; font-style: normal; }
+
+/* ===================================================================
+   월간 캘린더 리디자인 (입력 폼과 동일 디자인 톤: 카드·세그먼트·소프트 칩)
+=================================================================== */
+#scheduler{
+  --c-line:#e9edf4; --c-line-soft:#f0f3f8; --c-muted:#8a93a6;
+  --c-acc:#3b68f5; --c-acc-soft:#eef3ff; --c-sun:#e8554e; --c-sat:#3b82d6;
+}
+/* 툴바 */
+#scheduler .sch-toolbar h2{ font-size:22px; font-weight:800; letter-spacing:-.5px; color:#1f2433; }
+#scheduler .sch-toolbar .btn-outline{ border:1px solid var(--c-line); background:#fff; color:#5a6173; border-radius:9px; font-weight:700; }
+#scheduler .sch-toolbar .btn-outline:hover{ border-color:var(--c-acc); color:var(--c-acc); background:#fff; }
+#scheduler #btn-prev, #scheduler #btn-next{ padding:6px 12px; }
+#scheduler .sch-toolbar .btn-primary{ background:var(--c-acc); border-radius:10px; font-weight:700; box-shadow:0 2px 6px rgba(59,104,245,.22); }
+#scheduler .sch-toolbar .btn-primary:hover{ background:#2f59e0; }
+/* 뷰 탭 = 세그먼트 */
+#scheduler .view-tabs{ border:none; background:var(--c-line-soft); border-radius:10px; padding:3px; overflow:visible; }
+#scheduler .view-tabs button{ background:transparent; color:var(--c-muted); border-radius:7px; font-weight:700; padding:7px 15px; }
+#scheduler .view-tabs button.active{ background:#fff; color:var(--c-acc); box-shadow:0 1px 3px rgba(22,30,55,.1); }
+/* 월간 = 떠 있는 카드 */
+#scheduler #view-month{ background:#fff; border:1px solid var(--c-line); border-radius:16px; box-shadow:0 1px 2px rgba(22,30,55,.04), 0 16px 36px -20px rgba(22,30,55,.18); overflow:hidden; }
+/* 요일 헤더(밝게) */
+#scheduler .cal-header{ background:#fbfcfe; color:#6b7488; border-radius:0; border-bottom:1px solid var(--c-line); }
+#scheduler .cal-header div{ font-weight:700; }
+#scheduler .cal-header div:first-child{ color:var(--c-sun); }
+#scheduler .cal-header div:last-child{ color:var(--c-sat); }
+/* 토·일 컬럼은 평일의 70% 폭 (열 순서: 일 월 화 수 목 금 토) */
+#scheduler .cal-header,
+#scheduler .cal-grid{ grid-template-columns: 0.7fr 1fr 1fr 1fr 1fr 1fr 0.7fr; }
+/* 그리드·셀 — 모든 행 동일 높이(내용 많아도 안 늘어남, 넘치면 +N개) */
+#scheduler .cal-grid{ border:none; grid-auto-rows:minmax(0,1fr); }
+#scheduler .cal-cell{ border-right:1px solid var(--c-line-soft); border-bottom:1px solid var(--c-line-soft); overflow:hidden; }
+#scheduler .cal-cell:nth-child(7n){ border-right:none; }
+#scheduler .cal-cell:hover{ background:#fbfcfe; }
+#scheduler .cal-cell.other-month{ background:#fafbfd; }
+#scheduler .cal-cell.other-month .day-num{ color:#c4cad6; }
+#scheduler .cal-cell.today{ background:var(--c-acc-soft); }
+#scheduler .cal-cell.today .day-num{ background:var(--c-acc); }
+#scheduler .cal-cell.sunday .day-num{ color:var(--c-sun); }
+#scheduler .cal-cell.saturday .day-num{ color:var(--c-sat); }
+/* 이벤트 칩(소프트 파스텔 + 점) */
+#scheduler .event-chip{ display:flex; align-items:center; gap:5px; border-radius:7px; padding:3px 7px; font-weight:600; letter-spacing:-.2px; }
+#scheduler .event-chip .ev-dot{ width:6px; height:6px; border-radius:50%; flex:none; }
+#scheduler .event-chip .ev-tx{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; flex:1; }
+#scheduler .event-chip.done{ background:transparent; border:none; text-decoration:none; }
+#scheduler .event-chip.done .ev-tx{ color:#9aa3b5; text-decoration:none; }
+#scheduler .event-chip.done:hover{ background:#f3f5f9; }
+/* 모바일: 카드 테두리 제거(전체화면 느낌) + 셀 클립 해제(점 표시) */
+:is(body.is-mobile, body.w-narrow) #scheduler #view-month{ border:none; border-radius:0; box-shadow:none; }
+:is(body.is-mobile, body.w-narrow) #scheduler .cal-cell{ overflow:visible; }
+/* 모바일: 칩 = 작은 점으로 (데스크톱 flex/패딩 스타일 리셋) */
+:is(body.is-mobile, body.w-narrow) #scheduler .event-chip{ display:inline-block; padding:0; gap:0; border-radius:50%; width:10px; height:10px; }
+:is(body.is-mobile, body.w-narrow) #scheduler .event-chip .ev-tx{ display:none; }
+/* 모바일 완료 일정 = 회색 동그라미(기존처럼) */
+:is(body.is-mobile, body.w-narrow) #scheduler .event-chip.done{ width:10px; height:10px; padding:0; border-radius:50%; border:1px solid #c4ccd4; background:transparent; }
 </style>
 </head>
 <body class="<?= $mobile ? 'is-mobile' : '' ?>">
@@ -529,101 +670,93 @@ function sch_calendar(PDO $pdo): void {
         </div>
 
         <div id="modal-form-body">
-        <h3 id="modal-title" style="margin:14px 0 12px;font-size:16px;">일정 추가</h3>
+        <h3 id="modal-title">일정 추가</h3>
 
-        <!-- 제목 -->
-        <div class="form-row">
-            <label>제목 * <input type="text" id="f-title" placeholder="제목 입력"></label>
+        <!-- 제목 (라벨 없이 입력칸만) -->
+        <div class="form-row" id="row-title">
+            <input type="text" id="f-title" placeholder="제목 입력 *">
         </div>
 
-        <!-- 일정: 시작~종료 + 종일 -->
-        <div id="row-timed" style="display:flex;align-items:flex-end;gap:10px;margin-bottom:8px;">
-            <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;font-weight:600;flex:1;">
+        <!-- 일정: 시작·종료 + 반복 버튼 (한 줄) -->
+        <div id="row-timed" style="display:flex;align-items:flex-end;gap:10px;margin-bottom:12px;flex-wrap:wrap;">
+            <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;font-weight:600;flex:1 1 185px;min-width:178px;">
                 시작 * <input type="datetime-local" id="f-start">
             </label>
-            <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;font-weight:600;flex:1;">
+            <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;font-weight:600;flex:1 1 185px;min-width:178px;">
                 종료   <input type="datetime-local" id="f-end">
             </label>
-            <label style="display:flex;align-items:center;gap:4px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;padding-bottom:8px;flex-shrink:0;">
-                <input type="checkbox" id="f-allday" style="width:auto;accent-color:#3498db;"> 종일
-            </label>
-        </div>
-
-        <div id="end-time-msg" style="display:none;color:#e74c3c;font-size:12px;margin:-6px 0 8px;"></div>
-        <!-- 일정: 반복 버튼 행 -->
-        <div id="row-recur" style="display:flex;align-items:center;gap:6px;margin-bottom:12px;">
-            <span style="font-size:15px;color:#7f8c8d;">↺</span>
-            <button type="button" class="recur-type-btn" data-rtype="daily"   onclick="openRecurModal('daily')">매일</button>
-            <button type="button" class="recur-type-btn" data-rtype="weekly"  onclick="openRecurModal('weekly')">매주</button>
-            <button type="button" class="recur-type-btn" data-rtype="monthly" onclick="openRecurModal('monthly')">매월</button>
-            <button type="button" class="recur-type-btn" data-rtype="yearly"  onclick="openRecurModal('yearly')">매년</button>
-            <button type="button" id="btn-recur-clear" onclick="clearRecur()" style="display:none;margin-left:4px;background:none;border:none;color:#e74c3c;font-size:13px;cursor:pointer;padding:2px 6px;border-radius:4px;border:1px solid #e74c3c;">× 반복해제</button>
+            <div style="display:flex;align-items:center;gap:5px;padding-bottom:4px;flex-shrink:0;">
+                <span style="font-size:15px;color:#7f8c8d;">↺</span>
+                <button type="button" class="recur-type-btn" data-rtype="daily"   onclick="openRecurModal('daily')">매일</button>
+                <button type="button" class="recur-type-btn" data-rtype="weekly"  onclick="openRecurModal('weekly')">매주</button>
+                <button type="button" class="recur-type-btn" data-rtype="monthly" onclick="openRecurModal('monthly')">매월</button>
+                <button type="button" class="recur-type-btn" data-rtype="yearly"  onclick="openRecurModal('yearly')">매년</button>
+                <button type="button" id="btn-recur-clear" onclick="clearRecur()" style="display:none;margin-left:4px;background:none;border:none;color:#e74c3c;font-size:13px;cursor:pointer;padding:2px 6px;border-radius:4px;border:1px solid #e74c3c;">× 반복해제</button>
+            </div>
+            <!-- 종일: 화면 비표시(기존 종일 일정 호환용 상태값만 유지) -->
+            <label style="display:none;"><input type="checkbox" id="f-allday"> 종일</label>
             <!-- 반복 설정 hidden -->
             <input type="hidden" id="h-recur-type" value="">
             <input type="hidden" id="h-recur-interval" value="1">
             <input type="hidden" id="h-recur-end-type" value="none">
         </div>
 
+        <div id="end-time-msg" style="display:none;color:#e74c3c;font-size:12px;margin:-6px 0 8px;"></div>
+
         <!-- 반복 요약 -->
         <div id="recur-summary-row" style="display:none;margin:-6px 0 10px;padding:4px 10px;background:#eaf4ff;border-radius:5px;font-size:12px;color:#2980b9;">
             <span id="recur-summary-text"></span>
         </div>
 
-        <!-- 기념일: 양력/음력 선택 + 날짜 -->
-        <!-- 기념일: 분류 (일반/가족) -->
-        <div id="row-anniv-class" style="display:none;margin-bottom:12px;">
-            <div style="font-size:13px;font-weight:600;margin-bottom:8px;">분류</div>
-            <div style="display:flex;gap:8px;">
-                <button type="button" class="anniv-class-btn active" data-cls="0" onclick="setAnnivClass(0)">📅 일반</button>
-                <button type="button" class="anniv-class-btn" data-cls="1" onclick="setAnnivClass(1)">🏠 가족</button>
+        <!-- 기념일: 분류 + 카테고리 (한 줄) -->
+        <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;">
+            <!-- 분류 (일반/가족) -->
+            <div id="row-anniv-class" style="display:none;flex:0 0 auto;">
+                <div style="font-size:13px;font-weight:600;margin-bottom:8px;">분류</div>
+                <div style="display:flex;gap:8px;">
+                    <button type="button" class="anniv-class-btn active" data-cls="0" onclick="setAnnivClass(0)">📅 일반</button>
+                    <button type="button" class="anniv-class-btn" data-cls="1" onclick="setAnnivClass(1)">🏠 가족</button>
+                </div>
+                <input type="hidden" id="h-is-family" value="0">
             </div>
-            <input type="hidden" id="h-is-family" value="0">
-        </div>
-
-        <!-- 기념일: 카테고리 버튼 -->
-        <div id="row-anniv-cat" style="display:none;margin-bottom:12px;">
-            <div style="font-size:13px;font-weight:600;margin-bottom:8px;">카테고리</div>
-            <div style="display:flex;gap:6px;flex-wrap:wrap;" id="anniv-cat-btns"></div>
-            <input type="hidden" id="h-anniv-cat" value="생일">
+            <!-- 카테고리 버튼 -->
+            <div id="row-anniv-cat" style="display:none;flex:1;min-width:200px;">
+                <div style="font-size:13px;font-weight:600;margin-bottom:8px;">카테고리</div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;" id="anniv-cat-btns"></div>
+                <input type="hidden" id="h-anniv-cat" value="생일">
+            </div>
         </div>
 
         <div id="row-anniversary" style="display:none;margin-bottom:12px;">
-            <div style="display:flex;gap:14px;margin-bottom:8px;">
-                <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer;">
-                    <input type="radio" name="anniv-cal" value="solar" checked onchange="onAnnivCalChange()"> 양력
-                </label>
-                <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer;">
-                    <input type="radio" name="anniv-cal" value="lunar" onchange="onAnnivCalChange()"> 음력
-                </label>
-            </div>
-            <!-- 양력 날짜 -->
-            <div id="row-anniv-solar">
-                <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;font-weight:600;max-width:200px;">
-                    날짜 * <input type="date" id="f-anniv-date">
-                </label>
-            </div>
-            <!-- 음력 날짜 -->
-            <div id="row-anniv-lunar" style="display:none;">
-                <div style="display:flex;gap:8px;align-items:flex-end;">
-                    <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;font-weight:600;">
-                        음력 월 *
-                        <select id="f-lunar-month" style="width:80px;">
-                            <?php for($m=1;$m<=12;$m++) echo "<option value='{$m}'>{$m}월</option>"; ?>
-                        </select>
+            <!-- 양력/음력 + 날짜 (한 줄) -->
+            <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;">
+                <div style="display:flex;gap:14px;align-items:center;">
+                    <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer;">
+                        <input type="radio" name="anniv-cal" value="solar" checked onchange="onAnnivCalChange()"> 양력
                     </label>
-                    <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;font-weight:600;">
-                        일 *
-                        <select id="f-lunar-day" style="width:70px;">
-                            <?php for($d=1;$d<=30;$d++) echo "<option value='{$d}'>{$d}일</option>"; ?>
-                        </select>
-                    </label>
-                    <label style="display:flex;align-items:center;gap:4px;font-size:13px;padding-bottom:8px;cursor:pointer;">
-                        <input type="checkbox" id="f-lunar-leap" style="width:auto;"> 윤달
+                    <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer;">
+                        <input type="radio" name="anniv-cal" value="lunar" onchange="onAnnivCalChange()"> 음력
                     </label>
                 </div>
-                <div id="lunar-preview" style="margin-top:6px;font-size:12px;color:#8e44ad;"></div>
+                <!-- 양력 날짜 -->
+                <div id="row-anniv-solar">
+                    <input type="date" id="f-anniv-date" style="height:34px;">
+                </div>
+                <!-- 음력 날짜 (양력 필드처럼 컴팩트 · 윤달 이모지 배지) -->
+                <div id="row-anniv-lunar" style="display:none;">
+                    <div style="display:flex;gap:6px;align-items:center;">
+                        <select id="f-lunar-month" style="width:84px;height:34px;">
+                            <?php for($m=1;$m<=12;$m++) echo "<option value='{$m}'>{$m}월</option>"; ?>
+                        </select>
+                        <select id="f-lunar-day" style="width:78px;height:34px;">
+                            <?php for($d=1;$d<=30;$d++) echo "<option value='{$d}'>{$d}일</option>"; ?>
+                        </select>
+                        <span id="f-lunar-leap-badge" onclick="toggleLunarLeap()" title="윤달 — 클릭으로 전환"
+                              style="cursor:pointer;user-select:none;font-size:13px;font-weight:600;padding:7px 11px;border-radius:9px;border:1px solid #d4dae6;color:#b8bfca;background:#fff;white-space:nowrap;transition:.15s;">윤달</span>
+                        <input type="checkbox" id="f-lunar-leap" style="display:none;">
+                    </div>
+                </div>
             </div>
-            <div style="margin-top:6px;font-size:12px;color:#888;">★ 매년 자동 반복됩니다.</div>
 
             <!-- 이모지 선택 -->
             <div style="margin-top:10px;">
@@ -649,63 +782,62 @@ function sch_calendar(PDO $pdo): void {
             <button type="button" id="btn-recur-clear-todo" onclick="clearRecur()" style="display:none;margin-left:4px;background:none;border:none;color:#e74c3c;font-size:13px;cursor:pointer;padding:2px 6px;border-radius:4px;border:1px solid #e74c3c;">× 반복해제</button>
         </div>
 
-        <!-- 카테고리 + 우선순위 -->
+        <!-- 카테고리(반) + 우선순위(반) + 그룹 + 프로젝트 (한 줄) -->
         <div class="form-row">
-            <label>카테고리
+            <label style="flex:0.6 1 76px;min-width:76px;">카테고리
                 <select id="f-cat">
                     <option value="업무">업무</option><option value="개인">개인</option>
                     <option value="주식">주식</option><option value="회의">회의</option>
                     <option value="기타">기타</option>
                 </select>
             </label>
-            <label id="row-priority">우선순위
+            <label id="row-priority" style="flex:0.6 1 76px;min-width:76px;">우선순위
                 <select id="f-priority">
                     <option value="1">높음</option><option value="2" selected>보통</option><option value="3">낮음</option>
                 </select>
             </label>
-        </div>
-
-        <!-- 그룹 / 프로젝트 (분리) -->
-        <div class="form-row">
-            <label>그룹
+            <label style="min-width:100px;">그룹
                 <select id="f-group-id">
                     <option value="">없음</option>
                 </select>
             </label>
-            <label id="row-project" style="display:none;">프로젝트
+            <label id="row-project" style="display:none;min-width:100px;">프로젝트
                 <select id="f-project-id">
                     <option value="">연결 안 함</option>
                 </select>
             </label>
         </div>
 
-        <!-- 색상 -->
+        <!-- 색상 + 알림 (한 줄) -->
         <div class="form-row">
-            <label>색상
-                <div class="color-swatches">
-                    <span class="color-swatch selected" data-color="#3498db" style="background:#3498db"></span>
-                    <span class="color-swatch" data-color="#2ecc71" style="background:#2ecc71"></span>
-                    <span class="color-swatch" data-color="#e74c3c" style="background:#e74c3c"></span>
-                    <span class="color-swatch" data-color="#f39c12" style="background:#f39c12"></span>
-                    <span class="color-swatch" data-color="#9b59b6" style="background:#9b59b6"></span>
-                    <span class="color-swatch" data-color="#1abc9c" style="background:#1abc9c"></span>
-                    <span class="color-swatch" data-color="#e67e22" style="background:#e67e22"></span>
-                    <span class="color-swatch" data-color="#95a5a6" style="background:#95a5a6"></span>
+            <label style="flex:0 0 auto;min-width:auto;">색상
+                <div class="color-swatches" id="evt-swatches" style="position:relative;">
+                    <span id="evt-preset-wrap" style="display:contents;"></span>
+                    <span class="color-swatch color-edit" id="evt-edit-btn" onclick="toggleSwatchEdit(event)" title="색상 칸 편집: 누른 뒤 바꿀 칸을 선택">✎</span>
+                    <span class="color-swatch color-custom" id="evt-custom-swatch" onclick="openCustomPicker(event)" title="맞춤 색상(이 일정만)">🎨</span>
+                    <!-- 맞춤 색상 팝오버(팔레트 격자 + 정밀 입력) -->
+                    <div id="color-popover" style="display:none;position:absolute;top:34px;left:0;z-index:60;background:#fff;border:1px solid #d6dce2;border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.18);padding:12px;width:312px;">
+                        <div style="font-size:12px;font-weight:700;color:#444;margin-bottom:8px;">색상 선택</div>
+                        <div id="cc-palette" style="display:grid;gap:3px;margin-bottom:10px;"></div>
+                        <div style="display:flex;align-items:center;gap:8px;">
+                            <span id="cc-preview" style="width:32px;height:32px;border-radius:6px;border:1px solid #dde;background:#3498db;flex-shrink:0;"></span>
+                            <input type="text" id="cc-hex" value="#3498db" maxlength="7" placeholder="#RRGGBB"
+                                   style="flex:1;min-width:0;border:1px solid #dde;border-radius:6px;padding:6px 8px;font-size:13px;font-family:monospace;"
+                                   oninput="ccSyncFromHex(this.value);">
+                            <button type="button" class="btn" style="padding:5px 12px;font-size:12px;background:#3498db;color:#fff;border:none;flex-shrink:0;" onclick="ccApply()">적용</button>
+                        </div>
+                    </div>
                 </div>
             </label>
-        </div>
-
-        <!-- 알림 -->
-        <div class="form-row">
             <label>알림
-                <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:5px;">
-                    <label style="display:flex;align-items:center;gap:5px;font-weight:normal;font-size:13px;cursor:pointer;">
+                <div class="alarms" style="display:flex;gap:6px;flex-wrap:nowrap;margin-top:5px;">
+                    <label style="display:flex;align-items:center;gap:4px;font-weight:normal;font-size:13px;cursor:pointer;">
                         <input type="checkbox" class="f-alert" value="30" style="width:auto;accent-color:#3498db;"> 30분 전
                     </label>
-                    <label style="display:flex;align-items:center;gap:5px;font-weight:normal;font-size:13px;cursor:pointer;">
+                    <label style="display:flex;align-items:center;gap:4px;font-weight:normal;font-size:13px;cursor:pointer;">
                         <input type="checkbox" class="f-alert" value="60" style="width:auto;accent-color:#3498db;"> 1시간 전
                     </label>
-                    <label style="display:flex;align-items:center;gap:5px;font-weight:normal;font-size:13px;cursor:pointer;">
+                    <label style="display:flex;align-items:center;gap:4px;font-weight:normal;font-size:13px;cursor:pointer;">
                         <input type="checkbox" class="f-alert" value="1440" style="width:auto;accent-color:#3498db;"> 하루 전
                     </label>
                 </div>
@@ -747,6 +879,23 @@ function sch_calendar(PDO $pdo): void {
                 <input type="hidden" id="f-lat">
                 <input type="hidden" id="f-lng">
                 <input type="hidden" id="f-provider" value="naver">
+            </label>
+        </div>
+
+        <!-- 여행지도 (places.php에서 저장한 트립 연결) -->
+        <div class="form-row" id="row-trip">
+            <label style="min-width:auto;">여행지도 (선택)
+                <div style="display:flex;gap:5px;align-items:center;margin-top:5px;">
+                    <select id="f-trip" onchange="onTripChange()"
+                            style="flex:1;min-width:0;border:1px solid #dde;border-radius:6px;padding:0 8px;font-size:13px;height:34px;box-sizing:border-box;background:#fff;">
+                        <option value="">— 연결 안 함 —</option>
+                    </select>
+                    <button type="button" class="btn btn-outline" id="btn-trip-view" onclick="openTripPopup()" disabled
+                            style="flex-shrink:0;font-size:12px;padding:0 12px;height:34px;">🗺 보기</button>
+                </div>
+                <div id="trip-status" style="font-size:12px;margin-top:4px;color:#8a97a3;display:none;"></div>
+                <input type="hidden" id="f-trip-token">
+                <input type="hidden" id="f-trip-name">
             </label>
         </div>
 
@@ -792,6 +941,13 @@ function sch_calendar(PDO $pdo): void {
                 <div id="view-map"></div>
                 <div id="view-map-fallback" class="view-map-fallback" style="display:none;"></div>
                 <div id="view-map-links" class="view-map-links"></div>
+            </div>
+            <!-- 연결된 여행지도 -->
+            <div id="view-trip" style="display:none;margin-top:10px;">
+                <button type="button" class="btn btn-outline" onclick="openTripWindow(document.getElementById('view-trip').dataset.token)"
+                        style="font-size:13px;padding:7px 12px;width:100%;text-align:left;">
+                    🗺 <span id="view-trip-name" style="font-weight:600;"></span> 여행지도 보기
+                </button>
             </div>
             <!-- 활동 메모(타임스탬프 로그) -->
             <div id="view-log" style="margin-top:12px;border-top:1px solid #f0f0f0;padding-top:10px;">
@@ -979,6 +1135,16 @@ function contrastColor(hex) {
     const b = parseInt(hex.slice(5,7),16);
     return (0.299*r + 0.587*g + 0.114*b) / 255 > 0.5 ? '#1a1a1a' : '#ffffff';
 }
+// 임의 색 → 소프트 칩(연한 배경 + 읽기 쉬운 글자색 + 원본 점색)
+function _hexRgb(h){ h=(h||'').replace('#',''); if(h.length===3)h=h.split('').map(c=>c+c).join(''); return [parseInt(h.slice(0,2),16)||0,parseInt(h.slice(2,4),16)||0,parseInt(h.slice(4,6),16)||0]; }
+function _mix(a,b,t){ return a.map((v,i)=>Math.round(v+(b[i]-v)*t)); }
+function softChip(hex){
+    const rgb=_hexRgb(hex);
+    const bg=_mix(rgb,[255,255,255],0.86);
+    const lum=(0.299*rgb[0]+0.587*rgb[1]+0.114*rgb[2])/255;
+    const fg=_mix(rgb,[0,0,0], lum>0.62?0.46:0.18);
+    return { bg:`rgb(${bg.join(',')})`, fg:`rgb(${fg.join(',')})`, dot:hex };
+}
 // 이벤트 앞 프로젝트 번호(#N) — 배경 없이 대비색 텍스트만
 function projNumBadge(ev) {
     if (!ev.project_id) return '';
@@ -1005,8 +1171,8 @@ function evLabel(ev) {
 // 클릭 시 상세 모달 대신 외부 지도(네이버/구글)를 바로 새 탭으로 연다.
 function mapMark(ev) {
     if (!(ev.address && String(ev.address).trim())) return '';
-    const label = ev.place_name ? ' ' + esc(ev.place_name) : '';
-    return ` <span class="chip-map-mark" onclick="openMapFromChip(event, ${ev.id})" title="지도 바로 열기">📍${label}</span>`;
+    const tip = esc(ev.place_name || ev.address || '지도');
+    return ` <span class="chip-map-mark" onclick="openMapFromChip(event, ${ev.id})" title="${tip}">📍</span>`;
 }
 
 // 활동 메모 배지: 메모가 1개 이상이면 제목 옆에 📝N (esc 밖에서 raw HTML로 붙임)
@@ -1014,6 +1180,16 @@ function logMark(ev) {
     const n = +(ev.log_count || 0);
     if (!n) return '';
     return ` <span class="chip-log-mark" title="메모 ${n}개">📝(<b>${n}</b>)</span>`;
+}
+
+// 여행지도 마커: 트립 연결된 일정에 🗺, 클릭 시 공유모드 팝업 (토큰은 hex라 인라인 안전)
+function tripMark(ev) {
+    if (!ev.trip_token) return '';
+    return ` <span class="chip-trip-mark" onclick="openTripFromChip(event,'${ev.trip_token}')" title="여행지도 보기">🗺</span>`;
+}
+function openTripFromChip(e, token) {
+    e.stopPropagation();
+    openTripWindow(token);
 }
 
 // 칩의 위치 마커 클릭 → 현재위치에서 일정 장소로 길찾기
@@ -1109,11 +1285,11 @@ function showDayDetail(ds){
             const isDone=ev.is_done=='1';
             const isHol=ev.is_holiday=='1'||ev.event_type==='holiday';
             const bg = isHol ? '#e74c3c' : evBgColor(ev);
-            const tr = fmtTimeRange(ev).trim() || (ev.is_allday=='1'||ev.event_type==='allday'?'종일':'');
+            const tr = fmtTimeRange(ev, true).trim() || (ev.is_allday=='1'||ev.event_type==='allday'?'종일':'');
             return `<div class="mdd-item${isDone?' done':''}" data-idx="${i}">
                 <span class="mdd-bar" style="background:${bg}"></span>
                 <span class="mdd-time">${esc(tr||'-')}</span>
-                <span class="mdd-title">${esc((ev.icon?ev.icon+' ':'')+ (ev.title||'(제목없음)'))}${mapMark(ev)}${logMark(ev)}</span>
+                <span class="mdd-title">${esc((ev.icon?ev.icon+' ':'')+ (ev.title||'(제목없음)'))}${mapMarkLabel(ev)}${tripMark(ev)}${logMark(ev)}</span>
             </div>`;
         }).join('');
     }
@@ -1284,7 +1460,7 @@ function priorityLabel(p) { return p==1?'높음':p==3?'낮음':'보통'; }
 function priorityClass(p) { return p==1?'p1':p==3?'p3':'p2'; }
 
 // 시간 범위 포맷: "(종일)" 또는 "(HH:MM~HH:MM)"
-function fmtTimeRange(ev) {
+function fmtTimeRange(ev, full) {
     // 절기·잡절·공휴일은 시간 표시 없음
     if (['holiday','jeoegi','sundry'].includes(ev.event_type)) return '';
     // 기념일: 이모지 + 카테고리
@@ -1300,9 +1476,18 @@ function fmtTimeRange(ev) {
     if (!ev.start_dt) return '';
     const s = ev.start_dt.slice(11,16);
     if (!s || s==='00:00') return '';
-    const e = ev.end_dt ? ev.end_dt.slice(11,16) : '';
-    const validEnd = e && e!=='00:00' && e!=='23:59';
-    return validEnd ? `(${s}~${e}) ` : `(${s}) `;
+    if (full) {   // 모바일 하단 상세 등: 시작~종료 풀 표시
+        const e = ev.end_dt ? ev.end_dt.slice(11,16) : '';
+        const validEnd = e && e!=='00:00' && e!=='23:59';
+        return validEnd ? `(${s}~${e}) ` : `(${s}~) `;
+    }
+    return `(${s}~) `;   // 데스크톱 칩: 시작만(공간 절약)
+}
+// 지도 마크(장소명 포함) — 모바일 하단 상세 패널용
+function mapMarkLabel(ev) {
+    if (!(ev.address && String(ev.address).trim())) return '';
+    const label = ev.place_name ? ' ' + esc(ev.place_name) : '';
+    return ` <span class="chip-map-mark" onclick="openMapFromChip(event, ${ev.id})" title="지도 열기">📍${label}</span>`;
 }
 
 async function api(action, payload={}, method='GET', module='calendar') {
@@ -1422,12 +1607,18 @@ function renderMonth() {
             const chip=document.createElement('div');
             const isDone=ev.is_done=='1';
             chip.className='event-chip'+(isDone?' done':'');
+            let dotHtml='';
             if (!isDone) {
-                const bg = evBgColor(ev);
-                chip.style.background = bg;
-                chip.style.color = contrastColor(bg);
+                if (mob) {
+                    chip.style.background = evBgColor(ev);   // 모바일: 점 = 솔리드 색(선명)
+                } else {
+                    const c = softChip(evBgColor(ev));       // 데스크톱: 파스텔 칩 + 점
+                    chip.style.background = c.bg;
+                    chip.style.color = c.fg;
+                    dotHtml = `<span class="ev-dot" style="background:${c.dot}"></span>`;
+                }
             }
-            chip.innerHTML=projNumBadge(ev)+esc((isDone?'✓ ':'')+fmtTimeRange(ev)+evLabel(ev))+mapMark(ev)+logMark(ev);
+            chip.innerHTML=dotHtml+'<span class="ev-tx">'+projNumBadge(ev)+esc((isDone?'✓ ':'')+fmtTimeRange(ev)+evLabel(ev))+'</span>'+mapMark(ev)+tripMark(ev)+logMark(ev);
             chip.onclick=e=>{e.stopPropagation(); if(isMobileView()){showDayDetail(ds);} else {openView(ev);}};
             return chip;
         };
@@ -1529,7 +1720,7 @@ function renderWeek() {
                 const sty = bg2 ? `background:${bg2};color:${contrastColor(bg2)}` : '';
                 const ico=isHol?'':(icon2[ev.event_type]||'');
                 const cat=(!isHol&&ev.event_type==='anniversary'&&ev.category)?'['+ev.category+'] ':'';
-                return `<div class="${cls}" style="${sty}" data-id="${ev.id}">${isHol?'':projNumBadge(ev)}${esc((done?'✓ ':'')+ico+cat+evLabel(ev))}${mapMark(ev)}${logMark(ev)}</div>`;
+                return `<div class="${cls}" style="${sty}" data-id="${ev.id}">${isHol?'':projNumBadge(ev)}${esc((done?'✓ ':'')+ico+cat+evLabel(ev))}${mapMark(ev)}${tripMark(ev)}${logMark(ev)}</div>`;
             }).join('')+'</div>';
         });
         return r+'</div>';
@@ -1586,7 +1777,7 @@ function renderWeek() {
             const cls='week-event'+(done?' done':'');
             const wBg=done?'':evBgColor(ev);
             const bg=done?'':`background:${wBg};color:${contrastColor(wBg)};`;
-            const txt=projNumBadge(ev)+esc((done?'✓ ':'')+fmtTimeRange(ev)+evLabel(ev))+mapMark(ev)+logMark(ev);
+            const txt=projNumBadge(ev)+esc((done?'✓ ':'')+fmtTimeRange(ev)+evLabel(ev))+mapMark(ev)+tripMark(ev)+logMark(ev);
             h+=`<div class="${cls}" style="pointer-events:all;position:absolute;${bg}top:${topPx}px;height:${hPx}px;left:2px;right:2px;" data-id="${ev.id}">${txt}</div>`;
         });
         h+='</div>';
@@ -1692,7 +1883,7 @@ function renderList() {
     const c=document.getElementById('view-list');
     if (!S.events.length){c.innerHTML='<p style="padding:20px;color:#999">올해 일정이 없습니다.</p>';return;}
     const rows=S.events.map(ev=>`<tr class="${ev.is_done=='1'?'done':''}" style="cursor:pointer" data-id="${ev.id}">
-        <td><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${ev.color};margin-right:6px"></span>${projNumBadge(ev)}${esc(evLabel(ev))}${mapMark(ev)}${logMark(ev)}</td>
+        <td><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${ev.color};margin-right:6px"></span>${projNumBadge(ev)}${esc(evLabel(ev))}${mapMark(ev)}${tripMark(ev)}${logMark(ev)}</td>
         <td>${ev.start_dt.slice(0,16).replace('T',' ')}</td>
         <td>${ev.category}</td>
         <td><span class="priority-badge ${priorityClass(ev.priority)}">${priorityLabel(ev.priority)}</span></td>
@@ -1728,6 +1919,7 @@ function openNew(dt='', type='timed') {
     document.getElementById('f-cat').value='업무';
     document.getElementById('f-priority').value='2';
     setColor('#3498db');
+    closeColorPicker();
     clearRecur();
     setEventType(type);
     setAllday(false);
@@ -1760,6 +1952,8 @@ function openNew(dt='', type='timed') {
     renderAttendeeChips();
     // 위치 초기화
     resetLocationForm();
+    // 여행지도 초기화
+    resetTripForm();
     // 그룹/프로젝트: 그룹 드롭다운 + 날짜에 맞는 프로젝트 고정 표시
     fillGroupSelect();
     document.getElementById('f-group-id').value = '';
@@ -1779,6 +1973,7 @@ function openEdit(ev) {
     document.getElementById('f-priority').value=ev.priority||2;
     document.getElementById('f-memo').value=ev.memo||'';
     setColor(ev.color);
+    closeColorPicker();
     setEventType(type);
     clearRecur();
 
@@ -1798,6 +1993,8 @@ function openEdit(ev) {
             document.getElementById('row-anniv-lunar').style.display = '';
             document.getElementById('f-lunar-month').value = ev.lunar_month || 1;
             document.getElementById('f-lunar-day').value   = ev.lunar_day   || 1;
+            document.getElementById('f-lunar-leap').checked = (ev.lunar_leap=='1' || ev.is_leap=='1');
+            refreshLunarLeapBadge();
             updateLunarPreview();
         } else {
             // 양력: 등록된 날짜 그대로 표시
@@ -1852,6 +2049,8 @@ function openEdit(ev) {
 
     // 위치 복원
     fillLocationForm(ev);
+    // 여행지도 복원
+    fillTripForm(ev);
 
     // 반복 규칙 복원
     RECUR = ev.recur_rule||null;
@@ -1877,7 +2076,137 @@ function openEdit(ev) {
 function closeModal() { document.getElementById('modal-overlay').classList.remove('open'); }
 function setColor(c) {
     S.color=c;
-    document.querySelectorAll('.color-swatch').forEach(el=>el.classList.toggle('selected',el.dataset.color===c));
+    let matched=false;
+    document.querySelectorAll('#evt-swatches .color-swatch:not(.color-custom):not(.color-edit)').forEach(el=>{
+        const on = el.dataset.color===c;
+        el.classList.toggle('selected', on);
+        if (on) matched=true;
+    });
+    // 맞춤 스와치: 프리셋에 없는 색이면 그 색으로 채워 선택 표시, 프리셋이면 🎨 아이콘 복귀
+    const cust=document.getElementById('evt-custom-swatch');
+    if (cust) {
+        if (!matched && c) {                 // 현재 색 = 맞춤색 → 그 색으로 채워 선택 표시
+            cust.style.background=c; cust.dataset.color=c; cust.textContent='';
+            cust.classList.add('selected'); cust.title='맞춤 색상(이 일정만)';
+        } else {                             // 현재 색 = 프리셋 → 마지막 쓴 맞춤색이 있으면 그 색 미리보기
+            cust.classList.remove('selected');
+            const last = loadLastColor();
+            if (last) { cust.style.background=last; cust.dataset.color=last; cust.textContent=''; cust.title='맞춤 색상(마지막 색 표시 — 눌러서 변경/재사용)'; }
+            else { cust.style.background=''; cust.removeAttribute('data-color'); cust.textContent='🎨'; cust.title='맞춤 색상(이 일정만)'; }
+        }
+    }
+}
+// ── 맞춤 색상 피커 ─────────────────────────────────────────────
+// HSL → #RRGGBB
+function hslToHex(h, s, l) {
+    s /= 100; l /= 100;
+    const k = n => (n + h / 30) % 12;
+    const a = s * Math.min(l, 1 - l);
+    const f = n => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+    const hx = x => Math.round(255 * x).toString(16).padStart(2, '0');
+    return '#' + hx(f(0)) + hx(f(8)) + hx(f(4));
+}
+// 팔레트 격자 셀 HTML(색상 컬럼 × 명도 행 + 우측 무채색 컬럼). pickFn=클릭 시 호출할 함수명
+const CC_HUE_COLS = 16;
+function paletteCellsHtml(pickFn) {
+    const hues = Array.from({ length: CC_HUE_COLS }, (_, i) => Math.round(i * 360 / CC_HUE_COLS));
+    const lRows = [94, 86, 76, 66, 56, 47, 38, 29, 20, 12];   // 밝음→어두움
+    let html = '';
+    lRows.forEach(L => {
+        const sat = L > 88 || L < 16 ? 70 : 88;
+        hues.forEach(H => {
+            const hex = hslToHex(H, sat, L);
+            html += `<span class="cc-cell" style="background:${hex}" onclick="${pickFn}('${hex}')" title="${hex}"></span>`;
+        });
+        const g = Math.round(255 * L / 100).toString(16).padStart(2, '0');
+        const ghex = '#' + g + g + g;
+        html += `<span class="cc-cell" style="background:${ghex}" onclick="${pickFn}('${ghex}')" title="${ghex}"></span>`;
+    });
+    return html;
+}
+function buildPaletteInto(gridId, pickFn) {
+    const grid = document.getElementById(gridId);
+    if (!grid || grid.dataset.built) return;
+    grid.style.gridTemplateColumns = `repeat(${CC_HUE_COLS + 1}, 1fr)`;
+    grid.innerHTML = paletteCellsHtml(pickFn);
+    grid.dataset.built = '1';
+}
+function buildPalette() { buildPaletteInto('cc-palette', 'ccPick'); }
+// ── 사용자 지정 색상 칸(프리셋) — localStorage 영구 저장 ──────────
+const SCH_SWATCH_N = 5;   // 색상칸 개수
+const SCH_SWATCH_DEFAULT = ['#3498db','#2ecc71','#e74c3c','#f39c12','#9b59b6'];
+let SCH_SWATCHES = loadSwatches();
+let swatchEditMode = false;
+let ccAssignIndex = null;   // 편집모드에서 색을 지정할 칸 인덱스(없으면 null=일반 선택)
+function loadSwatches() {
+    try { const a = JSON.parse(localStorage.getItem('sch_swatches') || ''); if (Array.isArray(a) && a.length) return a.slice(0, SCH_SWATCH_N); } catch (e) {}
+    return SCH_SWATCH_DEFAULT.slice();
+}
+function saveSwatches() { try { localStorage.setItem('sch_swatches', JSON.stringify(SCH_SWATCHES.slice(0, SCH_SWATCH_N))); } catch (e) {} }
+// 마지막으로 쓴 맞춤색 자동 기억
+function loadLastColor() { try { return localStorage.getItem('sch_last_color') || ''; } catch (e) { return ''; } }
+function saveLastColor(hex) { try { localStorage.setItem('sch_last_color', hex); } catch (e) {} }
+function renderSwatches() {
+    const wrap = document.getElementById('evt-preset-wrap');
+    if (!wrap) return;
+    wrap.innerHTML = SCH_SWATCHES.map((c, i) =>
+        `<span class="color-swatch" data-color="${c}" data-idx="${i}" style="background:${c}" onclick="swatchClick(${i},event)"></span>`
+    ).join('');
+    const editBtn = document.getElementById('evt-edit-btn');
+    if (editBtn) editBtn.classList.toggle('editing', swatchEditMode);
+    document.getElementById('evt-swatches').classList.toggle('edit-mode', swatchEditMode);
+    if (typeof S !== 'undefined' && S && S.color) setColor(S.color);   // 선택표시 재적용
+}
+function swatchClick(i, e) {
+    if (swatchEditMode) { ccAssignIndex = i; openColorPicker(e); }   // 그 칸 색을 새로 지정
+    else setColor(SCH_SWATCHES[i]);
+}
+function toggleSwatchEdit(e) {
+    if (e) e.stopPropagation();
+    swatchEditMode = !swatchEditMode;
+    ccAssignIndex = null;
+    closeColorPicker();
+    renderSwatches();
+}
+function openCustomPicker(e) { ccAssignIndex = null; openColorPicker(e); }   // 🎨 = 이 일정만 맞춤색
+// 팔레트/hex 선택 결과 처리: 편집모드면 칸에 저장, 아니면 일정 색으로 선택
+function applyColorChoice(hex) {
+    if (ccAssignIndex !== null) {
+        SCH_SWATCHES[ccAssignIndex] = hex;
+        saveSwatches();
+        ccAssignIndex = null;
+        renderSwatches();      // 편집모드 유지(연속 편집 가능)
+        closeColorPicker();
+    } else {
+        if (!SCH_SWATCHES.includes(hex)) saveLastColor(hex);   // 프리셋이 아니면 '마지막 쓴 색'으로 기억
+        setColor(hex);
+        closeColorPicker();
+    }
+}
+function ccPick(hex) { applyColorChoice(hex); }
+function openColorPicker(e) {
+    if (e) e.stopPropagation();
+    buildPalette();
+    const cur = S.color || '#3498db';
+    // 현재 색이 프리셋이면(=맞춤색 아님) 마지막 쓴 맞춤색을 미리 띄워 재사용 쉽게
+    const seed = (ccAssignIndex === null && SCH_SWATCHES.includes(cur) && loadLastColor()) ? loadLastColor() : cur;
+    document.getElementById('cc-hex').value = seed;
+    const pv = document.getElementById('cc-preview');
+    if (pv) pv.style.background = /^#[0-9a-fA-F]{6}$/.test(seed) ? seed : '#3498db';
+    document.getElementById('color-popover').style.display = 'block';
+}
+function closeColorPicker() {
+    const pop = document.getElementById('color-popover');
+    if (pop) pop.style.display = 'none';
+}
+function ccSyncFromHex(v) {
+    if (/^#[0-9a-fA-F]{6}$/.test(v)) document.getElementById('cc-preview').style.background = v;
+}
+function ccApply() {
+    let v = document.getElementById('cc-hex').value.trim();
+    if (/^[0-9a-fA-F]{6}$/.test(v)) v = '#' + v;
+    if (!/^#[0-9a-fA-F]{6}$/.test(v)) { alert('색상코드를 #RRGGBB 형식으로 입력하세요.'); return; }
+    applyColorChoice(v.toLowerCase());
 }
 async function saveEvent() {
     const title=document.getElementById('f-title').value.trim();
@@ -1909,6 +2238,9 @@ async function saveEvent() {
         lng:        document.getElementById('f-lng').value || null,
         provider:   document.getElementById('f-address').value.trim() ? document.getElementById('f-provider').value : null,
         place_name: document.getElementById('f-place-name').value.trim() || null,
+        // 연결된 여행지도(트립)
+        trip_token: document.getElementById('f-trip-token').value || null,
+        trip_name:  document.getElementById('f-trip-name').value || null,
     };
 
     if (ETYPE==='timed') {
@@ -2066,6 +2398,16 @@ function openView(ev) {
 
     // 위치/지도
     renderViewLocation(ev);
+
+    // 연결된 여행지도
+    const tripWrap = document.getElementById('view-trip');
+    if (ev.trip_token) {
+        tripWrap.dataset.token = ev.trip_token;
+        document.getElementById('view-trip-name').textContent = ev.trip_name || '';
+        tripWrap.style.display = '';
+    } else {
+        tripWrap.style.display = 'none';
+    }
 
     // 헤더 색상 띠
     document.getElementById('view-header').style.borderLeft = `4px solid ${ev.color||'#3498db'}`;
@@ -2442,7 +2784,27 @@ async function onAnnivCalChange() {
             document.getElementById('f-lunar-leap').checked = res.data.leap === true || res.data.leap == 1;
         }
     }
+    refreshLunarLeapBadge();
     updateLunarPreview();
+}
+// 윤달 배지: 체크 상태 반영(자동변환이 윤달이면 강조). 클릭으로 수동 전환도 가능.
+function refreshLunarLeapBadge() {
+    const c = document.getElementById('f-lunar-leap');
+    const b = document.getElementById('f-lunar-leap-badge');
+    if (!c || !b) return;
+    if (c.checked) {
+        b.textContent = '🔁 윤달';
+        b.style.background = '#fff7e6'; b.style.borderColor = '#f0a92e'; b.style.color = '#b9740a';
+    } else {
+        b.textContent = '윤달';
+        b.style.background = '#fff'; b.style.borderColor = '#d4dae6'; b.style.color = '#b8bfca';
+    }
+}
+function toggleLunarLeap() {
+    const c = document.getElementById('f-lunar-leap');
+    if (!c) return;
+    c.checked = !c.checked;
+    refreshLunarLeapBadge();
 }
 function updateLunarPreview() {
     const m = document.getElementById('f-lunar-month')?.value;
@@ -2508,9 +2870,12 @@ const TYPE_ICON = {timed:'', allday:'📅', anniversary:'★', todo:'☑'};
 function setEventType(type) {
     ETYPE = type;
     document.querySelectorAll('.type-tab').forEach(t => t.classList.toggle('active', t.dataset.type===type));
+    // 모달 제목 = 타입 + 추가/수정
+    const _verb = S.editId ? '수정' : '추가';
+    const _noun = type==='anniversary' ? '기념일' : (type==='todo' ? '할일' : '일정');
+    document.getElementById('modal-title').textContent = _noun + ' ' + _verb;
     // 날짜 행
     document.getElementById('row-timed').style.display       = type==='timed'       ? 'flex'  : 'none';
-    document.getElementById('row-recur').style.display       = type==='timed'       ? 'flex'  : 'none';
     document.getElementById('row-anniv-class').style.display = type==='anniversary' ? 'block' : 'none';
     document.getElementById('row-anniv-cat').style.display   = type==='anniversary' ? 'block' : 'none';
     document.getElementById('row-anniversary').style.display = type==='anniversary' ? 'block' : 'none';
@@ -2936,7 +3301,15 @@ document.getElementById('btn-cancel').onclick = closeModal;
 document.getElementById('btn-save').onclick   = saveEvent;
 document.getElementById('btn-delete').onclick = deleteEvent;
 document.querySelectorAll('.sch-toolbar .view-tabs button').forEach(b=>{b.onclick=()=>switchView(b.dataset.view);});
-document.querySelectorAll('.color-swatch').forEach(el=>{el.onclick=()=>setColor(el.dataset.color);});
+renderSwatches();   // 사용자 지정 색상 칸 렌더(localStorage)
+// 팝오버 바깥 클릭 시 닫기(이벤트 모달 + 그룹/프로젝트 모달 공통)
+document.addEventListener('click', e=>{
+    const skip = e.target.closest('.color-custom') || e.target.closest('.color-edit');
+    const pop=document.getElementById('color-popover');
+    if (pop && pop.style.display==='block' && !pop.contains(e.target) && !skip) closeColorPicker();
+    const pmp=document.getElementById('pm-popover');
+    if (pmp && pmp.style.display==='block' && !pmp.contains(e.target) && !skip) pmCloseColorPicker();
+});
 document.getElementById('modal-overlay').addEventListener('click',function(e){
     if(e.target===this && !document.body.classList.contains('is-mobile') && !document.body.classList.contains('w-narrow')) closeModal();
 });
@@ -3400,10 +3773,21 @@ function openProjModal(id, presetType) {
         </div>` : ''}
         <div class="form-row">
             <label>색상
-                <div class="color-swatches" id="pm-swatches">
-                    ${['#3498db','#2ecc71','#e74c3c','#f39c12','#9b59b6','#1abc9c','#e67e22','#95a5a6'].map(c=>
-                        `<span class="color-swatch ${(p?p.color:'')==c?'selected':''}" data-color="${c}" style="background:${c}" onclick="pmPickColor(this)"></span>`
-                    ).join('')}
+                <div class="color-swatches" id="pm-swatches" style="position:relative;">
+                    <span id="pm-preset-wrap" style="display:contents;"></span>
+                    <span class="color-swatch color-edit" id="pm-edit-btn" onclick="pmToggleSwatchEdit(event)" title="색상 칸 편집: 누른 뒤 바꿀 칸을 선택">✎</span>
+                    <span class="color-swatch color-custom" id="pm-custom-swatch" onclick="pmOpenCustomPicker(event)" title="맞춤 색상">🎨</span>
+                    <div id="pm-popover" style="display:none;position:absolute;top:34px;left:0;z-index:4100;background:#fff;border:1px solid #d6dce2;border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.18);padding:12px;width:312px;">
+                        <div style="font-size:12px;font-weight:700;color:#444;margin-bottom:8px;">색상 선택</div>
+                        <div id="pm-palette" style="display:grid;gap:3px;margin-bottom:10px;"></div>
+                        <div style="display:flex;align-items:center;gap:8px;">
+                            <span id="pm-preview" style="width:32px;height:32px;border-radius:6px;border:1px solid #dde;background:#3498db;flex-shrink:0;"></span>
+                            <input type="text" id="pm-hex" value="#3498db" maxlength="7" placeholder="#RRGGBB"
+                                   style="flex:1;min-width:0;border:1px solid #dde;border-radius:6px;padding:6px 8px;font-size:13px;font-family:monospace;"
+                                   oninput="pmCcSyncFromHex(this.value);">
+                            <button type="button" class="btn" style="padding:5px 12px;font-size:12px;background:#3498db;color:#fff;border:none;flex-shrink:0;" onclick="pmCcApply()">적용</button>
+                        </div>
+                    </div>
                 </div>
                 <input type="hidden" id="pm-color" value="${p?p.color||'#3498db':'#3498db'}">
             </label>
@@ -3420,13 +3804,80 @@ function openProjModal(id, presetType) {
 
     document.body.appendChild(overlay);
     overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    pmEditMode = false; pmAssignIndex = null;
+    pmRenderSwatches();
+    pmSetColor(p ? (p.color || '#3498db') : '#3498db');
     setTimeout(() => overlay.querySelector('#pm-title').focus(), 50);
 }
 
-function pmPickColor(el) {
-    document.querySelectorAll('#pm-swatches .color-swatch').forEach(s => s.classList.remove('selected'));
-    el.classList.add('selected');
-    document.getElementById('pm-color').value = el.dataset.color;
+// ── 그룹/프로젝트 모달 색상 선택(이벤트 모달과 동일: 팔레트·편집·마지막색 공유) ──
+let pmEditMode = false;
+let pmAssignIndex = null;
+function pmCurColor() { const el = document.getElementById('pm-color'); return el ? el.value : '#3498db'; }
+function pmSetColor(c) {
+    const el = document.getElementById('pm-color'); if (el) el.value = c;
+    let matched = false;
+    document.querySelectorAll('#pm-swatches .color-swatch:not(.color-custom):not(.color-edit)').forEach(s => {
+        const on = s.dataset.color === c; s.classList.toggle('selected', on); if (on) matched = true;
+    });
+    const cust = document.getElementById('pm-custom-swatch');
+    if (cust) {
+        if (!matched && c) { cust.style.background = c; cust.dataset.color = c; cust.textContent = ''; cust.classList.add('selected'); }
+        else {
+            cust.classList.remove('selected');
+            const last = loadLastColor();
+            if (last) { cust.style.background = last; cust.dataset.color = last; cust.textContent = ''; }
+            else { cust.style.background = ''; cust.removeAttribute('data-color'); cust.textContent = '🎨'; }
+        }
+    }
+}
+function pmRenderSwatches() {
+    const wrap = document.getElementById('pm-preset-wrap'); if (!wrap) return;
+    wrap.innerHTML = SCH_SWATCHES.map((c, i) =>
+        `<span class="color-swatch" data-color="${c}" data-idx="${i}" style="background:${c}" onclick="pmSwatchClick(${i},event)"></span>`
+    ).join('');
+    const eb = document.getElementById('pm-edit-btn'); if (eb) eb.classList.toggle('editing', pmEditMode);
+    document.getElementById('pm-swatches').classList.toggle('edit-mode', pmEditMode);
+    pmSetColor(pmCurColor());
+}
+function pmSwatchClick(i, e) {
+    if (pmEditMode) { pmAssignIndex = i; pmOpenColorPicker(e); }
+    else pmSetColor(SCH_SWATCHES[i]);
+}
+function pmToggleSwatchEdit(e) {
+    if (e) e.stopPropagation();
+    pmEditMode = !pmEditMode; pmAssignIndex = null; pmCloseColorPicker(); pmRenderSwatches();
+}
+function pmOpenCustomPicker(e) { pmAssignIndex = null; pmOpenColorPicker(e); }
+function pmApplyColorChoice(hex) {
+    if (pmAssignIndex !== null) {
+        SCH_SWATCHES[pmAssignIndex] = hex; saveSwatches(); pmAssignIndex = null;
+        pmRenderSwatches();
+        if (typeof renderSwatches === 'function') renderSwatches();   // 이벤트 모달 색칸도 동기화
+        pmCloseColorPicker();
+    } else {
+        if (!SCH_SWATCHES.includes(hex)) saveLastColor(hex);
+        pmSetColor(hex); pmCloseColorPicker();
+    }
+}
+function pmCcPick(hex) { pmApplyColorChoice(hex); }
+function pmOpenColorPicker(e) {
+    if (e) e.stopPropagation();
+    buildPaletteInto('pm-palette', 'pmCcPick');
+    const cur = pmCurColor() || '#3498db';
+    const seed = (pmAssignIndex === null && SCH_SWATCHES.includes(cur) && loadLastColor()) ? loadLastColor() : cur;
+    document.getElementById('pm-hex').value = seed;
+    const pv = document.getElementById('pm-preview');
+    if (pv) pv.style.background = /^#[0-9a-fA-F]{6}$/.test(seed) ? seed : '#3498db';
+    document.getElementById('pm-popover').style.display = 'block';
+}
+function pmCloseColorPicker() { const p = document.getElementById('pm-popover'); if (p) p.style.display = 'none'; }
+function pmCcSyncFromHex(v) { if (/^#[0-9a-fA-F]{6}$/.test(v)) document.getElementById('pm-preview').style.background = v; }
+function pmCcApply() {
+    let v = document.getElementById('pm-hex').value.trim();
+    if (/^[0-9a-fA-F]{6}$/.test(v)) v = '#' + v;
+    if (!/^#[0-9a-fA-F]{6}$/.test(v)) { alert('색상코드를 #RRGGBB 형식으로 입력하세요.'); return; }
+    pmApplyColorChoice(v.toLowerCase());
 }
 
 async function saveProjModal(id) {
@@ -3617,6 +4068,94 @@ function fillLocationForm(ev) {
     document.getElementById('f-place-name').value = ev.place_name || '';
     setLocBtn(ev.address && ev.lat && ev.lng ? 'ok' : 'default');
     setLocStatus('', '');
+}
+
+// ── 여행지도(트립) 연결 ───────────────────────────────────────
+// places.php에서 저장한 트립을 일정에 연결 → 보기모달/모달에서 공유모드 팝업으로 열람
+let TRIPS = null;           // 내 트립 목록 캐시 [{id,name,stops,picks}]
+let _tripsLoading = null;
+function loadTrips() {
+    if (_tripsLoading) return _tripsLoading;
+    _tripsLoading = fetch('place_api.php?module=place&action=trip_list', {cache:'no-store'})
+        .then(r => r.json())
+        .then(d => { TRIPS = (d && d.trips) || []; })
+        .catch(() => { TRIPS = []; });
+    return _tripsLoading;
+}
+// select 옵션 렌더 (저장된 트립이 목록에 없으면 보존 옵션으로 표시)
+function renderTripSelect(selToken, selName) {
+    const sel = document.getElementById('f-trip');
+    const escA = s => esc(s).replace(/"/g, '&quot;');   // 속성값용(따옴표까지 이스케이프)
+    let html = '<option value="">— 연결 안 함 —</option>';
+    let matched = false;
+    (TRIPS || []).forEach(t => {
+        const on = (selName && t.name === selName) ? ' selected' : '';
+        if (on) matched = true;
+        html += '<option value="' + t.id + '" data-name="' + escA(t.name) + '"' + on + '>'
+              + esc(t.name) + ' (' + (t.stops||0) + '곳)</option>';
+    });
+    if (selToken && !matched) {
+        html += '<option value="__keep" data-name="' + escA(selName||'') + '" selected>'
+              + esc(selName || '연결된 여행지도') + ' (저장됨)</option>';
+    }
+    sel.innerHTML = html;
+    updateTripViewBtn();
+}
+function resetTripForm() {
+    document.getElementById('f-trip-token').value = '';
+    document.getElementById('f-trip-name').value  = '';
+    setTripStatus('');
+    loadTrips().then(() => renderTripSelect('', ''));
+}
+function fillTripForm(ev) {
+    const token = ev.trip_token || '';
+    const name  = ev.trip_name || '';
+    document.getElementById('f-trip-token').value = token;
+    document.getElementById('f-trip-name').value  = name;
+    setTripStatus('');
+    loadTrips().then(() => renderTripSelect(token, name));
+}
+// 드롭다운 변경 → 선택 트립의 '만료 없는' 영구 공유토큰 확보
+function onTripChange() {
+    const sel = document.getElementById('f-trip');
+    const opt = sel.options[sel.selectedIndex];
+    const val = sel.value;
+    if (!val) {
+        document.getElementById('f-trip-token').value = '';
+        document.getElementById('f-trip-name').value  = '';
+        setTripStatus(''); updateTripViewBtn(); return;
+    }
+    if (val === '__keep') { updateTripViewBtn(); return; }  // 기존 토큰 유지
+    setTripStatus('여행지도 연결 중…');
+    fetch('place_api.php?module=place&action=trip_share_perm&id=' + encodeURIComponent(val), {cache:'no-store'})
+        .then(r => r.json())
+        .then(d => {
+            if (d && d.ok && d.token) {
+                document.getElementById('f-trip-token').value = d.token;
+                document.getElementById('f-trip-name').value  = d.name || (opt ? opt.dataset.name : '');
+                setTripStatus('');
+            } else {
+                setTripStatus('연결 실패: ' + ((d && d.msg) || '오류'));
+            }
+            updateTripViewBtn();
+        })
+        .catch(() => setTripStatus('연결 실패(네트워크)'));
+}
+function updateTripViewBtn() {
+    document.getElementById('btn-trip-view').disabled = !document.getElementById('f-trip-token').value;
+}
+function setTripStatus(msg) {
+    const el = document.getElementById('trip-status');
+    el.textContent = msg || '';
+    el.style.display = msg ? '' : 'none';
+}
+// 팝업으로 여행지도 보기 (공유모드 게스트 뷰 = places.php?trip=토큰, 만료 없음)
+function openTripPopup() { openTripWindow(document.getElementById('f-trip-token').value); }
+function openTripWindow(token) {
+    if (!token) return;
+    window.open('places.php?trip=' + encodeURIComponent(token),
+        'tripmap_' + token,
+        'width=900,height=760,menubar=no,toolbar=no,location=no,scrollbars=yes,resizable=yes');
 }
 
 // ── 외부 지도 링크 ───────────────────────────────────────────
