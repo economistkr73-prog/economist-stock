@@ -451,6 +451,316 @@ class Place
         return ['type' => 'FeatureCollection', 'features' => $features];
     }
 
+    // 단건 장소 조회 — 마커/슬라이드 카드 상세보기용. searchNearby 와 동일한 properties 형태.
+    public function featureById(int $id): ?array {
+        $sql = "SELECT p.id, p.name, p.category, p.lat, p.lng, p.phone,
+                       p.address, p.region_lv1, p.region_lv2,
+                       p.period_start, p.period_end, p.attributes, p.updated_at,
+                       p.review_count, p.score, p.save_count,
+                       (SELECT COUNT(*) FROM place_ref r WHERE r.place_id = p.id) AS ref_count,
+                       (SELECT GROUP_CONCAT(t.tag ORDER BY t.tag SEPARATOR ',') FROM place_tag t WHERE t.place_id = p.id AND t.kind <> 'month') AS tags,
+                       (SELECT GROUP_CONCAT(CONCAT(g.guide, ':', COALESCE(g.grade, '')) ORDER BY g.guide SEPARATOR ',') FROM place_guide g WHERE g.place_id = p.id) AS guides
+                FROM place p
+                WHERE p.id = :id AND p.is_active = 1
+                LIMIT 1";
+        $st = $this->pdo->prepare($sql);
+        $st->execute([':id' => $id]);
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$row) return null;
+        return [
+            'type' => 'Feature',
+            'geometry' => ['type' => 'Point', 'coordinates' => [(float)$row['lng'], (float)$row['lat']]],
+            'properties' => [
+                'id'           => (int)$row['id'],
+                'name'         => $row['name'],
+                'category'     => $row['category'],
+                'phone'        => $row['phone'],
+                'address'      => $row['address'],
+                'region_lv1'   => $row['region_lv1'],
+                'region_lv2'   => $row['region_lv2'],
+                'period_start' => $row['period_start'],
+                'period_end'   => $row['period_end'],
+                'attributes'   => $row['attributes'] ? json_decode($row['attributes'], true) : null,
+                'updated_at'   => $row['updated_at'],
+                'ref_count'    => (int)$row['ref_count'],
+                'tags'         => $row['tags'] ? explode(',', $row['tags']) : [],
+                'guides'       => self::parseGuides($row['guides'] ?? null),
+            ],
+        ];
+    }
+
+    // ── 경로(회랑) 주변 검색 — 여행 경로 모드 전용 ───────────────
+    //  경로선(폴리라인) 좌표를 받아, DB '전체'에서 경로선까지 최단거리 ≤ 반경 인 장소를 반환.
+    //  ★지도 필터(지역잠금·분류칩·줌 티어)와 완전 무관 — 경로 전 구간의 맛집·여행지를 빠짐없이.
+    //  1) 경로 bbox(+반경 패딩)로 후보를 인덱스 컷 → 2) PHP 에서 점-폴리라인 최단거리로 회랑 판정.
+
+    // 점(lat,lng)에서 선분 A→B 까지 최단거리(km). 국소 평면 근사(수십 km까지 충분).
+    private static function ptSegKm(float $lat, float $lng, float $alat, float $alng, float $blat, float $blng): float {
+        $R = 6371.0; $d2r = M_PI / 180.0; $cl = cos($lat * $d2r);
+        $ax = ($alng - $lng) * $d2r * $cl; $ay = ($alat - $lat) * $d2r;
+        $bx = ($blng - $lng) * $d2r * $cl; $by = ($blat - $lat) * $d2r;
+        $dx = $bx - $ax; $dy = $by - $ay; $len2 = $dx * $dx + $dy * $dy;
+        $t = $len2 > 0 ? -($ax * $dx + $ay * $dy) / $len2 : 0.0;
+        if ($t < 0) $t = 0.0; if ($t > 1) $t = 1.0;
+        $cx = $ax + $t * $dx; $cy = $ay + $t * $dy;
+        return $R * sqrt($cx * $cx + $cy * $cy);
+    }
+    // 점에서 경로선($path=[[lng,lat],...])까지 최단거리(km)
+    private static function pathDistKm(float $lat, float $lng, array $path): float {
+        $n = count($path);
+        if ($n === 0) return INF;
+        if ($n === 1) return self::ptSegKm($lat, $lng, $path[0][1], $path[0][0], $path[0][1], $path[0][0]);
+        $best = INF;
+        for ($i = 0; $i < $n - 1; $i++) {
+            $d = self::ptSegKm($lat, $lng, $path[$i][1], $path[$i][0], $path[$i + 1][1], $path[$i + 1][0]);
+            if ($d < $best) $best = $d;
+        }
+        return $best;
+    }
+
+    /**
+     * 경로 회랑 검색.
+     * @param array      $path        [[lng,lat],...] 경로 폴리라인(도로 경로 또는 지점 직선)
+     * @param float      $radiusKm    경로선에서 이 거리 이내
+     * @param array|null $categoriesIn 표시할 분류(비면 전체)
+     * @param int        $limit       최종 반환 상한(품질순)
+     * @return array GeoJSON FeatureCollection (properties.dist_km = 경로선까지 거리)
+     */
+    public function searchAlongRoute(array $path, float $radiusKm = 5.0, ?array $categoriesIn = null, int $limit = 500, ?array $viewport = null): array {
+        // 입력 정제 + 서버측 솎음(최대 300점)
+        $pts = [];
+        foreach ($path as $p) {
+            if (is_array($p) && count($p) >= 2 && is_numeric($p[0]) && is_numeric($p[1])) $pts[] = [(float)$p[0], (float)$p[1]];
+        }
+        if (count($pts) < 2) return ['type' => 'FeatureCollection', 'features' => []];
+        $maxPts = 300;   // 안전망(클라가 길이비례 40~250점 전송). 그 위로만 한 번 더 솎음
+
+        if (count($pts) > $maxPts) {
+            $stride = (int)ceil(count($pts) / $maxPts);
+            $tmp = [];
+            for ($i = 0; $i < count($pts); $i += $stride) $tmp[] = $pts[$i];
+            $tmp[] = $pts[count($pts) - 1];
+            $pts = $tmp;
+        }
+        $radiusKm = max(0.3, min(30.0, $radiusKm));
+        // 경로 bbox + 반경 패딩
+        $minLat = $minLng = INF; $maxLat = $maxLng = -INF;
+        foreach ($pts as $p) {
+            $minLng = min($minLng, $p[0]); $maxLng = max($maxLng, $p[0]);
+            $minLat = min($minLat, $p[1]); $maxLat = max($maxLat, $p[1]);
+        }
+        $midLat = ($minLat + $maxLat) / 2;
+        $latPad = $radiusKm / 111.0; $cos = max(cos(deg2rad($midLat)), 0.01); $lngPad = $radiusKm / (111.0 * $cos);
+        $minLat -= $latPad; $maxLat += $latPad; $minLng -= $lngPad; $maxLng += $lngPad;
+        // ★뷰포트 증분: 현재 지도 화면 bbox 와 교집합 → 화면 밖 후보는 아예 안 끌어옴(장거리 경로 속도 핵심).
+        if ($viewport && isset($viewport['minLat'], $viewport['maxLat'], $viewport['minLng'], $viewport['maxLng'])) {
+            $minLat = max($minLat, (float)$viewport['minLat']); $maxLat = min($maxLat, (float)$viewport['maxLat']);
+            $minLng = max($minLng, (float)$viewport['minLng']); $maxLng = min($maxLng, (float)$viewport['maxLng']);
+            if ($minLat > $maxLat || $minLng > $maxLng) return ['type' => 'FeatureCollection', 'features' => []];   // 화면이 경로 회랑과 안 겹침
+        }
+        // 분류 필터
+        $allowed = ['travel', 'stay', 'restaurant', 'camping', 'etc'];
+        $cats = [];
+        if ($categoriesIn) {
+            foreach ($categoriesIn as $c) { $c = trim((string)$c); if ($c !== '' && in_array($c, $allowed, true)) $cats[] = $c; }
+        }
+        $args = [':latmin' => $minLat, ':latmax' => $maxLat, ':lngmin' => $minLng, ':lngmax' => $maxLng];
+        $catFilter = '';
+        if ($cats) {
+            $ph = [];
+            foreach (array_values($cats) as $k => $cc) { $cp = ":c{$k}"; $ph[] = $cp; $args[$cp] = $cc; }
+            $catFilter = " AND p.category IN (" . implode(',', $ph) . ")";
+        }
+        // ★1단계(가벼움): bbox 내 후보를 인덱스 컬럼만으로 '리뷰 컷 없이 전부'.
+        //  회랑(경로선 ≤ 반경) 판정을 먼저 해야, 시골 도로변 맛집(리뷰 적음)이
+        //  도시 고리뷰 맛집에 밀려 후보에서 탈락하지 않는다(=긴 경로에서 맛집이 통째로 사라지던 버그).
+        $sql1 = "SELECT p.id, p.category, p.lat, p.lng, p.review_count, p.score, p.save_count
+                 FROM place p
+                 WHERE p.is_active = 1 AND p.geocode_status = 'ok'
+                   AND p.lat BETWEEN :latmin AND :latmax
+                   AND p.lng BETWEEN :lngmin AND :lngmax" . $catFilter . "
+                 LIMIT 60000";
+        $st = $this->pdo->prepare($sql1);
+        $st->execute($args);
+        $byCat = [];
+        while ($row = $st->fetch(PDO::FETCH_ASSOC)) {
+            $d = self::pathDistKm((float)$row['lat'], (float)$row['lng'], $pts);
+            if ($d > $radiusKm) continue;          // 경로선에서 반경 밖이면 제외
+            $byCat[$row['category']][] = ['id' => (int)$row['id'], 'd' => round($d, 3)];
+        }
+        if (!$byCat) return ['type' => 'FeatureCollection', 'features' => []];
+        // 분류 내 정렬 = '경로선에 가까운 순'(상한에 잘려도 경로변 가까운 곳이 모든 구간에서 살아남게).
+        foreach ($byCat as $ck => &$arr) {
+            usort($arr, function ($a, $b) { return $a['d'] <=> $b['d']; });
+        }
+        unset($arr);
+        // ★분류 라운드로빈으로 limit 까지 — 모든 분류(특히 맛집)가 고르게 포함되게. id 선정 + 거리 맵.
+        $pick = []; $distById = [];
+        $catKeys = array_keys($byCat);
+        $idx = array_fill_keys($catKeys, 0);
+        $active = true;
+        while (count($pick) < $limit && $active) {
+            $active = false;
+            foreach ($catKeys as $ck) {
+                if ($idx[$ck] < count($byCat[$ck])) {
+                    $rec = $byCat[$ck][$idx[$ck]++];
+                    $pick[] = $rec['id']; $distById[$rec['id']] = $rec['d'];
+                    $active = true;
+                    if (count($pick) >= $limit) break;
+                }
+            }
+        }
+        if (!$pick) return ['type' => 'FeatureCollection', 'features' => []];
+        // ★2단계: 선정된 id 들만 전체 상세(무거운 태그/가이드 서브쿼리는 이들에만).
+        $in = []; $a2 = [];
+        foreach (array_values($pick) as $k => $pid) { $pp = ":p{$k}"; $in[] = $pp; $a2[$pp] = $pid; }
+        $sql2 = "SELECT p.id, p.name, p.category, p.lat, p.lng, p.phone,
+                        p.address, p.region_lv1, p.region_lv2,
+                        p.period_start, p.period_end, p.attributes, p.updated_at,
+                        p.review_count, p.score, p.save_count,
+                        (SELECT COUNT(*) FROM place_ref r WHERE r.place_id = p.id) AS ref_count,
+                        (SELECT GROUP_CONCAT(t.tag ORDER BY t.tag SEPARATOR ',') FROM place_tag t WHERE t.place_id = p.id AND t.kind <> 'month') AS tags,
+                        (SELECT GROUP_CONCAT(CONCAT(g.guide, ':', COALESCE(g.grade, '')) ORDER BY g.guide SEPARATOR ',') FROM place_guide g WHERE g.place_id = p.id) AS guides
+                 FROM place p
+                 WHERE p.id IN (" . implode(',', $in) . ")";
+        $st2 = $this->pdo->prepare($sql2);
+        $st2->execute($a2);
+        $rowById = [];
+        while ($r = $st2->fetch(PDO::FETCH_ASSOC)) $rowById[(int)$r['id']] = $r;
+        // 라운드로빈 순서대로 feature 빌드
+        $features = [];
+        foreach ($pick as $pid) {
+            $row = $rowById[$pid] ?? null;
+            if (!$row) continue;
+            $features[] = [
+                'type' => 'Feature',
+                'geometry' => ['type' => 'Point', 'coordinates' => [(float)$row['lng'], (float)$row['lat']]],
+                'properties' => [
+                    'id'           => (int)$row['id'],
+                    'name'         => $row['name'],
+                    'category'     => $row['category'],
+                    'phone'        => $row['phone'],
+                    'address'      => $row['address'],
+                    'region_lv1'   => $row['region_lv1'],
+                    'region_lv2'   => $row['region_lv2'],
+                    'period_start' => $row['period_start'],
+                    'period_end'   => $row['period_end'],
+                    'attributes'   => $row['attributes'] ? json_decode($row['attributes'], true) : null,
+                    'updated_at'   => $row['updated_at'],
+                    'ref_count'    => (int)$row['ref_count'],
+                    'tags'         => $row['tags'] ? explode(',', $row['tags']) : [],
+                    'guides'       => self::parseGuides($row['guides'] ?? null),
+                    'dist_km'      => $distById[$pid] ?? null,
+                ],
+            ];
+        }
+        return ['type' => 'FeatureCollection', 'features' => $features];
+    }
+
+    // ══ 여행지도 저장함(트립) — 경로(route)+찜(picks)을 이름 붙여 여러 개 저장 ══
+    private static $tripTableReady = false;
+    private function ensureTripTable(): void {
+        if (self::$tripTableReady) return;
+        $this->pdo->exec("CREATE TABLE IF NOT EXISTS travel_trip (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            owner VARCHAR(100) NOT NULL DEFAULT '',
+            name VARCHAR(200) NOT NULL,
+            route_json MEDIUMTEXT NULL,
+            picks_json MEDIUMTEXT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_owner_name (owner, name)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        // 공유 토큰 컬럼(기존 테이블에도 추가 — MariaDB 10.6 IF NOT EXISTS)
+        try { $this->pdo->exec("ALTER TABLE travel_trip ADD COLUMN IF NOT EXISTS share_token VARCHAR(40) NULL"); } catch (\Throwable $e) {}
+        try { $this->pdo->exec("ALTER TABLE travel_trip ADD COLUMN IF NOT EXISTS share_expires DATETIME NULL"); } catch (\Throwable $e) {}
+        try { $this->pdo->exec("ALTER TABLE travel_trip ADD UNIQUE INDEX IF NOT EXISTS uq_share_token (share_token)"); } catch (\Throwable $e) {}
+        self::$tripTableReady = true;
+    }
+    /** 저장(같은 owner·name 이면 덮어쓰기). route/picks 는 JSON 문자열. @return int trip id */
+    public function tripSave(string $owner, string $name, string $routeJson, string $picksJson): int {
+        $this->ensureTripTable();
+        $st = $this->pdo->prepare("INSERT INTO travel_trip (owner, name, route_json, picks_json)
+            VALUES (:o, :n, :r, :p)
+            ON DUPLICATE KEY UPDATE route_json = VALUES(route_json), picks_json = VALUES(picks_json)");
+        $st->execute([':o' => $owner, ':n' => $name, ':r' => $routeJson, ':p' => $picksJson]);
+        $q = $this->pdo->prepare("SELECT id FROM travel_trip WHERE owner = :o AND name = :n LIMIT 1");
+        $q->execute([':o' => $owner, ':n' => $name]);
+        return (int)$q->fetchColumn();
+    }
+    /** 내 트립 목록(가벼움: 지점·찜 개수만). @return array [{id,name,stops,picks,updated_at}] */
+    public function tripList(string $owner): array {
+        $this->ensureTripTable();
+        $st = $this->pdo->prepare("SELECT id, name, route_json, picks_json, updated_at
+            FROM travel_trip WHERE owner = :o ORDER BY updated_at DESC");
+        $st->execute([':o' => $owner]);
+        $out = [];
+        while ($r = $st->fetch(PDO::FETCH_ASSOC)) {
+            $route = $r['route_json'] ? json_decode($r['route_json'], true) : [];
+            $picks = $r['picks_json'] ? json_decode($r['picks_json'], true) : [];
+            $out[] = [
+                'id'         => (int)$r['id'],
+                'name'       => $r['name'],
+                'stops'      => is_array($route) ? count($route) : 0,
+                'picks'      => is_array($picks) ? count($picks) : 0,
+                'updated_at' => $r['updated_at'],
+            ];
+        }
+        return $out;
+    }
+    /** 트립 불러오기(소유자 본인만). @return array|null {name, route, picks} */
+    public function tripLoad(string $owner, int $id): ?array {
+        $this->ensureTripTable();
+        $st = $this->pdo->prepare("SELECT name, route_json, picks_json FROM travel_trip WHERE id = :i AND owner = :o LIMIT 1");
+        $st->execute([':i' => $id, ':o' => $owner]);
+        $r = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$r) return null;
+        return [
+            'name'  => $r['name'],
+            'route' => $r['route_json'] ? json_decode($r['route_json'], true) : [],
+            'picks' => $r['picks_json'] ? json_decode($r['picks_json'], true) : [],
+        ];
+    }
+    /** 트립 삭제(소유자 본인만). */
+    public function tripDelete(string $owner, int $id): bool {
+        $this->ensureTripTable();
+        $st = $this->pdo->prepare("DELETE FROM travel_trip WHERE id = :i AND owner = :o");
+        $st->execute([':i' => $id, ':o' => $owner]);
+        return $st->rowCount() > 0;
+    }
+    /** 공유 토큰 발급/갱신(본인 소유만) — 한시적(TTL). 토큰 없으면 생성, 만료시각은 항상 NOW()+TTL 로 갱신.
+     *  @return array|null {token, expires_at} */
+    public function tripShare(string $owner, int $id, int $ttlSeconds = 604800): ?array {
+        $this->ensureTripTable();
+        $ttl = max(3600, min($ttlSeconds, 90 * 24 * 3600));   // 1시간~90일 클램프
+        $st = $this->pdo->prepare("SELECT share_token FROM travel_trip WHERE id = :i AND owner = :o LIMIT 1");
+        $st->execute([':i' => $id, ':o' => $owner]);
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$row) return null;
+        $token = $row['share_token'] ?: bin2hex(random_bytes(16));
+        $u = $this->pdo->prepare("UPDATE travel_trip SET share_token = :t, share_expires = DATE_ADD(NOW(), INTERVAL :ttl SECOND)
+                                  WHERE id = :i AND owner = :o");
+        $u->execute([':t' => $token, ':ttl' => $ttl, ':i' => $id, ':o' => $owner]);
+        $q = $this->pdo->prepare("SELECT share_expires FROM travel_trip WHERE id = :i AND owner = :o LIMIT 1");
+        $q->execute([':i' => $id, ':o' => $owner]);
+        return ['token' => $token, 'expires_at' => $q->fetchColumn()];
+    }
+    /** 공유 토큰으로 트립 조회(공개·소유자 무관·미만료만). @return array|null {name, route, picks} */
+    public function tripByToken(string $token): ?array {
+        if ($token === '') return null;
+        $this->ensureTripTable();
+        $st = $this->pdo->prepare("SELECT name, route_json, picks_json FROM travel_trip
+                                   WHERE share_token = :t AND share_expires IS NOT NULL AND share_expires > NOW() LIMIT 1");
+        $st->execute([':t' => $token]);
+        $r = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$r) return null;
+        return [
+            'name'  => $r['name'],
+            'route' => $r['route_json'] ? json_decode($r['route_json'], true) : [],
+            'picks' => $r['picks_json'] ? json_decode($r['picks_json'], true) : [],
+        ];
+    }
+
     /**
      * ★통합 검색 — 분류(멀티) × 공간(뷰포트/지역/전국) × 도메인별 태그(독립 누적)를 한 쿼리로.
      *  결과 = 선택 분류들의 '합집합'. 각 도메인은 자기 태그로만 좁혀지고, 서로·분류를 초기화하지 않는다.

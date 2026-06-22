@@ -20,6 +20,9 @@ $placeBoot->ensureTable();
 // 인증: 유효한 공유 토큰이면 게스트(읽기전용), 아니면 로그인 필요
 $shareToken = trim((string)($_GET['share'] ?? $_POST['share'] ?? ''));
 $isGuest = $shareToken !== '' && $placeBoot->getValidShare($shareToken) !== null;
+// 트립 공유 토큰(?trip=)도 게스트로 인가(그 여행지도 열람용)
+$tripToken = trim((string)($_GET['trip'] ?? $_POST['trip'] ?? ''));
+if (!$isGuest && $tripToken !== '' && $placeBoot->tripByToken($tripToken) !== null) $isGuest = true;
 if (!$isGuest) require_login();
 
 ob_clean(); // stray output 제거 후 JSON 헤더 출력
@@ -48,7 +51,7 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
     $place = new Place($pdo);
 
     // 게스트(공유 링크)는 읽기전용 — 검색/출처/지오코딩/자동완성/태그검색만 허용
-    if ($isGuest && !in_array($action, ['search', 'refs', 'geocode', 'route', 'suggest', 'place_name_search', 'tag_list', 'tag_search', 'guide_list', 'place_guides'], true)) {
+    if ($isGuest && !in_array($action, ['search', 'refs', 'geocode', 'route', 'route_nearby', 'trip_view', 'place_one', 'suggest', 'place_name_search', 'tag_list', 'tag_search', 'guide_list', 'place_guides'], true)) {
         http_response_code(403);
         echo json_encode(['ok' => false, 'msg' => 'forbidden']);
         return;
@@ -82,11 +85,12 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
                 $rv = trim($rv);
                 if ($rv !== '') $regionIn[] = $rv;
             }
-            // 도메인별 태그(콤마구분): 여행지(theme/month) / 맛집(cuisine/grade) / 숙소·캠핑(분류별 유형)
-            $travelTags = array_values(array_filter(array_map('trim', explode(',', (string)($_GET['travel_tags']  ?? ''))), fn($t) => $t !== ''));
-            $foodTags   = array_values(array_filter(array_map('trim', explode(',', (string)($_GET['food_tags']    ?? ''))), fn($t) => $t !== ''));
-            $stayTags   = array_values(array_filter(array_map('trim', explode(',', (string)($_GET['stay_tags']    ?? ''))), fn($t) => $t !== ''));
-            $campTags   = array_values(array_filter(array_map('trim', explode(',', (string)($_GET['camping_tags'] ?? ''))), fn($t) => $t !== ''));
+            // 도메인별 태그: 여행지(theme/month) / 맛집(cuisine/grade) / 숙소·캠핑(분류별 유형)
+            //  ★구분자=줄바꿈(\n). 태그값 자체에 콤마가 들어있어("카페,디저트") 콤마 구분 불가.
+            $travelTags = array_values(array_filter(array_map('trim', explode("\n", (string)($_GET['travel_tags']  ?? ''))), fn($t) => $t !== ''));
+            $foodTags   = array_values(array_filter(array_map('trim', explode("\n", (string)($_GET['food_tags']    ?? ''))), fn($t) => $t !== ''));
+            $stayTags   = array_values(array_filter(array_map('trim', explode("\n", (string)($_GET['stay_tags']    ?? ''))), fn($t) => $t !== ''));
+            $campTags   = array_values(array_filter(array_map('trim', explode("\n", (string)($_GET['camping_tags'] ?? ''))), fn($t) => $t !== ''));
             $guide = trim((string)($_GET['guide'] ?? ''));
             // 분류별 최소리뷰(줌 티어): mr_restaurant/mr_stay/mr_camping
             $catMr = [];
@@ -125,6 +129,14 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
                 return;
             }
             echo json_encode(['ok' => true, 'refs' => $place->getRefs($id)], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+
+        // ── 단건 장소 조회(상세보기) — 경로 슬라이드 카드 등에서 id 로 전체 정보 요청 ──
+        case 'place_one': {
+            $id = (int)($_GET['id'] ?? $_POST['id'] ?? 0);
+            $f  = $id > 0 ? $place->featureById($id) : null;
+            echo json_encode(['ok' => (bool)$f, 'feature' => $f], JSON_UNESCAPED_UNICODE);
             break;
         }
 
@@ -438,6 +450,89 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
                 $waypoints = implode('|', array_slice(array_values($valid), 0, 5));
             }
             echo json_encode(naver_directions($start, $goal, $option, $waypoints), JSON_UNESCAPED_UNICODE);
+            break;
+        }
+
+        // ── 경로(회랑) 주변 검색 → GeoJSON ───────────────
+        //  여행 경로 모드 전용. 경로 폴리라인을 받아 DB 전체에서 경로선 N km 이내 장소 반환.
+        //  지도 필터(지역·분류·줌)와 무관 — 경로 전 구간 맛집·여행지를 빠짐없이.
+        case 'route_nearby': {
+            $rawPath = (string)($_POST['path'] ?? $_GET['path'] ?? '');
+            $path    = json_decode($rawPath, true);
+            if (!is_array($path) || count($path) < 2) {
+                http_response_code(400);
+                echo json_encode(['ok' => false, 'msg' => 'path(=[[경도,위도],...]) 가 필요합니다.']);
+                return;
+            }
+            $radius = max(0.3, min(30.0, (float)($_POST['radius'] ?? $_GET['radius'] ?? 5)));
+            $limit  = max(50, min(2000, (int)($_POST['limit'] ?? $_GET['limit'] ?? 500)));
+            $cats = [];
+            foreach (explode(',', (string)($_POST['cats'] ?? $_GET['cats'] ?? '')) as $cv) {
+                $cv = trim($cv);
+                if ($cv !== '') $cats[] = $cv;
+            }
+            // 뷰포트 증분: 현재 화면 bbox(있으면) 와 교집합만 조회 → 장거리 경로 속도/완전성
+            $viewport = null;
+            $vp = ['minLat', 'maxLat', 'minLng', 'maxLng'];
+            $hasVp = true;
+            foreach ($vp as $k) { if (!isset($_POST[$k]) && !isset($_GET[$k])) { $hasVp = false; break; } }
+            if ($hasVp) {
+                $viewport = [];
+                foreach ($vp as $k) $viewport[$k] = (float)($_POST[$k] ?? $_GET[$k]);
+            }
+            $geojson = $place->searchAlongRoute($path, $radius, $cats ?: null, $limit, $viewport);
+            echo json_encode($geojson, JSON_UNESCAPED_UNICODE);
+            break;
+        }
+
+        // ── 여행지도 저장함(트립) — 소유자 전용(게스트 화이트리스트 제외) ──
+        case 'trip_save': {
+            $name  = trim((string)($_POST['name'] ?? $_GET['name'] ?? ''));
+            $route = (string)($_POST['route'] ?? $_GET['route'] ?? '[]');
+            $picks = (string)($_POST['picks'] ?? $_GET['picks'] ?? '[]');
+            if ($name === '') { http_response_code(400); echo json_encode(['ok' => false, 'msg' => '이름이 필요합니다.']); return; }
+            // JSON 유효성(배열) 검사 — 깨진 입력 저장 방지
+            $rj = json_decode($route, true); $pj = json_decode($picks, true);
+            if (!is_array($rj)) $rj = []; if (!is_array($pj)) $pj = [];
+            $owner = (string)($_SESSION['usr_name'] ?? '');
+            $id = $place->tripSave($owner, mb_substr($name, 0, 200),
+                                   json_encode($rj, JSON_UNESCAPED_UNICODE), json_encode($pj, JSON_UNESCAPED_UNICODE));
+            echo json_encode(['ok' => true, 'id' => $id], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+        case 'trip_list': {
+            $owner = (string)($_SESSION['usr_name'] ?? '');
+            echo json_encode(['ok' => true, 'trips' => $place->tripList($owner)], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+        case 'trip_load': {
+            $id = (int)($_GET['id'] ?? $_POST['id'] ?? 0);
+            $owner = (string)($_SESSION['usr_name'] ?? '');
+            $trip = $place->tripLoad($owner, $id);
+            if (!$trip) { http_response_code(404); echo json_encode(['ok' => false, 'msg' => '트립을 찾을 수 없습니다.']); return; }
+            echo json_encode(['ok' => true, 'trip' => $trip], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+        case 'trip_delete': {
+            $id = (int)($_GET['id'] ?? $_POST['id'] ?? 0);
+            $owner = (string)($_SESSION['usr_name'] ?? '');
+            echo json_encode(['ok' => $place->tripDelete($owner, $id)], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+        case 'trip_share': {   // 소유자: 공유 토큰 발급(한시적 — TTL 기본 7일)
+            $id = (int)($_GET['id'] ?? $_POST['id'] ?? 0);
+            $ttl = (int)($_GET['ttl'] ?? $_POST['ttl'] ?? 604800);
+            $owner = (string)($_SESSION['usr_name'] ?? '');
+            $res = $place->tripShare($owner, $id, $ttl);
+            if ($res === null) { http_response_code(404); echo json_encode(['ok' => false, 'msg' => '트립을 찾을 수 없습니다.']); return; }
+            echo json_encode(['ok' => true, 'token' => $res['token'], 'expires_at' => $res['expires_at']], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+        case 'trip_view': {    // 공개: 공유 토큰으로 그 여행지도 열람(게스트 허용)
+            $token = trim((string)($_GET['trip'] ?? $_POST['trip'] ?? ''));
+            $trip = $place->tripByToken($token);
+            if (!$trip) { http_response_code(404); echo json_encode(['ok' => false, 'msg' => '공유 여행지도를 찾을 수 없습니다.']); return; }
+            echo json_encode(['ok' => true, 'trip' => $trip], JSON_UNESCAPED_UNICODE);
             break;
         }
 
