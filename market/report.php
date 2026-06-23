@@ -42,7 +42,12 @@ function mkt_generate_report(string $date, array $opt = []): ?array {
 // crawl.php 가 라이브러리로 include 할 땐(MKT_LIB_ONLY) 아래 웹/CLI 엔트리를 건너뛴다.
 if (!defined('MKT_LIB_ONLY')) {
     $cli = (PHP_SAPI === 'cli');
-    if (!$cli && ($_GET['key'] ?? '') !== MKT_KEY) { http_response_code(403); exit('forbidden'); }
+    // 인증: 크론·외부 호출은 ?key=MKT_KEY, 사람(헤더 메뉴 클릭)은 로그인 세션 허용
+    if (!$cli && ($_GET['key'] ?? '') !== MKT_KEY) {
+        require_once __DIR__ . '/../env/auth_fnc.php';
+        require_login();   // 미로그인 시 /lg.php 리다이렉트
+        $GLOBALS['current_user'] = $_SESSION['usr_name'] ?? '';   // 공통 헤더(nav)에 사용자명 표시
+    }
 
     $date  = $cli ? ($argv[1] ?? '') : ($_GET['date'] ?? '');
     if ($date === '') $date = mkt_latest_date() ?? date('Y-m-d');   // 기본 = 최신 거래일 스냅샷
@@ -53,7 +58,7 @@ if (!defined('MKT_LIB_ONLY')) {
     // 생성된 리포트가 DB에 있으면 즉시 서빙(웹). 재생성은 ?force=1·briefdebug 또는 크론에서만.
     if (!$cli && !$force && ($cachedHtml = mkt_load_html($date)) !== null) {
         header('Content-Type: text/html; charset=utf-8');
-        echo $cachedHtml;
+        echo mkt_inject_nav($cachedHtml);
         exit;
     }
     if (!mkt_load_snap($date)) {
@@ -79,7 +84,7 @@ if (!defined('MKT_LIB_ONLY')) {
         echo "  brief.head: " . ($r['brief']['head'] ?? '-') . "\n  anomalies: " . count($r['anom']) . "\n";
     } else {
         header('Content-Type: text/html; charset=utf-8');
-        echo $r['html'];
+        echo mkt_inject_nav($r['html']);
     }
 }
 
@@ -222,6 +227,23 @@ function mkt_jo(?float $eok): string { return $eok === null ? '—' : number_for
 function mkt_eok(?float $v): string { return $v === null ? '—' : number_format($v); }
 function mkt_arrow(?string $dir): string { return $dir === 'up' ? '▲' : ($dir === 'down' ? '▼' : '·'); }
 function h(?string $s): string { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); }
+
+/**
+ * 서빙 시점에 공통 상단 네비게이션(env/nav.inc)을 HTML 문자열에 주입한다.
+ * 캐시 HTML에는 nav를 굽지 않고(메뉴 변경 자동반영·로그인 사용자명 정확) 출력 직전에만 삽입한다.
+ */
+function mkt_inject_nav(string $html): string {
+    $navInc = __DIR__ . '/../env/nav.inc';
+    if (!is_file($navInc)) return $html;
+    require_once $navInc;
+    if (!function_exists('nav_css') || !function_exists('render_nav')) return $html;
+    ob_start(); nav_css();                 $css = ob_get_clean();
+    ob_start(); render_nav('morningbrief'); $nav = ob_get_clean();
+    // CSS는 </head> 직전, 네비 바는 <body> 직후에 1회 삽입
+    $html = preg_replace('/<\/head>/i', $css . '</head>', $html, 1);
+    $html = preg_replace('/<body[^>]*>/i', '$0' . addcslashes($nav, '\\$'), $html, 1);
+    return $html;
+}
 
 /* ════════════════════════ HTML 렌더 ════════════════════════ */
 
