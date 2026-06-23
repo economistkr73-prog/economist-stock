@@ -22,6 +22,8 @@ try {
         case 'calendar': api_calendar($action, $pdo); break;
         case 'contacts': api_contacts($action, $pdo); break;
         case 'projects': api_projects($action, $pdo); break;
+        case 'habit':    api_habit($action, $pdo);    break;
+        case 'goal':     api_goal($action, $pdo);     break;
         case 'geo':      api_geo($action);            break;
         case 'travel':   api_travel($action, $pdo);   break;
         // case 'kakao':    api_kakao($action, $pdo);    break;
@@ -285,6 +287,23 @@ function api_calendar(string $action, PDO $pdo): void {
             }
             echo json_encode(['ok' => true, 'parsed' => $p, 'candidates' => $candidates, 'heard' => $text],
                              JSON_UNESCAPED_UNICODE);
+            break;
+
+        // 대시보드 이번 달 달성률: 완료 의미 있는 할일(todo)만 집계
+        case 'todo_stats':
+            $year  = (int)($_GET['year']  ?? date('Y'));
+            $month = (int)($_GET['month'] ?? date('m'));
+            $ms = sprintf('%04d-%02d-01', $year, $month);
+            $me = date('Y-m-t', strtotime($ms));
+            $st = $pdo->prepare("
+                SELECT COALESCE(SUM(is_done),0) AS done, COUNT(*) AS total
+                  FROM tbl_schedule
+                 WHERE event_type='todo' AND due_dt BETWEEN :s AND :e
+            ");
+            $st->execute([':s' => $ms, ':e' => $me]);
+            $r = $st->fetch(PDO::FETCH_ASSOC) ?: ['done' => 0, 'total' => 0];
+            echo json_encode(['ok' => true,
+                'done'  => (int)$r['done'], 'total' => (int)$r['total']]);
             break;
 
         default:
@@ -810,6 +829,146 @@ function api_projects(string $action, PDO $pdo): void {
                 'data'     => $proj->getItems($id),
                 'projects' => $proj->getChildProjects($id),
             ]);
+            break;
+
+        default:
+            http_response_code(400);
+            echo json_encode(['ok' => false, 'msg' => "unknown action: {$action}"]);
+    }
+}
+
+// ==========================================================
+// 습관 모듈
+// ==========================================================
+function api_habit(string $action, PDO $pdo): void {
+    $hab = new Habit($pdo);
+
+    switch ($action) {
+        // 활성 습관 + 최근 로그(streak·히트맵용) + 오늘 완료여부
+        case 'list':
+            $today = preg_match('/^\d{4}-\d{2}-\d{2}$/', $_GET['today'] ?? '') ? $_GET['today'] : date('Y-m-d');
+            // streak/히트맵 윈도: 기본 100일(이번 달 + 충분한 과거)
+            $from  = preg_match('/^\d{4}-\d{2}-\d{2}$/', $_GET['from'] ?? '')
+                     ? $_GET['from'] : date('Y-m-d', strtotime($today . ' -100 days'));
+            echo json_encode(['ok' => true, 'data' => $hab->listActive($from, $today)], JSON_UNESCAPED_UNICODE);
+            break;
+
+        case 'create':
+            $d = json_decode(file_get_contents('php://input'), true);
+            if (trim($d['title'] ?? '') === '') { echo json_encode(['ok' => false, 'msg' => '제목은 필수입니다.']); return; }
+            $id = $hab->create($d);
+            echo json_encode(['ok' => true, 'id' => $id]);
+            break;
+
+        case 'update':
+            $d = json_decode(file_get_contents('php://input'), true);
+            if (!(int)($d['id'] ?? 0)) { echo json_encode(['ok' => false, 'msg' => 'id 없음']); return; }
+            $hab->update($d);
+            echo json_encode(['ok' => true]);
+            break;
+
+        case 'delete':
+            $id = (int)($_GET['id'] ?? $_POST['id'] ?? 0);
+            $hab->delete($id);
+            echo json_encode(['ok' => true]);
+            break;
+
+        // 지난(종료된) 습관 — 대시보드 회고
+        case 'ended':
+            echo json_encode(['ok' => true, 'data' => $hab->listEnded()], JSON_UNESCAPED_UNICODE);
+            break;
+
+        // 체크형 완료 토글 (날짜 단위)
+        case 'toggle':
+            $d    = json_decode(file_get_contents('php://input'), true);
+            $hid  = (int)($d['habit_id'] ?? 0);
+            $date = preg_match('/^\d{4}-\d{2}-\d{2}$/', $d['date'] ?? '') ? $d['date'] : date('Y-m-d');
+            if (!$hid) { echo json_encode(['ok' => false, 'msg' => 'habit_id 없음']); return; }
+            $r = $hab->toggle($hid, $date);
+            echo json_encode(['ok' => true] + $r);
+            break;
+
+        // 측정형 수량 기록 upsert (amount<=0 = 취소)
+        case 'log':
+            $d    = json_decode(file_get_contents('php://input'), true);
+            $hid  = (int)($d['habit_id'] ?? 0);
+            $date = preg_match('/^\d{4}-\d{2}-\d{2}$/', $d['date'] ?? '') ? $d['date'] : date('Y-m-d');
+            $amt  = (int)($d['amount'] ?? 0);
+            if (!$hid) { echo json_encode(['ok' => false, 'msg' => 'habit_id 없음']); return; }
+            $r = $hab->logAmount($hid, $date, $amt);
+            echo json_encode(['ok' => true] + $r);
+            break;
+
+        // 종료(졸업/그만둠) — 삭제 아님
+        case 'end':
+            $d = json_decode(file_get_contents('php://input'), true);
+            $hid = (int)($d['habit_id'] ?? 0);
+            $reason = ($d['reason'] ?? '') === 'completed' ? 'completed' : 'stopped';
+            if (!$hid) { echo json_encode(['ok' => false, 'msg' => 'habit_id 없음']); return; }
+            $hab->endHabit($hid, $reason, isset($d['at']) ? $d['at'] : null);
+            echo json_encode(['ok' => true]);
+            break;
+
+        // 종료 해제(다시 진행)
+        case 'reopen':
+            $d = json_decode(file_get_contents('php://input'), true);
+            $hid = (int)($d['habit_id'] ?? 0);
+            if (!$hid) { echo json_encode(['ok' => false, 'msg' => 'habit_id 없음']); return; }
+            $hab->reopen($hid);
+            echo json_encode(['ok' => true]);
+            break;
+
+        default:
+            http_response_code(400);
+            echo json_encode(['ok' => false, 'msg' => "unknown action: {$action}"]);
+    }
+}
+
+// ==========================================================
+// 목표 모듈
+// ==========================================================
+function api_goal(string $action, PDO $pdo): void {
+    $goal = new Goal($pdo);
+
+    switch ($action) {
+        // 전체 목표 + 이번 기간 진행률
+        case 'list':
+            $today = preg_match('/^\d{4}-\d{2}-\d{2}$/', $_GET['today'] ?? '') ? $_GET['today'] : date('Y-m-d');
+            echo json_encode(['ok' => true, 'data' => $goal->listWithProgress($today)], JSON_UNESCAPED_UNICODE);
+            break;
+
+        // 연결 분류 드롭다운용
+        case 'categories':
+            echo json_encode(['ok' => true, 'data' => $goal->categoryOptions()], JSON_UNESCAPED_UNICODE);
+            break;
+
+        case 'create':
+            $d = json_decode(file_get_contents('php://input'), true);
+            if (trim($d['title'] ?? '') === '') { echo json_encode(['ok' => false, 'msg' => '제목은 필수입니다.']); return; }
+            $id = $goal->create($d);
+            echo json_encode(['ok' => true, 'id' => $id]);
+            break;
+
+        case 'update':
+            $d = json_decode(file_get_contents('php://input'), true);
+            if (!(int)($d['id'] ?? 0)) { echo json_encode(['ok' => false, 'msg' => 'id 없음']); return; }
+            $goal->update($d);
+            echo json_encode(['ok' => true]);
+            break;
+
+        case 'delete':
+            $id = (int)($_GET['id'] ?? $_POST['id'] ?? 0);
+            $goal->delete($id);
+            echo json_encode(['ok' => true]);
+            break;
+
+        // MANUAL 모드 기간 달성 토글
+        case 'toggle':
+            $d     = json_decode(file_get_contents('php://input'), true);
+            $gid   = (int)($d['goal_id'] ?? 0);
+            $today = preg_match('/^\d{4}-\d{2}-\d{2}$/', $d['today'] ?? '') ? $d['today'] : date('Y-m-d');
+            if (!$gid) { echo json_encode(['ok' => false, 'msg' => 'goal_id 없음']); return; }
+            echo json_encode($goal->toggleManual($gid, $today));
             break;
 
         default:

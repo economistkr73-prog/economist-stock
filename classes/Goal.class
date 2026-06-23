@@ -1,0 +1,236 @@
+<?php
+/**
+ * Goal.class — 목표 DB 전담
+ *   tbl_goal       목표(기간당 N회). AUTO=분류 일정 자동집계 / MANUAL=수동 체크
+ *   tbl_goal_log   MANUAL 모드 기간별 달성 기록 (UNIQUE(goal_id, period_key))
+ *
+ * 핵심(스펙):
+ *   - AUTO 모드: 같은 이름의 분류(tbl_project type='group')를 자동 생성/연결(3.1).
+ *               진행률 = 이번 기간 tbl_schedule(project_id=category) 건수(3.2).
+ *   - MANUAL 모드: category_id=NULL, GoalLog로 기간별 1회 체크.
+ *   - "이번 기간"은 Asia/Seoul 기준 서버에서 산출.
+ */
+class Goal {
+    private PDO $pdo;
+
+    public function __construct(PDO $pdo) {
+        $this->pdo = $pdo;
+    }
+
+    /* ── 테이블 멱등 생성 ───────────────────────────── */
+    public function ensureTable(): void {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS tbl_goal (
+                id          INT AUTO_INCREMENT PRIMARY KEY,
+                title       VARCHAR(200) NOT NULL,
+                category_id INT          DEFAULT NULL COMMENT 'tbl_project(group) id, AUTO 모드',
+                cnt         INT          DEFAULT 1 COMMENT '기간당 목표 횟수',
+                period      ENUM('week','month','quarter','year') DEFAULT 'month',
+                mode        ENUM('auto','manual') DEFAULT 'auto' COMMENT 'auto=분류 자동집계, manual=수동 체크',
+                color       CHAR(7)      DEFAULT '#3498db',
+                sort_order  INT          DEFAULT 0,
+                created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS tbl_goal_log (
+                id           INT AUTO_INCREMENT PRIMARY KEY,
+                goal_id      INT         NOT NULL,
+                period_key   VARCHAR(20) NOT NULL COMMENT '2026-06(월)/2026-Q2/2026-W26/2026',
+                completed_at DATETIME    DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_goal_period (goal_id, period_key),
+                FOREIGN KEY (goal_id) REFERENCES tbl_goal(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+        // 목표가 자동 생성한 분류 표시용(분류 목록 아이콘·삭제 경고용) — tbl_project에 멱등 추가
+        $this->pdo->exec("ALTER TABLE tbl_project ADD COLUMN IF NOT EXISTS created_by_goal TINYINT(1) DEFAULT 0 COMMENT '목표가 자동 생성한 분류'");
+    }
+
+    /* ── 분류(group) 자동 생성/연결 (3.1) ──────────── */
+    private function findOrCreateCategory(string $title, string $color): ?int {
+        $title = trim($title);
+        if ($title === '') return null;
+        // 같은 이름의 분류(group)가 있으면 재사용(중복 생성 금지)
+        $st = $this->pdo->prepare("
+            SELECT id FROM tbl_project
+             WHERE type='group' AND title=:t
+             ORDER BY id ASC LIMIT 1
+        ");
+        $st->execute([':t' => $title]);
+        $id = $st->fetchColumn();
+        if ($id) return (int)$id;
+        // 없으면 생성
+        $ins = $this->pdo->prepare("
+            INSERT INTO tbl_project (title, type, color, created_by_goal)
+            VALUES (:t, 'group', :c, 1)
+        ");
+        $ins->execute([':t' => $title, ':c' => $color]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    /* ── CRUD ──────────────────────────────────────── */
+    public function create(array $d): int {
+        $mode   = ($d['mode'] ?? 'auto') === 'manual' ? 'manual' : 'auto';
+        $period = in_array($d['period'] ?? 'month', ['week','month','quarter','year'], true) ? $d['period'] : 'month';
+        $color  = ($d['color'] ?? '') !== '' ? $d['color'] : '#3498db';
+        $title  = trim((string)($d['title'] ?? ''));
+        $cnt    = max(1, (int)($d['cnt'] ?? 1));
+
+        $catId = null;
+        if ($mode === 'auto') {
+            // 명시 분류가 오면 그걸 쓰고, 없으면 제목으로 자동 생성/연결
+            $catId = !empty($d['category_id'])
+                   ? (int)$d['category_id']
+                   : $this->findOrCreateCategory($title, $color);
+        }
+        $st = $this->pdo->prepare("
+            INSERT INTO tbl_goal (title, category_id, cnt, period, mode, color)
+            VALUES (:t, :cat, :cnt, :p, :m, :c)
+        ");
+        $st->execute([
+            ':t' => $title, ':cat' => $catId, ':cnt' => $cnt,
+            ':p' => $period, ':m' => $mode, ':c' => $color,
+        ]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public function update(array $d): void {
+        $id = (int)($d['id'] ?? 0);
+        if (!$id) return;
+        $cur = $this->getById($id);
+        if (!$cur) return;
+
+        $mode   = ($d['mode'] ?? $cur['mode']) === 'manual' ? 'manual' : 'auto';
+        $period = in_array($d['period'] ?? $cur['period'], ['week','month','quarter','year'], true) ? $d['period'] : $cur['period'];
+        $color  = ($d['color'] ?? '') !== '' ? $d['color'] : $cur['color'];
+        $title  = trim((string)($d['title'] ?? $cur['title']));
+        $cnt    = max(1, (int)($d['cnt'] ?? $cur['cnt']));
+
+        $catId = null;
+        if ($mode === 'auto') {
+            if (!empty($d['category_id']))      $catId = (int)$d['category_id'];
+            elseif (!empty($cur['category_id'])) $catId = (int)$cur['category_id'];
+            else                                 $catId = $this->findOrCreateCategory($title, $color);
+        }
+        $st = $this->pdo->prepare("
+            UPDATE tbl_goal SET
+                title=:t, category_id=:cat, cnt=:cnt, period=:p, mode=:m, color=:c
+            WHERE id=:id
+        ");
+        $st->execute([
+            ':t' => $title, ':cat' => $catId, ':cnt' => $cnt,
+            ':p' => $period, ':m' => $mode, ':c' => $color, ':id' => $id,
+        ]);
+    }
+
+    public function delete(int $id): void {
+        // 목표만 삭제. 자동 생성한 분류는 보존(분류에 일정이 매달려 있을 수 있음).
+        $this->pdo->prepare("DELETE FROM tbl_goal WHERE id=:id")->execute([':id' => $id]);
+    }
+
+    public function getById(int $id): ?array {
+        $st = $this->pdo->prepare("SELECT * FROM tbl_goal WHERE id=:id");
+        $st->execute([':id' => $id]);
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        return $row ?: null;
+    }
+
+    /* ── 기간 범위/키 (Asia/Seoul) ─────────────────── */
+    public static function periodRange(string $period, string $today): array {
+        $d = new DateTime($today, new DateTimeZone('Asia/Seoul'));
+        switch ($period) {
+            case 'week': // 월~일 (ISO)
+                $dow   = (int)$d->format('N');          // 1=월 .. 7=일
+                $start = (clone $d)->modify('-' . ($dow - 1) . ' days');
+                $end   = (clone $start)->modify('+6 days');
+                $key   = $d->format('o-\WW');           // 2026-W26
+                break;
+            case 'quarter':
+                $m     = (int)$d->format('n');
+                $q     = intdiv($m - 1, 3);             // 0..3
+                $sm    = $q * 3 + 1;
+                $start = new DateTime(sprintf('%s-%02d-01', $d->format('Y'), $sm), new DateTimeZone('Asia/Seoul'));
+                $end   = (clone $start)->modify('+3 months')->modify('-1 day');
+                $key   = $d->format('Y') . '-Q' . ($q + 1);
+                break;
+            case 'year':
+                $start = new DateTime($d->format('Y') . '-01-01', new DateTimeZone('Asia/Seoul'));
+                $end   = new DateTime($d->format('Y') . '-12-31', new DateTimeZone('Asia/Seoul'));
+                $key   = $d->format('Y');
+                break;
+            case 'month':
+            default:
+                $start = new DateTime($d->format('Y-m-01'), new DateTimeZone('Asia/Seoul'));
+                $end   = (clone $start)->modify('last day of this month');
+                $key   = $d->format('Y-m');
+                break;
+        }
+        return [$start->format('Y-m-d'), $end->format('Y-m-d'), $key];
+    }
+
+    /* ── 진행률 (3.2) ──────────────────────────────── */
+    public function progress(array $g, string $today): array {
+        [$ps, $pe, $key] = self::periodRange($g['period'], $today);
+        $total = max(1, (int)$g['cnt']);
+        if ($g['mode'] === 'auto' && !empty($g['category_id'])) {
+            // 이번 기간 분류 일정 건수 (일정=start_dt, 할일=due_dt 기준)
+            $st = $this->pdo->prepare("
+                SELECT COUNT(*) FROM tbl_schedule
+                 WHERE project_id = :cat
+                   AND DATE(COALESCE(start_dt, due_dt)) BETWEEN :s AND :e
+            ");
+            $st->execute([':cat' => (int)$g['category_id'], ':s' => $ps, ':e' => $pe]);
+            $current = (int)$st->fetchColumn();
+        } else {
+            // MANUAL: 이번 기간 GoalLog 존재 여부
+            $st = $this->pdo->prepare("SELECT COUNT(*) FROM tbl_goal_log WHERE goal_id=:g AND period_key=:k");
+            $st->execute([':g' => (int)$g['id'], ':k' => $key]);
+            $current = (int)$st->fetchColumn() > 0 ? 1 : 0;
+        }
+        return [
+            'current'      => $current,
+            'total'        => $total,
+            'met'          => $current >= $total,
+            'period_start' => $ps,
+            'period_end'   => $pe,
+            'period_key'   => $key,
+        ];
+    }
+
+    /** 전체 목표 + 진행률 */
+    public function listWithProgress(string $today): array {
+        $goals = $this->pdo->query("SELECT * FROM tbl_goal ORDER BY sort_order ASC, id ASC")
+                           ->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($goals as &$g) {
+            $g['progress'] = $this->progress($g, $today);
+        }
+        return $goals;
+    }
+
+    /* ── MANUAL 토글 ───────────────────────────────── */
+    public function toggleManual(int $goalId, string $today): array {
+        $g = $this->getById($goalId);
+        if (!$g) return ['ok' => false];
+        [, , $key] = self::periodRange($g['period'], $today);
+        $st = $this->pdo->prepare("SELECT id FROM tbl_goal_log WHERE goal_id=:g AND period_key=:k");
+        $st->execute([':g' => $goalId, ':k' => $key]);
+        $exists = $st->fetchColumn();
+        if ($exists) {
+            $this->pdo->prepare("DELETE FROM tbl_goal_log WHERE id=:id")->execute([':id' => (int)$exists]);
+            return ['ok' => true, 'done' => false];
+        }
+        $this->pdo->prepare("INSERT INTO tbl_goal_log (goal_id, period_key) VALUES (:g, :k)")
+                  ->execute([':g' => $goalId, ':k' => $key]);
+        return ['ok' => true, 'done' => true];
+    }
+
+    /** 분류(group) 목록 — 목표 폼 '연결 분류' 드롭다운용 */
+    public function categoryOptions(): array {
+        return $this->pdo->query("
+            SELECT id, title, color, created_by_goal
+              FROM tbl_project
+             WHERE type='group'
+             ORDER BY title ASC
+        ")->fetchAll(PDO::FETCH_ASSOC);
+    }
+}

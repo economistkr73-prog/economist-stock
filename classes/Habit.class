@@ -1,0 +1,277 @@
+<?php
+/**
+ * Habit.class — 습관 DB 전담
+ *   tbl_habit       습관 규칙(반복·시각·색상)
+ *   tbl_habit_log   날짜별 완료 기록 (UNIQUE(habit_id, log_date))
+ *
+ * 핵심 원칙(스펙):
+ *   - 완료는 "항목"이 아니라 "날짜"에 기록한다(매일 새로 완료).
+ *   - 미래 row를 미리 만들지 않는다. 완료할 때만 log row 생성.
+ *   - streak / 이번달 달성률은 클라이언트에서 계산 → 여기서는 로그 날짜만 내려준다.
+ */
+class Habit {
+    private PDO $pdo;
+
+    public function __construct(PDO $pdo) {
+        $this->pdo = $pdo;
+    }
+
+    /* ── 테이블 멱등 생성 ───────────────────────────── */
+    public function ensureTable(): void {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS tbl_habit (
+                id           INT AUTO_INCREMENT PRIMARY KEY,
+                title        VARCHAR(200) NOT NULL,
+                recur_type   ENUM('daily','weekdays','week_quota') DEFAULT 'daily' COMMENT '매일/요일선택/주N회',
+                recur_days   VARCHAR(20)  DEFAULT NULL COMMENT 'weekdays: 0~6 CSV(일=0)',
+                week_quota   TINYINT      DEFAULT NULL COMMENT 'week_quota: 주당 목표 횟수',
+                do_time      TIME         DEFAULT NULL COMMENT '타임라인 블록 시각(보통 NULL)',
+                duration_min INT          DEFAULT NULL COMMENT '예상 소요(분)',
+                color        CHAR(7)      DEFAULT '#3498db',
+                icon         VARCHAR(10)  DEFAULT NULL,
+                active       TINYINT(1)   DEFAULT 1 COMMENT '보관 여부',
+                alert_time   TIME         DEFAULT NULL COMMENT '매일 알림 시각',
+                start_date   DATE         NOT NULL COMMENT '이 날부터 시작',
+                sort_order   INT          DEFAULT 0,
+                created_at   DATETIME     DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS tbl_habit_log (
+                id           INT AUTO_INCREMENT PRIMARY KEY,
+                habit_id     INT  NOT NULL,
+                log_date     DATE NOT NULL COMMENT '완료한 날짜',
+                amount       INT  DEFAULT 1 COMMENT '그날 실제 한 양(체크형=1)',
+                completed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_habit_date (habit_id, log_date),
+                FOREIGN KEY (habit_id) REFERENCES tbl_habit(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+        // ── v2 멱등 추가 (기존 v1 테이블 대비) ──
+        $this->pdo->exec("ALTER TABLE tbl_habit_log ADD COLUMN IF NOT EXISTS amount INT DEFAULT 1 COMMENT '그날 실제 한 양(체크형=1)'");
+        $this->pdo->exec("ALTER TABLE tbl_habit ADD COLUMN IF NOT EXISTS daily_target INT DEFAULT NULL COMMENT '하루 목표 수량(있으면 측정형)'");
+        $this->pdo->exec("ALTER TABLE tbl_habit ADD COLUMN IF NOT EXISTS unit VARCHAR(20) DEFAULT NULL COMMENT '단위(분/개/쪽)'");
+        $this->pdo->exec("ALTER TABLE tbl_habit ADD COLUMN IF NOT EXISTS track_total TINYINT(1) DEFAULT 0 COMMENT '누적 추적 여부'");
+        $this->pdo->exec("ALTER TABLE tbl_habit ADD COLUMN IF NOT EXISTS target_total INT DEFAULT NULL COMMENT '누적 목표(졸업 기준)'");
+        $this->pdo->exec("ALTER TABLE tbl_habit ADD COLUMN IF NOT EXISTS time_slot ENUM('morning','afternoon','evening','anytime') DEFAULT NULL COMMENT '시간대(정렬·그룹용)'");
+        $this->pdo->exec("ALTER TABLE tbl_habit ADD COLUMN IF NOT EXISTS reminders VARCHAR(200) DEFAULT NULL COMMENT '알림 시각 CSV(HH:MM,...)'");
+        $this->pdo->exec("ALTER TABLE tbl_habit ADD COLUMN IF NOT EXISTS end_date DATE DEFAULT NULL COMMENT '예정 종료일(그날까지만 예정)'");
+        $this->pdo->exec("ALTER TABLE tbl_habit ADD COLUMN IF NOT EXISTS ended_at DATE DEFAULT NULL COMMENT '실제 종료일(졸업/그만둠)'");
+        $this->pdo->exec("ALTER TABLE tbl_habit ADD COLUMN IF NOT EXISTS end_reason ENUM('completed','stopped') DEFAULT NULL COMMENT '종료 이유'");
+    }
+
+    /* ── 파라미터 정규화 ───────────────────────────── */
+    private function buildParams(array $d): array {
+        $type = in_array($d['recur_type'] ?? 'daily', ['daily','weekdays','week_quota'], true)
+                ? $d['recur_type'] : 'daily';
+
+        // 요일 CSV (0~6) 정규화
+        $days = null;
+        if ($type === 'weekdays') {
+            $raw = $d['recur_days'] ?? [];
+            if (is_string($raw)) $raw = array_filter(explode(',', $raw), 'strlen');
+            $days = implode(',', array_values(array_unique(array_map('intval', (array)$raw))));
+            if ($days === '') $days = null;
+        }
+        $quota = ($type === 'week_quota') ? max(1, (int)($d['week_quota'] ?? 1)) : null;
+
+        $do   = ($d['do_time'] ?? '') !== '' ? $d['do_time'] : null;
+        $dur  = ($d['duration_min'] ?? '') !== '' ? (int)$d['duration_min'] : null;
+        $icon = ($d['icon'] ?? '') !== '' ? $d['icon'] : null;
+        $sd   = ($d['start_date'] ?? '') !== '' ? $d['start_date'] : date('Y-m-d');
+
+        // v2: 측정형/누적/시간대/알림/예정종료
+        $dailyT = ($d['daily_target'] ?? '') !== '' ? (int)$d['daily_target'] : null;
+        $unit   = ($d['unit'] ?? '') !== '' ? mb_substr((string)$d['unit'], 0, 20) : null;
+        $track  = !empty($d['track_total']) ? 1 : 0;
+        $targetT= ($d['target_total'] ?? '') !== '' ? (int)$d['target_total'] : null;
+        if (!$track) $targetT = null;            // 누적 추적 꺼지면 목표도 비움
+        $slot   = in_array($d['time_slot'] ?? '', ['morning','afternoon','evening','anytime'], true) ? $d['time_slot'] : null;
+        // reminders: 배열 또는 CSV → "HH:MM,HH:MM"
+        $rem = $d['reminders'] ?? '';
+        if (is_array($rem)) $rem = implode(',', array_filter(array_map('trim', $rem), 'strlen'));
+        $rem = trim((string)$rem);
+        $reminders = $rem !== '' ? $rem : null;
+        $endDate = ($d['end_date'] ?? '') !== '' ? $d['end_date'] : null;
+
+        return [
+            ':title'        => trim((string)($d['title'] ?? '')),
+            ':recur_type'   => $type,
+            ':recur_days'   => $days,
+            ':week_quota'   => $quota,
+            ':do_time'      => $do,
+            ':duration_min' => $dur,
+            ':color'        => ($d['color'] ?? '') !== '' ? $d['color'] : '#3498db',
+            ':icon'         => $icon,
+            ':active'       => isset($d['active']) ? (int)!!$d['active'] : 1,
+            ':start_date'   => $sd,
+            ':daily_target' => $dailyT,
+            ':unit'         => $unit,
+            ':track_total'  => $track,
+            ':target_total' => $targetT,
+            ':time_slot'    => $slot,
+            ':reminders'    => $reminders,
+            ':end_date'     => $endDate,
+        ];
+    }
+
+    /* ── CRUD ──────────────────────────────────────── */
+    public function create(array $d): int {
+        $p = $this->buildParams($d);
+        $st = $this->pdo->prepare("
+            INSERT INTO tbl_habit
+                (title, recur_type, recur_days, week_quota, do_time, duration_min,
+                 color, icon, active, start_date,
+                 daily_target, unit, track_total, target_total, time_slot, reminders, end_date)
+            VALUES
+                (:title, :recur_type, :recur_days, :week_quota, :do_time, :duration_min,
+                 :color, :icon, :active, :start_date,
+                 :daily_target, :unit, :track_total, :target_total, :time_slot, :reminders, :end_date)
+        ");
+        $st->execute($p);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public function update(array $d): void {
+        $id = (int)($d['id'] ?? 0);
+        if (!$id) return;
+        $p = $this->buildParams($d);
+        $p[':id'] = $id;
+        $st = $this->pdo->prepare("
+            UPDATE tbl_habit SET
+                title=:title, recur_type=:recur_type, recur_days=:recur_days,
+                week_quota=:week_quota, do_time=:do_time, duration_min=:duration_min,
+                color=:color, icon=:icon, active=:active, start_date=:start_date,
+                daily_target=:daily_target, unit=:unit, track_total=:track_total,
+                target_total=:target_total, time_slot=:time_slot, reminders=:reminders,
+                end_date=:end_date
+            WHERE id=:id
+        ");
+        $st->execute($p);
+    }
+
+    public function delete(int $id): void {
+        $st = $this->pdo->prepare("DELETE FROM tbl_habit WHERE id=:id");
+        $st->execute([':id' => $id]);
+    }
+
+    public function getById(int $id): ?array {
+        $st = $this->pdo->prepare("SELECT * FROM tbl_habit WHERE id=:id");
+        $st->execute([':id' => $id]);
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        return $row ?: null;
+    }
+
+    /**
+     * 활성 습관 + 최근 로그(streak·히트맵용) + 오늘 완료여부.
+     * @param string $from  로그 윈도 시작(YYYY-MM-DD). streak 추적 가능한 범위.
+     * @param string $today 클라이언트 기준 오늘(YYYY-MM-DD)
+     */
+    public function listActive(string $from, string $today): array {
+        $habits = $this->pdo->query("
+            SELECT * FROM tbl_habit
+             WHERE active=1 AND ended_at IS NULL
+             ORDER BY FIELD(time_slot,'morning','afternoon','evening','anytime'),
+                      sort_order ASC, id ASC
+        ")->fetchAll(PDO::FETCH_ASSOC);
+        if (!$habits) return [];
+
+        $ids = array_column($habits, 'id');
+        $ph  = implode(',', array_fill(0, count($ids), '?'));
+        // 윈도 로그(amount 포함) — streak·히트맵용
+        $st  = $this->pdo->prepare("
+            SELECT habit_id, log_date, amount FROM tbl_habit_log
+             WHERE habit_id IN ($ph) AND log_date >= ?
+             ORDER BY log_date ASC
+        ");
+        $st->execute(array_merge($ids, [$from]));
+        $logMap = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $logMap[(int)$r['habit_id']][] = ['d' => $r['log_date'], 'a' => (int)$r['amount']];
+        }
+        // 전체 누적합 — 졸업 판정·진행바
+        $cs = $this->pdo->prepare("
+            SELECT habit_id, COALESCE(SUM(amount),0) AS s FROM tbl_habit_log
+             WHERE habit_id IN ($ph) GROUP BY habit_id
+        ");
+        $cs->execute($ids);
+        $cumMap = [];
+        foreach ($cs->fetchAll(PDO::FETCH_ASSOC) as $r) $cumMap[(int)$r['habit_id']] = (int)$r['s'];
+
+        foreach ($habits as &$h) {
+            $hid = (int)$h['id'];
+            $h['logs']      = $logMap[$hid] ?? [];
+            $h['cum_total'] = $cumMap[$hid] ?? 0;
+            $ta = 0;
+            foreach ($h['logs'] as $lg) if ($lg['d'] === $today) { $ta = $lg['a']; break; }
+            $h['today_amount'] = $ta;
+        }
+        return $habits;
+    }
+
+    private function cumTotal(int $habitId): int {
+        $st = $this->pdo->prepare("SELECT COALESCE(SUM(amount),0) FROM tbl_habit_log WHERE habit_id=:h");
+        $st->execute([':h' => $habitId]);
+        return (int)$st->fetchColumn();
+    }
+
+    /**
+     * 그날 기록 upsert (스펙 3.3). amount<=0 → row 삭제(=취소).
+     * 누적 추적(track_total)이면 목표 도달 시 자동 종료(COMPLETED).
+     */
+    public function logAmount(int $habitId, string $date, int $amount): array {
+        if ($amount <= 0) {
+            $this->pdo->prepare("DELETE FROM tbl_habit_log WHERE habit_id=:h AND log_date=:d")
+                      ->execute([':h' => $habitId, ':d' => $date]);
+        } else {
+            $this->pdo->prepare("
+                INSERT INTO tbl_habit_log (habit_id, log_date, amount, completed_at)
+                VALUES (:h, :d, :a, NOW())
+                ON DUPLICATE KEY UPDATE amount=VALUES(amount), completed_at=NOW()
+            ")->execute([':h' => $habitId, ':d' => $date, ':a' => $amount]);
+        }
+        $cum = $this->cumTotal($habitId);
+        $ended = false; $reason = null;
+        $h = $this->getById($habitId);
+        if ($h && (int)$h['track_total'] === 1 && $h['target_total'] !== null
+            && $h['ended_at'] === null && $cum >= (int)$h['target_total']) {
+            $this->endHabit($habitId, 'completed', $date);
+            $ended = true; $reason = 'completed';
+        }
+        return ['done' => $amount > 0, 'amount' => max(0, $amount), 'cum_total' => $cum,
+                'ended' => $ended, 'end_reason' => $reason];
+    }
+
+    /** 체크형 토글: 있으면 취소(0), 없으면 완료(1) */
+    public function toggle(int $habitId, string $date): array {
+        $st = $this->pdo->prepare("SELECT amount FROM tbl_habit_log WHERE habit_id=:h AND log_date=:d");
+        $st->execute([':h' => $habitId, ':d' => $date]);
+        $exists = $st->fetchColumn();
+        return $this->logAmount($habitId, $date, $exists !== false ? 0 : 1);
+    }
+
+    /** 종료(졸업/그만둠) — 삭제 아님, 기록 보존 (스펙 3.6) */
+    public function endHabit(int $habitId, string $reason, ?string $at = null): void {
+        $reason = $reason === 'completed' ? 'completed' : 'stopped';
+        $at = ($at && preg_match('/^\d{4}-\d{2}-\d{2}$/', $at)) ? $at : date('Y-m-d');
+        $this->pdo->prepare("UPDATE tbl_habit SET ended_at=:at, end_reason=:r WHERE id=:id")
+                  ->execute([':at' => $at, ':r' => $reason, ':id' => $habitId]);
+    }
+
+    /** 종료 해제(다시 진행) */
+    public function reopen(int $habitId): void {
+        $this->pdo->prepare("UPDATE tbl_habit SET ended_at=NULL, end_reason=NULL WHERE id=:id")
+                  ->execute([':id' => $habitId]);
+    }
+
+    /** 지난(종료된) 습관 — 대시보드 회고용 */
+    public function listEnded(): array {
+        $rows = $this->pdo->query("
+            SELECT * FROM tbl_habit
+             WHERE ended_at IS NOT NULL
+             ORDER BY ended_at DESC, id DESC
+        ")->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($rows as &$h) $h['cum_total'] = $this->cumTotal((int)$h['id']);
+        return $rows;
+    }
+}
