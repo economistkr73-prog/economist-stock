@@ -480,6 +480,27 @@ function sch_calendar(PDO $pdo): void {
 .hl-muted { color: #aab2bd; font-size: 13px; }
 .hl-pct { font-size: 12px; color: #1d9e75; font-weight: 600; }
 .hl-remain { font-size: 11px; color: #aab2bd; margin-top: 3px; }
+.hl-today { margin-bottom: 16px; }
+.hl-today-h { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 6px; font-size: 13px; color: #7f8c8d; }
+.hl-hero { display: flex; align-items: baseline; gap: 6px; margin-bottom: 10px; }
+.hl-hero b { font-size: 34px; font-weight: 500; line-height: 1; color: #2c3e50; }
+.hl-hero-sub { font-size: 18px; color: #aab2bd; }
+.hl-hero-done { margin-left: auto; font-size: 13px; font-weight: 600; color: #1d9e75; }
+.hl-bar-lg { height: 8px; }
+.hl-head-streak { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; font-weight: 500; padding: 3px 8px; border-radius: 20px; background: #faeeda; color: #8a5410; flex: none; }
+.hl-seg { display: flex; gap: 4px; padding: 3px; background: #eef1f4; border-radius: 10px; margin-bottom: 12px; }
+.hl-seg button { flex: 1; height: 32px; border: none; border-radius: 7px; font-size: 13px; font-weight: 500; color: #7f8c8d; background: transparent; cursor: pointer; }
+.hl-seg button.active { background: #fff; color: #185fa5; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+.hl-seg-label { font-size: 12px; color: #7f8c8d; margin-bottom: 6px; }
+.hl-mode-hint { font-size: 12px; color: #aab2bd; margin-top: 7px; }
+.hl-cum-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.hl-cum-l { font-size: 13px; color: #7f8c8d; }
+.hl-cum-l b { font-size: 15px; font-weight: 500; color: #2c3e50; }
+.hl-cum-pct { font-size: 13px; font-weight: 500; color: #7f8c8d; }
+.hl-cum-remain { font-size: 12px; color: #aab2bd; margin-top: 7px; }
+.th-ref { flex: none; cursor: pointer; font-size: 13px; margin-right: 2px; }
+.hl-ref { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; margin-bottom: 14px; padding: 9px; border: 1px solid #d6e4f0; border-radius: 8px; background: #f3f8fd; color: #1f6fb2; font-size: 13px; font-weight: 500; cursor: pointer; }
+.hl-ref:hover { background: #e7f1fb; }
 /* 월 하단 '오늘 남은 습관' 고정 바 */
 #month-habit-bar { flex: none; border-top: 1px solid #e6ebf0; background: #f7f9fb; padding: 8px 11px; }
 .mhb-head { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; font-size: 11px; color: #7f8c8d; }
@@ -932,6 +953,11 @@ function sch_calendar(PDO $pdo): void {
     <!-- ── 습관 탭 ── -->
     <div id="td-pane-habit" class="td-pane" style="padding-top:12px;display:none;">
       <input id="td-h-title" class="td-inp" placeholder="제목 입력 *">
+      <div class="td-lbl">분류 <span style="color:#aab2bd;">(선택 · 배지)</span></div>
+      <input id="td-h-cat" class="td-inp" placeholder="예: 독서, 운동, 공부" list="td-h-cat-list" maxlength="40">
+      <datalist id="td-h-cat-list"></datalist>
+      <div class="td-lbl">참고 링크 <span style="color:#aab2bd;">(선택 · 유튜브/블로그)</span></div>
+      <input id="td-h-ref" class="td-inp" type="url" placeholder="https://… (기록할 때 팝업으로 열림)" maxlength="500">
       <div class="td-lbl">반복 *</div>
       <div class="td-seg" id="td-h-recurseg">
         <button data-k="daily"      class="active" onclick="tdSetRecur('daily')">매일</button>
@@ -1047,44 +1073,58 @@ function sch_calendar(PDO $pdo): void {
         <div id="hl-name" class="hl-name"></div>
         <div id="hl-date" class="hl-date"></div>
       </div>
+      <span id="hl-streak" class="hl-head-streak"></span>
       <span class="hl-x" onclick="closeHabitLog()" title="닫기">✕</span>
     </div>
-    <div class="hl-inputs">
-      <div class="hl-incol">
-        <label class="hl-lbl">오늘 한 양</label>
-        <div class="hl-amt-row">
-          <input id="hl-amt" type="number" min="0" class="hl-amt" oninput="hlFromToday()" onkeydown="if(event.key==='Enter')hlSave()">
-          <span id="hl-unit" class="hl-unit"></span>
-        </div>
+    <!-- 오늘 = 히어로 -->
+    <div class="hl-today">
+      <div class="hl-today-h">
+        <span>오늘 목표</span>
+        <span id="hl-today-target"></span>
       </div>
-      <div class="hl-incol" id="hl-total-wrap" style="display:none;">
-        <label class="hl-lbl">누적(현재 위치)</label>
-        <div class="hl-amt-row">
-          <input id="hl-total" type="number" min="0" class="hl-amt" oninput="hlFromTotal()" onkeydown="if(event.key==='Enter')hlSave()">
-          <span id="hl-unit2" class="hl-unit"></span>
-        </div>
+      <div class="hl-hero">
+        <b id="hl-today-now">0</b><span id="hl-today-slash" class="hl-hero-sub"></span>
+        <span id="hl-today-remain" class="hl-hero-done"></span>
       </div>
+      <div class="hl-bar hl-bar-lg"><div id="hl-today-bar" class="hl-bar-base"></div></div>
     </div>
-    <div id="hl-prevhint" class="hl-prevhint"></div>
-    <div id="hl-daily" class="hl-daily"></div>
+
+    <!-- 참고 링크(있을 때만) -->
+    <button id="hl-ref" class="hl-ref" style="display:none;" onclick="openHabitRef(event,this.dataset.url)"></button>
+
+    <!-- 입력 방식: ＋추가(증분) / 누적값(현재 총값 직접 입력) -->
+    <div class="hl-seg" id="hl-mode">
+      <button type="button" data-m="add"   onclick="hlSetMode('add')">＋ 추가</button>
+      <button type="button" data-m="total" onclick="hlSetMode('total')">누적값</button>
+    </div>
+    <div id="hl-mode-label" class="hl-seg-label"></div>
+    <div class="hl-amt-row">
+      <input id="hl-val" type="number" min="0" class="hl-amt" onfocus="if(HL.mode==='total')this.value='';" onkeydown="if(event.key==='Enter'){event.preventDefault();hlSubmit();}">
+      <span id="hl-unit" class="hl-unit"></span>
+      <button class="btn btn-primary" style="flex:none;" onclick="hlSubmit()">기록</button>
+    </div>
+    <div id="hl-mode-hint" class="hl-mode-hint"></div>
+
+    <!-- 누적 = 요약 (track_total만) -->
     <div id="hl-track" class="hl-track" style="display:none;">
-      <div class="hl-track-top">
-        <span class="hl-track-lbl">누적 진행</span>
-        <span id="hl-streak" class="hl-track-streak"></span>
+      <div class="hl-cum-top">
+        <span class="hl-cum-l">누적 <b id="hl-now"></b> <span class="hl-muted" id="hl-target"></span></span>
+        <span id="hl-pct" class="hl-cum-pct"></span>
       </div>
-      <div class="hl-bar">
-        <div id="hl-bar-base" class="hl-bar-base"></div>
-        <div id="hl-bar-add" class="hl-bar-add"></div>
-      </div>
-      <div class="hl-track-nums">
-        <span><b id="hl-now"></b> <span class="hl-muted" id="hl-target"></span></span>
-        <span id="hl-pct" class="hl-pct"></span>
-      </div>
-      <div id="hl-remain" class="hl-remain"></div>
+      <div class="hl-bar"><div id="hl-bar-base" class="hl-bar-base"></div></div>
+      <div id="hl-cum-remain" class="hl-cum-remain"></div>
     </div>
-    <div class="modal-footer" style="margin-top:18px;display:flex;justify-content:flex-end;gap:8px;">
-      <button class="btn" onclick="closeHabitLog()">취소</button>
-      <button class="btn btn-primary" onclick="hlSave()">저장</button>
+  </div>
+</div>
+
+<!-- 참고 영상(유튜브) 임베드 팝업 -->
+<div class="modal-overlay" id="yt-overlay">
+  <div class="modal" style="width:760px;max-width:96vw;padding:0;overflow:hidden;background:#000;">
+    <div style="display:flex;justify-content:flex-end;padding:6px 8px;background:#000;">
+      <span class="hl-x" onclick="closeYt()" title="닫기" style="color:#fff;">✕</span>
+    </div>
+    <div style="position:relative;width:100%;padding-top:56.25%;">
+      <iframe id="yt-frame" src="" style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;" allow="autoplay; encrypted-media; fullscreen" allowfullscreen></iframe>
     </div>
   </div>
 </div>
@@ -3974,9 +4014,10 @@ function renderProjPanel() {
         const done = doneOn(h, t);
         const sk = h.recur_type==='week_quota' ? 0 : habitStreak(h);
         const streak = sk>0 ? `<span class="th-streak">🔥${sk}</span>` : '';
+        const refIcon = h.ref_url ? `<span class="th-ref" data-url="${esc(h.ref_url)}" onclick="openHabitRef(event,this.dataset.url)" title="참고 링크">${ytId(h.ref_url)?'📺':'🔗'}</span>` : '';
         const icon = `<span class="th-check ${done?'on':''}" onclick="habitIconTap(event,${h.id})" title="${measure?'오늘 수치 입력':'오늘 완료'}">${done?'☑':'☐'}</span>`;
         const lbl  = `<span class="proj-label ${done?'th-done':''}" onclick="openTodoModal('habit',${h.id})">${esc((h.icon||'')+h.title)}</span>`;
-        const top  = `<div class="proj-item th-row">${icon}${lbl}<span class="th-right">${streak}</span></div>`;
+        const top  = `<div class="proj-item th-row">${icon}${lbl}<span class="th-right">${refIcon}${streak}</span></div>`;
         // 아랫줄: 누적 진행바 (track_total일 때만)
         let bar = '';
         if (+h.track_total===1 && h.target_total){
@@ -4141,12 +4182,12 @@ function habitIconTap(e, id){
     openHabitLog(id);                                       // 측정형=모달(실시간 미리보기)
 }
 
-// ── 습관 오늘 기록 모달 (측정형) ──
-let HL = { id:0, habit:null };
+// ── 습관 오늘 기록 모달 (측정형 · 증분 입력) ──
+let HL = { id:0, habit:null, track:false };
 function openHabitLog(id){
     const h = TODO_HABITS.find(x=>x.id==id);
     if (!h) return;
-    HL = { id:id, habit:h };
+    HL = { id:id, habit:h, track:(+h.track_total===1) && !!h.target_total };
     const DK=['일','월','화','수','목','금','토'];
     const d = new Date();
     document.getElementById('hl-icon').textContent = h.icon || '🔁';
@@ -4154,100 +4195,141 @@ function openHabitLog(id){
     document.getElementById('hl-date').textContent = `오늘 · ${d.getMonth()+1}/${d.getDate()} (${DK[d.getDay()]})`;
     const unit = h.unit || '';
     document.getElementById('hl-unit').textContent = unit;
-    document.getElementById('hl-unit2').textContent = unit;
-    const ta = +h.today_amount || 0;
-    const dt = +h.daily_target || 0;
-    const eff = ta>0 ? ta : dt;            // 오늘 기록 없으면 하루목표를 기본값으로 채움(보이는 값=저장값)
-    document.getElementById('hl-amt').value = eff>0 ? eff : '';
-    document.getElementById('hl-amt').placeholder = String(dt || '0');
-    const track = (+h.track_total===1) && h.target_total;
-    HL.track = track; HL.warnRewind = false;
-    document.getElementById('hl-track').style.display = track ? 'block' : 'none';
-    document.getElementById('hl-total-wrap').style.display = track ? 'block' : 'none';
-    if (track){
-        const prev = Math.max(0, (+h.cum_total||0) - ta);
-        const total = prev + eff;
-        document.getElementById('hl-total').value = total>0 ? total : '';
-        document.getElementById('hl-total').placeholder = String(prev || 0);
-        const sk = h.recur_type==='week_quota' ? 0 : habitStreak(h);
-        document.getElementById('hl-streak').innerHTML = sk>0 ? `🔥 streak ${sk}일` : '';
-    }
-    hlUpdate();
+    const refEl = document.getElementById('hl-ref');
+    if (h.ref_url){
+        refEl.style.display = 'flex';
+        refEl.textContent = ytId(h.ref_url) ? '📺 참고 영상 보기' : '🔗 참고 링크 열기';
+        refEl.dataset.url = h.ref_url;
+    } else { refEl.style.display = 'none'; }
+    hlRender();
+    hlSetMode('add');   // 기본은 항상 ＋추가
     document.getElementById('habit-log-overlay').classList.add('open');
-    setTimeout(()=>{ const a=document.getElementById('hl-amt'); a.focus(); a.select(); }, 30);
+    setTimeout(()=>{ document.getElementById('hl-val').focus(); }, 30);
 }
 function closeHabitLog(){ document.getElementById('habit-log-overlay').classList.remove('open'); }
-// 이전까지 누적(오늘 제외) = SUM(log) − 오늘분 = cum_total − today_amount
-function hlPrev(){ const h=HL.habit; if(!h) return 0; return Math.max(0,(+h.cum_total||0)-(+h.today_amount||0)); }
-// '오늘 한 양' 입력 → 누적 = prev + today 자동
-function hlFromToday(){
-    if (HL.track){
-        const today = Math.max(0, parseInt(document.getElementById('hl-amt').value||'0',10)||0);
-        const total = hlPrev()+today;
-        document.getElementById('hl-total').value = total>0 ? total : '';
-        HL.warnRewind = false;
-    }
-    hlUpdate();
+
+// 참고 링크: 유튜브면 임베드 팝업, 그 외엔 새 창 팝업
+function ytId(url){
+    if (!url) return null;
+    try {
+        const u = new URL(url);
+        const host = u.hostname.replace(/^www\./,'');
+        if (host==='youtu.be') return u.pathname.slice(1) || null;
+        if (host.endsWith('youtube.com')){
+            if (u.pathname==='/watch') return u.searchParams.get('v');
+            const m = u.pathname.match(/\/(embed|shorts|v)\/([^/?#]+)/);
+            if (m) return m[2];
+        }
+    } catch(e){}
+    return null;
 }
-// '누적(현재 위치)' 입력 → 오늘 한 양 = total − prev (음수면 0 클램프 + 경고)
-function hlFromTotal(){
-    const raw = document.getElementById('hl-total').value;
-    if (raw===''){ document.getElementById('hl-amt').value=''; HL.warnRewind=false; hlUpdate(); return; }
-    const totalRaw = parseInt(raw,10);
-    if (!isNaN(totalRaw)){
-        let today = totalRaw - hlPrev();
-        HL.warnRewind = today < 0;        // 이전 누적보다 작음 = 되감기
-        if (today < 0) today = 0;         // 클램프
-        document.getElementById('hl-amt').value = today>0 ? today : '0';
+function openHabitRef(e, url){
+    if (e){ e.stopPropagation(); }
+    if (!url) return;
+    const id = ytId(url);
+    if (id){
+        document.getElementById('yt-frame').src = `https://www.youtube.com/embed/${id}?autoplay=1`;
+        document.getElementById('yt-overlay').classList.add('open');
+    } else {
+        window.open(url, 'habitRef', 'width=900,height=720,scrollbars=yes,resizable=yes');
     }
-    hlUpdate();
 }
-function hlUpdate(){
+function closeYt(){
+    document.getElementById('yt-overlay').classList.remove('open');
+    document.getElementById('yt-frame').src = '';   // 재생 중지
+}
+
+// 현재 상태(HL.habit)로 진행 표시 갱신 — 저장이 끝난 뒤 다시 그림
+function hlRender(){
     const h = HL.habit; if(!h) return;
     const unit = h.unit || '';
-    const v = Math.max(0, parseInt(document.getElementById('hl-amt').value||'0',10) || 0);
-    // 오늘 목표 판정
-    const dt = (h.daily_target!=null && h.daily_target!=='') ? +h.daily_target : null;
-    const dailyEl = document.getElementById('hl-daily');
-    if (dt!=null){
-        dailyEl.innerHTML = (v>=dt)
-            ? `<span class="hl-ok">✓ 오늘 목표 달성 (${dt}${unit}) · streak 유지</span>`
-            : `<span class="hl-warn">목표 ${dt}${unit} 중 ${v}${unit} · ${dt-v}${unit} 더</span>`;
-        dailyEl.style.display='block';
-    } else { dailyEl.style.display='none'; }
-    // 누적 미리보기 (저장 시 오늘분 교체 → 오늘 제외 누적 + 입력값)
-    const track = (+h.track_total===1) && h.target_total;
-    if (track){
-        const target = +h.target_total;
-        const baseExcl = Math.max(0, (+h.cum_total||0) - (+h.today_amount||0));
-        const total = Math.min(target, baseExcl + v);
-        const basePct = Math.min(100, baseExcl/target*100);
-        const addPct  = Math.min(100-basePct, Math.max(0, (total-baseExcl)/target*100));
-        document.getElementById('hl-bar-base').style.width = basePct+'%';
-        document.getElementById('hl-bar-add').style.left = basePct+'%';
-        document.getElementById('hl-bar-add').style.width = addPct+'%';
-        document.getElementById('hl-now').textContent = total.toLocaleString();
-        document.getElementById('hl-target').textContent = `/ ${target.toLocaleString()}${unit}`;
-        const p = total/target*100;
-        document.getElementById('hl-pct').textContent = (Math.round(p*10)/10)+'%';
-        document.getElementById('hl-remain').textContent = total>=target
-            ? '목표 달성! 저장 시 졸업 처리' : `목표까지 ${(target-total).toLocaleString()}${unit}`;
+    const ta = +h.today_amount || 0;
+    const dt = +h.daily_target || 0;
+    // 오늘 = 히어로
+    document.getElementById('hl-today-target').textContent = (dt ? dt.toLocaleString() : '0') + unit;
+    document.getElementById('hl-today-now').textContent = ta.toLocaleString();
+    document.getElementById('hl-today-slash').textContent = ' / ' + (dt ? dt.toLocaleString() : '0');
+    const tpct = dt>0 ? Math.min(100, ta/dt*100) : (ta>0 ? 100 : 0);
+    document.getElementById('hl-today-bar').style.width = tpct + '%';
+    document.getElementById('hl-today-remain').textContent = (dt>0 && ta>=dt) ? '✓ 달성' : '';
+    // streak 칩(헤더)
+    const sk = h.recur_type==='week_quota' ? 0 : habitStreak(h);
+    const skEl = document.getElementById('hl-streak');
+    if (sk>0){ skEl.textContent = `🔥 ${sk}`; skEl.style.display = 'inline-flex'; }
+    else { skEl.style.display = 'none'; }
+    // 누적 = 요약 (track_total만)
+    document.getElementById('hl-track').style.display = HL.track ? 'block' : 'none';
+    if (HL.track){
+        const cum = +h.cum_total || 0, tt = +h.target_total;
+        const cpct = tt>0 ? Math.min(100, cum/tt*100) : 0;
+        document.getElementById('hl-bar-base').style.width = cpct + '%';
+        document.getElementById('hl-now').textContent = cum.toLocaleString();
+        document.getElementById('hl-target').textContent = `/ ${tt.toLocaleString()}${unit}`;
+        document.getElementById('hl-pct').textContent = (Math.round(cpct*10)/10) + '%';
+        document.getElementById('hl-cum-remain').textContent = cum>=tt
+            ? '목표 달성!' : `목표까지 ${(tt-cum).toLocaleString()}${unit}`;
     }
-    // 이전 누적 힌트 (누적 사용 습관만)
-    const ph = document.getElementById('hl-prevhint');
-    if (track){
-        const prev = Math.max(0, (+h.cum_total||0) - (+h.today_amount||0));
-        const totalNow = prev + v;
-        let html = `이전 누적 <b>${prev.toLocaleString()}${unit}</b> · 오늘 <b>${v.toLocaleString()}${unit}</b> → 누적 <b>${totalNow.toLocaleString()}${unit}</b> <span style="color:#aab2bd;">(자동)</span>`;
-        if (HL.warnRewind) html += `<br><span class="hl-rewind">⚠ 이전 누적(${prev.toLocaleString()}${unit})보다 작아요 → 오늘 0 처리</span>`;
-        ph.innerHTML = html; ph.style.display = 'block';
-    } else { ph.style.display = 'none'; }
 }
-async function hlSave(){
-    const v = document.getElementById('hl-amt').value;
-    const id = HL.id;
-    closeHabitLog();
-    await logHabitAmount(id, v);   // 0 입력=취소(삭제), 누적 도달 시 자동 졸업
+
+// 입력 방식 전환: add=방금 한 양(증분) / total=현재 누적값 직접 입력
+function hlSetMode(m){
+    HL.mode = (m==='total') ? 'total' : 'add';
+    document.querySelectorAll('#hl-mode button').forEach(b=>b.classList.toggle('active', b.dataset.m===HL.mode));
+    const h = HL.habit; if(!h) return;
+    const unit = h.unit || '';
+    const inp = document.getElementById('hl-val');
+    const lbl = document.getElementById('hl-mode-label');
+    const hint = document.getElementById('hl-mode-hint');
+    if (HL.mode==='total'){
+        const cur = HL.track ? (+h.cum_total||0) : (+h.today_amount||0);   // 책=누적페이지 / 그 외=오늘총량
+        inp.value = cur>0 ? cur : '';
+        inp.placeholder = HL.track ? '현재 누적' : '오늘 누적';
+        lbl.textContent = '누적값';
+        hint.textContent = HL.track ? '지금까지의 누적 합계를 이 값으로 맞춰요' : '오늘까지의 총량을 이 값으로 맞춰요';
+    } else {
+        inp.value = '';
+        inp.placeholder = '방금 한 양';
+        lbl.textContent = '방금 한 양';
+        hint.textContent = '방금 한 양만큼 누적에 더해요';
+    }
+    if (HL.mode==='add') inp.focus();   // total은 미리채운 값 보이게 자동포커스 안 함(클릭 시 지워짐)
+}
+
+// 기록 — 모드에 따라 증분(add) 또는 누적 절대값(log)으로 저장. 모달은 열어둔 채 갱신
+async function hlSubmit(){
+    const h = HL.habit; if(!h) return;
+    const id = HL.id, t = todayStr();
+    const inp = document.getElementById('hl-val');
+    if (inp.value.trim()===''){ inp.focus(); return; }   // 빈 입력=실수 방지(누적 0 처리 안 함)
+    const raw = Math.max(0, parseInt(inp.value||'0',10) || 0);
+    let url, body;
+    if (HL.mode==='total'){
+        // 현재 누적값 → 오늘분 = 누적 − 이전누적(어제까지). 이전보다 작으면 0 클램프
+        const prev = HL.track ? Math.max(0, (+h.cum_total||0) - (+h.today_amount||0)) : 0;
+        let today = raw - prev;
+        if (today < 0) today = 0;
+        url = 'schedule_api.php?module=habit&action=log';
+        body = {habit_id:id, date:t, amount:today};
+    } else {
+        if (raw<=0){ inp.focus(); return; }
+        url = 'schedule_api.php?module=habit&action=add';
+        body = {habit_id:id, date:t, delta:raw};
+    }
+    const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)}).then(r=>r.json()).catch(()=>null);
+    if (!r || !r.ok){ showToast('기록 실패'); return; }
+    if (h) applyHabitLocal(h, t, (+r.amount||0), r.cum_total);
+    renderProjPanel(); renderMonthHabitBar();
+    if (dashOpen) renderDashboard();
+    const unit = h.unit || '';
+    if (r.ended){ showToast('🎉 누적 목표 달성! 습관을 졸업했어요'); closeHabitLog(); await loadTodoData(); return; }
+    hlRender();
+    if (HL.mode==='total'){
+        showToast(`누적 ${(HL.track ? (+r.cum_total||0) : (+r.amount||0)).toLocaleString()}${unit}`);
+        hlSetMode('total');   // 새 누적값을 입력칸에 다시 표시
+    } else {
+        inp.value = ''; inp.focus();
+        showToast(`+${raw.toLocaleString()}${unit} · 오늘까지 ${(+r.amount||0).toLocaleString()}${unit}`);
+    }
 }
 
 // 체크형 토글
@@ -4281,23 +4363,6 @@ async function habitBlockToggle(e, id, ds){
     await loadTodoData();   // 습관 로그 갱신(사이드바·하단바·캘린더 점/블록 — loadTodoData가 render 호출)
 }
 
-// 측정형 수량 기록
-async function logHabitAmount(id, val){
-    const t = todayStr();
-    const amt = Math.max(0, parseInt(val||'0',10) || 0);
-    const r = await fetch('schedule_api.php?module=habit&action=log', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({habit_id:id, date:t, amount:amt})
-    }).then(r=>r.json()).catch(()=>null);
-    if (!r || !r.ok) { showToast('기록 실패'); return; }
-    if (r.ended){ showToast('🎉 누적 목표 달성! 습관을 졸업했어요'); await loadTodoData(); return; }
-    const h = TODO_HABITS.find(x=>x.id==id);
-    if (h) applyHabitLocal(h, t, amt, r.cum_total);
-    renderProjPanel();
-    renderMonthHabitBar();
-    if (dashOpen) renderDashboard();
-}
-
 async function toggleGoalManual(e, id){
     if(e){ e.stopPropagation(); }
     const r = await fetch('schedule_api.php?module=goal&action=toggle', {
@@ -4325,6 +4390,9 @@ async function openTodoModal(type, id){
     document.getElementById('td-g-cat').value   = '';
     tdSetMode('auto');
     document.getElementById('td-h-title').value = '';
+    document.getElementById('td-h-cat').value = '';
+    document.getElementById('td-h-ref').value = '';
+    tdFillHabitCats();
     document.getElementById('td-h-quota').value = 3;
     document.getElementById('td-h-daily').value = '';
     document.getElementById('td-h-unit').value = '';
@@ -4357,6 +4425,8 @@ async function openTodoModal(type, id){
             const h = TODO_HABITS.find(x=>x.id==TD.id);
             if (h){
                 document.getElementById('td-h-title').value = h.title||'';
+                document.getElementById('td-h-cat').value = h.category||'';
+                document.getElementById('td-h-ref').value = h.ref_url||'';
                 tdSetRecur(h.recur_type||'daily');
                 if (h.recur_type==='weekdays'){
                     const days = String(h.recur_days||'').split(',').filter(s=>s!=='').map(Number);
@@ -4447,6 +4517,13 @@ function tdToggleTime(){ document.getElementById('td-h-timerow').style.display =
 let TD_REMINDERS = [];   // ['08:00','12:00']
 function tdToggleTrack(){ document.getElementById('td-h-trackrow').style.display = document.getElementById('td-h-tracksw').checked ? 'flex' : 'none'; }
 function tdSyncUnit(){ document.getElementById('td-h-target-unit').textContent = document.getElementById('td-h-unit').value.trim() || ''; }
+// 기존 습관들에서 쓰인 분류를 datalist 자동완성으로 제공
+function tdFillHabitCats(){
+    const dl = document.getElementById('td-h-cat-list');
+    if (!dl) return;
+    const cats = [...new Set((TODO_HABITS||[]).map(h=>(h.category||'').trim()).filter(Boolean))].sort();
+    dl.innerHTML = cats.map(c=>`<option value="${esc(c)}">`).join('');
+}
 function tdSetSlot(s){
     TD.slot = s || '';
     document.querySelectorAll('#td-h-slotseg button').forEach(b=>b.classList.toggle('active', b.dataset.s===TD.slot));
@@ -4540,6 +4617,8 @@ async function saveTodoModal(){
         module = 'habit';
         payload = {
             title, color, recur_type: recur,
+            category: document.getElementById('td-h-cat').value.trim(),
+            ref_url: document.getElementById('td-h-ref').value.trim(),
             recur_days: days, week_quota: quota,
             daily_target: dailyV !== '' ? Math.max(1, parseInt(dailyV,10)||0) : '',
             unit: document.getElementById('td-h-unit').value.trim(),
@@ -4740,6 +4819,7 @@ function dashHabitHeat(h, year, month){
     const cs = dashColorSet(h.color||'#3498db');
     const icon = esc(h.icon || '⭐');                  // 카테고리 아이콘(이모지). 반복아이콘(🔁) 금지 — 스펙 §2
     const recurLbl = h.recur_type==='weekdays' ? '요일' : (h.recur_type==='week_quota' ? '주'+(h.week_quota||1)+'회' : '매일');
+    const badgeLbl = (h.category||'').trim() || recurLbl;   // 분류 있으면 분류 배지, 없으면 반복라벨
     // 누적 진행바 (track_total)
     let track = '';
     if (+h.track_total===1 && h.target_total){
@@ -4754,7 +4834,7 @@ function dashHabitHeat(h, year, month){
         <div class="dash-tcard-head">
             <div class="dash-tcard-ico" style="color:${cs.fg}">${icon}</div>
             <div class="dash-tcard-meta">
-                <span class="dash-tcard-badge" style="color:${cs.fg}">${recurLbl}</span>
+                <span class="dash-tcard-badge" style="color:${cs.fg}">${esc(badgeLbl)}</span>
                 <div class="dash-tcard-name">${esc(h.title)}</div>
             </div>
             ${sk>0?`<span class="dash-tcard-streak">🔥${sk}</span>`:''}

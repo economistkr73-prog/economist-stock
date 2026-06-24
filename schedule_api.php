@@ -899,6 +899,17 @@ function api_habit(string $action, PDO $pdo): void {
             echo json_encode(['ok' => true] + $r);
             break;
 
+        // 측정형 증분 기록 (방금 한 양을 그날 총합에 더함)
+        case 'add':
+            $d     = json_decode(file_get_contents('php://input'), true);
+            $hid   = (int)($d['habit_id'] ?? 0);
+            $date  = preg_match('/^\d{4}-\d{2}-\d{2}$/', $d['date'] ?? '') ? $d['date'] : date('Y-m-d');
+            $delta = (int)($d['delta'] ?? 0);
+            if (!$hid) { echo json_encode(['ok' => false, 'msg' => 'habit_id 없음']); return; }
+            $r = $hab->addAmount($hid, $date, $delta);
+            echo json_encode(['ok' => true] + $r);
+            break;
+
         // 종료(졸업/그만둠) — 삭제 아님
         case 'end':
             $d = json_decode(file_get_contents('php://input'), true);
