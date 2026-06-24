@@ -122,7 +122,7 @@ function api_calendar(string $action, PDO $pdo): void {
             }
             // ?쒓컙 寃뱀묠 ?먮룞 ?쒖뿰 (timed ?대깽?몃쭔)
             $shifted = [];
-            if (($d['event_type'] ?? '') === 'timed' && !empty($d['start_dt']) && !empty($d['end_dt'])) {
+            if (($d['event_type'] ?? '') === 'timed' && !empty($d['start_dt']) && !empty($d['end_dt']) && empty($d['is_draft'])) {
                 $shifted = adjust_overlaps($pdo, $id, $d['start_dt'], $d['end_dt']);
             }
             echo json_encode(['ok' => true, 'id' => $id, 'shifted' => $shifted]);
@@ -137,7 +137,7 @@ function api_calendar(string $action, PDO $pdo): void {
             }
             // ?쒓컙 寃뱀묠 ?먮룞 ?쒖뿰 (timed ?대깽?몃쭔)
             $shifted = [];
-            if (($d['event_type'] ?? '') === 'timed' && !empty($d['start_dt']) && !empty($d['end_dt'])) {
+            if (($d['event_type'] ?? '') === 'timed' && !empty($d['start_dt']) && !empty($d['end_dt']) && empty($d['is_draft'])) {
                 $shifted = adjust_overlaps($pdo, (int)$d['id'], $d['start_dt'], $d['end_dt']);
             }
             echo json_encode(['ok' => true, 'shifted' => $shifted]);
@@ -285,7 +285,34 @@ function api_calendar(string $action, PDO $pdo): void {
                     if (count($candidates) >= 50) break;
                 }
             }
-            echo json_encode(['ok' => true, 'parsed' => $p, 'candidates' => $candidates, 'heard' => $text],
+
+            // create + 시각 지정: 같은 시간대에 겹치는 기존 일정 찾기 → 경고용 (등록은 막지 않음)
+            $conflicts = [];
+            if (($p['intent'] ?? '') === 'create' && empty($p['is_allday'])
+                && !empty($p['date']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $p['date'])
+                && !empty($p['start_time']) && preg_match('/^\d{1,2}:\d{2}$/', $p['start_time'])) {
+                $st  = $p['start_time'];
+                $et  = (!empty($p['end_time']) && preg_match('/^\d{1,2}:\d{2}$/', $p['end_time']))
+                        ? $p['end_time'] : date('H:i', strtotime($st) + 3600);
+                $newStart = $p['date'] . ' ' . $st . ':00';
+                $newEnd   = $p['date'] . ' ' . $et . ':00';
+                foreach ($sch->listByRange($p['date'], $p['date'], null) as $ev) {
+                    if (($ev['is_allday'] ?? '') == '1') continue;
+                    if (in_array($ev['event_type'] ?? '', ['allday','anniversary','todo','holiday'], true)) continue;
+                    if (($ev['is_holiday'] ?? '') == '1') continue;
+                    $es = (string)($ev['start_dt'] ?? '');
+                    if ($es === '') continue;
+                    $ee = (string)($ev['end_dt'] ?? '');
+                    if ($ee === '') $ee = date('Y-m-d H:i:s', strtotime($es) + 3600);
+                    if ($es < $newEnd && $ee > $newStart) {   // 시간대 겹침
+                        $conflicts[] = $ev;
+                        if (count($conflicts) >= 10) break;
+                    }
+                }
+            }
+
+            echo json_encode(['ok' => true, 'parsed' => $p, 'candidates' => $candidates,
+                              'conflicts' => $conflicts, 'heard' => $text],
                              JSON_UNESCAPED_UNICODE);
             break;
 
@@ -333,19 +360,37 @@ function voice_parse_claude(string $text): array {
     // 기준 시각(Asia/Seoul)
     try { $now = new DateTime('now', new DateTimeZone('Asia/Seoul')); }
     catch (Throwable $e) { $now = new DateTime(); }
-    $dow   = ['일','월','화','수','목','금','토'][(int)$now->format('w')];
+    $dowKr = ['일','월','화','수','목','금','토'];
+    $dow   = $dowKr[(int)$now->format('w')];
     $today = $now->format('Y-m-d');
     $hhmm  = $now->format('H:i');
+
+    // 상대 날짜 오인 방지: 이번주/다음주/다다음주 각 요일의 실제 날짜를 표로 제공(모델이 직접 산수하지 않게)
+    $sun  = (clone $now)->modify('-' . (int)$now->format('w') . ' days'); // 이번주 일요일(주 시작=일)
+    $thisW = $nextW = $afterW = [];
+    for ($i = 0; $i < 7; $i++) {
+        $thisW[]  = $dowKr[$i] . '=' . (clone $sun)->modify("+$i days")->format('Y-m-d');
+        $nextW[]  = $dowKr[$i] . '=' . (clone $sun)->modify('+' . ($i + 7)  . ' days')->format('Y-m-d');
+        $afterW[] = $dowKr[$i] . '=' . (clone $sun)->modify('+' . ($i + 14) . ' days')->format('Y-m-d');
+    }
+    $tomorrow = (clone $now)->modify('+1 day')->format('Y-m-d');
+    $weekRef =
+        "[날짜 기준표]\n"
+      . "- 내일=" . $tomorrow . ", 모레=" . (clone $now)->modify('+2 days')->format('Y-m-d') . "\n"
+      . "- 이번주(일~토): " . implode(', ', $thisW) . "\n"
+      . "- 다음주(일~토): " . implode(', ', $nextW) . "\n"
+      . "- 다다음주(일~토): " . implode(', ', $afterW) . "\n";
 
     $system =
         "당신은 한국어 음성 일정 비서입니다. 사용자의 발화를 분석해 아래 JSON 객체 하나만 출력하세요. "
         . "설명·인사·마크다운·코드블록 없이 순수 JSON만 출력합니다.\n"
-        . "오늘은 {$today} ({$dow}요일), 현재 시각 {$hhmm}, 시간대 Asia/Seoul.\n\n"
+        . "오늘은 {$today} ({$dow}요일), 현재 시각 {$hhmm}, 시간대 Asia/Seoul.\n"
+        . $weekRef . "\n"
         . "필드:\n"
         . "{\n"
         . "  \"intent\": \"create|find|delete|unknown\",   // 등록 / 조회·검색 / 삭제 / 판단불가\n"
         . "  \"title\": \"일정 제목(create용. '등록/추가/잡아줘/만들어' 같은 동작어는 빼고 핵심만)\",\n"
-        . "  \"date\": \"YYYY-MM-DD (create의 날짜. '내일/모레/다음주 월요일' 등 상대표현은 오늘 기준 절대날짜로 변환. 없으면 오늘)\",\n"
+        . "  \"date\": \"YYYY-MM-DD (create의 날짜. 상대표현은 위 [날짜 기준표]의 날짜를 그대로 사용. 없으면 오늘)\",\n"
         . "  \"start_time\": \"HH:MM 또는 null (시간 미지정·종일이면 null)\",\n"
         . "  \"end_time\": \"HH:MM 또는 null\",\n"
         . "  \"is_allday\": true/false,\n"
@@ -354,9 +399,12 @@ function voice_parse_claude(string $text): array {
         . "  \"date_to\": \"YYYY-MM-DD 또는 null (find/delete 기간 끝)\"\n"
         . "}\n\n"
         . "규칙:\n"
+        . "- ★날짜는 반드시 위 [날짜 기준표]를 근거로 계산. '이번주 금요일'=이번주 표의 금, '다음주 금요일'/'담주 금요일'=다음주 표의 금, '다다음주 금요일'=다다음주 표의 금. 직접 날짜 산수 금지.\n"
+        . "- 요일만 말하고 '이번주/다음주' 없으면(예: '금요일') 오늘 이후 가장 가까운 그 요일(오늘 포함). 이번주 표에서 오늘보다 빠르면 다음주 표 사용.\n"
         . "- '오전/오후' 없는 시간은 한국어 일상 맥락으로 추론('3시'=15:00, '아침 8시'=08:00, '점심'=12:00, '저녁'=18:00).\n"
         . "- 종료시간 명시 없으면 end_time=null.\n"
         . "- find에서 '오늘/내일/이번주/다음주/이번달'이면 date_from~date_to 범위로 채움. 특정 키워드만 있으면 date_from/date_to는 null.\n"
+        . "- ★find에서 특정 하루를 가리키면(예 '이번주 금요일 일정', '내일 일정', '7월 3일') date_from=date_to=그 날짜(기준표 사용). 제목 키워드 없으면 keyword는 빈 문자열로 두고 그날 전체를 보여줌.\n"
         . "- 반드시 JSON 한 개만 출력.";
 
     $payload = json_encode([

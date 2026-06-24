@@ -50,6 +50,7 @@ class Schedule {
         $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS extra_attendees TEXT DEFAULT NULL COMMENT '주소록 외 참석자(이름 콤마구분)'");
         $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS trip_token VARCHAR(64) DEFAULT NULL COMMENT '연결된 여행지도 공유토큰(places.php?trip=)'");
         $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS trip_name  VARCHAR(200) DEFAULT NULL COMMENT '연결된 여행지도 이름'");
+        $this->pdo->exec("ALTER TABLE tbl_schedule ADD COLUMN IF NOT EXISTS is_draft TINYINT(1) DEFAULT 0 COMMENT '입력대기(음성 빠른등록) 여부'");
 
         // ── 마이그레이션: 반복을 recur_rule 단일 경로로 통일 ──
         // 음력 기념일: is_lunar 컬럼 → recur_rule(JSON) 로 흡수
@@ -234,12 +235,12 @@ class Schedule {
                (event_type, title, start_dt, end_dt, due_dt,
                 category, color, priority, memo, is_done, is_allday, recur_rule,
                 is_lunar, lunar_month, lunar_day, icon, is_family, project_id,
-                address, lat, lng, provider, place_name, extra_attendees, trip_token, trip_name)
+                address, lat, lng, provider, place_name, extra_attendees, trip_token, trip_name, is_draft)
              VALUES
                (:event_type, :title, :start_dt, :end_dt, :due_dt,
                 :category, :color, :priority, :memo, :is_done, :is_allday, :recur_rule,
                 :is_lunar, :lunar_month, :lunar_day, :icon, :is_family, :project_id,
-                :address, :lat, :lng, :provider, :place_name, :extra_attendees, :trip_token, :trip_name)"
+                :address, :lat, :lng, :provider, :place_name, :extra_attendees, :trip_token, :trip_name, :is_draft)"
         );
         $stmt->execute($this->buildParams($d));
         $id = (int)$this->pdo->lastInsertId();
@@ -257,7 +258,7 @@ class Schedule {
                is_lunar=:is_lunar, lunar_month=:lunar_month, lunar_day=:lunar_day,
                icon=:icon, is_family=:is_family, project_id=:project_id,
                address=:address, lat=:lat, lng=:lng, provider=:provider, place_name=:place_name, extra_attendees=:extra_attendees,
-               trip_token=:trip_token, trip_name=:trip_name
+               trip_token=:trip_token, trip_name=:trip_name, is_draft=:is_draft
              WHERE id=:id"
         );
         $params = $this->buildParams($d);
@@ -514,6 +515,7 @@ class Schedule {
             ':extra_attendees' => isset($d['extra_attendees']) && trim((string)$d['extra_attendees']) !== '' ? trim((string)$d['extra_attendees']) : null,
             ':trip_token'  => isset($d['trip_token']) && trim((string)$d['trip_token']) !== '' ? trim((string)$d['trip_token']) : null,
             ':trip_name'   => isset($d['trip_name']) && trim((string)$d['trip_name']) !== '' ? trim((string)$d['trip_name']) : null,
+            ':is_draft'    => (int)($d['is_draft'] ?? 0),
         ];
     }
 

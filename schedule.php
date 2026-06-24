@@ -754,6 +754,14 @@ function sch_calendar(PDO $pdo): void {
     padding:9px 12px; font-size:14px; margin-bottom:12px; }
 .vo-heard b { color:#9b59b6; }
 .vo-sub { font-size:12.5px; color:#7f8c8d; margin-bottom:8px; }
+.vo-sum { background:#f8fafc; border:1px solid #eef1f4; border-radius:8px; padding:11px 13px; margin-bottom:12px; }
+.vo-sum b { font-size:15px; color:#2c3e50; }
+.vo-sum .vo-it-sub { margin-top:3px; }
+.vo-choice { display:flex; gap:8px; }
+.vo-choice .btn { flex:1; padding:11px 8px; font-size:14px; }
+.vo-hint { margin-top:10px; font-size:12px; color:#95a5a6; line-height:1.5; }
+.vo-warn { background:#fdecea; border:1px solid #f5c6c2; color:#c0392b; border-radius:8px; padding:10px 12px; margin-bottom:12px; font-size:13.5px; }
+.vo-warn-list { margin-top:6px; font-size:12.5px; color:#922b21; line-height:1.55; }
 .vo-loading, .vo-empty { color:#7f8c8d; font-size:14px; padding:16px 4px; text-align:center; }
 .vo-err { color:#c0392b; font-size:14px; padding:14px 4px; line-height:1.6; }
 .vo-item { display:flex; align-items:center; gap:10px; padding:10px 12px; border:1px solid #eef1f4;
@@ -832,6 +840,10 @@ function sch_calendar(PDO $pdo): void {
 #scheduler .event-chip.done{ background:transparent; border:none; text-decoration:none; }
 #scheduler .event-chip.done .ev-tx{ color:#9aa3b5; text-decoration:none; }
 #scheduler .event-chip.done:hover{ background:#f3f5f9; }
+/* ⏳ 입력대기(draft): 점선 테두리 + 앰버 톤 */
+#scheduler .event-chip.draft{ background:#fff7e6 !important; color:#b97400 !important; border:1px dashed #f0b95a; font-weight:600; }
+#scheduler .event-chip.draft .ev-dot{ display:none; }
+:is(body.is-mobile, body.w-narrow) .event-chip.draft{ background:#fff !important; border:1.5px dashed #f0b95a; }
 /* 모바일: 카드 테두리 제거(전체화면 느낌) + 셀 클립 해제(점 표시) */
 :is(body.is-mobile, body.w-narrow) #scheduler #view-month{ border:none; border-radius:0; box-shadow:none; }
 :is(body.is-mobile, body.w-narrow) #scheduler .cal-cell{ overflow:visible; }
@@ -1399,6 +1411,7 @@ function sch_calendar(PDO $pdo): void {
         </div>
         <!-- 본문 -->
         <div style="padding:14px 20px;">
+            <div id="view-draft-note" style="display:none;background:#fff7e6;border:1px solid #f0d29a;color:#b97400;border-radius:8px;padding:9px 12px;font-size:13px;margin-bottom:10px;line-height:1.5;">⏳ <b>입력대기</b> 일정입니다. <b>수정</b>을 눌러 내용을 채워 저장하면 정식 등록됩니다.</div>
             <div id="view-datetime" style="font-size:13px;color:#555;margin-bottom:8px;"></div>
             <div id="view-category" style="font-size:13px;color:#555;margin-bottom:8px;"></div>
             <div id="view-recur"    style="font-size:12px;color:#3498db;margin-bottom:8px;display:none;"></div>
@@ -1782,13 +1795,15 @@ function showDayDetail(ds){
     } else {
         html+=evs.map((ev,i)=>{
             const isDone=ev.is_done=='1';
+            const isDraft=ev.is_draft=='1';
             const isHol=ev.is_holiday=='1'||ev.event_type==='holiday';
-            const bg = isHol ? '#e74c3c' : evBgColor(ev);
+            const bg = isHol ? '#e74c3c' : (isDraft ? '#f0b95a' : evBgColor(ev));
             const tr = fmtTimeRange(ev, true).trim() || (ev.is_allday=='1'||ev.event_type==='allday'?'종일':'');
+            const pfx = isDraft ? '⏳ ' : (ev.icon?ev.icon+' ':'');
             return `<div class="mdd-item${isDone?' done':''}" data-idx="${i}">
                 <span class="mdd-bar" style="background:${bg}"></span>
                 <span class="mdd-time">${esc(tr||'-')}</span>
-                <span class="mdd-title">${esc((ev.icon?ev.icon+' ':'')+ (ev.title||'(제목없음)'))}${mapMarkLabel(ev)}${tripMark(ev)}${logMark(ev)}</span>
+                <span class="mdd-title">${esc(pfx+ (ev.title||'(제목없음)'))}${mapMarkLabel(ev)}${tripMark(ev)}${logMark(ev)}</span>
             </div>`;
         }).join('');
     }
@@ -1859,9 +1874,7 @@ async function voiceHandle(text){
     }
     const p = res.parsed || {};
     if (p.intent === 'create'){
-        voiceClose();
-        voiceFillCreate(p);
-        showToast('🎤 인식: ' + text);
+        voiceCreateChoice(text, p, res.conflicts || []);
     } else if (p.intent === 'find'){
         voiceRenderList('find', res.candidates || [], p);
     } else if (p.intent === 'delete'){
@@ -1870,6 +1883,64 @@ async function voiceHandle(text){
         voiceBody('<div class="vo-err">무슨 작업인지 이해하지 못했어요.<br>'
             + '예) "내일 오후 3시 치과 예약 등록", "이번 주 일정 찾아줘", "금요일 회의 삭제"</div>');
     }
+}
+
+// 등록 인식 후: [지금 입력] vs [입력대기로 저장] 선택 화면 (+ 시간 충돌 경고)
+function voiceCreateChoice(heard, p, conflicts){
+    conflicts = conflicts || [];
+    const date  = (p.date && /^\d{4}-\d{2}-\d{2}$/.test(p.date)) ? p.date : ymd(new Date());
+    const isAll = !!p.is_allday || !p.start_time;
+    const st    = (p.start_time && /^\d{1,2}:\d{2}$/.test(p.start_time)) ? p.start_time : null;
+    const when  = date + ((isAll || !st) ? ' · 종일' : ' · ' + st);
+    let warn = '';
+    if (conflicts.length){
+        const lines = conflicts.slice(0,5).map(ev =>
+            '· ' + esc((fmtTimeRange(ev, true).trim() || '종일') + ' ' + (ev.title || '(제목없음)'))).join('<br>');
+        const more = conflicts.length > 5 ? '<br>… 외 ' + (conflicts.length - 5) + '건' : '';
+        warn = '<div class="vo-warn">⚠️ <b>해당 시간에 일정이 있습니다</b><div class="vo-warn-list">'
+             + lines + more + '</div></div>';
+    }
+    voiceShow(heard,
+        '<div class="vo-sum"><b>' + esc(p.title || '(제목 없음)') + '</b>'
+      +   '<div class="vo-it-sub">' + esc(when) + '</div></div>'
+      + warn
+      + '<div class="vo-choice">'
+      +   '<button class="btn btn-primary" id="vo-fill-now">📝 지금 입력</button>'
+      +   '<button class="btn" id="vo-save-draft">⏳ 입력대기로 저장</button>'
+      + '</div>'
+      + '<div class="vo-hint">입력대기로 저장하면 제목·시간만 캘린더에 ⏳로 올라가고, '
+      +   '나중에 그 일정을 탭해서 나머지를 채우면 정식 등록됩니다.</div>');
+    document.getElementById('vo-fill-now').onclick = () => {
+        voiceClose(); voiceFillCreate(p); showToast('🎤 인식: ' + heard);
+    };
+    document.getElementById('vo-save-draft').onclick = () => voiceSaveDraft(p);
+}
+
+// 입력대기(draft) 즉시 저장 — 제목+시간만, 모달 없이
+async function voiceSaveDraft(p){
+    const date  = (p.date && /^\d{4}-\d{2}-\d{2}$/.test(p.date)) ? p.date : ymd(new Date());
+    const isAll = !!p.is_allday || !p.start_time;
+    const st    = (p.start_time && /^\d{1,2}:\d{2}$/.test(p.start_time)) ? p.start_time : null;
+    let start_dt, end_dt, is_allday;
+    if (isAll || !st){
+        is_allday = 1; start_dt = date + ' 00:00:00'; end_dt = null;
+    } else {
+        is_allday = 0; start_dt = date + ' ' + st + ':00';
+        const d = new Date(date + 'T' + st); d.setHours(d.getHours() + 1);
+        end_dt = ymdhm(d).replace('T', ' ') + ':00';   // draft도 1시간 기본 종료(주/일뷰 렌더용, 겹침조정 제외)
+    }
+    const payload = {
+        event_type: 'timed', title: p.title || '(제목 없음)',
+        is_draft: 1, is_allday, start_dt, end_dt,
+        color: '#f0b95a', force: true,   // 빠른 캡처 → 중복확인 생략
+    };
+    const res = await api('create', payload, 'POST');
+    if (res && !res.ok){ voiceBody('<div class="vo-err">저장 실패: ' + esc(res.msg || '') + '</div>'); return; }
+    voiceClose();
+    showToast('⏳ 입력대기로 저장했어요 — 캘린더에서 탭해 완성하세요');
+    const d = new Date(date + 'T00:00:00');   // 저장한 달로 이동 후 갱신
+    S.year = d.getFullYear(); S.month = d.getMonth() + 1;
+    loadEvents();
 }
 
 // 등록: 기존 일정 모달에 값 채워 열기 → 사용자가 확인·수정 후 저장
@@ -2106,9 +2177,10 @@ function renderMonth() {
         const makeChip = (ev) => {
             const chip=document.createElement('div');
             const isDone=ev.is_done=='1';
-            chip.className='event-chip'+(isDone?' done':'');
+            const isDraft=ev.is_draft=='1';
+            chip.className='event-chip'+(isDone?' done':'')+(isDraft?' draft':'');
             let dotHtml='';
-            if (!isDone) {
+            if (!isDone && !isDraft) {
                 if (mob) {
                     chip.style.background = evBgColor(ev);   // 모바일: 점 = 솔리드 색(선명)
                 } else {
@@ -2118,8 +2190,10 @@ function renderMonth() {
                     dotHtml = `<span class="ev-dot" style="background:${c.dot}"></span>`;
                 }
             }
-            chip.innerHTML=dotHtml+'<span class="ev-tx">'+projNumBadge(ev)+esc((isDone?'✓ ':'')+fmtTimeRange(ev)+evLabel(ev))+'</span>'+mapMark(ev)+tripMark(ev)+logMark(ev);
-            chip.onclick=e=>{e.stopPropagation(); if(isMobileView()){showDayDetail(ds);} else {openView(ev);}};
+            const draftPfx = isDraft ? '⏳ ' : '';
+            chip.innerHTML=dotHtml+'<span class="ev-tx">'+projNumBadge(ev)+esc(draftPfx+(isDone?'✓ ':'')+fmtTimeRange(ev)+evLabel(ev))+'</span>'+mapMark(ev)+tripMark(ev)+logMark(ev);
+            // 입력대기는 탭하면 바로 편집(나머지 채우기) → 저장 시 정식 등록으로 전환
+            chip.onclick=e=>{e.stopPropagation(); if(isMobileView()){showDayDetail(ds);} else if(isDraft){openEdit(ev);} else {openView(ev);}};
             return chip;
         };
         regularEvs.forEach(ev => cell.appendChild(makeChip(ev)));
@@ -2878,10 +2952,14 @@ function openView(ev) {
     const isDone = ev.is_done == '1';
     const DAY_KR = ['일','월','화','수','목','금','토'];
 
-    // 제목 (이모지 + 아이콘 포함)
+    // 제목 (이모지 + 아이콘 포함). 입력대기는 ⏳ 표시
+    const isDraft = ev.is_draft == '1';
     const icon = ev.icon ? ev.icon+' ' : '';
     const typeIcon = {timed:'',allday:'📅 ',anniversary:'',todo:'☑ '}[ev.event_type]||'';
-    document.getElementById('view-title').textContent = icon + typeIcon + ev.title;
+    document.getElementById('view-title').textContent = (isDraft?'⏳ ':'') + icon + typeIcon + ev.title;
+    // 입력대기 안내: 수정 버튼으로 나머지를 채우면 정식 등록됨
+    const draftNote = document.getElementById('view-draft-note');
+    if (draftNote) draftNote.style.display = isDraft ? '' : 'none';
 
     // 완료 뱃지
     document.getElementById('view-done-badge').style.display = isDone ? '' : 'none';
