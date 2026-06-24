@@ -216,25 +216,63 @@ function mkt_norm_rate(string $id, string $name, int $tenor, array $row): array 
     ];
 }
 
-/* ──────────────────── 네이버: 국내지수 (polling JSON) ──────────────────── */
+/* ──────────────────── 네이버: 국내지수 (일별 시세 — 전 거래일 종가 기준) ──────────────────── */
 
-function mkt_naver_indices(): array {
+/**
+ * 네이버 일별 지수 시세(siseJson) → [YYYYMMDD => 종가] (오래된→최신 순서 유지).
+ * 실시간 polling 은 장 시작 전(아침 크롤)에 전일 종가를 등락 0 으로 주므로 일봉을 쓴다.
+ */
+function mkt_naver_index_daily(string $symbol, int $days = 30): array {
+    $end   = date('Ymd');
+    $start = date('Ymd', strtotime("-$days days"));
+    $raw   = mkt_http("https://api.finance.naver.com/siseJson.naver?symbol=$symbol&requestType=1&startTime=$start&endTime=$end&timeframe=day",
+        ['headers' => ['Referer: https://finance.naver.com/']]);
+    if ($raw === null) return [];
+    // JS 배열(작은따옴표 헤더 문자열) → JSON. 데이터는 숫자뿐이라 ' → " 치환이 안전.
+    $arr = json_decode(str_replace("'", '"', $raw), true);
+    if (!is_array($arr)) return [];
+    $closes = [];
+    foreach ($arr as $r) {
+        if (!is_array($r) || count($r) < 5) continue;
+        $dt = (string) $r[0];
+        if (!ctype_digit($dt)) continue;                 // 헤더 행('날짜'…) 건너뜀
+        $closes[$dt] = (float) $r[4];                     // [날짜,시가,고가,저가,종가,…]
+    }
+    return $closes;
+}
+
+/**
+ * 국내지수 hero — 기준일($targetDate, 보통 전 거래일)의 종가와 직전 거래일 대비 등락.
+ */
+function mkt_naver_indices(string $targetDate): array {
     $map = ['KOSPI' => '코스피', 'KOSDAQ' => '코스닥', 'KPI200' => '코스피200'];
+    $tgt = str_replace('-', '', $targetDate);
     $out = [];
-    foreach ($map as $code => $kname) {
-        $j = mkt_http("https://polling.finance.naver.com/api/realtime/domestic/index/$code",
-            ['headers' => ['Referer: https://finance.naver.com/']]);
-        $row = $j ? (json_decode($j, true)['datas'][0] ?? null) : null;
-        if (!$row) { $out[$code] = mkt_norm_price(strtolower($code), $kname, []); continue; }
-        $pct  = mkt_num($row['fluctuationsRatio'] ?? null);
-        $name = $row['compareToPreviousPrice']['name'] ?? '';
-        $dir  = $name === 'RISING' ? 'up' : ($name === 'FALLING' ? 'down' : 'flat');
-        $out[$code] = mkt_norm_price(strtolower($code), $kname, [
-            'close' => mkt_num($row['closePrice'] ?? null),
-            'chg'   => mkt_num($row['compareToPreviousClosePrice'] ?? null),
-            'pct'   => $pct,
-            'dir'   => $dir,
-            'asof'  => null,
+    foreach ($map as $symbol => $kname) {
+        $id     = strtolower($symbol);
+        $closes = mkt_naver_index_daily($symbol);
+        $dates  = array_keys($closes);                    // 오래된→최신
+        if (!$dates) { $out[$id] = mkt_norm_price($id, $kname, []); continue; }
+
+        // 기준일 선택: 정확히 있으면 그 날, 없으면 기준일 이하 최신 거래일
+        $pick = isset($closes[$tgt]) ? $tgt : null;
+        if ($pick === null) {
+            foreach (array_reverse($dates) as $dt) if ($dt <= $tgt) { $pick = $dt; break; }
+        }
+        if ($pick === null) { $out[$id] = mkt_norm_price($id, $kname, []); continue; }
+
+        // 직전 거래일 = pick 보다 작은 마지막 날
+        $prev = null;
+        foreach (array_reverse($dates) as $dt) if ($dt < $pick) { $prev = $dt; break; }
+
+        $close = $closes[$pick];
+        $pclose = $prev !== null ? $closes[$prev] : null;
+        $chg = $pclose !== null ? $close - $pclose : null;
+        $pct = ($pclose && abs($pclose) > 1e-9) ? ($chg / $pclose * 100) : null;
+        $dir = $chg === null ? 'flat' : ($chg > 0 ? 'up' : ($chg < 0 ? 'down' : 'flat'));
+
+        $out[$id] = mkt_norm_price($id, $kname, [
+            'close' => $close, 'chg' => $chg, 'pct' => $pct, 'dir' => $dir, 'asof' => null,
         ]);
     }
     return array_values($out);

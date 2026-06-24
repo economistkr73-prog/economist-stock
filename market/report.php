@@ -291,20 +291,20 @@ function mkt_render(array $d, ?array $prev, array $anom, array $brief): string {
 
   <?=mkt_news_panel($d)?>
 
-  <div class="divider"><span class="tag">국내 증시</span><span class="ln"></span></div>
-
   <!-- 국내지수 hero (좌 국내 / 우 미국) -->
-  <div class="panel" style="margin-bottom:16px;">
-    <div class="sechdr"><span class="eyebrow">국내 지수</span><span class="asof mono"><?=h($asofKr)?></span></div>
-    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:24px;flex-wrap:wrap;">
-      <div style="display:flex;gap:30px;flex-wrap:wrap;">
-        <?php foreach (($d['indicesKr'] ?? []) as $i): if (($i['quality'] ?? '') !== 'ok') continue; $cl = mkt_cls($i['day']['dir']); ?>
-        <div>
-          <div style="font-size:13px;color:var(--muted);"><?=h($i['name'])?></div>
-          <div class="mono <?=$cl?>" style="font-size:28px;font-weight:800;"><?=h(number_format($i['close'], 2))?></div>
-          <div class="mono <?=$cl?>" style="font-size:13px;"><?=mkt_arrow($i['day']['dir'])?> <?=number_format(abs($i['day']['chg']), 2)?> &nbsp; <?=mkt_signpct($i['day']['pct'])?></div>
+  <div class="panel" style="margin-bottom:16px;margin-top:28px;">
+    <div class="mkt-hero">
+      <div class="mkt-hero-col">
+        <div class="mkt-hero-cat">국내지수 <span class="mkt-hero-date">· <?=h($asofKr)?></span></div>
+        <div class="mkt-hero-cards">
+          <?php foreach (($d['indicesKr'] ?? []) as $i): if (($i['quality'] ?? '') !== 'ok') continue; $cl = mkt_cls($i['day']['dir']); ?>
+          <div>
+            <div style="font-size:12px;color:var(--muted);"><?=h($i['name'])?></div>
+            <div class="mono <?=$cl?>" style="font-size:20px;font-weight:800;"><?=h(number_format($i['close'], 2))?></div>
+            <div class="mono <?=$cl?>" style="font-size:12px;"><?=mkt_arrow($i['day']['dir'])?> <?=number_format(abs($i['day']['chg']), 2)?> &nbsp; <?=mkt_signpct($i['day']['pct'])?></div>
+          </div>
+          <?php endforeach; ?>
         </div>
-        <?php endforeach; ?>
       </div>
       <?=mkt_us_index_box($d)?>
     </div>
@@ -477,17 +477,17 @@ function mkt_us_index_box(array $d): string {
         if (($by[$id]['quality'] ?? '') === 'ok') $pick[] = $by[$id];
     if (!$pick) return '';
     ob_start(); ?>
-      <div style="min-width:240px;border-left:1px solid var(--line);padding-left:18px;">
-        <div style="font-size:10px;letter-spacing:.1em;color:var(--faint);text-transform:uppercase;margin-bottom:8px;">미국 증시 <span style="text-transform:none;letter-spacing:0;">간밤 <?=h($d['asof']['indices'] ?? '')?></span></div>
-        <table style="width:100%;">
-          <?php foreach ($pick as $i): $cl = mkt_cls($i['day']['dir']); ?>
-          <tr>
-            <td style="padding:3px 0;font-size:12.5px;color:var(--muted);border:0;"><?=h($i['name'])?></td>
-            <td class="mono" style="padding:3px 0;font-size:13px;text-align:right;border:0;"><?=h(number_format($i['close'], 2))?></td>
-            <td class="mono <?=$cl?>" style="padding:3px 0 3px 12px;font-size:13px;text-align:right;border:0;"><?=mkt_arrow($i['day']['dir'])?> <?=mkt_signpct($i['day']['pct'])?></td>
-          </tr>
+      <div class="mkt-hero-col mkt-hero-us">
+        <div class="mkt-hero-cat">미국지수 <span class="mkt-hero-date">· 간밤 <?=h($d['asof']['indices'] ?? '')?></span></div>
+        <div class="mkt-hero-cards">
+          <?php foreach ($pick as $i): $cl = mkt_cls($i['day']['dir']); $chg = $i['day']['chg']; ?>
+          <div>
+            <div style="font-size:12px;color:var(--muted);"><?=h($i['name'])?></div>
+            <div class="mono <?=$cl?>" style="font-size:20px;font-weight:800;"><?=h(number_format($i['close'], 2))?></div>
+            <div class="mono <?=$cl?>" style="font-size:12px;"><?=mkt_arrow($i['day']['dir'])?> <?=$chg === null ? '—' : number_format(abs($chg), 2)?> &nbsp; <?=mkt_signpct($i['day']['pct'])?></div>
+          </div>
           <?php endforeach; ?>
-        </table>
+        </div>
       </div>
     <?php return ob_get_clean();
 }
@@ -733,6 +733,19 @@ function mkt_css(): string {
   .db .bar { position:relative;height:18px;background:rgba(255,255,255,.04);border-radius:4px; }
   .db .bar .center { position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--line); }
   .db .bar .fill { position:absolute;top:3px;bottom:3px;border-radius:3px;opacity:.9; }
+  /* 국내지수 hero: PC=국내 좌 / 미국 우(각자 카테고리·기준일, 한줄), 모바일=미국이 아래로 */
+  .db .mkt-hero { display:flex;align-items:flex-start;gap:24px; }
+  .db .mkt-hero-col { flex-shrink:0; }
+  .db .mkt-hero-us { margin-left:auto;border-left:1px solid var(--line);padding-left:22px; }
+  .db .mkt-hero-cat { font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);font-weight:700;margin-bottom:12px; }
+  .db .mkt-hero-date { color:var(--faint);font-weight:400;letter-spacing:0;text-transform:none;font-size:11px; }
+  .db .mkt-hero-cards { display:flex;gap:18px;flex-wrap:nowrap; }
+  @media (max-width:760px){
+    .db .mkt-hero { flex-direction:column;gap:18px; }
+    .db .mkt-hero-col { flex-shrink:1; }
+    .db .mkt-hero-us { margin-left:0;width:100%;border-left:0;border-top:1px solid var(--line);padding-left:0;padding-top:16px; }
+    .db .mkt-hero-cards { flex-wrap:wrap; }
+  }
 </style>
 CSS;
 }

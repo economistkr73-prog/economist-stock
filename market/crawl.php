@@ -74,10 +74,7 @@ foreach (mkt_naver_marketindex() as $item) {
     $commodities[] = $item;
 }
 
-/* ── 3) 네이버: 국내지수 hero ── */
-$indicesKr = mkt_naver_indices();
-foreach ($indicesKr as $it) if ($it['quality'] === 'missing') $missing['indicesKr'][] = $it['name'];
-$asof['indicesKr'] = date('Y-m-d');  // 장중/실시간
+/* ── 3) 국내지수 hero 는 거래일(marketDate) 확정 후 아래 6) 에서 일봉 기준으로 수집 ── */
 
 /* ── 4) 채권 커브 스프레드(bp) ── */
 $lvl = [];
@@ -104,6 +101,12 @@ if (!($investors['kospi'] ?? null)) $missing['investors'][] = '투자자별 매�
 /* ── 6) 거래일(기준일) 확정 + 그 날짜의 시황 뉴스 ── */
 //  국내 마지막 거래일 = 투자자 매매동향 최신일. (아침 크롤이면 전일) 없으면 직전 평일.
 $marketDate = !empty($investors['kospi']['asof']) ? $investors['kospi']['asof'] : mkt_prev_weekday($crawlDate);
+
+// 국내지수 hero — 거래일(전 거래일) 종가·전일대비 (일봉 기준, 실시간 polling 의 0% 문제 회피)
+$indicesKr = mkt_naver_indices($marketDate);
+foreach ($indicesKr as $it) if ($it['quality'] === 'missing') $missing['indicesKr'][] = $it['name'];
+$asof['indicesKr'] = $marketDate;
+
 // 국내 시황 = 거래일(전일 마감) / 뉴욕 = 크롤일(간밤 미국장, 새벽 발행이라 보통 page1)
 $news   = mkt_naver_news(str_replace('-', '', $marketDate), 8, '401');
 $newsUs = mkt_naver_news(str_replace('-', '', $crawlDate), 5, '403', MKT_NEWS_US_POS, true, 4);
