@@ -29,3 +29,5 @@ img/
 
 # 여행 썸네일 디스크 캐시 (travel_thumb.php 가 드라이브 썸네일을 받아 저장)
 cache/
+# 로컬 백업 폴더 (env_bak/.vscode_bak 등 - 자격증명 사본, git 노출 금지)
+*_bak/
