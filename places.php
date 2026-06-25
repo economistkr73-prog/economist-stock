@@ -120,7 +120,7 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 /* 분류 칩바 — 멀티선택(전체 = 전체선택/해제 토글, 개별 = on/off). active 는 그 분류 색. */
 #pl-catbar { display: flex; align-items: center; gap: 6px; padding: 8px 12px; background: #fff; border-top: 1px solid #f0f2f5; flex-shrink: 0; }
 .cb-lbl { font-size: 11.5px; color: #8b97a2; flex-shrink: 0; margin-right: 2px; }
-.cb-chips { display: flex; gap: 6px; overflow-x: auto; flex: 1; scrollbar-width: thin; }
+.cb-chips { display: flex; gap: 6px; overflow-x: auto; flex: 0 1 auto; scrollbar-width: thin; }
 .cb-chips::-webkit-scrollbar { height: 5px; }
 .cb-chips::-webkit-scrollbar-thumb { background: #d8dde3; border-radius: 3px; }
 .cb-chip { flex-shrink: 0; white-space: nowrap; font-size: 13px; font-weight: 700; padding: 6px 14px; border-radius: 18px; background: #f1f3f5; border: 1px solid #e2e7ec; color: #5a6b7b; cursor: pointer; transition: .12s; }
@@ -132,6 +132,10 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .cb-chip.cat-camping.active    { background: #27ae60; }
 .cb-chip.cat-etc.active        { background: #7f8c8d; }
 .cb-chip.cb-all.active         { background: #34495e; }
+/* 줌인 주변 오버레이 ON/OFF 토글 (칩바 우측 고정) */
+.cb-ov { flex-shrink: 0; white-space: nowrap; font-size: 12px; font-weight: 700; padding: 6px 12px; border-radius: 18px; background: #f1f3f5; border: 1px solid #e2e7ec; color: #8b97a2; cursor: pointer; transition: .12s; }
+.cb-ov:hover { filter: brightness(.97); }
+.cb-ov.on { background: #16a085; border-color: transparent; color: #fff; }
 /* 지역(시도) 선택 바 — 2단계: 권역 칩 → 시도 칩 */
 #pl-regionbar { display: flex; align-items: center; gap: 6px; padding: 7px 12px; background: #fbfdfc; border-top: 1px solid #f0f2f5; flex-shrink: 0; }
 /* 공유된 여행지도(보기 전용): 검색·지역·분류·태그 바 전부 숨기고 지도만 */
@@ -276,9 +280,16 @@ body.trip-view .pl-fbar { display: none !important; }
 /* 맛집 가이드 배지(블루리본·미쉐린 등급) — 카드 */
 .li-guides { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
 .li-guide { flex-shrink: 0; font-size: 10px; font-weight: 700; color: #fff; padding: 1px 7px; border-radius: 9px; line-height: 1.5; letter-spacing: -.2px; }
+/* 가이드 칩 안 등급 글리프 — 블루리본=흰 리본×N / 미쉐린=흰 ★×N */
+.li-guide .lg-grade { margin-left: 3px; font-size: 9px; letter-spacing: -.5px; vertical-align: 1px; }
+.li-guide .lg-grade .mk-rb { width: 7px; height: 9px; fill: #fff; vertical-align: -1px; margin-left: 1px; }
+.li-guide .lg-grade .lg-gs { color: #2ecc71; }   /* 그린스타 */
+.li-guide .lg-grade .lg-bib { font-size: 8.5px; }
 /* 상세패널 가이드 배지 */
 .panel-guides { display: flex; flex-wrap: wrap; gap: 5px; margin: 6px 0 2px; }
 .panel-guides .li-guide { font-size: 11px; padding: 2px 9px; }
+.panel-guides .li-guide .lg-grade { font-size: 10px; }
+.panel-guides .li-guide .lg-grade .mk-rb { width: 8px; height: 10px; }
 /* 가이드 칩(1행, 맛집 모드) — 가이드색 테두리, 선택 시 가이드색 채움 */
 .tb-chip.guide { border-color: var(--gc, #e2e7ec); color: var(--gc, #5a6b7b); }
 .tb-chip.guide:hover { background: #f4f6f8; }
@@ -720,6 +731,7 @@ a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
 <div id="pl-catbar">
     <span class="cb-lbl">🗂 분류</span>
     <div id="cbChips" class="cb-chips"></div>
+    <button id="ovToggle" class="cb-ov" onclick="plToggleOverlay()" title="줌인했을 때 주변의 다른 분류 마커를 덧댈지 켜고 끕니다 (맛집 등 일부 분류는 기본 제외)">🔭 주변</button>
 </div>
 <div id="pl-tagbar" class="pl-fbar">
     <span class="mb-lbl">🌸 여행지</span>
@@ -993,12 +1005,34 @@ function plMkColor(pr) {
 function plMkBadge(pr) {
     return (pr && pr.category === 'restaurant') ? plGradeBadge(pr) : '';
 }
-// 카드/패널용 가이드 배지들 [한글명] (등급은 #리본2 태그로 별도 표시)
-function plGuideBadges(guides) {
-    if (!guides || !guides.length) return '';
+// 가이드 칩 안에 표시할 등급 글리프 — 블루리본=흰 리본×N / 미쉐린=★×N(그린스타·빕·셀)
+//  레벨 정본 = place_tag(kind='grade') 태그(리본N/스타N) — 마커 배지 plGradeBadge 와 동일 소스
+function plGuideGradeHtml(guideKey, tags) {
+    tags = tags || [];
+    function has(t) { return tags.indexOf(t) >= 0; }
+    function lv(p) { for (var n = 3; n >= 1; n--) if (has(p + n)) return n; return 0; }
+    var out = '';
+    if (guideKey === 'bluer') {
+        var r = lv('리본');
+        for (var i = 0; i < r; i++) out += PL_RIBBON_SVG;
+    } else if (guideKey === 'michelin') {
+        var s = lv('스타');
+        if (s) { for (var j = 0; j < s; j++) out += '★'; }
+        else if (has('그린스타')) out += '<span class="lg-gs">★</span>';
+        else if (has('빕구르망')) out += '<span class="lg-bib">빕</span>';
+        else if (has('셀렉티드')) out += '·';
+    }
+    return out ? '<span class="lg-grade">' + out + '</span>' : '';
+}
+// 카드/패널용 가이드 배지들 [한글명+등급글리프] (pr 로 guides·tags 함께 읽음)
+function plGuideBadges(pr) {
+    var guides = (pr && pr.guides) || [];
+    if (!guides.length) return '';
+    var tags = (pr && pr.tags) || [];
     return guides.map(function (g) {
         var d = PL_GUIDES[g.guide]; if (!d) return '';
-        return '<span class="li-guide" style="background:' + d.color + '">' + plEsc(d.ko) + '</span>';
+        return '<span class="li-guide" style="background:' + d.color + '">' +
+               plEsc(d.ko) + plGuideGradeHtml(g.guide, tags) + '</span>';
     }).join('');
 }
 // 마커 등급 배지 — 가진 가이드별 등급을 모두 표시(블루리본=리본, 미쉐린=별).
@@ -1052,6 +1086,12 @@ function plSetSearchMarker(lat, lng, label) {
 //  ★좌측 목록은 항상 베이스(필터) 결과를 유지한다 — 줌에 따라 목록 의미가 바뀌지 않게.
 //  ※ 분류(또는 태그)가 선택돼 베이스가 좁혀진 상태에서만 동작 — 주변 맥락을 덧대는 용도.
 var PL_DETAIL_ZOOM = 14;       // 이 줌 이상이면 주변 오버레이 표시(네이버 스케일 ≈ 300m. 100m=16/200m=15/300m=14/500m=13/1km=12)
+// 분류별: 줌인 시 그 분류를 볼 때 '주변 오버레이'(다른 분류 덧대기)를 띄울지.
+//  ★단일 진실원천 — 기본은 전 분류 동일(true). 켜고 끄는 건 사용자가 🔭주변 토글(plOverlayOn)로 일괄 제어.
+//  특정 분류만 '항상' 끄고 싶으면(분기 추가 말고) 여기서 그 분류만 false 로.
+var PL_ZOOM_OVERLAY = { travel: true, restaurant: true, stay: true, camping: true, etc: true };
+// 줌인 주변 오버레이 전체 ON/OFF (칩바 🔭주변 버튼). 분류별 PL_ZOOM_OVERLAY 위에 얹는 마스터 스위치. 기본 ON·기억됨.
+var plOverlayOn = (function () { try { return localStorage.getItem('pl_overlay_on') !== '0'; } catch (e) { return true; } })();
 var plOv = [];                 // 현재 오버레이 마커들
 var plOvFeats = [];            // 오버레이 장소(마커 클릭 plProxPick 참조용)
 var plOvActive = -1;           // 오버레이/경로주변에서 선택(강조) 중인 마커 인덱스
@@ -1104,9 +1144,22 @@ function plFitZoom(lat, km) {
 function plProxIcon(pr) {
     return plMarkerIcon(pr.category, '', false, plMkColor(pr), plMkBadge(pr));
 }
-// 오버레이 표시 자격 = 분류가 하나라도 선택돼(=베이스가 좁혀짐) + 충분히 줌인.
-//  태그뿐 아니라 분류만 골라도 줌인하면 주변 전 분류를 덧댄다(분류 미선택=빈 지도라 제외).
-function plOverlayElig() { return plReady && !(typeof rtMode !== 'undefined' && rtMode) && plCatSel.length > 0 && plMap.getZoom() >= PL_DETAIL_ZOOM; }
+// 오버레이 표시 자격 = 선택 분류 중 '오버레이를 원하는'(PL_ZOOM_OVERLAY) 게 하나라도 + 충분히 줌인.
+//  맛집만 보면 오버레이 OFF, 여행지·숙소 등은 줌인 시 주변 맥락을 덧댄다(분류별 동작은 PL_ZOOM_OVERLAY 한 곳에서 결정).
+function plOverlayElig() { return plReady && plOverlayOn && !(typeof rtMode !== 'undefined' && rtMode) && plCatSel.some(function (c) { return PL_ZOOM_OVERLAY[c]; }) && plMap.getZoom() >= PL_DETAIL_ZOOM; }
+// 🔭주변 버튼 = 줌인 오버레이 마스터 스위치. 끄면 즉시 사라지고 켜면 즉시 덧댐.
+function plToggleOverlay() {
+    plOverlayOn = !plOverlayOn;
+    try { localStorage.setItem('pl_overlay_on', plOverlayOn ? '1' : '0'); } catch (e) {}
+    plOvToggleRender();
+    plUpdateOverlay();   // 끄면 plExitOverlay 로 제거, 켜면 자격 충족 시 다시 덧댐
+    plUpdateLabels();
+}
+function plOvToggleRender() {
+    var b = document.getElementById('ovToggle'); if (!b) return;
+    b.classList.toggle('on', plOverlayOn);
+    b.textContent = plOverlayOn ? '🔭 주변 ON' : '🔭 주변 OFF';
+}
 // 줌/뷰포트에 맞춰 오버레이 갱신 — idle 마다 호출. 조건 미충족이면 제거.
 function plUpdateOverlay() {
     if (!plReady) return;
@@ -1311,6 +1364,7 @@ function plInit() {
         });
         plReady = true;
         plTagBarInit();   // 상단 태그 칩 바 로드
+        plOvToggleRender();   // 🔭주변 토글 버튼 초기 상태(저장값) 반영
 
         // 추이 페이지에서 저장한 분류별 지도 기준(localStorage 'pl_map_filter') 로드.
         //  기본 분류='전체' → 맛집·스테이·캠핑을 각 기준으로 함께 표시.
@@ -2025,7 +2079,7 @@ function plLiHtml(f, i, opts) {
     var dist = (pr.dist_km != null) ? '<span class="li-dist">~' + plFmtDist(pr.dist_km) + '</span>' : '';
     var refs = (pr.ref_count > 0)
         ? '<span class="li-refs" title="연결된 기사 ' + pr.ref_count + '건">' + pr.ref_count + '</span>' : '';
-    var gb = plGuideBadges(pr.guides);                       // 맛집 가이드 배지
+    var gb = plGuideBadges(pr);                              // 맛집 가이드 배지(등급글리프 포함)
     var gbLine = gb ? '<div class="li-guides">' + gb + '</div>' : '';
     var nvLine = plNaverLine(pr);                            // 네이버 평점·리뷰
     var sub = (pr.tags && pr.tags.length)
@@ -2274,7 +2328,7 @@ function plOpenPanel(pr) {
     head.innerHTML =
         '<button class="panel-close" onclick="plClosePanel()">×</button>' +
         '<span class="cat-badge ' + (pr.category || 'etc') + '">' + (CAT_KO[pr.category] || '기타') + '</span>' +
-        (plGuideBadges(pr.guides) ? '<div class="panel-guides">' + plGuideBadges(pr.guides) + '</div>' : '') +
+        (plGuideBadges(pr) ? '<div class="panel-guides">' + plGuideBadges(pr) + '</div>' : '') +
         '<h3>' + plEsc(pr.name) + '</h3>' +
         '<div class="meta">' + meta.join('<br>') + '</div>' +
         plNaverHtml(pr) +
