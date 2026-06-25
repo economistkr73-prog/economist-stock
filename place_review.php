@@ -805,6 +805,113 @@ if ($action !== 'view') {
                 echo json_encode(['ok' => true, 'jobs' => count($jobs), 'merged' => $merged, 'failed' => $failed, 'results' => $results], JSON_UNESCAPED_UNICODE);
                 break;
             }
+            case 'dup_fuzzy': {   // 진단(읽기): 변형이름(포함관계) + 좌표근접 = 중복 후보. dup_groups(완전일치)가 못 잡는 변형 보완
+                $distM   = max(10, min(1000, (int)($_GET['dist'] ?? 200)));
+                $limit   = max(1, min(500, (int)($_GET['limit'] ?? 200)));
+                $catF    = preg_replace('/[^a-z]/', '', (string)($_GET['cat'] ?? ''));
+                $minLen  = max(3, (int)($_GET['min_len'] ?? 4));   // 짧은 일반명(공원·해변…) 오매칭 방지: 포함되는 쪽 최소 길이
+                $crossCat = !empty($_GET['cross_cat']);
+
+                $where = "p.is_active=1 AND p.lat IS NOT NULL AND p.geocode_status='ok'";
+                $params = [];
+                if ($catF !== '') { $where .= " AND p.category = ?"; $params[] = $catF; }
+                $st = $pdo->prepare(
+                    "SELECT p.id, p.name, p.category, p.lat, p.lng, p.address, p.region_lv2, COUNT(r.id) ref_cnt
+                       FROM place p LEFT JOIN place_ref r ON r.place_id = p.id
+                      WHERE {$where} GROUP BY p.id"
+                );
+                $st->execute($params);
+                // region_lv2 버킷 + 정규화이름 미리계산
+                $byRegion = [];
+                foreach ($st as $r) {
+                    $r['nk'] = dupNorm((string)$r['name']);
+                    if (mb_strlen($r['nk']) < 2) continue;
+                    $byRegion[(string)$r['region_lv2']][] = $r;
+                }
+                // 각 지역 내 lat 정렬 스윕(근접쌍만) → 포함관계 검사 → union-find 그룹화
+                $pairs = [];   // [idA, idB] 후보쌍
+                $LATW = $distM / 111000.0 * 1.3;   // 위도 윈도우(여유 1.3배)
+                foreach ($byRegion as $items) {
+                    $n = count($items); if ($n < 2) continue;
+                    usort($items, fn($a, $b) => (float)$a['lat'] <=> (float)$b['lat']);
+                    for ($i = 0; $i < $n; $i++) {
+                        for ($j = $i + 1; $j < $n; $j++) {
+                            if (((float)$items[$j]['lat'] - (float)$items[$i]['lat']) > $LATW) break;   // 스윕 컷
+                            $a = $items[$i]; $b = $items[$j];
+                            if (!$crossCat && $a['category'] !== $b['category']) continue;
+                            $na = $a['nk']; $nb = $b['nk'];
+                            if ($na === $nb) continue;   // 완전일치는 dup_groups 담당
+                            $short = mb_strlen($na) <= mb_strlen($nb) ? $na : $nb;
+                            $long  = $short === $na ? $nb : $na;
+                            if (mb_strlen($short) < $minLen) continue;
+                            if (mb_strpos($long, $short) === false) continue;   // 포함관계 아니면 제외
+                            if (haversineM((float)$a['lat'], (float)$a['lng'], (float)$b['lat'], (float)$b['lng']) > $distM) continue;
+                            $pairs[] = [$a, $b];
+                        }
+                    }
+                }
+                // union-find 로 후보쌍을 그룹으로
+                $parent = []; $info = [];
+                $find = function ($x) use (&$parent, &$find) { while ($parent[$x] !== $x) { $parent[$x] = $parent[$parent[$x]]; $x = $parent[$x]; } return $x; };
+                foreach ($pairs as $pr) {
+                    foreach ($pr as $m) { $id = (int)$m['id']; if (!isset($parent[$id])) { $parent[$id] = $id; $info[$id] = $m; } }
+                    $ra = $find((int)$pr[0]['id']); $rb = $find((int)$pr[1]['id']);
+                    if ($ra !== $rb) $parent[$ra] = $rb;
+                }
+                $clusters = [];
+                foreach ($parent as $id => $_) $clusters[$find($id)][] = $info[$id];
+                $groups = [];
+                foreach ($clusters as $cl) {
+                    if (count($cl) < 2) continue;
+                    usort($cl, fn($a, $b) => ((int)$b['ref_cnt'] <=> (int)$a['ref_cnt']) ?: ((int)$a['id'] <=> (int)$b['id']));
+                    $to = $cl[0];
+                    $groups[] = [
+                        'to_id' => (int)$to['id'], 'to_name' => $to['name'], 'to_refs' => (int)$to['ref_cnt'], 'category' => $to['category'],
+                        'from_ids' => array_map(fn($x) => (int)$x['id'], array_slice($cl, 1)),
+                        'members' => array_map(fn($x) => [
+                            'id' => (int)$x['id'], 'name' => $x['name'], 'cat' => $x['category'],
+                            'lat' => round((float)$x['lat'], 6), 'lng' => round((float)$x['lng'], 6),
+                            'addr' => $x['address'], 'refs' => (int)$x['ref_cnt'],
+                        ], $cl),
+                    ];
+                }
+                usort($groups, fn($a, $b) => (count($b['members']) <=> count($a['members'])) ?: ($b['to_refs'] <=> $a['to_refs']));
+                echo json_encode([
+                    'ok' => true, 'mode' => 'fuzzy', 'dist_m' => $distM, 'min_len' => $minLen, 'cross_cat' => $crossCat, 'cat' => $catF ?: null,
+                    'total_groups' => count($groups), 'total_removable' => array_sum(array_map(fn($g) => count($g['from_ids']), $groups)),
+                    'groups' => array_slice($groups, 0, $limit),
+                ], JSON_UNESCAPED_UNICODE);
+                break;
+            }
+            case 'event_fix': {   // 폐지분류 event → travel 전환 + 축제명에 '축제' theme 태그(⑩ 설계 완성)
+                $write = (($_POST['mode'] ?? $_GET['mode'] ?? 'preview') === 'apply');
+                $rows  = $pdo->query("SELECT id, name FROM place WHERE category = 'event'")->fetchAll(PDO::FETCH_ASSOC);
+                $festRe = '/축제|페스티벌|페스타|문화제|문화축제|festival|불꽃|빛축제|등축제|머드축제/iu';
+                $fest = []; $plain = [];
+                foreach ($rows as $r) {
+                    if (preg_match($festRe, (string)$r['name'])) $fest[] = $r; else $plain[] = $r;
+                }
+                if (!$write) {
+                    echo json_encode(['ok' => true, 'mode' => 'preview', 'event_total' => count($rows),
+                        'to_travel' => count($rows), 'festival_tag' => count($fest),
+                        'festival_sample' => array_slice(array_map(fn($x) => $x['name'], $fest), 0, 30),
+                        'plain_sample'    => array_slice(array_map(fn($x) => $x['name'], $plain), 0, 30)], JSON_UNESCAPED_UNICODE);
+                    break;
+                }
+                $pdo->beginTransaction();
+                try {
+                    $conv = $pdo->exec("UPDATE place SET category = 'travel' WHERE category = 'event'");
+                    $tagSt = $pdo->prepare("INSERT IGNORE INTO place_tag (place_id, kind, tag) VALUES (?, 'theme', '축제')");
+                    $tagged = 0;
+                    foreach ($fest as $r) { $tagSt->execute([(int)$r['id']]); $tagged += $tagSt->rowCount(); }
+                    $pdo->commit();
+                    echo json_encode(['ok' => true, 'mode' => 'apply', 'converted' => (int)$conv, 'festival_tagged' => $tagged], JSON_UNESCAPED_UNICODE);
+                } catch (Throwable $e) {
+                    $pdo->rollBack();
+                    echo json_encode(['ok' => false, 'msg' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+                }
+                break;
+            }
             default:
                 http_response_code(400);
                 echo json_encode(['ok' => false, 'msg' => "unknown action: {$action}"]);

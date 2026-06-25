@@ -537,6 +537,18 @@ body.trip-view .pl-legend { display: none; }   /* 경로 보기엔 분류 범례
     #rt-sum-panel { border-right: none; border-bottom: 1px solid #e8eaf0; }
 }
 
+/* 패널 접기/펼치기 — 캘린더식 화살표 탭(경로·찜은 유지, 패널만 슬라이드) */
+#rtDockTab { flex-shrink: 0; width: 20px; align-self: stretch; background: #e8ecf0; border: none; cursor: pointer; font-size: 12px; font-weight: 700; color: #5a4cd0; padding: 0; transition: background .15s; }
+#rtDockTab:hover { background: #d8d2f3; color: #2c3e50; }
+#rt-sum-panel, #rt-panel { transition: width .22s, opacity .22s; }
+body.rt-collapsed #rt-sum-panel, body.rt-collapsed #rt-panel { width: 0; max-width: 0; opacity: 0; pointer-events: none; overflow: hidden; border: 0; }
+@media (max-width: 640px) {
+    #rtDockTab { width: 100%; height: 22px; align-self: auto; }
+    #rt-sum-panel, #rt-panel { transition: height .22s, opacity .22s, flex-basis .22s; }
+    body.rt-collapsed #rt-dock { height: auto; }   /* 접으면 탭 줄만 남김(하단) */
+    body.rt-collapsed #rt-sum-panel, body.rt-collapsed #rt-panel { height: 0; min-height: 0; flex: 0 0 0; opacity: 0; pointer-events: none; overflow: hidden; border: 0; }
+}
+
 /* 수정 모달 (장소 이름/분류/좌표 지정) */
 .pl-modal { position: fixed; inset: 0; z-index: 1000; background: rgba(0,0,0,.45); display: none; align-items: center; justify-content: center; }
 .pl-modal.open { display: flex; }
@@ -821,6 +833,7 @@ a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
 <?php if (!$isGuest): ?>
     <div class="rt-banner">🧭 여행 경로 만들기 중 — 주소 입력·주변 마커로 지점을 추가하면 실제 도로 경로·소요시간과 경로 주변(전국 DB) 맛집·여행지를 지도 필터와 무관하게 보여줍니다</div>
     <div id="rt-dock">
+    <button id="rtDockTab" onclick="rtCollapse()" title="패널 접기/펼치기(경로는 유지)">▶</button>
     <div id="rt-sum-panel">
         <div class="rt-head"><h3>📋 경로 주변 장소</h3><span class="rt-sub" id="rtSumCnt"></span></div>
         <div class="rt-sum" id="rtSum">
@@ -3299,6 +3312,8 @@ function rtToggleMode() {
     }
     rtMode = !rtMode;
     document.body.classList.toggle('rt-on', rtMode);
+    document.body.classList.remove('rt-collapsed');   // 모드 진입/종료는 항상 펼친 상태로 시작
+    rtSyncTabArrow();
     var b = document.getElementById('rtModeBtn');
     if (b) { b.classList.toggle('active', rtMode); b.textContent = rtMode ? '🧭 경로 만들기 종료' : '🧭 여행 경로 만들기'; }
     if (rtMode) {
@@ -3324,6 +3339,23 @@ function rtToggleMode() {
         plUpdateLabels();   // 베이스 라벨 복원(rtMode 해제됐으므로 plFeatures 기준)
         setTimeout(plBumpResize, 60);
     }
+}
+
+// 패널 접기/펼치기 — 경로·찜은 그대로 두고 패널만 슬라이드(모바일에서 지도 가림 해소)
+// 캘린더 #proj-panel-tab 패턴: 얇은 화살표 탭만 남기고 패널 폭(모바일=높이)을 0으로
+function rtCollapse() {
+    document.body.classList.toggle('rt-collapsed');
+    rtSyncTabArrow();
+    setTimeout(plBumpResize, 240);   // 슬라이드 끝난 뒤 지도 리사이즈
+}
+// 탭 화살표를 현재 상태·뷰포트(가로/세로)에 맞게 갱신
+function rtSyncTabArrow() {
+    var tab = document.getElementById('rtDockTab');
+    if (!tab) return;
+    var mob = window.matchMedia('(max-width:640px)').matches;
+    var col = document.body.classList.contains('rt-collapsed');
+    // 접힘=다시 열기 방향, 펼침=접기 방향. 모바일은 상/하, 데스크톱은 좌/우
+    tab.textContent = col ? (mob ? '▲' : '◀') : (mob ? '▼' : '▶');
 }
 
 // 검색 결과(마커/리스트 항목)를 경로에 추가
