@@ -97,6 +97,26 @@ class Schedule {
                 UNIQUE KEY uniq_exc (parent_id, origin_dt)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         ");
+
+        $this->ensureAttachTable();
+    }
+
+    // ── 첨부 이미지 테이블 (메모 붙여넣기/첨부) ───────────────
+    // 일정 삭제 시 ON DELETE CASCADE 로 이미지도 함께 삭제된다.
+    public function ensureAttachTable(): void {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS tbl_schedule_attach (
+                id          INT AUTO_INCREMENT PRIMARY KEY,
+                schedule_id INT NOT NULL,
+                mime        VARCHAR(30) NOT NULL,
+                w           INT DEFAULT NULL,
+                h           INT DEFAULT NULL,
+                data        LONGBLOB NOT NULL,
+                created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_sch_attach (schedule_id),
+                FOREIGN KEY (schedule_id) REFERENCES tbl_schedule(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
     }
 
     // ── 기간 내 일정 조회 ─────────────────────────────────────
@@ -343,8 +363,69 @@ class Schedule {
     }
 
     public function delete(int $id): void {
+        // 첨부 이미지는 FK ON DELETE CASCADE 로 자동 삭제됨
         $this->pdo->prepare("DELETE FROM tbl_schedule WHERE id=:id")
                   ->execute([':id' => $id]);
+    }
+
+    // ── 첨부 이미지 동기화/조회/서빙 ──────────────────────────
+    // data:image/...;base64,... → [mime, bin, w, h] | null (검증 실패 시 null)
+    private function decodeImageDataUrl(string $dataUrl): ?array {
+        if (!preg_match('#^data:(image/(?:png|jpe?g|gif|webp));base64,#i', $dataUrl, $m)) return null;
+        $bin = base64_decode(substr($dataUrl, strpos($dataUrl, ',') + 1), true);
+        if ($bin === false) return null;
+        if (strlen($bin) > 8 * 1024 * 1024) return null;          // 8MB 상한
+        $info = @getimagesizefromstring($bin);                     // 매직바이트 검증(위조 차단)
+        if ($info === false) return null;
+        return [strtolower($m[1]), $bin, (int)$info[0], (int)$info[1]];
+    }
+
+    // keepIds 외의 기존 첨부 삭제 + newItems(dataURL 배열) 신규 삽입
+    public function syncAttach(int $scheduleId, array $keepIds, array $newItems): void {
+        $this->ensureAttachTable();
+        // 1) keep 목록에 없는 기존 첨부 삭제
+        $st = $this->pdo->prepare("SELECT id FROM tbl_schedule_attach WHERE schedule_id=:sid");
+        $st->execute([':sid' => $scheduleId]);
+        $existing = array_map('intval', $st->fetchAll(PDO::FETCH_COLUMN));
+        $del = array_values(array_diff($existing, array_map('intval', $keepIds)));
+        if ($del) {
+            $in   = implode(',', array_fill(0, count($del), '?'));
+            $this->pdo->prepare("DELETE FROM tbl_schedule_attach WHERE schedule_id=? AND id IN ($in)")
+                      ->execute(array_merge([$scheduleId], $del));
+        }
+        // 2) 새 첨부 삽입
+        if ($newItems) {
+            $ins = $this->pdo->prepare(
+                "INSERT INTO tbl_schedule_attach (schedule_id, mime, w, h, data)
+                 VALUES (:sid, :mime, :w, :h, :data)"
+            );
+            foreach ($newItems as $dataUrl) {
+                if (!is_string($dataUrl)) continue;
+                $d = $this->decodeImageDataUrl($dataUrl);
+                if ($d === null) continue;
+                $ins->bindValue(':sid',  $scheduleId, PDO::PARAM_INT);
+                $ins->bindValue(':mime', $d[0]);
+                $ins->bindValue(':w',    $d[2], PDO::PARAM_INT);
+                $ins->bindValue(':h',    $d[3], PDO::PARAM_INT);
+                $ins->bindValue(':data', $d[1], PDO::PARAM_LOB);
+                $ins->execute();
+            }
+        }
+    }
+
+    // 썸네일 참조용 메타(데이터 제외)
+    public function listAttachMeta(int $scheduleId): array {
+        $this->ensureAttachTable();
+        $st = $this->pdo->prepare("SELECT id, w, h FROM tbl_schedule_attach WHERE schedule_id=:sid ORDER BY id");
+        $st->execute([':sid' => $scheduleId]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    // 이미지 1건 (서빙용) — [mime, data] | null
+    public function getAttach(int $id): ?array {
+        $st = $this->pdo->prepare("SELECT mime, data FROM tbl_schedule_attach WHERE id=:id");
+        $st->execute([':id' => $id]);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: null;
     }
 
     // ── 반복 일정 범위별 삭제 ─────────────────────────────────

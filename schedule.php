@@ -190,13 +190,34 @@ function sch_calendar(PDO $pdo): void {
 .cal-header div:last-child  { color: #3498db; }
 .cal-grid { flex: 1; display: grid; grid-template-columns: repeat(7,1fr); grid-auto-rows: 1fr; border: 1px solid #dde; border-top: none; overflow-y: auto; }
 .cal-cell { border-right: 1px solid #e0e0e0; border-bottom: 1px solid #e0e0e0; padding: 4px; min-height: 80px; background: #fff; cursor: pointer; transition: background .1s; position: relative; }
-/* 월 칸 습관 점 (과거 회고: 완료=옅게, 미완료=경고색) */
+/* 월 칸 습관 점 (과거 회고: 완료=옅게, 오늘 미완료=주황 빈점 대기, 과거 미완료=빨간 ✕ 실패) */
 .hab-dots { position: absolute; bottom: 3px; left: 5px; display: flex; gap: 3px; align-items: center; pointer-events: none; z-index: 2; }
-.hab-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
-.hab-dot.miss { background: #e74c3c; box-shadow: 0 0 0 1px rgba(231,76,60,.22); }
+.hab-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; box-sizing: border-box; }
+.hab-dot.pending { background: #e74c3c; box-shadow: 0 0 0 1px rgba(231,76,60,.22); }
 .hab-dot.done { background: #aab2c2; opacity: .42; }
+.hab-x { color: #e74c3c; font-size: 9px; line-height: 7px; font-weight: 800; flex: none; }
 .hab-more { font-size: 9px; line-height: 1; color: #9aa6b2; font-weight: 700; margin-left: 1px; }
 :is(body.is-mobile, body.w-narrow) .hab-dot { width: 6px; height: 6px; }
+:is(body.is-mobile, body.w-narrow) .hab-x { font-size: 8px; line-height: 6px; }
+/* 일정 메모 이미지 첨부 */
+#f-attach-area { margin-top: 8px; }
+#f-attach-list { display: flex; flex-wrap: wrap; gap: 8px; }
+#f-attach-list:not(:empty) { margin-bottom: 8px; }
+.f-att-thumb { position: relative; width: 64px; height: 64px; border-radius: 6px; overflow: hidden; border: 1px solid #dde3ea; background: #f4f6f8; flex: none; }
+.f-att-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.f-att-thumb.loading { display: flex; align-items: center; justify-content: center; font-size: 11px; color: #9aa6b2; }
+.f-att-x { position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; border-radius: 50%; border: none; background: rgba(0,0,0,.6); color: #fff; font-size: 12px; line-height: 18px; text-align: center; cursor: pointer; padding: 0; }
+.f-attach-tools { display: flex; align-items: center; gap: 10px; }
+.f-attach-btn { padding: 5px 10px; font-size: 12px; border: 1px solid #cfd6de; background: #fff; border-radius: 6px; cursor: pointer; color: #4a5a6a; }
+.f-attach-btn:hover { background: #f4f6f8; }
+.f-attach-hint { font-size: 11px; color: #9aa6b2; }
+/* 보기 모달 첨부 썸네일 */
+#view-attach { display: flex; flex-wrap: wrap; gap: 8px; }
+.va-thumb { width: 72px; height: 72px; border-radius: 6px; overflow: hidden; border: 1px solid #dde3ea; cursor: pointer; flex: none; }
+.va-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* 이미지 라이트박스 */
+#img-lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.85); z-index: 9999; display: none; align-items: center; justify-content: center; cursor: zoom-out; }
+#img-lightbox img { max-width: 92vw; max-height: 92vh; border-radius: 6px; box-shadow: 0 6px 30px rgba(0,0,0,.5); }
 .cal-cell:hover { background: #f8f9fa; }
 .cal-cell.other-month { background: #f8f8f8; }
 .cal-cell.today { background: #eaf4ff; }
@@ -418,7 +439,8 @@ function sch_calendar(PDO $pdo): void {
 .dash-tcard .hc-grid { display: flex; flex-wrap: wrap; gap: 4px; grid-template-columns: none; margin-bottom: 12px; }
 .dash-tcard .hc { width: 13px; height: 13px; aspect-ratio: auto; border-radius: 3px; box-sizing: border-box; background: #fff; border: .5px solid rgba(0,0,0,.10); }
 .dash-tcard .hc.out { background: rgba(255,255,255,.45); border-color: transparent; }
-.dash-tcard .hc.miss { background: #fff; border: .5px solid rgba(0,0,0,.10); }
+.dash-tcard .hc.miss { background: #fff; border: .5px solid rgba(0,0,0,.10); display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.dash-tcard .hc.miss::before { content: '✕'; color: #e74c3c; font-size: 14px; line-height: 1; font-weight: 800; }
 .dash-tcard .hc.done { background: var(--dh); border: none; }
 .dash-tcard .hc.future { background: #fff; border: .5px solid rgba(0,0,0,.06); }
 .dash-tcard .hc.today { background: transparent; border: 1.5px solid var(--dfg); }
@@ -581,7 +603,7 @@ function sch_calendar(PDO $pdo): void {
 }
 :is(body.is-mobile, body.w-narrow) #modal-overlay .type-tabs {
     flex-shrink: 0;
-    padding: 12px 16px 0;
+    padding: 12px 44px 0 16px;
     margin: 0;
     border-bottom: 1px solid #eee;
 }
@@ -607,11 +629,20 @@ function sch_calendar(PDO $pdo): void {
   --m-acc:#3b68f5; --m-acc-soft:#eaf0ff; --m-acc-ink:#264bd6;
 }
 #modal-overlay .modal{
+  position:relative;
   padding:0; border-radius:22px; color:var(--m-ink);
   box-shadow:0 1px 2px rgba(22,30,55,.05), 0 18px 40px -16px rgba(22,30,55,.22);
 }
+/* 헤더 우상단 × 닫기 버튼 */
+#modal-overlay .modal-x{
+  position:absolute; top:9px; right:11px; z-index:6;
+  width:30px; height:30px; padding:0; line-height:1;
+  border:none; background:transparent; color:var(--m-muted);
+  font-size:17px; cursor:pointer; border-radius:9px;
+}
+#modal-overlay .modal-x:hover{ background:var(--m-field); color:var(--m-ink); }
 /* 상단 탭 */
-#modal-overlay .type-tabs{ padding:14px 16px 0; gap:6px; border-bottom:1px solid var(--m-line); }
+#modal-overlay .type-tabs{ padding:14px 44px 0 16px; gap:6px; border-bottom:1px solid var(--m-line); }
 #modal-overlay .type-tab{
   flex:1; border:none; background:transparent; color:var(--m-muted);
   border-radius:12px 12px 0 0; padding:12px 10px 13px; font-size:14.5px; font-weight:600;
@@ -1143,6 +1174,7 @@ function sch_calendar(PDO $pdo): void {
 
 <div class="modal-overlay" id="modal-overlay">
     <div class="modal">
+        <button type="button" class="modal-x" id="btn-modal-x" title="닫기" onclick="closeModal()">✕</button>
         <!-- 타입 탭 -->
         <div class="type-tabs">
             <button class="type-tab" data-type="timed"       onclick="setEventType('timed')">일정</button>
@@ -1351,10 +1383,10 @@ function sch_calendar(PDO $pdo): void {
                     <input type="text" id="f-address" placeholder="주소 입력 후 엔터"
                            style="flex:2;min-width:0;border:1px solid #dde;border-radius:6px;padding:0 10px;font-size:13px;height:34px;box-sizing:border-box;"
                            onkeydown="if(event.key==='Enter'){event.preventDefault();openMapPicker(this.value.trim());}"
-                           oninput="setLocBtn('default'); document.getElementById('f-place-name').value=''">
+                           oninput="setLocBtn('default'); if(!this.value.trim()){ this.dataset.picked=''; document.getElementById('f-place-name').value=''; }">
                     <input type="text" id="f-place-name" placeholder="상호명"
                            style="flex:1;min-width:0;border:1px solid #dde;border-radius:6px;padding:0 8px;font-size:13px;height:34px;box-sizing:border-box;">
-                    <button type="button" class="btn btn-outline" id="btn-map-pick" onclick="openMapPicker(document.getElementById('f-address').value.trim())" style="flex-shrink:0;font-size:12px;padding:0 12px;height:34px;">주소확인</button>
+                    <button type="button" class="btn btn-outline" id="btn-map-pick" onclick="reopenMapPicker()" style="flex-shrink:0;font-size:12px;padding:0 12px;height:34px;">주소확인</button>
                 </div>
                 <div id="loc-status" style="font-size:12px;margin-top:4px;min-height:0;display:none;"></div>
                 <input type="hidden" id="f-lat">
@@ -1382,7 +1414,15 @@ function sch_calendar(PDO $pdo): void {
 
         <!-- 메모 -->
         <div class="form-row">
-            <label>메모 <textarea id="f-memo" placeholder="메모 (선택)"></textarea></label>
+            <label>메모 <textarea id="f-memo" placeholder="메모 (선택) — 이미지를 붙여넣기(Ctrl+V)하면 첨부됩니다"></textarea></label>
+            <div id="f-attach-area">
+                <div id="f-attach-list"></div>
+                <div class="f-attach-tools">
+                    <button type="button" class="f-attach-btn" onclick="document.getElementById('f-attach-file').click()">📎 이미지 첨부</button>
+                    <span class="f-attach-hint">메모창에 붙여넣기(Ctrl+V)해도 첨부됩니다</span>
+                </div>
+                <input type="file" id="f-attach-file" accept="image/*" multiple style="display:none" onchange="attachFromFiles(this.files); this.value='';">
+            </div>
         </div>
         </div><!-- /modal-form-body -->
 
@@ -1417,6 +1457,7 @@ function sch_calendar(PDO $pdo): void {
             <div id="view-recur"    style="font-size:12px;color:#3498db;margin-bottom:8px;display:none;"></div>
             <div id="view-attendees" style="font-size:13px;color:#555;margin-bottom:8px;display:none;"></div>
             <div id="view-memo"     style="font-size:13px;color:#666;background:#f8f9fa;border-radius:6px;padding:10px;display:none;white-space:pre-wrap;"></div>
+            <div id="view-attach"   style="display:none;margin-top:8px;"></div>
             <!-- 위치/지도 -->
             <div id="view-location" style="display:none;margin-top:10px;">
                 <div id="view-address" style="font-size:13px;color:#555;margin-bottom:6px;"></div>
@@ -1721,7 +1762,7 @@ function openMapFromChip(e, id) {
     if (isMobileView() && lat && lng) {
         openNaverRouteApp(lat, lng, name);
     } else {
-        window.open(naverMapUrl(ev.address, lat, lng), '_blank', 'noopener');
+        window.open(naverMapUrl(ev.address, lat, lng, ev.place_name), '_blank', 'noopener');
     }
 }
 
@@ -2073,6 +2114,106 @@ async function api(action, payload={}, method='GET', module='calendar') {
     } catch(e) { console.error('API error',module,action,e); return {ok:false,data:[]}; }
 }
 
+// ===== 메모 이미지 첨부 (클립보드 붙여넣기 / 파일 선택) — DB(BLOB) 저장 =====
+// MODAL_ATTACH 항목: 기존={id,w,h}(DB에 있음) / 신규={dataURL}(저장 시 일괄 삽입)
+let MODAL_ATTACH = [];
+
+const ATTACH_IMG = id => `/schedule_api.php?module=attach&action=img&id=${id}`;
+function attachSrc(a){ return a.dataURL ? a.dataURL : ATTACH_IMG(a.id); }
+
+function renderAttachList(){
+    const box = document.getElementById('f-attach-list');
+    if (!box) return;
+    box.innerHTML = '';
+    MODAL_ATTACH.forEach((a, i) => {
+        const src = attachSrc(a);
+        const d = document.createElement('div');
+        d.className = 'f-att-thumb';
+        d.innerHTML = `<img src="${esc(src)}" alt=""><button type="button" class="f-att-x" title="삭제">×</button>`;
+        d.querySelector('img').onclick = () => openLightbox(src);
+        d.querySelector('.f-att-x').onclick = () => { MODAL_ATTACH.splice(i,1); renderAttachList(); };
+        box.appendChild(d);
+    });
+}
+
+// 큰 이미지는 캔버스로 축소(긴 변 1600px 상한) → dataURL
+function attachToDataURL(blob){
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        const u = URL.createObjectURL(blob);
+        img.onload = () => {
+            URL.revokeObjectURL(u);
+            const MAX = 1600;
+            let w = img.width, h = img.height;
+            if (w > MAX || h > MAX){ const r = Math.min(MAX/w, MAX/h); w = Math.round(w*r); h = Math.round(h*r); }
+            const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+            cv.getContext('2d').drawImage(img, 0, 0, w, h);
+            const isPng = blob.type === 'image/png';   // PNG는 스크린샷/투명 보존, 그 외 JPEG로 용량절감
+            resolve(cv.toDataURL(isPng ? 'image/png' : 'image/jpeg', isPng ? undefined : 0.88));
+        };
+        img.onerror = () => { URL.revokeObjectURL(u); reject(new Error('이미지 로드 실패')); };
+        img.src = u;
+    });
+}
+
+// 붙여넣기/선택 이미지를 (서버 전송 없이) 모달 목록에 추가 — 저장 시 일괄 삽입
+async function addAttachBlob(blob){
+    const box = document.getElementById('f-attach-list');
+    const ph = document.createElement('div'); ph.className = 'f-att-thumb loading'; ph.textContent = '…';
+    if (box) box.appendChild(ph);
+    try {
+        const dataURL = await attachToDataURL(blob);
+        MODAL_ATTACH.push({ dataURL });
+    } catch(e){ showToast('이미지 처리 실패'); }
+    finally { renderAttachList(); }   // placeholder 제거 + 목록 갱신
+}
+
+function attachFromFiles(files){
+    [...files].filter(f => f.type.startsWith('image/')).forEach(addAttachBlob);
+}
+
+// 메모창 붙여넣기 → 클립보드 이미지만 가로채 첨부 (텍스트 붙여넣기는 그대로)
+function attachPasteHandler(e){
+    const items = (e.clipboardData && e.clipboardData.items) || [];
+    const imgs = [...items].filter(it => it.kind === 'file' && it.type.startsWith('image/'));
+    if (!imgs.length) return;
+    e.preventDefault();
+    imgs.forEach(it => { const b = it.getAsFile(); if (b) addAttachBlob(b); });
+}
+
+function openLightbox(src){
+    const lb = document.getElementById('img-lightbox');
+    lb.querySelector('img').src = src;
+    lb.style.display = 'flex';
+}
+
+// 일정 id로 기존 첨부 메타를 불러와 수정 모달 목록 채우기
+async function loadAttachInto(id){
+    MODAL_ATTACH = []; renderAttachList();
+    if (!id) return;
+    const res = await api('list', { id }, 'GET', 'attach');
+    if (res && res.ok && Array.isArray(res.data)) {
+        MODAL_ATTACH = res.data.map(a => ({ id: a.id, w: a.w, h: a.h }));
+        renderAttachList();
+    }
+}
+
+// 보기 모달 첨부 썸네일 (일정 id로 조회)
+async function renderViewAttach(ev){
+    const box = document.getElementById('view-attach');
+    if (!box) return;
+    box.style.display = 'none'; box.innerHTML = '';
+    if (!ev || !ev.id) return;
+    const res = await api('list', { id: ev.id }, 'GET', 'attach');
+    const list = (res && res.ok && Array.isArray(res.data)) ? res.data : [];
+    if (!list.length) return;
+    box.innerHTML = list.map(a => `<div class="va-thumb"><img src="${esc(ATTACH_IMG(a.id))}" alt=""></div>`).join('');
+    [...box.querySelectorAll('.va-thumb img')].forEach((im,i) => im.onclick = () => openLightbox(ATTACH_IMG(list[i].id)));
+    box.style.display = 'flex';
+}
+
+document.getElementById('f-memo')?.addEventListener('paste', attachPasteHandler);
+
 async function loadEvents() {
     let p={};
     if (S.view==='month')      p={view:'month',year:S.year,month:S.month};
@@ -2197,14 +2338,22 @@ function renderMonth() {
             return chip;
         };
         regularEvs.forEach(ev => cell.appendChild(makeChip(ev)));
-        // 습관 점 — 과거·오늘만(미래 제외). 그날 예정 습관마다 점: 완료=옅은회색, 미완료=경고색.
+        // 습관 점 — 과거·오늘만(미래 제외). 완료=옅은회색 점 / 오늘 미완료=주황 빈점(대기) / 과거 미완료=빨간 ✕(실패).
         if (ds <= todayStr()) {
             const schedH = (TODO_HABITS||[]).filter(hb=>habitScheduled(hb, date));
             if (schedH.length) {
-                const states = schedH.map(hb=>doneOn(hb, ds)).sort((a,b)=>a-b);   // 미완료(false) 먼저
+                const isToday = (ds === todayStr());
+                const states = schedH.map(hb => doneOn(hb, ds) ? 'done' : (isToday ? 'pending' : 'fail'));
+                const order = {fail:0, pending:1, done:2};
+                states.sort((a,b)=>order[a]-order[b]);   // 실패 > 대기 > 완료 순 (중요한 것 먼저 노출)
                 const wrap=document.createElement('div'); wrap.className='hab-dots';
                 const MAXD=4;
-                states.slice(0,MAXD).forEach(dn=>{ const s=document.createElement('span'); s.className='hab-dot '+(dn?'done':'miss'); wrap.appendChild(s); });
+                states.slice(0,MAXD).forEach(st=>{
+                    const s=document.createElement('span');
+                    if (st==='fail'){ s.className='hab-x'; s.textContent='✕'; }
+                    else { s.className='hab-dot '+st; }
+                    wrap.appendChild(s);
+                });
                 if (states.length>MAXD){ const m=document.createElement('span'); m.className='hab-more'; m.textContent='+'+(states.length-MAXD); wrap.appendChild(m); }
                 cell.appendChild(wrap);
             }
@@ -2542,6 +2691,7 @@ function openNew(dt='', type='timed') {
     document.getElementById('modal-title').textContent='일정 추가';
     document.getElementById('f-title').value='';
     document.getElementById('f-memo').value='';
+    MODAL_ATTACH=[]; renderAttachList();
     document.getElementById('f-cat').value='업무';
     document.getElementById('f-priority').value='2';
     setColor('#3498db');
@@ -2598,6 +2748,7 @@ function openEdit(ev) {
     document.getElementById('f-cat').value=ev.category;
     document.getElementById('f-priority').value=ev.priority||2;
     document.getElementById('f-memo').value=ev.memo||'';
+    loadAttachInto(ev.id);
     setColor(ev.color);
     closeColorPicker();
     setEventType(type);
@@ -2850,6 +3001,8 @@ async function saveEvent() {
         color:     S.color,
         priority:  document.getElementById('f-priority').value,
         memo:      document.getElementById('f-memo').value,
+        attach_keep: MODAL_ATTACH.filter(a=>a.id).map(a=>a.id),
+        attach_new:  MODAL_ATTACH.filter(a=>a.dataURL).map(a=>a.dataURL),
         recur_rule: RECUR||null,
         alert_mins: [...document.querySelectorAll('.f-alert:checked')].map(cb=>+cb.value),
         attendees: SEL_ATTENDEES.map(a=>a.id),
@@ -3025,6 +3178,9 @@ function openView(ev) {
     } else {
         memoEl.style.display = 'none';
     }
+
+    // 첨부 이미지
+    renderViewAttach(ev);
 
     // 위치/지도
     renderViewLocation(ev);
@@ -3941,9 +4097,7 @@ document.addEventListener('click', e=>{
     const pmp=document.getElementById('pm-popover');
     if (pmp && pmp.style.display==='block' && !pmp.contains(e.target) && !skip) pmCloseColorPicker();
 });
-document.getElementById('modal-overlay').addEventListener('click',function(e){
-    if(e.target===this && !document.body.classList.contains('is-mobile') && !document.body.classList.contains('w-narrow')) closeModal();
-});
+// 일정 입력 모달은 바깥(오버레이) 클릭으로 닫지 않음 — × 버튼·취소·Esc 로만 닫기(실수 닫힘 방지)
 document.getElementById('view-overlay').addEventListener('click',function(e){if(e.target===this)closeViewModal();});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeModal();closeViewModal();}});
 
@@ -5516,11 +5670,13 @@ async function ensureGeocodedForSave() {
     if (!address) {  // 위치 미입력 → 좌표 클리어
         document.getElementById('f-lat').value = '';
         document.getElementById('f-lng').value = '';
+        addrEl.dataset.picked = '';
         return true;
     }
-    const hasLat   = !!document.getElementById('f-lat').value;
-    const changed  = addrEl.dataset.geocoded !== address;
-    if (!hasLat || changed) {
+    const hasLat = !!document.getElementById('f-lat').value;
+    // ★좌표가 이미 있으면(지도에서 찍었거나 기존 저장값) 절대 재지오코딩하지 않는다 — 정확한 핀을 주소 중심점으로 덮어쓰는 사고 방지.
+    //   좌표가 아예 없을 때만(주소만 직접 타이핑하고 지도 선택을 안 한 경우) 주소로 변환.
+    if (!hasLat) {
         const ok = await doGeocode();
         if (!ok && !document.getElementById('f-lat').value) {
             return confirm('주소 좌표를 찾지 못했습니다.\n주소만 저장하고 지도는 표시하지 않을까요?');
@@ -5533,6 +5689,7 @@ async function ensureGeocodedForSave() {
 function resetLocationForm() {
     document.getElementById('f-address').value = '';
     document.getElementById('f-address').dataset.geocoded = '';
+    document.getElementById('f-address').dataset.picked = '';
     document.getElementById('f-lat').value = '';
     document.getElementById('f-lng').value = '';
     document.getElementById('f-place-name').value = '';
@@ -5547,6 +5704,8 @@ function fillLocationForm(ev) {
     setLocRegion(provider);
     document.getElementById('f-address').value = ev.address || '';
     document.getElementById('f-address').dataset.geocoded = (ev.lat && ev.lng) ? (ev.address || '') : '';
+    // 저장된 좌표는 확정 지점으로 취급 — 수정 시 주소 텍스트를 고쳐도 핀 유지(재지오코딩 방지)
+    document.getElementById('f-address').dataset.picked = (ev.lat && ev.lng) ? '1' : '';
     document.getElementById('f-lat').value = ev.lat || '';
     document.getElementById('f-lng').value = ev.lng || '';
     document.getElementById('f-place-name').value = ev.place_name || '';
@@ -5643,9 +5802,11 @@ function openTripWindow(token) {
 }
 
 // ── 외부 지도 링크 ───────────────────────────────────────────
-function naverMapUrl(address, lat, lng) {
-    // 네이버 지도 웹 검색 (좌표보다 주소 검색이 핀 표기 안정적)
-    return 'https://map.naver.com/p/search/' + encodeURIComponent(address || (lat + ',' + lng));
+function naverMapUrl(address, lat, lng, placeName) {
+    // 상호명(POI)이 있으면 그 이름으로 검색 → 해당 업체가 바로 뜸(주소로 검색하면 그 주소의 모든 업체가 나열됨).
+    // 상호명 없으면 주소, 둘 다 없으면 좌표.
+    const q = (placeName && placeName.trim()) || address || (lat + ',' + lng);
+    return 'https://map.naver.com/p/search/' + encodeURIComponent(q);
 }
 function googleMapUrl(address, lat, lng) {
     const q = (lat && lng) ? (lat + ',' + lng) : address;
@@ -5700,7 +5861,7 @@ function renderViewLocation(ev) {
     fbEl.style.display = 'none';
 
     // "다른 지도로 보기" — 좌표를 찾은 제공자와 반대편 지도
-    const naverLink  = `<a href="${naverMapUrl(ev.address, ev.lat, ev.lng)}"  target="_blank" rel="noopener">네이버 지도에서 열기 ↗</a>`;
+    const naverLink  = `<a href="${naverMapUrl(ev.address, ev.lat, ev.lng, ev.place_name)}"  target="_blank" rel="noopener">네이버 지도에서 열기 ↗</a>`;
     const googleLink = `<a href="${googleMapUrl(ev.address, ev.lat, ev.lng)}" target="_blank" rel="noopener">구글 지도에서 열기 ↗</a>`;
     linksEl.innerHTML = provider === 'naver' ? (naverLink + googleLink) : (googleLink + naverLink);
 
@@ -5762,6 +5923,12 @@ function showMapFallback(mapEl, fbEl, name) {
 // ══════════════════════════════════════════════════════════════
 let _mpMap = null, _mpMarker = null, _mpPicked = null;
 
+// 주소확인/확인완료 버튼: 좌표가 이미 확정돼 있으면 주소 재검색 없이 그 지점으로 픽커를 연다(선택 유지·무한 반복 방지)
+function reopenMapPicker() {
+    const hasCoord = document.getElementById('f-lat').value && document.getElementById('f-lng').value;
+    openMapPicker(hasCoord ? '' : document.getElementById('f-address').value.trim());
+}
+
 function openMapPicker(query) {
     if (!MAP_CFG.naverClientId) { alert('네이버 지도 키가 설정되지 않았습니다.'); return; }
     document.getElementById('map-picker-overlay').style.display = 'flex';
@@ -5769,9 +5936,9 @@ function openMapPicker(query) {
     document.getElementById('mp-btn-select').disabled = true;
     document.getElementById('mp-status').textContent = '지도 불러오는 중…';
     _mpPicked = null;
-    if (query) {
-        document.getElementById('mp-search').value = query;
-    }
+    // 이전 검색어·결과목록 잔존 제거 (좌표로 재오픈 시 옛 목록 오클릭 → 엉뚱한 POI 선택 방지)
+    document.getElementById('mp-search').value = query || '';
+    mpHideResults();
     loadNaverSDK().then(() => {
         document.getElementById('mp-status').textContent = '';
         if (!_mpMap) {
@@ -5787,13 +5954,21 @@ function openMapPicker(query) {
         if (query) {
             mpSearch();
         } else {
-            // 기존 좌표가 있으면 그 위치로 이동
+            // 기존 좌표가 있으면 그 위치로 이동 + 그 선택을 그대로 재확정할 수 있게 _mpPicked 미리 채움
             const lat = document.getElementById('f-lat').value;
             const lng = document.getElementById('f-lng').value;
             if (lat && lng) {
                 const pos = new naver.maps.LatLng(+lat, +lng);
                 _mpMap.setCenter(pos); _mpMap.setZoom(16);
                 _mpMarker.setPosition(pos); _mpMarker.setVisible(true);
+                _mpPicked = {
+                    lat: +lat, lng: +lng,
+                    address: document.getElementById('f-address').value.trim(),
+                    name:    document.getElementById('f-place-name').value.trim()
+                };
+                document.getElementById('mp-selected-addr').textContent =
+                    (_mpPicked.name ? _mpPicked.name + '  ' : '') + _mpPicked.address;
+                document.getElementById('mp-btn-select').disabled = false;
             }
         }
     }).catch(() => {
@@ -5901,12 +6076,15 @@ function mpSelectPlace(i) {
 
 function confirmMapPick() {
     if (!_mpPicked) return;
+    // ★setLocRegion을 좌표 세팅보다 "먼저" 호출 — setLocRegion은 기존 좌표를 클리어하므로,
+    //   뒤에 부르면 방금 넣은 핀 좌표를 지워버린다(저장 시 빈 좌표→주소 재지오코딩→중심점 사고의 원인이었음).
+    setLocRegion('naver');
     document.getElementById('f-address').value = _mpPicked.address;
     document.getElementById('f-address').dataset.geocoded = _mpPicked.address;
+    document.getElementById('f-address').dataset.picked = '1';   // 지도에서 콕 찍은 정확한 지점 — 저장 시 재지오코딩 금지
     document.getElementById('f-lat').value = _mpPicked.lat;
     document.getElementById('f-lng').value = _mpPicked.lng;
     document.getElementById('f-place-name').value = _mpPicked.name || '';
-    setLocRegion('naver');
     setLocBtn('ok');
     setLocStatus('', '');
     closeMapPicker();
@@ -5934,6 +6112,7 @@ function confirmMapPick() {
         </div>
     </div>
 </div>
+<div id="img-lightbox" onclick="this.style.display='none'"><img src="" alt=""></div>
 </body>
 </html>
 <?php

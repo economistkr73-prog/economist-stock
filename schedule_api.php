@@ -26,6 +26,7 @@ try {
         case 'goal':     api_goal($action, $pdo);     break;
         case 'geo':      api_geo($action);            break;
         case 'travel':   api_travel($action, $pdo);   break;
+        case 'attach':   api_attach($action, $pdo);   break;
         // case 'kakao':    api_kakao($action, $pdo);    break;
         // case 'progress': api_progress($action, $pdo); break;
         default:
@@ -40,6 +41,33 @@ try {
 // ==========================================================
 // 罹섎┛??紐⑤뱢
 // ==========================================================
+// ==========================================================
+// 첨부 이미지 모듈 — DB(tbl_schedule_attach BLOB) 목록/서빙
+//   action=list : 일정의 첨부 메타[{id,w,h}]  (썸네일 참조용)
+//   action=img  : 이미지 1건 바이너리 서빙     (<img src>로 사용)
+// 저장(삽입/삭제)은 calendar create/update 에서 syncAttach 로 처리
+// ==========================================================
+function api_attach(string $action, PDO $pdo): void {
+    $sch = new Schedule($pdo);
+
+    if ($action === 'list') {
+        $id = (int)($_GET['id'] ?? 0);
+        echo json_encode(['ok'=>true, 'data'=> $id ? $sch->listAttachMeta($id) : []]);
+        return;
+    }
+    if ($action === 'img') {
+        $id  = (int)($_GET['id'] ?? 0);
+        $row = $id ? $sch->getAttach($id) : null;
+        if (!$row) { http_response_code(404); header('Content-Type: text/plain; charset=utf-8', true); echo 'not found'; return; }
+        header('Content-Type: ' . $row['mime'], true);   // 상단 application/json 헤더 교체
+        header('Cache-Control: private, max-age=86400');
+        header('Content-Length: ' . strlen($row['data']));
+        echo $row['data'];
+        return;
+    }
+    echo json_encode(['ok'=>false, 'msg'=>'unknown action']);
+}
+
 function api_calendar(string $action, PDO $pdo): void {
     $sch = new Schedule($pdo);
 
@@ -116,6 +144,7 @@ function api_calendar(string $action, PDO $pdo): void {
                 }
             }
             $id = $sch->create($d);
+            $sch->syncAttach($id, [], $d['attach_new'] ?? []);   // 첨부 이미지(신규 일정)
             // 李몄꽍???곌껐
             if (isset($d['attendees']) && is_array($d['attendees'])) {
                 (new Contact($pdo))->setAttendees($id, $d['attendees']);
@@ -131,6 +160,10 @@ function api_calendar(string $action, PDO $pdo): void {
         case 'update':
             $d = json_decode(file_get_contents('php://input'), true);
             $sch->update($d);
+            // 첨부 이미지: keep(유지할 기존 id) 외 삭제 + new 삽입
+            if (!empty($d['id'])) {
+                $sch->syncAttach((int)$d['id'], $d['attach_keep'] ?? [], $d['attach_new'] ?? []);
+            }
             // 李몄꽍??媛깆떊
             if (isset($d['attendees']) && is_array($d['attendees']) && !empty($d['id'])) {
                 (new Contact($pdo))->setAttendees((int)$d['id'], $d['attendees']);
@@ -223,6 +256,10 @@ function api_calendar(string $action, PDO $pdo): void {
                 $d['origin_dt']       ?? date('Y-m-d'),
                 $d
             );
+            // 첨부는 시리즈(원본) 단위 — 전체(all) 수정일 때만 동기화
+            if (($d['scope'] ?? 'all') === 'all' && !empty($d['id'])) {
+                $sch->syncAttach((int)$d['id'], $d['attach_keep'] ?? [], $d['attach_new'] ?? []);
+            }
             echo json_encode(['ok' => true]);
             break;
 
