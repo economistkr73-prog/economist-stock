@@ -3492,6 +3492,8 @@ function rtDraw() {
 function rtRouteMarkerClick(idx, pos) {
     if (PL_TRIP) { rtShareFocus(idx); return; }
     plMap.panTo(pos);
+    var wp = rtRoute[idx];
+    if (wp) { rtSelId = wp.placeId || null; rtShareOpenDetail(wp); }   // 경로 번호핀 클릭 = 그 지점 상세패널(placeId면 풀 상세, 없으면 이름·주소) — 찜/주변 마커와 일관
     var r = document.getElementById('rt-row-' + idx);
     if (r) { r.scrollIntoView({ block: 'nearest' }); r.style.background = '#efe9ff'; setTimeout(function () { r.style.background = ''; }, 700); }
 }
@@ -3716,8 +3718,12 @@ function rtComputeNearby() {
     rtNearby = rtRoute.map(function () { return []; });
     if (!rtRoute.length) return;
     var seen = {};
+    // 경로 지점 자신(등록 장소=placeId)은 주변 목록에서 제외 — 지점 헤더로 이미 표시되므로 ~0m 중복 방지
+    var wpIds = {};
+    for (var w0 = 0; w0 < rtRoute.length; w0++) { if (rtRoute[w0].placeId != null) wpIds[rtRoute[w0].placeId] = 1; }
     function addRec(lat, lng, props) {
         if (lat == null || lng == null || seen[props.id]) return;
+        if (props.id != null && wpIds[props.id]) return;   // 경로 지점 자신 제외(헤더=상세 진입점)
         var best = 0, bestD = Infinity;
         for (var w = 0; w < rtRoute.length; w++) {
             var dw = rtHaversine(lat, lng, rtRoute[w].lat, rtRoute[w].lng);
@@ -3891,10 +3897,12 @@ function rtRenderSummary() {
     }).join('');
 }
 
-// 지점 헤더 클릭 → 그 지점으로 이동
+// 지점 헤더 클릭 → 그 지점으로 이동 + 상세패널(placeId면 풀 상세, 없으면 이름·주소). 지점 자신은 목록에서 빠졌으므로 헤더가 상세 진입점.
 function rtFocusWaypoint(wi) {
     var wp = rtRoute[wi]; if (!wp) return;
+    rtSelId = wp.placeId || null;   // 목록 active 표시와 일관(지점 선택 강조)
     plMap.morph(new naver.maps.LatLng(wp.lat, wp.lng), Math.max(11, plZoomForRadius(rtRadius)));
+    rtShareOpenDetail(wp);
 }
 
 // 종합(우측 패널) 항목 클릭 → 그 장소로 이동 + 상세패널 + 선택 강조(재렌더 후에도 유지)
@@ -4064,15 +4072,18 @@ function rtTripLoad(id) {
         rtPicks = Array.isArray(d.trip.picks) ? d.trip.picks : [];
         rtLoadedName = d.trip.name || ''; rtUpdateTripName();
         rtSelId = null; rtSave(); rtPicksSave();
+        rtFinalized = true;                              // ★저장함 불러오기 기본 = 주변보기 off(찜·경로만, 회랑 안 부름) — 게스트뷰와 동일
         rtTripClose();
-        if (!rtMode) { rtToggleMode(); }                 // 진입(rtHideBase+rtRenderRows+rtDrawPicks+rtFetchRoute)
-        else { rtRenderRows(); rtDrawPicks(); rtFetchRoute(); }
+        if (!rtMode) { rtToggleMode(); }                 // 진입(rtUpdateFinalBtn 라벨 동기화·rtFetchNearby 는 finalized 라 skip)
+        else { rtUpdateFinalBtn(); rtRenderRows(); rtDrawPicks(); rtFetchRoute(); }
+        document.body.classList.add('rt-collapsed'); rtSyncTabArrow();   // ★불러오기 = 좌측 패널 닫힌 채 시작(지도 우선·탭으로 펼침). 진입부가 풀어둔 것을 다시 접음
         // 불러온 지도가 한눈에 보이도록 경로+찜 전체 범위로 맞춤(이후 idle 이 그 화면의 회랑을 로드)
         var pts = rtRoute.concat(rtPicks).filter(function (p) { return p && p.lat != null && p.lng != null; });
         if (pts.length && plMap) {
             var b = new naver.maps.LatLngBounds(new naver.maps.LatLng(pts[0].lat, pts[0].lng), new naver.maps.LatLng(pts[0].lat, pts[0].lng));
             pts.forEach(function (p) { b.extend(new naver.maps.LatLng(p.lat, p.lng)); });
-            try { plMap.fitBounds(b, { top: 60, right: 60, bottom: 90, left: 60 }); } catch (e) {}
+            // 패널 접힘 슬라이드(240ms) 후 지도 리사이즈 → 넓어진 화면 기준으로 범위 맞춤
+            setTimeout(function () { plBumpResize(); try { plMap.fitBounds(b, { top: 60, right: 60, bottom: 90, left: 60 }); } catch (e) {} }, 260);
         }
         plHint('📂 불러옴: ' + (d.trip.name || ''));
     }).catch(function () { alert('불러오기 오류'); });
