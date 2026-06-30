@@ -330,8 +330,6 @@ function sch_calendar(PDO $pdo): void {
 .list-table td { padding: 9px 12px; border-bottom: 1px solid #f0f0f0; font-size: var(--fs-base); vertical-align: middle; }
 .list-table tr:hover td { background: #f8f9fa; }
 .list-table tr.done td { opacity: .55; }
-.priority-badge { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: var(--fs-xs); font-weight: 700; }
-.p1 { background: #fde8e8; color: #c0392b; } .p2 { background: #fef9e7; color: #d68910; } .p3 { background: #e9f7ef; color: #1e8449; }
 /* 모달 */
 .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 3000; align-items: center; justify-content: center; }
 .modal-overlay.open { display: flex; }
@@ -1295,18 +1293,13 @@ function sch_calendar(PDO $pdo): void {
             <button type="button" id="btn-recur-clear-todo" onclick="clearRecur()" style="display:none;margin-left:4px;background:none;border:none;color:#e74c3c;font-size:13px;cursor:pointer;padding:2px 6px;border-radius:4px;border:1px solid #e74c3c;">× 반복해제</button>
         </div>
 
-        <!-- 카테고리(반) + 우선순위(반) + 그룹 + 프로젝트 (한 줄) -->
+        <!-- 카테고리(반) + 그룹 + 프로젝트 (한 줄) -->
         <div class="form-row">
             <label style="flex:0.6 1 76px;min-width:76px;">카테고리
                 <select id="f-cat">
                     <option value="업무">업무</option><option value="개인">개인</option>
                     <option value="주식">주식</option><option value="회의">회의</option>
                     <option value="기타">기타</option>
-                </select>
-            </label>
-            <label id="row-priority" style="flex:0.6 1 76px;min-width:76px;">우선순위
-                <select id="f-priority">
-                    <option value="1">높음</option><option value="2" selected>보통</option><option value="3">낮음</option>
                 </select>
             </label>
             <label style="min-width:100px;">분류
@@ -2067,8 +2060,6 @@ function mondayOf(d) {
 }
 function addDays(d,n) { const r=new Date(d); r.setDate(r.getDate()+n); return r; }
 function sameDay(a,b) { return ymd(a)===ymd(b); }
-function priorityLabel(p) { return p==1?'높음':p==3?'낮음':'보통'; }
-function priorityClass(p) { return p==1?'p1':p==3?'p3':'p2'; }
 
 // 시간 범위 포맷: "(종일)" 또는 "(HH:MM~HH:MM)"
 function fmtTimeRange(ev, full) {
@@ -2661,10 +2652,9 @@ function renderList() {
         <td><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${ev.color};margin-right:6px"></span>${projNumBadge(ev)}${esc(evLabel(ev))}${mapMark(ev)}${tripMark(ev)}${logMark(ev)}</td>
         <td>${ev.start_dt.slice(0,16).replace('T',' ')}</td>
         <td>${ev.category}</td>
-        <td><span class="priority-badge ${priorityClass(ev.priority)}">${priorityLabel(ev.priority)}</span></td>
         <td style="text-align:center">${ev.is_done=='1'?'✔':'—'}</td>
     </tr>`).join('');
-    c.innerHTML=`<table class="list-table"><thead><tr><th>제목</th><th>시작일시</th><th>카테고리</th><th>우선순위</th><th>완료</th></tr></thead><tbody>${rows}</tbody></table>`;
+    c.innerHTML=`<table class="list-table"><thead><tr><th>제목</th><th>시작일시</th><th>카테고리</th><th>완료</th></tr></thead><tbody>${rows}</tbody></table>`;
     c.querySelectorAll('tr[data-id]').forEach(tr=>tr.addEventListener('click',()=>{const ev=S.events.find(x=>x.id==tr.dataset.id);if(ev)openView(ev);}));
 }
 
@@ -2693,7 +2683,6 @@ function openNew(dt='', type='timed') {
     document.getElementById('f-memo').value='';
     MODAL_ATTACH=[]; renderAttachList();
     document.getElementById('f-cat').value='업무';
-    document.getElementById('f-priority').value='2';
     setColor('#3498db');
     closeColorPicker();
     clearRecur();
@@ -2746,7 +2735,6 @@ function openEdit(ev) {
     document.getElementById('modal-title').textContent='일정 수정';
     document.getElementById('f-title').value=ev.title;
     document.getElementById('f-cat').value=ev.category;
-    document.getElementById('f-priority').value=ev.priority||2;
     document.getElementById('f-memo').value=ev.memo||'';
     loadAttachInto(ev.id);
     setColor(ev.color);
@@ -2999,7 +2987,6 @@ async function saveEvent() {
         category:  isAnniv ? document.getElementById('h-anniv-cat').value : document.getElementById('f-cat').value,
         is_family: isAnniv ? +document.getElementById('h-is-family').value : 0,
         color:     S.color,
-        priority:  document.getElementById('f-priority').value,
         memo:      document.getElementById('f-memo').value,
         attach_keep: MODAL_ATTACH.filter(a=>a.id).map(a=>a.id),
         attach_new:  MODAL_ATTACH.filter(a=>a.dataURL).map(a=>a.dataURL),
@@ -3668,8 +3655,7 @@ function setEventType(type) {
     document.getElementById('row-anniversary').style.display = type==='anniversary' ? 'block' : 'none';
     document.getElementById('row-todo').style.display        = type==='todo'        ? 'block' : 'none';
     document.getElementById('row-todo-recur').style.display  = type==='todo'        ? 'flex'  : 'none';
-    // 우선순위·카테고리 select: 기념일 숨김
-    document.getElementById('row-priority').style.display    = type==='anniversary' ? 'none'  : '';
+    // 카테고리 select: 기념일 숨김
     document.getElementById('f-cat').closest('label').style.display = type==='anniversary' ? 'none' : '';
     document.getElementById('recur-summary-row').style.display = 'none';
 

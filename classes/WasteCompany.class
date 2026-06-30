@@ -1,0 +1,308 @@
+<?php
+/**
+ * WasteCompany.class — 공제조합 회원관리(전국 폐기물 수집·운반 업체) DB 전담 클래스
+ *
+ * 설계: 회원/조합원/운영 상태는 별도 코드값이 아니라 is_member·is_coop·is_active
+ *       3개 boolean 으로만 보관. 모든 통계는 GROUP BY 로 동적 산출.
+ *       marker_grade 만 지도 표시 편의를 위해 적재 시 계산해 저장.
+ *
+ *   타겟 고객 = is_active=1 AND is_coop=0  (운영 중인 비조합원)
+ *   marker_grade:  is_active=0 → 'direct'(지점/미운영)
+ *                  is_active=1 AND is_coop=0 → 'target'(타겟)
+ *                  is_active=1 AND is_coop=1 → 'member'(조합원)
+ */
+class WasteCompany
+{
+    private PDO $pdo;
+
+    public function __construct(PDO $pdo)
+    {
+        $this->pdo = $pdo;
+    }
+
+    /** 테이블 보장 (없으면 생성). db_waste_setup.php 와 동일 스키마. */
+    public function ensureTable(): void
+    {
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS waste_companies (
+                id            INT AUTO_INCREMENT PRIMARY KEY,
+                sido          VARCHAR(20)  NOT NULL,
+                sigungu       VARCHAR(40)  NOT NULL,
+                company_name  VARCHAR(100) NOT NULL,
+                ceo           VARCHAR(80),
+                zipcode       VARCHAR(10),
+                address       VARCHAR(255),
+                phone         VARCHAR(50),
+                note          VARCHAR(255),
+                is_member     TINYINT(1) NOT NULL DEFAULT 0,
+                is_active     TINYINT(1) NOT NULL DEFAULT 0,
+                is_coop       TINYINT(1) NOT NULL DEFAULT 0,
+                waste_type    VARCHAR(30),
+                marker_grade  VARCHAR(12) NOT NULL DEFAULT 'other',
+                lat           DECIMAL(10,7),
+                lng           DECIMAL(10,7),
+                geocode_status ENUM('pending','ok','failed') NOT NULL DEFAULT 'pending',
+                geocoded_at   DATETIME,
+                created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_region (sido, sigungu),
+                INDEX idx_grade (marker_grade),
+                INDEX idx_flags (is_active, is_coop, is_member),
+                INDEX idx_waste (waste_type),
+                INDEX idx_geocode (geocode_status)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
+    }
+
+    /** marker_grade 산출 (적재 시 호출) */
+    public static function gradeFor(int $isActive, int $isCoop): string
+    {
+        if ($isActive === 0) return 'direct';
+        return $isCoop === 0 ? 'target' : 'member';
+    }
+
+    /**
+     * 대량 적재 — 한 트랜잭션으로 INSERT. (마이그레이션 전용)
+     * @param array $rows 각 행: sido,sigungu,company_name,ceo,zipcode,address,phone,note,
+     *                    is_member,is_active,is_coop,waste_type
+     * @return int 적재 건수
+     */
+    public function insertMany(array $rows): int
+    {
+        $sql = "INSERT INTO waste_companies
+                (sido, sigungu, company_name, ceo, zipcode, address, phone, note,
+                 is_member, is_active, is_coop, waste_type, marker_grade,
+                 lat, lng, geocode_status)
+                VALUES
+                (:sido, :sigungu, :company_name, :ceo, :zipcode, :address, :phone, :note,
+                 :is_member, :is_active, :is_coop, :waste_type, :marker_grade,
+                 NULL, NULL, 'pending')";
+        $st = $this->pdo->prepare($sql);
+        $n = 0;
+        $this->pdo->beginTransaction();
+        try {
+            foreach ($rows as $r) {
+                $isMember = (int)($r['is_member'] ?? 0);
+                $isActive = (int)($r['is_active'] ?? 0);
+                $isCoop   = (int)($r['is_coop'] ?? 0);
+                $st->execute([
+                    ':sido'         => (string)($r['sido'] ?? ''),
+                    ':sigungu'      => (string)($r['sigungu'] ?? ''),
+                    ':company_name' => (string)($r['company_name'] ?? ''),
+                    ':ceo'          => $this->nn($r['ceo'] ?? null),
+                    ':zipcode'      => $this->nn($r['zipcode'] ?? null),
+                    ':address'      => $this->nn($r['address'] ?? null),
+                    ':phone'        => $this->nn($r['phone'] ?? null),
+                    ':note'         => $this->nn($r['note'] ?? null),
+                    ':is_member'    => $isMember,
+                    ':is_active'    => $isActive,
+                    ':is_coop'      => $isCoop,
+                    ':waste_type'   => $this->nn($r['waste_type'] ?? null),
+                    ':marker_grade' => self::gradeFor($isActive, $isCoop),
+                ]);
+                $n++;
+            }
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+        return $n;
+    }
+
+    /** 빈 문자열은 NULL 로 */
+    private function nn($v): ?string
+    {
+        if ($v === null) return null;
+        $v = trim((string)$v);
+        return $v === '' ? null : $v;
+    }
+
+    /** 전체 비우기 (재적재용) */
+    public function truncate(): void
+    {
+        $this->pdo->exec("TRUNCATE TABLE waste_companies");
+    }
+
+    /**
+     * 지도/목록용 검색. 선택적 필터를 AND 로 결합.
+     * @param array $f sido, sigungu, waste_type(문자열)
+     *                 is_member,is_coop (0/1 또는 null), active (0/1/null),
+     *                 target (1이면 is_active=1 AND is_coop=0)
+     *                 only_geo (1이면 좌표 있는 행만)
+     * @return array assoc rows
+     */
+    public function search(array $f = []): array
+    {
+        $where = [];
+        $args  = [];
+
+        foreach (['sido' => 'sido', 'sigungu' => 'sigungu', 'waste_type' => 'waste_type'] as $k => $col) {
+            if (isset($f[$k]) && $f[$k] !== '' && $f[$k] !== null) {
+                $where[] = "$col = :$k";
+                $args[":$k"] = (string)$f[$k];
+            }
+        }
+        foreach (['is_member' => 'is_member', 'is_coop' => 'is_coop', 'active' => 'is_active'] as $k => $col) {
+            if (isset($f[$k]) && $f[$k] !== '' && $f[$k] !== null) {
+                $where[] = "$col = :$k";
+                $args[":$k"] = (int)$f[$k];
+            }
+        }
+        if (!empty($f['target'])) {
+            $where[] = "is_active = 1 AND is_coop = 0";
+        }
+        if (!empty($f['only_geo'])) {
+            $where[] = "lat IS NOT NULL AND lng IS NOT NULL";
+        }
+
+        $sql = "SELECT id, sido, sigungu, company_name, ceo, zipcode, address, phone, note,
+                       is_member, is_active, is_coop, waste_type, marker_grade,
+                       lat, lng, geocode_status
+                  FROM waste_companies";
+        if ($where) $sql .= " WHERE " . implode(' AND ', $where);
+        $sql .= " ORDER BY marker_grade='target' DESC, sido, sigungu, company_name";
+
+        $st = $this->pdo->prepare($sql);
+        $st->execute($args);
+        $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+
+        // 타입 정리 (JSON 직렬화 시 숫자/좌표 일관성)
+        foreach ($rows as &$r) {
+            $r['id']        = (int)$r['id'];
+            $r['is_member'] = (int)$r['is_member'];
+            $r['is_active'] = (int)$r['is_active'];
+            $r['is_coop']   = (int)$r['is_coop'];
+            $r['lat']       = $r['lat'] !== null ? (float)$r['lat'] : null;
+            $r['lng']       = $r['lng'] !== null ? (float)$r['lng'] : null;
+        }
+        unset($r);
+        return $rows;
+    }
+
+    /**
+     * 대시보드 통계. 회원분류 요약(운영 중 기준) + 타겟 수 + 시도별 타겟 분포 + 좌표화 현황.
+     */
+    public function stats(): array
+    {
+        $total  = (int)$this->pdo->query("SELECT COUNT(*) FROM waste_companies")->fetchColumn();
+        $active = (int)$this->pdo->query("SELECT COUNT(*) FROM waste_companies WHERE is_active=1")->fetchColumn();
+        $direct = (int)$this->pdo->query("SELECT COUNT(*) FROM waste_companies WHERE is_active=0")->fetchColumn();
+        $member = (int)$this->pdo->query("SELECT COUNT(*) FROM waste_companies WHERE is_member=1")->fetchColumn();
+        $coop   = (int)$this->pdo->query("SELECT COUNT(*) FROM waste_companies WHERE is_coop=1")->fetchColumn();
+        $target = (int)$this->pdo->query("SELECT COUNT(*) FROM waste_companies WHERE is_active=1 AND is_coop=0")->fetchColumn();
+
+        // 운영중 4분면
+        $matrix = [
+            'member_coop'    => (int)$this->pdo->query("SELECT COUNT(*) FROM waste_companies WHERE is_active=1 AND is_member=1 AND is_coop=1")->fetchColumn(),
+            'member_noncoop' => (int)$this->pdo->query("SELECT COUNT(*) FROM waste_companies WHERE is_active=1 AND is_member=1 AND is_coop=0")->fetchColumn(),
+            'nonmem_coop'    => (int)$this->pdo->query("SELECT COUNT(*) FROM waste_companies WHERE is_active=1 AND is_member=0 AND is_coop=1")->fetchColumn(),
+            'nonmem_noncoop' => (int)$this->pdo->query("SELECT COUNT(*) FROM waste_companies WHERE is_active=1 AND is_member=0 AND is_coop=0")->fetchColumn(),
+        ];
+
+        // 시도별 타겟 분포
+        $byTarget = $this->pdo->query(
+            "SELECT sido, COUNT(*) AS cnt FROM waste_companies
+              WHERE is_active=1 AND is_coop=0 GROUP BY sido ORDER BY cnt DESC"
+        )->fetchAll(PDO::FETCH_ASSOC);
+
+        // 좌표화 현황
+        $geo = $this->pdo->query(
+            "SELECT geocode_status, COUNT(*) AS cnt FROM waste_companies GROUP BY geocode_status"
+        )->fetchAll(PDO::FETCH_KEY_PAIR);
+
+        return [
+            'total'   => $total,
+            'active'  => $active,
+            'direct'  => $direct,
+            'member'  => $member,
+            'coop'    => $coop,
+            'target'  => $target,
+            'matrix'  => $matrix,
+            'by_sido_target' => $byTarget,
+            'geocode' => [
+                'ok'      => (int)($geo['ok'] ?? 0),
+                'pending' => (int)($geo['pending'] ?? 0),
+                'failed'  => (int)($geo['failed'] ?? 0),
+            ],
+        ];
+    }
+
+    /** 시도 목록 (드롭다운용) */
+    public function sidoList(): array
+    {
+        return $this->pdo->query(
+            "SELECT sido, COUNT(*) AS cnt FROM waste_companies GROUP BY sido ORDER BY sido"
+        )->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 폐기물 종류 목록 (드롭다운용) */
+    public function wasteTypeList(): array
+    {
+        return $this->pdo->query(
+            "SELECT waste_type, COUNT(*) AS cnt FROM waste_companies
+              WHERE waste_type IS NOT NULL AND waste_type<>'' GROUP BY waste_type ORDER BY cnt DESC"
+        )->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    // ── 지오코딩 (cron_waste_geocode.php 에서 사용. cron_place_geocode 헬퍼와 호환되도록
+    //    company_name→name, sido→region_lv1, sigungu→region_lv2 로 alias) ──
+
+    /** 주소 있는 pending */
+    public function pendingForGeocode(int $limit = 50): array
+    {
+        $st = $this->pdo->prepare(
+            "SELECT id, company_name AS name, address,
+                    sido AS region_lv1, sigungu AS region_lv2
+               FROM waste_companies
+              WHERE geocode_status='pending' AND address IS NOT NULL AND address<>''
+              ORDER BY id LIMIT :lim"
+        );
+        $st->bindValue(':lim', $limit, PDO::PARAM_INT);
+        $st->execute();
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 주소 없는 pending (이름+지역으로 카카오 키워드 검색) */
+    public function pendingByName(int $limit = 50): array
+    {
+        $st = $this->pdo->prepare(
+            "SELECT id, company_name AS name, address,
+                    sido AS region_lv1, sigungu AS region_lv2
+               FROM waste_companies
+              WHERE geocode_status='pending' AND (address IS NULL OR address='')
+                AND company_name IS NOT NULL AND company_name<>''
+              ORDER BY id LIMIT :lim"
+        );
+        $st->bindValue(':lim', $limit, PDO::PARAM_INT);
+        $st->execute();
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 좌표화 결과 반영 */
+    public function setGeocode(int $id, ?float $lat, ?float $lng, string $status): void
+    {
+        $st = $this->pdo->prepare(
+            "UPDATE waste_companies
+                SET lat=:lat, lng=:lng, geocode_status=:st,
+                    geocoded_at=" . ($status === 'ok' ? "NOW()" : "geocoded_at") . "
+              WHERE id=:id"
+        );
+        $st->execute([
+            ':lat' => $lat,
+            ':lng' => $lng,
+            ':st'  => $status,
+            ':id'  => $id,
+        ]);
+    }
+
+    /** 남은 pending(처리 가능한 것: 주소 또는 이름 보유) 수 */
+    public function remainingPending(): int
+    {
+        return (int)$this->pdo->query(
+            "SELECT COUNT(*) FROM waste_companies
+              WHERE geocode_status='pending'
+                AND ((address IS NOT NULL AND address<>'') OR (company_name IS NOT NULL AND company_name<>''))"
+        )->fetchColumn();
+    }
+}
