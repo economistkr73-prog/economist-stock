@@ -710,6 +710,8 @@ function mkt_tofill_note(array $d): string {
 function mkt_css(): string {
     return <<<'CSS'
 <style>
+  /* 브라우저 기본 body 여백(8px) 제거 — 다른 페이지처럼 네비/콘텐츠가 가장자리까지 꽉 차게(흰 테두리 박스 제거) */
+  html,body { margin:0; padding:0; background:#0E1320; }
   .db * { box-sizing:border-box; }
   .db { --ink:#0E1320;--panel:#151B2B;--line:rgba(255,255,255,.08);--text:#E6E9F0;--muted:#8A93A6;--faint:#5A6377;--amber:#E0A340;--up:#E5484D;--down:#3E7BFA;--ok:#4ED88B;
     background:var(--ink);color:var(--text);padding:24px 16px 48px;font-family:'Apple SD Gothic Neo','Pretendard',system-ui,sans-serif;line-height:1.55;min-height:100vh; }

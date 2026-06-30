@@ -237,11 +237,12 @@ echo <<<'PAGE'
   ::-webkit-scrollbar{width:9px;height:9px;}
   ::-webkit-scrollbar-thumb{background:#2b3654;border-radius:5px;}
   ::-webkit-scrollbar-track{background:transparent;}
-  /* 공통 네비는 PC 전용 — 모바일 폭에선 숨김(이 페이지는 PC/4K 분석용) */
-  @media(max-width:768px){ .top-nav-bar{display:none!important;} }
+  /* 공통 네비는 PC 전용 페이지 — 모바일(UA)에선 아래(서버 $mobile)에서 숨김 */
 </style>
 PAGE;
 nav_css();                 // 공통 네비 CSS (PC 가로 메뉴)
+// PC/4K 분석 전용 → 모바일(UA, 서버 $mobile)이면 상단 네비 숨김 (폭 아님)
+if (!empty($GLOBALS['mobile'])) echo "<style>.top-nav-bar{display:none!important;}</style>";
 echo "</head>\n<body>\n";
 render_nav('updash');      // 상단 네비 바 (PC 전용 노출)
 echo <<<'PAGE'

@@ -94,9 +94,17 @@ class NaverFinanceAPI {
                 $title = trim($titleNode->nodeValue);
                 if (in_array($title, $seenTitles)) continue;
                 $seenTitles[] = $title;
+                // ★모바일 대응: 구형 finance.naver.com news_read(?article_id&office_id) 는 모바일에서
+                //   기사로 못 열고 목록으로 떨어짐 → 모던 네이버뉴스 URL(n.news.naver.com/article/oid/aid)로 변환
+                $nhref = $titleNode->getAttribute('href');
+                if (preg_match('/article_id=(\d+)/', $nhref, $aM) && preg_match('/office_id=(\d+)/', $nhref, $oM)) {
+                    $nlink = "https://n.news.naver.com/article/{$oM[1]}/{$aM[1]}";
+                } else {
+                    $nlink = (strpos($nhref, 'http') === 0) ? $nhref : "https://finance.naver.com" . $nhref;
+                }
                 $newsList[] = [
                     'title' => $title,
-                    'link'  => "https://finance.naver.com" . $titleNode->getAttribute('href'),
+                    'link'  => $nlink,
                     'info'  => $infoNode ? trim($infoNode->nodeValue) : '',
                     'date'  => trim($dateNode->nodeValue)
                 ];

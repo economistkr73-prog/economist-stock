@@ -2383,8 +2383,7 @@ function plClosePanel() { document.getElementById('pl-panel').classList.remove('
 function plOpenArticle(url) {
     if (!url) return;
     // 모바일은 팝업 지오메트리(width/height)를 제대로 못 다뤄 "로딩되다 오류" 발생 → 새 탭으로 열고, 차단 시 현재 탭 이동
-    var isMobile = (window.matchMedia && window.matchMedia('(max-width: 768px)').matches)
-                || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+    var isMobile = /Android|iPhone|iPad|iPod|Mobile|Macintosh/i.test(navigator.userAgent || '');   // UA(기기) 기준, 폭 무관
     if (isMobile) {
         var w = window.open(url, '_blank');
         if (!w) location.href = url;

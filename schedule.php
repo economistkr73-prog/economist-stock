@@ -197,8 +197,8 @@ function sch_calendar(PDO $pdo): void {
 .hab-dot.done { background: #aab2c2; opacity: .42; }
 .hab-x { color: #e74c3c; font-size: 9px; line-height: 7px; font-weight: 800; flex: none; }
 .hab-more { font-size: 9px; line-height: 1; color: #9aa6b2; font-weight: 700; margin-left: 1px; }
-:is(body.is-mobile, body.w-narrow) .hab-dot { width: 6px; height: 6px; }
-:is(body.is-mobile, body.w-narrow) .hab-x { font-size: 8px; line-height: 6px; }
+body.is-mobile .hab-dot { width: 6px; height: 6px; }
+body.is-mobile .hab-x { font-size: 8px; line-height: 6px; }
 /* 일정 메모 이미지 첨부 */
 #f-attach-area { margin-top: 8px; }
 #f-attach-list { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -311,7 +311,7 @@ function sch_calendar(PDO $pdo): void {
 .wk-hev.done .wk-hbadge { background: #dde3ea; color: #9aa6b2; }
 .wk-now { position: absolute; left: 0; right: 0; height: 2px; background: var(--wk-sun); z-index: 4; pointer-events: none; }
 .wk-now::before { content: ''; position: absolute; left: -3px; top: -3px; width: 8px; height: 8px; border-radius: 50%; background: var(--wk-sun); }
-@media (max-width: 820px) { #view-week { --wk-gutter: 44px; } .week-head .wkn { font-size: 15px; } }
+body.is-mobile #view-week { --wk-gutter: 44px; } body.is-mobile .week-head .wkn { font-size: 15px; }
 /* 일간 */
 /* ── 일간 뷰 (주간과 동일 라이트 톤) ── */
 #view-day { flex: 1; overflow: hidden; display: flex; flex-direction: column;
@@ -586,10 +586,10 @@ function sch_calendar(PDO $pdo): void {
 .pdp-dday { display:inline-block; background:#fdecea; color:#c0392b; font-size:11px; font-weight:700; padding:1px 8px; border-radius:10px; margin-left:6px; }
 .proj-bar, .travel-bar { font-size: var(--fs-xs); line-height: 16px; height: 16px; color:#fff; padding: 0 4px; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; font-weight: 600; }
 /* ── 모바일 일정 입력 모달 → 풀스크린 ── */
-:is(body.is-mobile, body.w-narrow) #modal-overlay {
+body.is-mobile #modal-overlay {
     align-items: stretch;
 }
-:is(body.is-mobile, body.w-narrow) #modal-overlay .modal {
+body.is-mobile #modal-overlay .modal {
     width: 100%;
     max-width: 100%;
     border-radius: 0;
@@ -599,19 +599,19 @@ function sch_calendar(PDO $pdo): void {
     flex-direction: column;
     overflow: hidden;
 }
-:is(body.is-mobile, body.w-narrow) #modal-overlay .type-tabs {
+body.is-mobile #modal-overlay .type-tabs {
     flex-shrink: 0;
     padding: 12px 44px 0 16px;
     margin: 0;
     border-bottom: 1px solid #eee;
 }
-:is(body.is-mobile, body.w-narrow) #modal-overlay #modal-form-body {
+body.is-mobile #modal-overlay #modal-form-body {
     flex: 1;
     overflow-y: auto;
     padding: 0 16px 12px;
     -webkit-overflow-scrolling: touch;
 }
-:is(body.is-mobile, body.w-narrow) #modal-overlay .modal-footer {
+body.is-mobile #modal-overlay .modal-footer {
     flex-shrink: 0;
     padding: 12px 16px;
     border-top: 1px solid #eee;
@@ -708,39 +708,39 @@ function sch_calendar(PDO $pdo): void {
    UA 기반 body.is-mobile(실기기) + 좁은 폭(max-width:820px) 양쪽에서 적용.
    두 셀렉터가 같은 규칙을 공유하도록 :is()로 묶음.
    ※ 헤더(네비게이션) 모바일 규칙은 env/nav.inc 의 nav_css() 로 통합됨 */
-:is(body.is-mobile, body.w-narrow) #proj-panel,
-:is(body.is-mobile, body.w-narrow) #proj-panel-tab { display: none !important; }
-:is(body.is-mobile, body.w-narrow) #scheduler { padding: 8px; gap: 8px; }
-:is(body.is-mobile, body.w-narrow) #sch-body { gap: 0; }
-:is(body.is-mobile, body.w-narrow) .sch-toolbar { flex-wrap: wrap; gap: 6px; }
-:is(body.is-mobile, body.w-narrow) .sch-toolbar h2 { font-size: 17px; min-width: 0; flex: 1; order: -1; width: 100%; }
-:is(body.is-mobile, body.w-narrow) .spacer { display: none; }
-:is(body.is-mobile, body.w-narrow) .view-tabs { flex: 1; }
-:is(body.is-mobile, body.w-narrow) .cal-cell { min-height: 64px; padding: 2px; }
-:is(body.is-mobile, body.w-narrow) .cal-cell .day-num { font-size: 13px; margin-bottom: 2px; }
+body.is-mobile #proj-panel,
+body.is-mobile #proj-panel-tab { display: none !important; }
+body.is-mobile #scheduler { padding: 8px; gap: 8px; }
+body.is-mobile #sch-body { gap: 0; }
+body.is-mobile .sch-toolbar { flex-wrap: wrap; gap: 6px; }
+body.is-mobile .sch-toolbar h2 { font-size: 17px; min-width: 0; flex: 1; order: -1; width: 100%; }
+body.is-mobile .spacer { display: none; }
+body.is-mobile .view-tabs { flex: 1; }
+body.is-mobile .cal-cell { min-height: 64px; padding: 2px; }
+body.is-mobile .cal-cell .day-num { font-size: 13px; margin-bottom: 2px; }
 /* 이벤트 칩 = 작은 점으로 표시 (제목은 탭하면 보기) */
-:is(body.is-mobile, body.w-narrow) .event-chip {
+body.is-mobile .event-chip {
     display: inline-block; width: 10px; height: 10px; padding: 0;
     border-radius: 50%; margin: 2px; font-size: 0; line-height: 0;
     vertical-align: middle; overflow: hidden;
 }
-:is(body.is-mobile, body.w-narrow) .event-chip.done { width: 10px; height: 10px; border: 1px solid #ccc; }
-:is(body.is-mobile, body.w-narrow) .holiday-badge,
-:is(body.is-mobile, body.w-narrow) .jeoegi-badge { font-size: 9px; }
-:is(body.is-mobile, body.w-narrow) .more-link { font-size: 10px; }
-:is(body.is-mobile, body.w-narrow) .proj-bar,
-:is(body.is-mobile, body.w-narrow) .travel-bar { font-size: 9px; height: 13px; line-height: 13px; }
+body.is-mobile .event-chip.done { width: 10px; height: 10px; border: 1px solid #ccc; }
+body.is-mobile .holiday-badge,
+body.is-mobile .jeoegi-badge { font-size: 9px; }
+body.is-mobile .more-link { font-size: 10px; }
+body.is-mobile .proj-bar,
+body.is-mobile .travel-bar { font-size: 9px; height: 13px; line-height: 13px; }
 /* 선택된 날짜 강조 */
-:is(body.is-mobile, body.w-narrow) .cal-cell.sel-day { box-shadow: inset 0 0 0 2px #3498db; }
+body.is-mobile .cal-cell.sel-day { box-shadow: inset 0 0 0 2px #3498db; }
 /* 모바일: 달력은 컴팩트(내용만), 아래 상세 패널이 남은 공간 채움 */
-:is(body.is-mobile, body.w-narrow) #view-month { flex: 0 0 auto !important; overflow: visible !important; }
-:is(body.is-mobile, body.w-narrow) .cal-grid { overflow: visible !important; }
-:is(body.is-mobile, body.w-narrow) .cal-cell { cursor: default; }
-:is(body.is-mobile, body.w-narrow) #btn-new { display: none; }   /* 상단 추가버튼 숨김 → FAB 사용 */
-:is(body.is-mobile, body.w-narrow) #btn-voice { display: none; }  /* 모바일은 플로팅 🎤 사용 */
+body.is-mobile #view-month { flex: 0 0 auto !important; overflow: visible !important; }
+body.is-mobile .cal-grid { overflow: visible !important; }
+body.is-mobile .cal-cell { cursor: default; }
+body.is-mobile #btn-new { display: none; }   /* 상단 추가버튼 숨김 → FAB 사용 */
+body.is-mobile #btn-voice { display: none; }  /* 모바일은 플로팅 🎤 사용 */
 /* 하단 상세 패널 (기본 숨김, 모바일만 표시) */
 #m-day-detail { display: none; }
-:is(body.is-mobile, body.w-narrow) #m-day-detail {
+body.is-mobile #m-day-detail {
     display: flex; flex-direction: column; flex: 1; min-height: 120px;
     border-top: 8px solid #f0f2f5; background: #fff; overflow-y: auto; padding: 12px 14px 80px;
 }
@@ -755,7 +755,7 @@ function sch_calendar(PDO $pdo): void {
 .mdd-item.done .mdd-title { text-decoration: line-through; color: #aaa; }
 /* 플로팅 추가 버튼 */
 #m-fab { display: none; }
-:is(body.is-mobile, body.w-narrow) #m-fab {
+body.is-mobile #m-fab {
     display: flex; align-items: center; justify-content: center;
     position: fixed; right: 18px; bottom: 22px; width: 56px; height: 56px;
     border-radius: 50%; border: none; background: #3498db; color: #fff;
@@ -766,7 +766,7 @@ function sch_calendar(PDO $pdo): void {
 
 /* 🎤 음성 명령 버튼 (모바일 플로팅, + 위) */
 #m-mic { display: none; }
-:is(body.is-mobile, body.w-narrow) #m-mic {
+body.is-mobile #m-mic {
     display: flex; align-items: center; justify-content: center;
     position: fixed; right: 18px; bottom: 88px; width: 56px; height: 56px;
     border-radius: 50%; border: none; background: #9b59b6; color: #fff;
@@ -872,15 +872,15 @@ function sch_calendar(PDO $pdo): void {
 /* ⏳ 입력대기(draft): 점선 테두리 + 앰버 톤 */
 #scheduler .event-chip.draft{ background:#fff7e6 !important; color:#b97400 !important; border:1px dashed #f0b95a; font-weight:600; }
 #scheduler .event-chip.draft .ev-dot{ display:none; }
-:is(body.is-mobile, body.w-narrow) .event-chip.draft{ background:#fff !important; border:1.5px dashed #f0b95a; }
+body.is-mobile .event-chip.draft{ background:#fff !important; border:1.5px dashed #f0b95a; }
 /* 모바일: 카드 테두리 제거(전체화면 느낌) + 셀 클립 해제(점 표시) */
-:is(body.is-mobile, body.w-narrow) #scheduler #view-month{ border:none; border-radius:0; box-shadow:none; }
-:is(body.is-mobile, body.w-narrow) #scheduler .cal-cell{ overflow:visible; }
+body.is-mobile #scheduler #view-month{ border:none; border-radius:0; box-shadow:none; }
+body.is-mobile #scheduler .cal-cell{ overflow:visible; }
 /* 모바일: 칩 = 작은 점으로 (데스크톱 flex/패딩 스타일 리셋) */
-:is(body.is-mobile, body.w-narrow) #scheduler .event-chip{ display:inline-block; padding:0; gap:0; border-radius:50%; width:10px; height:10px; }
-:is(body.is-mobile, body.w-narrow) #scheduler .event-chip .ev-tx{ display:none; }
+body.is-mobile #scheduler .event-chip{ display:inline-block; padding:0; gap:0; border-radius:50%; width:10px; height:10px; }
+body.is-mobile #scheduler .event-chip .ev-tx{ display:none; }
 /* 모바일 완료 일정 = 회색 동그라미(기존처럼) */
-:is(body.is-mobile, body.w-narrow) #scheduler .event-chip.done{ width:10px; height:10px; padding:0; border-radius:50%; border:1px solid #c4ccd4; background:transparent; }
+body.is-mobile #scheduler .event-chip.done{ width:10px; height:10px; padding:0; border-radius:50%; border:1px solid #c4ccd4; background:transparent; }
 </style>
 </head>
 <body class="<?= $mobile ? 'is-mobile' : '' ?>">
@@ -1806,7 +1806,7 @@ const S = {
 const TODAY = new Date(); TODAY.setHours(0,0,0,0);
 let _selDay = null;   // 모바일 월간뷰에서 선택된 날짜(YYYY-MM-DD)
 
-function isMobileView(){ return document.body.classList.contains('is-mobile') || document.body.classList.contains('w-narrow'); }
+function isMobileView(){ return document.body.classList.contains('is-mobile'); }   // UA(서버 $mobile) 단일 기준
 
 // 모바일: 선택한 날짜의 상세 일정 패널 렌더
 function showDayDetail(ds){
@@ -5885,23 +5885,17 @@ function showMapFallback(mapEl, fbEl, name) {
     fbEl.textContent = `${name} 지도 키가 없거나 불러오지 못했습니다. 아래 링크로 외부 지도에서 확인하세요.`;
 }
 
-// 좁은 폭(태블릿/가로모드 등) 폴백: body.w-narrow 토글
+// 모바일 판정은 UA(body.is-mobile=서버 $mobile) 전담. 폭 기반 w-narrow 폴백 제거(PC는 창 좁혀도 항상 PC).
+// 데스크톱 월간뷰에서 창 폭이 바뀌면 칩 표시 개수만 재계산.
 (function(){
     let _chipLimitTimer = null;
-    const apply = () => {
-        const now = window.innerWidth <= 820;
-        const was = document.body.classList.contains('w-narrow');
-        document.body.classList.toggle('w-narrow', now);
-        if (was!==now && S.view==='month' && typeof renderMonth==='function') {
-            renderMonth(); // 모바일↔데스크톱 전환: 전체 재렌더
-        } else if (!now && S.view==='month') {
-            // 데스크톱에서 창 폭 변경 시 칩 limit만 재계산 (debounce)
+    window.addEventListener('resize', () => {
+        if (document.body.classList.contains('is-mobile')) return;
+        if (S.view === 'month') {
             clearTimeout(_chipLimitTimer);
             _chipLimitTimer = setTimeout(applyMonthChipLimit, 150);
         }
-    };
-    apply();
-    window.addEventListener('resize', apply);
+    });
 })();
 
 // ══════════════════════════════════════════════════════════════

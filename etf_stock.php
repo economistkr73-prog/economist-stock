@@ -2344,9 +2344,8 @@ if (!empty($news_data)) {
 
 
 
-$html_news .= "<a href='{$news['link']}'
-                  onclick=\"window.open('{$news['link']}', 'news_popup', 'width=800,height=900,left=200,top=100,scrollbars=yes'); return false;\" 
-                  class='news-item'>";
+$news_click = $mobile ? '' : "onclick=\"window.open('{$news['link']}', 'news_popup', 'width=800,height=900,left=200,top=100,scrollbars=yes'); return false;\"";
+$html_news .= "<a href='{$news['link']}' target='_blank' rel='noopener noreferrer' {$news_click} class='news-item'>";
         
         // 날짜와 언론사 정보 (위쪽)
         $html_news .= "  <div class='news-meta'>";

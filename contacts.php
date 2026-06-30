@@ -125,35 +125,32 @@ body { font-family:'Pretendard','Malgun Gothic',sans-serif; background:#f0f2f5; 
 .modal-footer { display:flex; gap:8px; justify-content:flex-end; margin-top:18px; }
 /* 모바일 전용 버튼 (기본 숨김) */
 .m-only { display:none !important; }
-/* ── 모바일 (≤768px): 드릴다운 레이아웃 ── */
-@media (max-width:768px) {
-    /* 모바일 글씨 키우기 */
-    :root { --fs-sm:15px; --fs-base:17px; --fs-lg:20px; }
-    .contact-item .c-name { font-size:18px; }
-    .contact-item .c-group, .contact-item .new-badge { font-size:13px; }
-    .detail-row { font-size:17px; }
-    .detail-row .label { width:78px; }
-    .btn { font-size:15px; padding:9px 14px; }
-    #wrap { flex-direction:column; padding:8px; gap:8px; position:relative; }
-    .m-only { display:inline-flex !important; }
-    #group-chipbar { padding:8px 8px 0; }
-    /* 목록 → 전체 폭 메인 화면 */
-    #left { width:100%; flex:1; }
-    /* 3단 상세 → 전체화면 오버레이 (선택 시 슬라이드 인) */
-    #right {
-        position:fixed; top:60px; left:0; right:0; bottom:0;
-        border-radius:0; transform:translateX(100%);
-        transition:transform .25s ease; z-index:1600; padding:16px;
-    }
-    body.detail-open #right { transform:translateX(0); }
-    body.detail-open { overflow:hidden; }
-    .detail-head h2 { font-size:20px; }
-    .history-item .h-date { min-width:auto; }
+/* ── 모바일(UA, body.is-mobile): 드릴다운 레이아웃 — 폭 아닌 기기 기준(폴더블 와이드/세로 모두) ── */
+body.is-mobile { --fs-sm:15px; --fs-base:17px; --fs-lg:20px; }   /* 모바일 글씨 키우기 */
+body.is-mobile .contact-item .c-name { font-size:18px; }
+body.is-mobile .contact-item .c-group, body.is-mobile .contact-item .new-badge { font-size:13px; }
+body.is-mobile .detail-row { font-size:17px; }
+body.is-mobile .detail-row .label { width:78px; }
+body.is-mobile .btn { font-size:15px; padding:9px 14px; }
+body.is-mobile #wrap { flex-direction:column; padding:8px; gap:8px; position:relative; }
+body.is-mobile .m-only { display:inline-flex !important; }
+body.is-mobile #group-chipbar { padding:8px 8px 0; }
+/* 목록 → 전체 폭 메인 화면 */
+body.is-mobile #left { width:100%; flex:1; }
+/* 3단 상세 → 전체화면 오버레이 (선택 시 슬라이드 인) */
+body.is-mobile #right {
+    position:fixed; top:60px; left:0; right:0; bottom:0;
+    border-radius:0; transform:translateX(100%);
+    transition:transform .25s ease; z-index:1600; padding:16px;
 }
+body.is-mobile.detail-open #right { transform:translateX(0); }
+body.is-mobile.detail-open { overflow:hidden; }
+body.is-mobile .detail-head h2 { font-size:20px; }
+body.is-mobile .history-item .h-date { min-width:auto; }
 </style>
 <?php nav_css(); ?>
 </head>
-<body>
+<body class="<?= !empty($mobile) ? 'is-mobile' : '' ?>">
 <?php render_nav('contacts'); ?>
 
 <!-- 상단: 분류 칩 바 -->
@@ -436,7 +433,7 @@ function filterGroup(g){ CUR_GROUP=g; loadGroups(); loadContacts(); }
 let searchTimer=null;
 function debounceSearch(){ clearTimeout(searchTimer); searchTimer=setTimeout(loadContacts,250); }
 
-function isMobile(){ return window.matchMedia('(max-width:768px)').matches; }
+function isMobile(){ return document.body.classList.contains('is-mobile'); }   // UA(서버 $mobile) 단일 기준
 function closeDetail(){ document.body.classList.remove('detail-open'); }
 
 async function selectContact(id) {
