@@ -96,9 +96,23 @@ echo <<<'HEAD'
   .nt-tbl { width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden;
             box-shadow: 0 1px 3px rgba(0,0,0,.05); }
   .nt-tbl th, .nt-tbl td { padding: 9px 10px; text-align: right; font-size: 13px; border-bottom: 1px solid #eef1f5; white-space: nowrap; }
-  .nt-tbl th { background: #fafbfc; color: #6a7686; font-weight: 700; font-size: 12px; cursor: pointer; user-select: none; }
+  .nt-tbl th { background: #fafbfc; color: #6a7686; font-weight: 700; font-size: 12px; user-select: none; }
+  .nt-tbl th.sortable { cursor: pointer; }
+  .nt-tbl th.sortable:hover { color: #2979ff; background: #f0f4fa; }
   .nt-tbl th.s-on { color: #2979ff; }
-  .nt-tbl th:first-child, .nt-tbl td:first-child { text-align: center; color: #aab3bf; width: 34px; }
+  .nt-tbl th .sar { margin-left: 3px; font-size: 11px; color: #c2cad4; }        /* 미정렬 ↕ */
+  .nt-tbl th.s-on .sar.von { color: #2979ff; }                                   /* 값 정렬 ▼ */
+  .nt-tbl th.tot.s-on .sar.von { color: #6a3fb5; }
+  .nt-tbl th .sar.don { color: #e1234a; font-weight: 700; }                      /* 증가순(Δ)·급등 정렬 */
+  .nt-tbl th .sar.down2 { color: #2979ff; font-weight: 700; }                    /* 급락 정렬 */
+  .nt-sorthint { color: #9aa6b2; font-size: 12px; }
+  .nt-tbl th:first-child, .nt-tbl td:first-child { text-align: center; color: #aab3bf; width: 48px; }
+  .nt-tbl td.rank { line-height: 1.2; font-weight: 700; color: #6a7686; }
+  .rkmv { display: block; font-size: 10.5px; font-weight: 800; margin-top: 1px; font-variant-numeric: tabular-nums; }
+  .rkmv.up   { color: #e1234a; }   /* 순위 상승 ▲ */
+  .rkmv.down { color: #2979ff; }   /* 순위 하락 ▼ */
+  .rkmv.flat { color: #c2cad4; font-weight: 600; }
+  .rkmv.new  { color: #2bb673; }   /* 신규 NEW */
   .nt-tbl td.name { text-align: left; max-width: 280px; }
   .nt-tbl td.name .nm { font-weight: 700; }
   .nt-tbl td.name a.nm { color: #2c3440; text-decoration: none; }
@@ -199,18 +213,7 @@ echo <<<'BODY'
       </select>
     </span>
     <span class="nt-cnt" id="ntCount" title="현재 표(최소리뷰·지역) 필터에 해당하는 곳수"></span>
-    <span><label>정렬</label>
-      <select id="ntSort">
-        <option value="total_score" selected>종합점수순</option>
-        <option value="review">리뷰 많은순</option>
-        <option value="score">평점 높은순</option>
-        <option value="save">저장 많은순</option>
-        <option value="d_review">리뷰 증가순</option>
-        <option value="d_save">저장 증가순</option>
-        <option value="d_score">평점 상승순</option>
-        <option value="d_visitor">방문 증가순</option>
-      </select>
-    </span>
+    <span class="nt-sorthint">정렬: 헤더 클릭(재클릭=증가순 Δ) · <b>#</b> 클릭=순위 급등/급락순</span>
     <span class="grow"></span>
     <span class="nt-cnt nt-mapcnt" id="ntMapCount" title="지도 표시 기준에 해당하는 마커 곳수(고정)"></span>
     <button type="button" id="ntMapBtn" class="nt-mapbtn" onclick="ntMapModalOpen()" title="지도에 표시할 기준(분류·최소리뷰)을 선택">🗺️ 지도 기준 설정</button>
@@ -250,6 +253,16 @@ echo <<<'BODY'
 var API = '/naver_trend_api.php';
 var ntChart = null;
 var ntView = 'list', ntRows = [];                       // 현재 표시 행(표·지도 공용)
+var ntSort = 'total_score';                             // 현재 정렬 키(헤더 클릭으로 변경 · 값⇄증가순 토글)
+// 표 헤더 정의: 값 정렬(v) ⇄ 증가순 델타 정렬(d) 토글. 종합점수는 델타 정렬 없음.
+var NT_COLS = [
+  { label:'종합점수', v:'total_score', d:null,        cls:'tot',     title:'평점·리뷰·저장·방문·블로그 가중 종합(0~100)' },
+  { label:'평점',     v:'score',       d:'d_score',   cls:'' },
+  { label:'리뷰',     v:'review',      d:'d_review',  cls:'' },
+  { label:'방문',     v:'visitor',     d:'d_visitor', cls:'col-opt' },
+  { label:'블로그',   v:'blog',        d:'d_blog',    cls:'col-opt' },
+  { label:'저장',     v:'save',        d:'d_save',    cls:'' }
+];
 var ntMap = null, ntMapMarkers = [], ntInfo = null, ntSelRow = null;
 // 게스트(공유) 모드 — PHP 가 주입(미주입 시 false)
 if (typeof NT_SHARE === 'undefined') { var NT_SHARE = false, NT_SHARE_CAT = 'food', NT_SHARE_TOKEN = '', NT_SHARE_REGION = '', NT_SHARE_MINREV = 0, NT_SHARE_SORT = 'total_score'; }
@@ -278,7 +291,7 @@ function ntLoad(){
   var p   = document.getElementById('ntPeriod').value;
   var rg  = document.getElementById('ntRegion').value.trim();
   var mr  = document.getElementById('ntMinRev').value;
-  var srt = document.getElementById('ntSort').value;
+  var srt = ntSort;
   var q = API + '?action=list&cat=' + encodeURIComponent(CAT)
         + '&period=' + encodeURIComponent(p)
         + '&region=' + encodeURIComponent(rg)
@@ -296,27 +309,50 @@ function ntLoad(){
 function ntRender(rows){
   ntRows = rows || [];                                   // 표·지도 공용 보관
   if (!rows.length){ document.getElementById('ntBody').innerHTML = '<div class="nt-empty">이 조건에 데이터가 없습니다. (수집 회차가 1개뿐이면 델타는 다음 달부터 표시됩니다)</div>'; return; }
-  var srt = document.getElementById('ntSort').value;
-  var on = function(k){ return srt===k ? ' class="s-on"' : ''; };
+  var ths = NT_COLS.map(function(c){
+    var isV = (ntSort === c.v), isD = (c.d && ntSort === c.d);
+    var cls = ['sortable'];
+    if (c.cls) cls.push(c.cls);
+    if (isV || isD) cls.push('s-on');
+    var arrow = isV ? '<span class="sar von">▼</span>'
+              : isD ? '<span class="sar don">Δ▲</span>'
+              :       '<span class="sar">↕</span>';
+    var title = c.title ? c.title : (c.d ? '클릭: 값 많은순 · 다시 클릭: 증가순(Δ)' : '');
+    return '<th class="'+cls.join(' ')+'" data-v="'+c.v+'"'+(c.d?' data-d="'+c.d+'"':'')
+         + (title?' title="'+ntEsc(title)+'"':'')+'>'+c.label+arrow+'</th>';
+  }).join('');
+  // # 헤더 = 순위 급등/급락 정렬 토글 (급등 → 급락 → 기본)
+  var rankArrow = ntSort==='rank_up'   ? '<span class="sar don">▲</span>'
+                : ntSort==='rank_down' ? '<span class="sar down2">▼</span>'
+                :                        '<span class="sar">⇅</span>';
+  var rankOn = (ntSort==='rank_up'||ntSort==='rank_down') ? ' s-on' : '';
+  var rankTh = '<th class="sortable rankcol'+rankOn+'" data-rank="1" title="클릭: 순위 급등순 → 급락순 → 기본">#'+rankArrow+'</th>';
   var h = '<table class="nt-tbl"><thead><tr>'
-        + '<th>#</th><th style="text-align:left">'+ntEsc(ntCatLabel(CAT))+'</th>'
-        + '<th class="tot"'+on('total_score')+' data-s="total_score" title="평점·리뷰·저장·방문·블로그 가중 종합(0~100)">종합점수</th>'
-        + '<th'+on('score')+' data-s="score">평점</th>'
-        + '<th'+on('review')+' data-s="review">리뷰</th>'
-        + '<th class="col-opt"'+on('visitor')+' data-s="visitor">방문</th>'
-        + '<th class="col-opt"'+on('blog')+' data-s="blog">블로그</th>'
-        + '<th'+on('save')+' data-s="save">저장</th>'
+        + rankTh + '<th style="text-align:left">'+ntEsc(ntCatLabel(CAT))+'</th>'
+        + ths
         + '</tr></thead><tbody>';
   rows.forEach(function(r, i){
     var isNew = (r.prev_period == null);
     var dTot = (r.total_score != null && r.prev_total != null) ? (r.total_score - r.prev_total) : null;
+    // 전월대비 순위 변동: 이번 순위(cur_rank) vs 지난달 순위(prev_rank). + = 상승
+    var isMoveSort = (ntSort==='rank_up'||ntSort==='rank_down');
+    var cr = (r.cur_rank != null) ? Number(r.cur_rank) : (i + 1);
+    var mv = '';
+    if (isNew) {
+      mv = '<span class="rkmv new">NEW</span>';
+    } else if (r.prev_rank != null) {
+      var rd = Number(r.prev_rank) - cr;
+      mv = rd > 0 ? '<span class="rkmv up" title="지난달 대비 '+rd+'계단 상승">▲'+rd+'</span>'
+         : rd < 0 ? '<span class="rkmv down" title="지난달 대비 '+(-rd)+'계단 하락">▼'+(-rd)+'</span>'
+         :          '<span class="rkmv flat" title="지난달과 동일">–</span>';
+    }
+    var num = isMoveSort ? cr : (i + 1);   // 급등/급락 정렬 땐 실제 종합순위 표시
     h += '<tr onclick="ntOpenChart(\''+(r.place_id||0)+'\',\''+ntEsc(r.name).replace(/'/g,"\\'")+'\')">'
-       + '<td>'+(i+1)+'</td>'
+       + '<td class="rank">'+num+mv+'</td>'
        + '<td class="name">'
          + (r.naver_id
              ? '<a class="nm" href="https://map.naver.com/p/entry/place/'+ntEsc(String(r.naver_id))+'" onclick="return ntOpenNaver(event,\''+ntEsc(String(r.naver_id))+'\')" title="네이버 플레이스에서 자세히 보기">'+ntEsc(r.name)+'</a>'
              : '<span class="nm">'+ntEsc(r.name)+'</span>')
-         + (isNew?'<span class="nt-new">NEW</span>':'')
          + ((r.address||r.region)?'<div class="addr">'+ntEsc(r.address||r.region)+'</div>':'') + '</td>'
        + '<td class="tot">'+ntCell(r.total_score, dTot, true)+'</td>'
        + '<td>'+ntCell(r.score, r.d_score, true)+'</td>'
@@ -328,9 +364,19 @@ function ntRender(rows){
   });
   h += '</tbody></table>';
   document.getElementById('ntBody').innerHTML = h;
-  // 헤더 클릭 정렬
-  Array.prototype.forEach.call(document.querySelectorAll('.nt-tbl th[data-s]'), function(th){
-    th.addEventListener('click', function(){ document.getElementById('ntSort').value = th.getAttribute('data-s'); ntLoad(); });
+  // 값 헤더 클릭: 값 정렬 ⇄ 같은 헤더 재클릭 시 증가순(Δ) 토글
+  Array.prototype.forEach.call(document.querySelectorAll('.nt-tbl th[data-v]'), function(th){
+    th.addEventListener('click', function(){
+      var v = th.getAttribute('data-v'), d = th.getAttribute('data-d');
+      ntSort = (d && ntSort === v) ? d : v;   // 값 → 증가순 토글, 그 외(증가순·다른 헤더)엔 값
+      ntLoad();
+    });
+  });
+  // # 헤더 클릭: 순위 급등순 → 급락순 → 기본(종합점수) 순환
+  var rankHead = document.querySelector('.nt-tbl th[data-rank]');
+  if (rankHead) rankHead.addEventListener('click', function(){
+    ntSort = (ntSort==='rank_up') ? 'rank_down' : (ntSort==='rank_down' ? 'total_score' : 'rank_up');
+    ntLoad();
   });
 }
 
@@ -375,7 +421,7 @@ function ntShareCreate(){
   var q = API + '?action=share_create&cat=' + encodeURIComponent(CAT) + '&ttl=' + encodeURIComponent(ttl)
         + '&region=' + encodeURIComponent(document.getElementById('ntRegion').value.trim())
         + '&min_review=' + encodeURIComponent(document.getElementById('ntMinRev').value)
-        + '&sort=' + encodeURIComponent(document.getElementById('ntSort').value);
+        + '&sort=' + encodeURIComponent(ntSort);
   fetch(q).then(function(r){ return r.json(); })
     .then(function(j){ if (j.ok) ntShareRender(j.token, j.expires_at, j.region); else alert('생성 실패'); });
 }
@@ -516,7 +562,7 @@ function ntApplyCat(){
   if (NT_SHARE) {            // 공유: 공유시점 지역·필터로 고정(컨트롤바는 숨김 상태)
     document.getElementById('ntRegion').value = NT_SHARE_REGION || '';
     document.getElementById('ntMinRev').value = String(NT_SHARE_MINREV);
-    if (NT_SHARE_SORT) document.getElementById('ntSort').value = NT_SHARE_SORT;
+    if (NT_SHARE_SORT) ntSort = NT_SHARE_SORT;
   }
   ntRenderMapCrit();         // 지도 기준 버튼 라벨 = 현재 탭 분류 기준
   ntLoadMapCount();          // 지도 기준 곳수 = 현재 탭 분류
@@ -636,7 +682,7 @@ function ntRenderMapCrit(){
 }
 
 // 컨트롤 이벤트
-['ntPeriod','ntMinRev','ntSort'].forEach(function(id){ document.getElementById(id).addEventListener('change', ntLoad); });
+['ntPeriod','ntMinRev'].forEach(function(id){ document.getElementById(id).addEventListener('change', ntLoad); });
 var rgTimer = null;
 document.getElementById('ntRegion').addEventListener('input', function(){
   ntFillRegionList(this.value);                              // 자동완성 후보 갱신(최대 12)

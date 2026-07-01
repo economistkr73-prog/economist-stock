@@ -77,11 +77,19 @@ function rise_report(RiseAnalyzer $ra): void {
             default:           return ['미해결', 'muted'];
         }
     };
+    // 클릭 가능한 종목명 셀 — 우측 그래프 도크(gOpen) 트리거. rate/price는 있을 때만 헤더에 표시(PC 전용, JS에서 가드)
+    $gcell = function($name, $code, $rate = null, $price = null) use ($h) {
+        $a = "data-code=\"{$h($code)}\" data-name=\"{$h($name)}\"";
+        if ($rate  !== null && $rate  !== '') $a .= " data-rate=\"{$h($rate)}\"";
+        if ($price !== null && $price !== '') $a .= " data-price=\"{$h($price)}\"";
+        return "<td class='l nm gopen' {$a}>{$h($name)} <span class='muted'>{$h($code)}</span></td>";
+    };
 
     header('Content-Type: text/html; charset=utf-8');
     echo "<!DOCTYPE html><html lang='ko'><head><meta charset='utf-8'>";
     echo "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
     echo "<title>상승확률 분석</title>";
+    echo "<script src='https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js'></script>";
     nav_css();
     echo "<style>
       :root{--bg:#0e1320;--panel:#141b2b;--panel-2:#1b2335;--line:#26304a;--ink:#dfe6f2;--ink-dim:#8893ab;--ink-mute:#5b6884;--up:#e8493f;--down:#2f7bd6;--accent:#d9a441}
@@ -106,12 +114,46 @@ function rise_report(RiseAnalyzer $ra): void {
       .o{color:#34d058;font-weight:800} .x{color:var(--ink-mute)}
       .muted{color:var(--ink-mute)}
       .scroll{overflow-x:auto}
+      /* ── PC 2단: 좌 분석표 / 우 대형 그래프 (stock_analysis.php?mode=updash 차트 이식) ── */
+      td.gopen{cursor:pointer} td.gopen:hover{color:var(--accent)}
+      @media(min-width:901px){
+        .wrap{max-width:none;display:flex;gap:16px;align-items:flex-start;padding:14px 16px}
+        .rleft{flex:1 1 40%;min-width:0}                      /* 좌: 분석표 (세로 스크롤) */
+        #gdock{flex:1 1 60%;position:sticky;top:12px;height:calc(100vh - 24px);   /* 우: 최대한 큰 그래프 */
+          display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--line);
+          border-radius:10px;overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,.25)}
+      }
+      @media(max-width:900px){#gdock{display:none} td.gopen{cursor:default} td.gopen:hover{color:inherit}}
+      #gdock .gsel{display:flex;align-items:baseline;gap:12px;padding:10px 14px;background:var(--panel-2);border-bottom:1px solid var(--line);flex:0 0 auto}
+      #gdock .gsel .snm{font-size:16px;font-weight:800;letter-spacing:-.02em;color:var(--ink)}
+      #gdock .gsel .scode{font-size:11px;color:var(--ink-mute)}
+      #gdock .gsel .sprice{font-size:16px;font-weight:700;margin-left:auto;font-variant-numeric:tabular-nums}
+      #gdock .gsel .schg{font-size:12.5px;font-weight:700;font-variant-numeric:tabular-nums}
+      .gcharts{flex:1;display:flex;flex-direction:column;min-height:0;position:relative}
+      .gblock{flex:1 1 64%;min-height:0;display:flex;flex-direction:column}       /* 일봉 크게 */
+      .gblock.bottom{flex:1 1 36%;border-top:1px solid var(--line)}               /* 분봉 */
+      .gbar{flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:6px 12px;background:var(--panel);flex-wrap:wrap}
+      .gbar .lbl{font-size:11.5px;font-weight:700;color:var(--ink)}
+      .gbar .px{font-size:11px;color:var(--ink-dim)}
+      .cline-chip{background:var(--panel-2);color:var(--ink-mute);border:1px solid var(--line);border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;cursor:pointer}
+      .cline-chip:hover{color:var(--ink)} .cline-chip.on{background:var(--accent);color:#0b1020;border-color:var(--accent)}
+      .gseg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+      .gseg button{background:var(--panel-2);color:var(--ink-mute);border:0;font-size:11px;font-weight:700;padding:2px 9px;cursor:pointer}
+      .gseg button + button{border-left:1px solid var(--line)} .gseg button.on{background:var(--accent);color:#0b1020}
+      .ghost{flex:1;min-height:0;position:relative}
+      .gph-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:20px;color:var(--ink-mute);font-size:14px;background:var(--panel);z-index:6}
+      .chip-layer{position:absolute;inset:0;pointer-events:none;overflow:hidden;z-index:3}
+      .dchip{position:absolute;background:#fff;border-radius:7px;padding:2px 7px;font-size:10px;font-weight:800;line-height:1.2;text-align:center;box-shadow:0 1px 5px rgba(0,0,0,.45);white-space:nowrap}
+      .dchip .r{display:block;color:#c0241a} .dchip .w{display:block;color:#111;font-variant-numeric:tabular-nums}
+      .dchip .w.real{color:#0a7d32} .dchip .w.est{color:#666;font-style:italic}
+      .dchip.gold{box-shadow:0 1px 6px rgba(184,134,11,.6)} .dchip.gold .r{color:#b8860b}
     </style></head><body>";
     render_nav('riseanalysis');
     echo "<div class='wrap'>";
+    echo "<div class='rleft'>";   // 좌: 분석표 (PC). 모바일은 flex 해제되어 단일 컬럼
 
     echo "<h2>상승확률 분석 <span class='muted' style='font-size:14px'>· 가격·거래량 신호</span></h2>";
-    echo "<div class='sub'>후보=종가 3%↑ 또는 고가 전일대비 7%↑ (적응형, 상한 200). 핵심=종가 60일신고가돌파+거래량2배 · 장중=고가만 돌파/강세+거래량2배. 예측=in-sample, 실제=3거래일 채점 누적.</div>";
+    echo "<div class='sub'>후보=종가 3%↑ 또는 고가 전일대비 7%↑ (적응형, 상한 200). 핵심=종가 60일신고가돌파+거래량2배 · 장중=고가만 돌파/강세+거래량2배. 예측=in-sample, 실제=3거래일 채점 누적. <span style='color:var(--accent)'>· 종목명 클릭 시 우측 그래프(PC)</span></div>";
     echo "<a class='runbtn' href='rise_analysis.php?mode=run'>＋ 장 종료 후 분석 시작</a>";
     echo " <a class='runbtn' style='background:#2f7bd6;box-shadow:0 0 12px rgba(47,123,214,.35)' href='rise_analysis.php?mode=bt'>📉 매매 백테스트</a>";
 
@@ -175,7 +217,7 @@ function rise_report(RiseAnalyzer $ra): void {
             $hrt = $p['high_rate'] !== null ? '+' . number_format($p['high_rate'], 1) . '%' : '-';
             echo "<tr{$cls}>";
             echo "<td>{$p['rank_no']}</td>";
-            echo "<td class='l nm'>{$h($p['stock_name'])} <span class='muted'>{$h($p['stock_code'])}</span></td>";
+            echo $gcell($p['stock_name'], $p['stock_code'], $p['today_rate'], $p['close_price']);
             echo "<td>{$tb}</td>";
             echo "<td class='{$rc}'>{$rt}</td>";
             echo "<td class='up'>{$hrt}</td>";
@@ -223,7 +265,7 @@ function rise_report(RiseAnalyzer $ra): void {
             $ncCls = ($g['nx_close'] !== null && (float)$g['nx_close'] >= 0) ? 'up' : 'dn';
             echo "<tr>";
             echo "<td class='l'>{$h($g['signal_date'])}</td>";
-            echo "<td class='l nm'>{$h($g['stock_name'])} <span class='muted'>{$h($g['stock_code'])}</span></td>";
+            echo $gcell($g['stock_name'], $g['stock_code']);
             echo "<td>{$ckfmt($g['cell_key'])}</td>";
             echo "<td class='muted'>{$pct($g['pred_hit3'])}</td>";
             echo "<td>{$hit}</td>";
@@ -256,7 +298,7 @@ function rise_report(RiseAnalyzer $ra): void {
             $dayC = $g['retest_day_c'] !== null ? ' <span class="muted">D+' . (int)$g['retest_day_c'] . '</span>' : '';
             echo "<tr>";
             echo "<td class='l'>{$h($g['signal_date'])}</td>";
-            echo "<td class='l nm'>{$h($g['stock_name'])} <span class='muted'>{$h($g['stock_code'])}</span></td>";
+            echo $gcell($g['stock_name'], $g['stock_code']);
             echo "<td>{$tname}</td>";
             echo "<td>" . number_format((int)$g['prior_high']) . "</td>";
             echo "<td class='{$lcH}'>{$labH}{$dayH}</td>";
@@ -282,7 +324,115 @@ function rise_report(RiseAnalyzer $ra): void {
         echo "</table></div></div>";
     }
 
-    echo "</div></body></html>";
+    echo "</div>";   // .rleft 닫기
+
+    // ── 우측 대형 그래프 패널 (PC 전용·상시표시) — stock_analysis.php?mode=updash 차트 이식 ──
+    echo <<<'DOCK'
+<div id="gdock">
+  <div class="gsel">
+    <span class="snm" id="gName">종목을 선택하세요</span>
+    <span class="scode" id="gCode"></span>
+    <span class="sprice" id="gPrice"></span>
+    <span class="schg" id="gChg"></span>
+  </div>
+  <div class="gcharts">
+    <div class="gph-empty" id="gEmpty">◀ 왼쪽 표에서 종목명을 클릭하면<br>여기에 일봉·분봉 그래프가 표시됩니다</div>
+    <div class="gblock">
+      <div class="gbar"><span class="lbl">일봉</span>
+        <button type="button" id="gToggleHigh" class="cline-chip on" title="신호일 전고점(돌파레벨) 수평선">전고점선</button>
+        <button type="button" id="gToggleTodayHigh" class="cline-chip on" title="당일 기준 전고점(직전 60일 최고가) 수평선">당일전고</button>
+        <button type="button" id="gToggleCur" class="cline-chip" title="현재가격선">현재가</button>
+        <span class="gseg"><button type="button" id="gDay160" class="on">160</button><button type="button" id="gDay240">240</button></span>
+        <span class="px">흰칩 ▲N.Nx=신고가+대량 · 아래=승률(초록=실측) · 금색=5배+</span>
+      </div>
+      <div class="ghost" id="gDaily"></div>
+    </div>
+    <div class="gblock bottom">
+      <div class="gbar"><span class="lbl">분봉</span><span class="px">당일 09:00~15:30 · 1분</span></div>
+      <div class="ghost" id="gMinute"></div>
+    </div>
+  </div>
+</div>
+</div><!-- .wrap 닫기 -->
+<script>
+(function(){
+  const API='stock_analysis_api.php';
+  const LWC=window.LightweightCharts;
+  if(!LWC) return;
+  const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const UP=css('--up'), DOWN=css('--down');
+  const G=id=>document.getElementById(id);
+  const isPC=()=>window.innerWidth>900;
+
+  const fmtPrice=p=>Math.round(Number(p)||0).toLocaleString();
+  const fmtRate=r=>{r=Number(r)||0;return (r>=0?'+':'')+r.toFixed(2)+'%';};
+  function fmtKDate(t){ if(typeof t==='string'){const p=t.split('-');return `${+p[0]}년 ${+p[1]}월 ${+p[2]}일`;} if(t&&typeof t==='object'&&'year' in t)return `${t.year}년 ${t.month}월 ${t.day}일`; const d=new Date((Number(t)||0)*1000); return `${d.getUTCFullYear()}년 ${d.getUTCMonth()+1}월 ${d.getUTCDate()}일`; }
+  function fmtKDateShort(t){ if(typeof t==='string'){const p=t.split('-');return `${+p[1]}/${+p[2]}`;} if(t&&typeof t==='object'&&'year' in t)return `${t.month}/${t.day}`; const d=new Date((Number(t)||0)*1000); return `${d.getUTCMonth()+1}/${d.getUTCDate()}`; }
+  function fmtHM(t){ const d=new Date((Number(t)||0)*1000); return String(d.getUTCHours()).padStart(2,'0')+':'+String(d.getUTCMinutes()).padStart(2,'0'); }
+
+  const chartOpts={ layout:{background:{color:'transparent'},textColor:css('--ink-dim'),fontFamily:'Pretendard'}, grid:{vertLines:{color:'rgba(38,48,74,.4)'},horzLines:{color:'rgba(38,48,74,.4)'}}, rightPriceScale:{borderColor:css('--line')}, timeScale:{borderColor:css('--line'),timeVisible:true,secondsVisible:false}, crosshair:{mode:LWC.CrosshairMode.Normal} };
+  const candleOpts={upColor:UP,downColor:DOWN,borderUpColor:UP,borderDownColor:DOWN,wickUpColor:UP,wickDownColor:DOWN};
+  function makeChart(hostId,kind){ const host=G(hostId); const opt={...chartOpts,width:host.clientWidth,height:host.clientHeight}; if(kind==='daily'){opt.localization={timeFormatter:fmtKDate};opt.timeScale={borderColor:css('--line'),timeVisible:false,secondsVisible:false,tickMarkFormatter:fmtKDateShort};}else{opt.localization={timeFormatter:fmtHM};opt.timeScale={borderColor:css('--line'),timeVisible:true,secondsVisible:false,tickMarkFormatter:fmtHM};} const chart=LWC.createChart(host,opt); const candle=chart.addCandlestickSeries(candleOpts); const vol=chart.addHistogramSeries({priceFormat:{type:'volume'},priceScaleId:'vol'}); chart.priceScale('vol').applyOptions({scaleMargins:{top:0.8,bottom:0}}); return {chart,candle,vol,host}; }
+  function paint(c,data){ c.candle.setData(data.map(d=>({time:d.time,open:d.open,high:d.high,low:d.low,close:d.close}))); c.vol.setData(data.map(d=>({time:d.time,value:d.vol,color:(d.close>=d.open?UP:DOWN)+'66'}))); if(data.length) c.chart.timeScale().fitContent(); }
+
+  // 칼리브레이션 실측 승률 (stock_analysis_api.php?action=calib)
+  let CALIB={}; const CALIB_MIN_N=8;
+  const volTier=r=>r>=5?'5+':r>=3?'3-5':r>=2?'2-3':r>=1?'1-2':'0-1';
+  const brkWinStatic=r=>r>=5?90:r>=3?82:78;
+  function winInfo(ratio){ const c=CALIB['core:'+volTier(ratio)]; if(c&&c.n>=CALIB_MIN_N)return {pct:Math.round(c.rate),real:true,n:c.n,lo:c.lo,hi:c.hi}; return {pct:brkWinStatic(ratio),real:false}; }
+  async function loadCalib(){ try{ const m=await fetch(API+'?action=calib').then(r=>r.json()); if(m&&typeof m==='object'){CALIB=m; renderDailyChips();} }catch(e){} }
+
+  function computeDailySignals(data){ const out=[];const n=data.length; for(let i=60;i<n;i++){ let ph=-Infinity,vs=0; for(let k=i-60;k<i;k++){if(data[k].high>ph)ph=data[k].high; vs+=data[k].vol;} if(!(data[i].close>ph))continue; const ratio=vs>0?data[i].vol/(vs/60):0; if(ratio<2)continue; out.push({time:data[i].time,low:data[i].low,close:data[i].close,ph,ratio}); } return out; }
+
+  let daily=null,minute=null,ready=false,dailyChipLayer=null;
+  let DAILY_FULL=[],DAILY_SIGNALS=[],DAILY_DAYS=160,DAILY_PRICELINES=[],SHOW_HIGH_LINES=true,TODAY_HIGH_LINE=null,SHOW_TODAY_HIGH=true;
+
+  function renderDailyChips(){ if(!ready)return; dailyChipLayer.innerHTML=''; const ts=daily.chart.timeScale(); for(const s of DAILY_SIGNALS){ const x=ts.timeToCoordinate(s.time); if(x==null)continue; const y=daily.candle.priceToCoordinate(s.low); if(y==null)continue; const w=winInfo(s.ratio); const c=document.createElement('div'); c.className='dchip'+(s.ratio>=5?' gold':''); c.style.left=x+'px'; c.style.top=(y+8)+'px'; c.title=w.real?`실측 적중률 ${w.pct}% · 3일내 +3% 터치 (표본 ${w.n}건, 95%CI ${w.lo}~${w.hi}%)`:`추정 승률 ${w.pct}% · 실측 표본 부족`; c.innerHTML=`<span class="r">▲ ${s.ratio.toFixed(1)}x</span><span class="w ${w.real?'real':'est'}">${w.pct}%</span>`; dailyChipLayer.appendChild(c); } }
+  function drawSignalPriceLines(){ for(const pl of DAILY_PRICELINES)daily.candle.removePriceLine(pl); DAILY_PRICELINES=[]; if(!SHOW_HIGH_LINES)return; for(const s of DAILY_SIGNALS){ if(s.ph==null)continue; const gold=s.ratio>=5; DAILY_PRICELINES.push(daily.candle.createPriceLine({price:s.ph,color:gold?'#b8860b':'rgba(255,255,255,.45)',lineWidth:1,lineStyle:LWC.LineStyle.Dashed,axisLabelVisible:false})); } }
+  function todayPriorHigh(){ const n=DAILY_FULL.length; if(n<2)return null; const end=n-1; let ph=-Infinity; for(let k=Math.max(0,end-60);k<end;k++){if(DAILY_FULL[k].high>ph)ph=DAILY_FULL[k].high;} return ph>-Infinity?ph:null; }
+  function drawTodayHighLine(){ if(TODAY_HIGH_LINE){daily.candle.removePriceLine(TODAY_HIGH_LINE);TODAY_HIGH_LINE=null;} if(!SHOW_TODAY_HIGH)return; const ph=todayPriorHigh(); if(ph==null)return; TODAY_HIGH_LINE=daily.candle.createPriceLine({price:ph,color:'#22d3ee',lineWidth:1,lineStyle:LWC.LineStyle.Solid,axisLabelVisible:false}); }
+  function repaintDaily(){ const view=DAILY_DAYS===160?DAILY_FULL.slice(-160):DAILY_FULL; paint(daily,view); drawSignalPriceLines(); drawTodayHighLine(); setTimeout(renderDailyChips,0); }
+  function applyDaily(d){ DAILY_FULL=(Array.isArray(d)?d:[]).map(x=>({time:x.t,open:x.o,high:x.h,low:x.l,close:x.c,vol:x.v})); DAILY_SIGNALS=computeDailySignals(DAILY_FULL); repaintDaily(); }
+  function setDailyDays(n){ if(DAILY_DAYS===n)return; DAILY_DAYS=n; G('gDay160').classList.toggle('on',n===160); G('gDay240').classList.toggle('on',n===240); repaintDaily(); }
+  function resizeAll(){ if(!ready)return; for(const c of [daily,minute])c.chart.resize(c.host.clientWidth,c.host.clientHeight); renderDailyChips(); }
+
+  function initCharts(){ if(ready)return;
+    daily=makeChart('gDaily','daily'); minute=makeChart('gMinute','minute');
+    daily.candle.applyOptions({priceLineVisible:false,priceLineStyle:LWC.LineStyle.Solid,priceLineColor:'#d9a441',priceLineWidth:1});
+    dailyChipLayer=document.createElement('div'); dailyChipLayer.className='chip-layer'; G('gDaily').appendChild(dailyChipLayer);
+    daily.chart.timeScale().subscribeVisibleLogicalRangeChange(renderDailyChips);
+    ready=true;
+    G('gToggleHigh').onclick=function(){SHOW_HIGH_LINES=!SHOW_HIGH_LINES;this.classList.toggle('on',SHOW_HIGH_LINES);drawSignalPriceLines();};
+    G('gToggleTodayHigh').onclick=function(){SHOW_TODAY_HIGH=!SHOW_TODAY_HIGH;this.classList.toggle('on',SHOW_TODAY_HIGH);drawTodayHighLine();};
+    G('gToggleCur').onclick=function(){const on=!this.classList.contains('on');this.classList.toggle('on',on);daily.candle.applyOptions({priceLineVisible:on});};
+    G('gDay160').onclick=()=>setDailyDays(160); G('gDay240').onclick=()=>setDailyDays(240);
+    new ResizeObserver(resizeAll).observe(G('gDaily')); window.addEventListener('resize',resizeAll);
+  }
+  async function gOpen(code,name,rate,price){
+    if(!isPC()||!code)return;
+    initCharts();
+    const emp=G('gEmpty'); if(emp) emp.style.display='none';
+    G('gName').textContent=name||code; G('gCode').textContent=code||'';
+    const hasR=rate!==''&&rate!=null&&!isNaN(Number(rate));
+    const up=hasR?Number(rate)>=0:true;
+    G('gPrice').textContent=(price!==''&&price!=null&&!isNaN(Number(price)))?fmtPrice(price):'';
+    const chg=G('gChg'); chg.textContent=hasR?fmtRate(rate):''; chg.className='schg '+(up?'up':'dn');
+    const [d,m]=await Promise.all([
+      fetch(`${API}?action=daily&code=${encodeURIComponent(code)}&days=240`).then(r=>r.json()).catch(()=>[]),
+      fetch(`${API}?action=minute&code=${encodeURIComponent(code)}`).then(r=>r.json()).catch(()=>[])
+    ]);
+    applyDaily(d);
+    paint(minute,(Array.isArray(m)?m:[]).map(x=>({time:Math.floor(Date.parse(x.t.replace(' ','T')+'Z')/1000),open:x.o,high:x.h,low:x.l,close:x.c,vol:x.v})));
+  }
+
+  document.addEventListener('click',e=>{ const cell=e.target.closest('.gopen'); if(!cell||!isPC())return; gOpen(cell.dataset.code||'',cell.dataset.name||'',cell.dataset.rate??'',cell.dataset.price??''); });
+  // PC 상시 표시 패널: 로드 시 빈 차트를 미리 생성해 전체 크기로 렌더(클릭 전에도 축/그리드 표시)
+  setTimeout(()=>{ if(isPC()){ initCharts(); resizeAll(); } }, 0);
+  loadCalib();
+})();
+</script>
+</body></html>
+DOCK;
 }
 
 // ==========================================================

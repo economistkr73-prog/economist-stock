@@ -223,6 +223,8 @@ echo <<<'PAGE'
     box-shadow:0 1px 5px rgba(0,0,0,.45);white-space:nowrap;}
   .dchip .r{display:block;color:#c0241a;}
   .dchip .w{display:block;color:#111;font-variant-numeric:tabular-nums;}
+  .dchip .w.real{color:#0a7d32;}                 /* 실측 칼리브레이션 적중률 — 초록 */
+  .dchip .w.est{color:#666;font-style:italic;}   /* 표본부족 정적추정 — 회색 이탤릭 */
   .dchip.gold{box-shadow:0 1px 6px rgba(184,134,11,.6);} .dchip.gold .r{color:#b8860b;}
   #selBar{display:flex;align-items:baseline;gap:12px;padding:8px 14px;background:var(--panel-2);border-bottom:1px solid var(--line);}
   #selBar .snm{font-size:16px;font-weight:800;letter-spacing:-.02em;}
@@ -371,7 +373,21 @@ function paint(c,data){
   if(data.length) c.chart.timeScale().fitContent();
 }
 // 상승 셋업: '종가 60일 신고가 돌파 + 거래량 60일평균 2배+' → 흰색 칩(배수+승률)
-function brkWin(r){ return r>=5?90 : r>=3?82 : 78; }   // 거래량 등급별 대략 승률(3일내 +3% 기준)
+// 승률 = 상승확률 엔진의 누적 실측 적중률(rise_pattern_stats)을 cell_key로 조회. 표본 부족 시 정적추정 폴백.
+let CALIB={};                 // {'core:2-3':{n,rate,lo,hi}, ...} — action=calib 로 1회 로드
+const CALIB_MIN_N=8;          // 실측 채택 최소 표본(그 미만은 정적추정 사용)
+function volTier(r){ return r>=5?'5+' : r>=3?'3-5' : r>=2?'2-3' : r>=1?'1-2' : '0-1'; }  // 엔진 volTier와 동일
+function brkWinStatic(r){ return r>=5?90 : r>=3?82 : 78; }   // 폴백: 거래량 등급별 대략 승률(3일내 +3%)
+// 클라이언트 흰칩은 '종가 신고가 돌파'(=core) 신호 → cell_key 'core:{tier}'
+function winInfo(ratio){
+  const c=CALIB['core:'+volTier(ratio)];
+  if(c && c.n>=CALIB_MIN_N) return {pct:Math.round(c.rate), real:true, n:c.n, lo:c.lo, hi:c.hi};
+  return {pct:brkWinStatic(ratio), real:false};
+}
+async function loadCalib(){
+  try{ const m=await fetch(API+'?action=calib').then(r=>r.json());
+       if(m && typeof m==='object') { CALIB=m; renderDailyChips(); } }catch(e){}
+}
 function computeDailySignals(data){
   const out=[]; const n=data.length;
   for(let i=60;i<n;i++){
@@ -380,7 +396,7 @@ function computeDailySignals(data){
     if(!(data[i].close>ph)) continue;
     const ratio = vs>0 ? data[i].vol/(vs/60) : 0;
     if(ratio<2) continue;
-    out.push({time:data[i].time, low:data[i].low, close:data[i].close, ph, ratio, win:brkWin(ratio)});  // ph=전고점(돌파레벨)
+    out.push({time:data[i].time, low:data[i].low, close:data[i].close, ph, ratio});  // ph=전고점(돌파레벨). 승률은 렌더시 winInfo로 산출
   }
   return out;
 }
@@ -393,10 +409,14 @@ function renderDailyChips(){
   for(const s of DAILY_SIGNALS){
     const x=ts.timeToCoordinate(s.time); if(x==null) continue;
     const y=daily.candle.priceToCoordinate(s.low); if(y==null) continue;
+    const w=winInfo(s.ratio);
     const c=document.createElement('div');
     c.className='dchip'+(s.ratio>=5?' gold':'');
     c.style.left=x+'px'; c.style.top=(y+8)+'px';
-    c.innerHTML=`<span class="r">▲ ${s.ratio.toFixed(1)}x</span><span class="w">${s.win}%</span>`;
+    c.title = w.real
+      ? `실측 적중률 ${w.pct}% · 3일내 +3% 터치 (표본 ${w.n}건, 95%CI ${w.lo}~${w.hi}%)`
+      : `추정 승률 ${w.pct}% · 실측 표본 부족(정적추정)`;
+    c.innerHTML=`<span class="r">▲ ${s.ratio.toFixed(1)}x</span><span class="w ${w.real?'real':'est'}">${w.pct}%</span>`;
     dailyChipLayer.appendChild(c);
   }
 }
@@ -788,6 +808,7 @@ loadSignals().then(()=>loadPage(null,0));
 loadPrevSignals();
 loadRecent();
 loadMeta();
+loadCalib();   // 흰칩 승률용 실측 칼리브레이션(rise_pattern_stats) 로드
 </script>
 </body>
 </html>

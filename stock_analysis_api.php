@@ -317,6 +317,28 @@ function api_stock(string $action, PDO $pdo): void
             return;
         }
 
+        // ── 칼리브레이션: 상승확률 엔진 누적 실측 적중률(rise_pattern_stats) ──
+        //   cell_key(예 'core:2-3')별 {n:표본, rate:3일내+3%적중%, lo/hi:95%CI}.
+        //   일봉 흰칩 승률을 정적추정 대신 실측값으로 표시하기 위한 소스. 테이블 없으면 {}.
+        case 'calib': {
+            $out = [];
+            try {
+                $rows = $pdo->query(
+                    "SELECT cell_key, n_samples, hit3_rate, ci_low, ci_high FROM rise_pattern_stats"
+                )->fetchAll(PDO::FETCH_ASSOC);
+                foreach ($rows as $r) {
+                    $out[$r['cell_key']] = [
+                        'n'    => (int) $r['n_samples'],
+                        'rate' => round((float) $r['hit3_rate'] * 100, 1),
+                        'lo'   => round((float) $r['ci_low']    * 100, 1),
+                        'hi'   => round((float) $r['ci_high']   * 100, 1),
+                    ];
+                }
+            } catch (Throwable $e) { $out = []; }   // 테이블 미존재 → 빈 맵(프론트 정적폴백)
+            echo json_encode($out, JSON_UNESCAPED_UNICODE);
+            return;
+        }
+
         default:
             http_response_code(400);
             echo json_encode(['error' => "unknown action: {$action}"], JSON_UNESCAPED_UNICODE);

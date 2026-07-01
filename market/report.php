@@ -462,6 +462,18 @@ function mktDrawInv(s){
     tooltip:{theme:"dark",y:{formatter:jo2}},
   }); mktCh.daily.render();
 }
+// 뉴스 링크: PC=팝업창(etf_stock.php etf_d5 네이버기사와 동일) / 모바일=target=_blank 새창 유지
+// 서버 $mobile(cnt.inc) UA 정규식을 그대로 미러링 — HTML이 캐시 서빙이라 서버 분기 불가, 런타임 JS로 판정
+(function(){
+  var isMobile = /(Windows CE|Nokia|SonyEricsson|webOS|PalmOS|Android|Mobile|Macintosh)/.test(navigator.userAgent);
+  if (isMobile) return;   // 모바일: 현재처럼 새창(target=_blank) 그대로
+  document.querySelectorAll('a.mkt-news-a').forEach(function(a){
+    a.addEventListener('click', function(e){
+      e.preventDefault();
+      window.open(a.href, 'news_popup', 'width=800,height=900,left=200,top=100,scrollbars=yes');
+    });
+  });
+})();
 </script>
 </body></html>
     <?php
@@ -497,7 +509,7 @@ function mkt_news_list(array $items): string {
     <ol style="margin:0;padding-left:20px;list-style:decimal;">
       <?php foreach ($items as $a): ?>
       <li style="margin:0 0 11px;">
-        <a href="<?=h($a['link'])?>" target="_blank" rel="noopener" style="color:var(--text);font-size:14px;font-weight:600;text-decoration:none;"><?=h($a['title'])?></a>
+        <a href="<?=h($a['link'])?>" target="_blank" rel="noopener" class="mkt-news-a" style="color:var(--text);font-size:14px;font-weight:600;text-decoration:none;"><?=h($a['title'])?></a>
         <?php if (!empty($a['summary'])): ?><div style="font-size:12px;color:var(--muted);margin-top:2px;"><?=h($a['summary'])?></div><?php endif; ?>
       </li>
       <?php endforeach; ?>

@@ -192,6 +192,23 @@ class NaverPlaceCollector
                 KEY idx_nts_cat (cat)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
         );
+        // 정합(reconcile) 감시 목록: 이번 회차에 소멸(직접검색 안나옴)한 유명점의 1차 스트라이크.
+        // 다음 회차에도 안 나오면(2차) 폐업으로 판단해 place 삭제. place 삭제 시 FK CASCADE 로 함께 정리됨.
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS naver_reconcile_watch (
+                place_id      BIGINT UNSIGNED NOT NULL,
+                category      VARCHAR(16)     NOT NULL DEFAULT 'food',
+                missed_period CHAR(7)         NOT NULL,
+                naver_id      VARCHAR(32)     NULL,
+                prev_review   INT             NULL,
+                name          VARCHAR(160)    NULL,
+                created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (place_id),
+                KEY idx_recon (category, missed_period),
+                CONSTRAINT fk_recon_place FOREIGN KEY (place_id)
+                    REFERENCES place(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
 
         // ── 기존 설치(category 도입 전) 업그레이드: 멱등 ALTER (MariaDB IF [NOT] EXISTS) ──
         // 기존 행은 전부 맛집이므로 DEFAULT 'food' 로 채워진다.
@@ -543,10 +560,20 @@ class NaverPlaceCollector
             'region' => trim((string)$regionLabel), 'category' => $category,
         ];
 
-        // 같은 카테고리 안에서만 중복 판정(캠핑↔맛집 동명 오병합 방지).
-        $dup = $this->findDuplicate($name, $lat, $lng, $placeCat);
+        // naver_id 우선(고유키) → 없으면 같은 카테고리 안 이름+좌표(캠핑↔맛집 동명 오병합 방지).
+        $dup = $this->findDuplicate($name, $lat, $lng, $placeCat, $nid);
 
         if ($dup) {
+            // ── 오매칭/부속 리스팅 가드 ─────────────────────────────────────
+            //   "이성당"(리뷰 6.9만)에 "이성당cafe"(리뷰 4.8천)처럼 다른 naver 업소가 접두+100m 로
+            //   오매칭돼 유명점의 review_count/naver_id 를 덮어쓰고(추이엔 가짜 폭락) 지도 품질까지
+            //   훼손하는 문제. 기존이 리뷰 많은 곳(≥1000)인데 신규가 그 절반 미만이면 다른(작은)
+            //   리스팅으로 보고 스킵 — 유명점 데이터 보존. (네이버 리뷰수는 실제로 반토막나지 않음)
+            $exRev = (int)$this->pdo->query('SELECT review_count FROM place WHERE id = ' . (int)$dup['id'])->fetchColumn();
+            if ($exRev >= 1000 && $review < $exRev * 0.5) {
+                return ['name' => $name, 'action' => 'skip', 'id' => $dup['id'], 'match' => $dup['name'],
+                        'msg' => "mismatch guard (기존 리뷰 {$exRev} ≫ 신규 {$review})"];
+            }
             if (!$write) {
                 return ['name' => $name, 'action' => 'enrich', 'id' => $dup['id'], 'match' => $dup['name'], 'dist_m' => $dup['dist_m'], 'review' => $review];
             }
@@ -624,9 +651,219 @@ class NaverPlaceCollector
         ]);
     }
 
-    // ── 중복 판정 (place_review.php 의 findDuplicate + 보수 재검증과 동일 규칙) ──
-    private function findDuplicate(string $name, float $lat, float $lng, ?string $category = null): ?array
+    // ============================================================
+    //  정합(reconcile) — 소멸 유명점 재분류
+    //    이번 회차에 stat 이 사라진 유명점(전월 리뷰>=임계)을 업소명으로 직접검색:
+    //      · 나옴(naver_id 일치 or 이름접두+300m+리뷰>=50%) → 이번 회차 실값으로 복구(recordStat)
+    //        = "지역검색 100컷 누락"을 되살림.
+    //      · 안나옴 → 1차는 감시목록 등록(보류), 다음 회차에도 안나오면 2차=폐업으로 place 삭제.
+    //        (네이버 일시적 누락으로 인한 오삭제를 2회 확인으로 방지)
+    //      · fetch 실패(429/빈응답) → 건드리지 않고 다음 호출 재시도.
+    // ============================================================
+    const RECON_MIN = ['food' => 1000, 'stay' => 300, 'camping' => 200];
+
+    /** 'YYYY-MM' → 직전 달 'YYYY-MM'. */
+    public static function prevPeriod(string $period): string
     {
+        if (!preg_match('/^(\d{4})-(\d{2})$/', $period, $mm)) return $period;
+        $y = (int)$mm[1]; $m = (int)$mm[2] - 1;
+        if ($m < 1) { $m = 12; $y--; }
+        return sprintf('%04d-%02d', $y, $m);
+    }
+
+    private static function havMeters(float $la1, float $lo1, float $la2, float $lo2): float
+    {
+        $R = 6371000.0;
+        $dLa = deg2rad($la2 - $la1); $dLo = deg2rad($lo2 - $lo1);
+        $a = sin($dLa / 2) ** 2 + cos(deg2rad($la1)) * cos(deg2rad($la2)) * sin($dLo / 2) ** 2;
+        return $R * 2 * atan2(sqrt($a), sqrt(1 - $a));
+    }
+
+    /**
+     * 소멸 후보 목록.
+     *   $watched=false(1차): 전월 stat(리뷰>=min) 있고 이번달 stat 없음 + 아직 감시목록에 없음.
+     *   $watched=true (2차): 감시목록(이전 회차 1차) 중 이번달 여전히 stat 없음.
+     */
+    private function reconcileList(string $period, string $prev, string $category, int $min, bool $watched): array
+    {
+        if ($watched) {
+            $sql = "SELECT w.place_id, w.prev_review, w.naver_id,
+                           COALESCE(w.name, p.name) AS sname,
+                           p.name AS pname, p.lat, p.lng, p.region_lv1, p.region_lv2
+                      FROM naver_reconcile_watch w
+                      JOIN place p ON p.id = w.place_id
+                     WHERE w.category = :c AND w.missed_period < :cur1
+                       AND NOT EXISTS (SELECT 1 FROM place_naver_stat s
+                                        WHERE s.place_id = w.place_id AND s.period = :cur2 AND s.category = :c2)
+                     ORDER BY w.prev_review DESC";
+            $st = $this->pdo->prepare($sql);
+            $st->execute([':c' => $category, ':c2' => $category, ':cur1' => $period, ':cur2' => $period]);
+            return $st->fetchAll(PDO::FETCH_ASSOC);
+        }
+        $sql = "SELECT pv.place_id, pv.review AS prev_review, pv.naver_id, pv.name AS sname,
+                       p.name AS pname, p.lat, p.lng, p.region_lv1, p.region_lv2
+                  FROM place_naver_stat pv
+                  JOIN place p ON p.id = pv.place_id
+                 WHERE pv.period = :prev AND pv.category = :c AND pv.review >= :min
+                   AND NOT EXISTS (SELECT 1 FROM place_naver_stat s
+                                    WHERE s.place_id = pv.place_id AND s.period = :cur AND s.category = :c2)
+                   AND NOT EXISTS (SELECT 1 FROM naver_reconcile_watch w WHERE w.place_id = pv.place_id)
+                 ORDER BY pv.review DESC";
+        $st = $this->pdo->prepare($sql);
+        $st->execute([':prev' => $prev, ':cur' => $period, ':c' => $category, ':c2' => $category, ':min' => $min]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 업소명 직접검색으로 후보를 찾는다. 반환 status = found(m=매칭 레코드) | closed | fail(http). */
+    private function reconcileFind(array $r, string $category): array
+    {
+        $res = $this->fetchRegion((string)$r['sname'], $category);
+        if (!$res['ok']) return ['status' => 'fail', 'http' => $res['http']];
+        $tn   = self::dupNorm((string)$r['sname']);
+        $tnid = trim((string)($r['naver_id'] ?? ''));
+        $tRev = (int)($r['prev_review'] ?? 0);
+        $tlat = (float)$r['lat']; $tlng = (float)$r['lng'];
+        $nidHit = null; $strong = null;
+        foreach ($res['items'] as $it) {
+            $inid = trim((string)($it['nid'] ?? ''));
+            if ($tnid !== '' && $inid === $tnid) {
+                $it['_rev'] = (int)$it['vrev'] + (int)$it['brev']; $nidHit = $it; break;
+            }
+            $en = self::dupNorm((string)$it['name']);
+            $nameEq = ($en === $tn) ||
+                      (mb_strlen($tn) >= 3 && mb_strlen($en) >= 3 &&
+                       (mb_strpos($en, $tn) !== false || mb_strpos($tn, $en) !== false));
+            if (!$nameEq || empty($it['lat']) || empty($it['lng'])) continue;
+            $d = self::havMeters($tlat, $tlng, (float)$it['lat'], (float)$it['lng']);
+            $rev = (int)$it['vrev'] + (int)$it['brev'];
+            if ($d <= 300 && $rev >= $tRev * 0.5) {
+                if ($strong === null || $rev > $strong['_rev']) { $it['_rev'] = $rev; $strong = $it; }
+            }
+        }
+        $m = $nidHit ?? $strong;
+        return $m ? ['status' => 'found', 'm' => $m] : ['status' => 'closed'];
+    }
+
+    /** 나옴 → place 품질컬럼 + 이번 회차 stat 을 실값으로 복구(오매칭 가드 없이 = naver_id/이름 확정 매칭). */
+    private function reconcileApplyFound(int $pid, array $m, string $period, string $category, ?string $region): void
+    {
+        $nid  = trim((string)($m['nid'] ?? ''));
+        $rev  = (int)($m['_rev'] ?? ((int)($m['vrev'] ?? 0) + (int)($m['brev'] ?? 0)));
+        $vis  = (int)($m['vrev'] ?? 0); $blog = (int)($m['brev'] ?? 0);
+        $score = (isset($m['score']) && $m['score'] !== null && $m['score'] !== '') ? (float)$m['score'] : null;
+        $saveN = self::num($m['save'] ?? null);
+        $nv = array_filter([
+            'id' => $nid ?: null, 'score' => $score, 'review' => $rev ?: null,
+            'visitor' => $vis, 'blog' => $blog,
+            'save' => (isset($m['save']) && $m['save'] !== '' ? (string)$m['save'] : null),
+            'cat'  => (!empty($m['ncat']) ? $m['ncat'] : null),
+            'url'  => ($nid ? "https://map.naver.com/p/entry/place/{$nid}" : null),
+        ], fn($v) => $v !== null && $v !== '');
+        $this->pdo->prepare(
+            "UPDATE place SET naver_id = :nid, review_count = :rc, score = COALESCE(:sc, score),
+                save_count = :sv,
+                attributes = JSON_SET(COALESCE(attributes, JSON_OBJECT()), '$.naver', JSON_EXTRACT(:nv, '$')),
+                updated_at = NOW() WHERE id = :id"
+        )->execute([':nid' => $nid ?: null, ':rc' => $rev, ':sc' => $score, ':sv' => $saveN,
+                    ':nv' => json_encode($nv, JSON_UNESCAPED_UNICODE), ':id' => $pid]);
+        $this->recordStat($nid, $period, $pid, [
+            'score' => $score, 'review' => $rev, 'visitor' => $vis, 'blog' => $blog, 'save' => $saveN,
+            'name' => ($m['name'] ?? null), 'region' => $region, 'category' => $category,
+        ]);
+    }
+
+    private function watchAdd(int $pid, string $category, string $period, int $prevReview, string $name, string $nid): void
+    {
+        $this->pdo->prepare(
+            "INSERT INTO naver_reconcile_watch (place_id, category, missed_period, naver_id, prev_review, name)
+             VALUES (:pid,:c,:p,:nid,:rev,:nm)
+             ON DUPLICATE KEY UPDATE category=VALUES(category), missed_period=VALUES(missed_period),
+                 naver_id=VALUES(naver_id), prev_review=VALUES(prev_review), name=VALUES(name)"
+        )->execute([':pid' => $pid, ':c' => $category, ':p' => $period, ':nid' => $nid ?: null,
+                    ':rev' => $prevReview, ':nm' => mb_substr($name, 0, 160)]);
+    }
+
+    /**
+     * 이 카테고리·회차 정합 처리. $max=이번 호출 최대 건수, $deadline=microtime 종료시각.
+     * self-drain: 복구=이번회차 stat 생김 / 감시=목록등록 / 삭제=place 제거 → 모두 후보집합에서 이탈.
+     * 남은(fetch실패·예산초과) 건은 다음 호출에서 이어받음.
+     */
+    public function reconcile(string $period, string $category, bool $write, int $max, int $delay, float $deadline, int $minReview = 0): array
+    {
+        $category = self::cat($category);
+        $prev = self::prevPeriod($period);
+        $min  = $minReview > 0 ? $minReview : (self::RECON_MIN[$category] ?? 1000);
+
+        // 0) 감시목록 자동정리(fetch 없이): 이번달 stat 이 생긴 곳(정기수집이 되살림)은 감시해제.
+        $this->pdo->prepare(
+            "DELETE w FROM naver_reconcile_watch w
+              WHERE w.category = :c
+                AND EXISTS (SELECT 1 FROM place_naver_stat s
+                             WHERE s.place_id = w.place_id AND s.period = :cur AND s.category = :c2)"
+        )->execute([':c' => $category, ':c2' => $category, ':cur' => $period]);
+
+        $work = [];
+        foreach ($this->reconcileList($period, $prev, $category, $min, true)  as $r) { $r['_pass'] = 2; $work[] = $r; }
+        foreach ($this->reconcileList($period, $prev, $category, $min, false) as $r) { $r['_pass'] = 1; $work[] = $r; }
+
+        $out = ['recovered'=>0, 'watched'=>0, 'deleted'=>0, 'failed'=>0,
+                'rate'=>false, 'budget'=>false, 'processed'=>0, 'remaining'=>0, 'lines'=>[]];
+        $n = 0; $tot = count($work);
+        foreach ($work as $idx => $r) {
+            if ($n >= $max)                    { $out['budget'] = true; break; }
+            if (microtime(true) > $deadline)   { $out['budget'] = true; break; }
+            $pid  = (int)$r['place_id']; $pass = (int)$r['_pass'];
+            $find = $this->reconcileFind($r, $category);
+
+            if ($find['status'] === 'fail') {
+                $out['failed']++;
+                $out['lines'][] = "  ⚠ {$r['pname']} fetch 실패(http{$find['http']})";
+                if ((int)$find['http'] === 429) { $out['rate'] = true; break; }
+            } elseif ($find['status'] === 'found') {
+                if ($write) {
+                    $this->reconcileApplyFound($pid, $find['m'], $period, $category, (string)$r['region_lv2']);
+                    $this->pdo->prepare("DELETE FROM naver_reconcile_watch WHERE place_id = ?")->execute([$pid]);
+                }
+                $out['recovered']++;
+                $out['lines'][] = "  ✓복구 {$r['pname']} 리뷰 {$r['prev_review']}→{$find['m']['_rev']}";
+            } else { // closed
+                if ($pass === 2) {
+                    if ($write) $this->pdo->prepare("DELETE FROM place WHERE id = ?")->execute([$pid]); // CASCADE
+                    $out['deleted']++;
+                    $out['lines'][] = "  ✗삭제(2차) {$r['pname']} (전월 {$r['prev_review']}) — 폐업 확정";
+                } else {
+                    if ($write) $this->watchAdd($pid, $category, $period, (int)$r['prev_review'], (string)$r['sname'], (string)($r['naver_id'] ?? ''));
+                    $out['watched']++;
+                    $out['lines'][] = "  ⏳감시(1차) {$r['pname']} (전월 {$r['prev_review']}) — 다음 회차 재확인";
+                }
+            }
+            $n++;
+            if ($delay > 0 && $idx < $tot - 1) sleep($delay);
+        }
+        $out['processed'] = $n;
+        // 남은 작업(예산·429로 미처리 + fetch실패 잔존) 재계산.
+        $out['remaining'] = count($this->reconcileList($period, $prev, $category, $min, true))
+                          + count($this->reconcileList($period, $prev, $category, $min, false));
+        return $out;
+    }
+
+    // ── 중복 판정 (place_review.php 의 findDuplicate + 보수 재검증과 동일 규칙) ──
+    private function findDuplicate(string $name, float $lat, float $lng, ?string $category = null, string $nid = ''): ?array
+    {
+        // 0) naver_id 정확 매칭 — 네이버 place id 는 업소 고유·안정키. 상호/분류가 바뀌어도
+        //    같은 업소이며 리뷰 이력도 이어진다(예: 정다운식당→희경, 리뷰 27,656→27,694 승계).
+        //    이름·좌표 기반 매칭이 놓치는 개명/이전을 잡아 '오라우팅'(같은 업소가 새 place 로 중복 생성)을 막는다.
+        //    ★분류 무관 조회(맛집이 travel 등 다른 분류로 기존 등록된 경우도 동일 업소로 인식).
+        //    ※ 소규모 부속 리스팅(○○cafe 등)은 naver_id 가 달라 여기서 안 걸리고, 이름매칭 경로의
+        //      리뷰격차 가드(ingestOne)가 계속 차단한다.
+        if ($nid !== '') {
+            $st = $this->pdo->prepare("SELECT id, name FROM place WHERE naver_id = ? LIMIT 1");
+            $st->execute([$nid]);
+            if ($row = $st->fetch(PDO::FETCH_ASSOC)) {
+                return ['id' => (int)$row['id'], 'name' => $row['name'], 'dist_m' => 0];
+            }
+        }
+        // 1) 이름 + 좌표(250m) 매칭 — naver_id 가 없거나(신규 업소) 아직 place 에 미기록일 때.
         $tn = self::dupNorm($name);
         if ($tn === '') return null;
         $fc = $this->place->searchNearby($lat, $lng, 0.3, $category);
@@ -675,7 +912,37 @@ class NaverPlaceCollector
                          ->fetchAll(PDO::FETCH_COLUMN);
     }
 
-    /** 수집된 지역(region·시군구) 목록 — 가나다순. 지역창 자동완성용. category 지정 시 그 카테고리만. */
+    // 시도(광역) 검색용 — region 스냅샷은 시군구뿐이라 "대전" 등 시도로는 안 걸린다.
+    //  시도명을 입력하면 place.address 접두로 매칭한다. 도명개정(전북특별자치도 등)·풀네임 혼재를
+    //  address 실측(_diag_sido)으로 확정한 접두 목록. cf. places.php 의 plRegionLock 과 동일 발상.
+    private const SIDO_PREFIX = [
+        '서울' => ['서울'], '부산' => ['부산'], '대구' => ['대구'], '인천' => ['인천'], '광주' => ['광주'],
+        '대전' => ['대전'], '울산' => ['울산'], '세종' => ['세종'], '경기' => ['경기'], '강원' => ['강원'],
+        '충북' => ['충청북도', '충북'], '충남' => ['충청남도', '충남'],
+        '전북' => ['전북', '전라북도'], '전남' => ['전라남도', '전남'],
+        '경북' => ['경상북도', '경북'], '경남' => ['경상남도', '경남'], '제주' => ['제주'],
+    ];
+    private const SIDO_ALIAS = [
+        '서울특별시' => '서울', '부산광역시' => '부산', '대구광역시' => '대구', '인천광역시' => '인천',
+        '광주광역시' => '광주', '대전광역시' => '대전', '울산광역시' => '울산',
+        '세종특별자치시' => '세종', '세종시' => '세종', '경기도' => '경기',
+        '강원도' => '강원', '강원특별자치도' => '강원',
+        '충청북도' => '충북', '충청남도' => '충남', '전라북도' => '전북', '전북특별자치도' => '전북',
+        '전라남도' => '전남', '경상북도' => '경북', '경상남도' => '경남',
+        '제주도' => '제주', '제주특별자치도' => '제주',
+    ];
+
+    /** 입력이 시도(단축·풀·별칭)면 주소 접두 목록 반환, 아니면 [] (=시군구로 취급). */
+    public static function sidoPrefixes(string $in): array
+    {
+        $in = trim($in);
+        if ($in === '') return [];
+        if (isset(self::SIDO_PREFIX[$in])) return self::SIDO_PREFIX[$in];
+        if (isset(self::SIDO_ALIAS[$in])) return self::SIDO_PREFIX[self::SIDO_ALIAS[$in]];
+        return [];
+    }
+
+    /** 수집된 지역 목록 — 지역창 자동완성용. 시도(광역) 17개 + 시군구(가나다순). category 지정 시 그 카테고리만. */
     public function regions(?string $category = null): array
     {
         if ($category !== null) {
@@ -684,12 +951,15 @@ class NaverPlaceCollector
                   WHERE category = ? AND region IS NOT NULL AND region <> '' ORDER BY region"
             );
             $st->execute([self::cat($category)]);
-            return $st->fetchAll(PDO::FETCH_COLUMN);
+            $gu = $st->fetchAll(PDO::FETCH_COLUMN);
+        } else {
+            $gu = $this->pdo->query(
+                "SELECT DISTINCT region FROM place_naver_stat
+                  WHERE region IS NOT NULL AND region <> '' ORDER BY region"
+            )->fetchAll(PDO::FETCH_COLUMN);
         }
-        return $this->pdo->query(
-            "SELECT DISTINCT region FROM place_naver_stat
-              WHERE region IS NOT NULL AND region <> '' ORDER BY region"
-        )->fetchAll(PDO::FETCH_COLUMN);
+        // 시도명을 앞에(자동완성 상단) — "대전" 입력 시 대전 전체 검색 가능
+        return array_values(array_unique(array_merge(array_keys(self::SIDO_PREFIX), $gu)));
     }
 
     // ============================================================
@@ -776,8 +1046,11 @@ class NaverPlaceCollector
         if ($period === '') return ['period' => '', 'rows' => [], 'total' => 0];
 
         $sortable = ['d_review','d_score','d_save','d_visitor','d_blog',
-                     'review','score','save','visitor','blog','total_score'];
+                     'review','score','save','visitor','blog','total_score',
+                     'rank_up','rank_down'];              // rank_* = 종합순위 전월대비 급등/급락
         $sort = in_array(($opt['sort'] ?? ''), $sortable, true) ? $opt['sort'] : 'total_score';
+        $isMove = ($sort === 'rank_up' || $sort === 'rank_down');
+        $metric = $isMove ? 'total_score' : $sort;         // 실제 랭킹/정렬 기준 컬럼
         $dir  = (strtolower((string)($opt['dir'] ?? 'desc')) === 'asc') ? 'ASC' : 'DESC';
         $limit  = max(1, min(500, (int)($opt['limit'] ?? 100)));
         $offset = max(0, (int)($opt['offset'] ?? 0));
@@ -785,7 +1058,19 @@ class NaverPlaceCollector
         $where = ['period = :period'];
         $args  = [':period' => $period];
         if (!empty($opt['category'])) { $where[] = 'category = :category'; $args[':category'] = self::cat((string)$opt['category']); }
-        if (!empty($opt['region'])) { $where[] = 'region LIKE :region'; $args[':region'] = '%' . $opt['region'] . '%'; }
+        if (!empty($opt['region'])) {
+            // 시군구는 region 스냅샷 LIKE. 시도(대전 등)면 place.address 접두로도 매칭(region 엔 시도가 없음).
+            $rg = trim((string)$opt['region']);
+            $conds = ['region LIKE :region']; $args[':region'] = '%' . $rg . '%';
+            $i = 0;
+            foreach (self::sidoPrefixes($rg) as $pf) {
+                $k = ':sidopf' . $i;
+                $conds[] = "EXISTS(SELECT 1 FROM place p WHERE p.id = t.place_id AND p.address LIKE {$k})";
+                $args[$k] = $pf . '%';
+                $i++;
+            }
+            $where[] = '(' . implode(' OR ', $conds) . ')';
+        }
         if (!empty($opt['min_review'])) { $where[] = 'review >= :minr'; $args[':minr'] = (int)$opt['min_review']; }
         $whereSql = implode(' AND ', $where);
 
@@ -837,7 +1122,47 @@ class NaverPlaceCollector
 
         $total = (int)$this->prepRun("SELECT COUNT(*) FROM ({$base}) c", $args)->fetchColumn();
 
-        $sql = "{$base} ORDER BY ({$sort}) IS NULL, {$sort} {$dir}, review DESC LIMIT {$limit} OFFSET {$offset}";
+        // ── 전월대비 순위 변동 ─────────────────────────────────────────────
+        //   cur_rank  = 현재 정렬기준의 이번 회차 순위(필터 전체 집단 기준·RANK)
+        //   prev_rank = 같은 기준으로 지난달 값을 매긴 순위(현재 집단 내 · 신규는 NULL)
+        //   값(review 등)·종합점수 정렬에만 의미 있음. 증가순(d_*) 정렬은 prev_rank NULL.
+        //   ★prev_<metric> = 현재값 - 델타 (예: review - d_review). prev_total 은 이미 산출됨.
+        $prevRankMap = [
+            'total_score' => 'prev_total',
+            'review'  => '(review  - d_review)',
+            'score'   => '(score   - d_score)',
+            'save'    => '(save    - d_save)',
+            'visitor' => '(visitor - d_visitor)',
+            'blog'    => '(blog    - d_blog)',
+        ];
+        $curRankExpr  = $metric;                       // 랭킹 기준(급등/급락이면 종합점수)
+        $prevRankExpr = $prevRankMap[$metric] ?? null; // 증가순(d_*) 정렬이면 순위변동 없음
+        // ★순위(RANK)는 표시 순서와 반드시 동일한 정렬을 써야 한다. 표시 ORDER BY 의 타이브레이크
+        //   (review DESC, place_id) 를 RANK 에도 넣어 동점끼리 유니크 순위를 매긴다. 안 그러면
+        //   표시 순번(리뷰순 12·13·14)과 순위(동점 12·12·12)가 어긋나 배지가 위치변화와 반대로 보인다.
+        //   prev_rank 는 지난달 표시순서 = 지난달 값(prev_*) 기준으로 동일 규칙 적용(prev_review = review - d_review).
+        $curTie  = 'review DESC, place_id ASC';
+        $prevTie = '(review - d_review) DESC, place_id ASC';
+        $rankSel  = "RANK() OVER (ORDER BY ({$curRankExpr}) IS NULL, ({$curRankExpr}) {$dir}, {$curTie}) AS cur_rank";
+        $rankSel .= $prevRankExpr !== null
+            ? ", CASE WHEN b.prev_period IS NULL THEN NULL
+                     ELSE RANK() OVER (ORDER BY ({$prevRankExpr}) IS NULL, ({$prevRankExpr}) {$dir}, {$prevTie}) END AS prev_rank"
+            : ", NULL AS prev_rank";
+
+        $inner = "SELECT b.*, {$rankSel} FROM ({$base}) b";
+        if ($isMove) {
+            // 급등순=많이 오른 순 / 급락순=많이 내린 순. 신규(prev_rank NULL)는 이동값 없어 제외.
+            $mvDir = ($sort === 'rank_up') ? 'DESC' : 'ASC';
+            $sql = "SELECT w.*, (w.prev_rank - w.cur_rank) AS rank_move
+                    FROM ({$inner}) w
+                    WHERE w.prev_rank IS NOT NULL
+                    ORDER BY (w.prev_rank - w.cur_rank) {$mvDir}, w.cur_rank ASC
+                    LIMIT {$limit} OFFSET {$offset}";
+        } else {
+            $sql = "SELECT w.* FROM ({$inner}) w
+                    ORDER BY ({$sort}) IS NULL, {$sort} {$dir}, review DESC, place_id ASC
+                    LIMIT {$limit} OFFSET {$offset}";
+        }
         $rows = $this->prepRun($sql, $args)->fetchAll(PDO::FETCH_ASSOC);
         return ['period' => $period, 'rows' => $rows, 'total' => $total];
     }

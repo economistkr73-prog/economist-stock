@@ -163,6 +163,55 @@ if (!empty($_GET['purge'])) {
     exit;
 }
 
+// ── 정합(reconcile): 이 회차 소멸 유명점 재분류 ──────────────────────────────
+//    직접검색 나옴=이번 회차 실값 복구(100컷 누락 되살림) / 안나옴 1차=감시 등록,
+//    다음 회차에도 안나오면 2차=폐업 place 삭제(FK CASCADE 로 추이·ref·태그·마커 정리).
+//    ★게이트: 이 카테고리·회차 지역수집이 완료(pending·error 0)돼야 실행(미완료면 소멸 오판).
+//    ※ 정합은 수집 완료 후 이 크론의 "완료 이후" fire 에서 자동 수행되므로(하단 완료 분기),
+//      별도 cron 등록은 필요 없다. 이 reconcile=1 모드는 수동 실행/디버깅용.
+//      ?key=…&reconcile=1&cat=food&max=15&delay=4&max_sec=150  (dry=1 이면 판정만·DB 미변경)
+if (!empty($_GET['reconcile'])) {
+    $g = $pdo->prepare(
+        "SELECT l.status, COUNT(*) c FROM naver_collect_log l
+           JOIN naver_collect_region r ON r.id = l.region_id
+          WHERE l.period = :p AND r.category = :cat GROUP BY l.status"
+    );
+    $g->execute([':p' => $period, ':cat' => $category]);
+    $gs = ['pending' => 0, 'done' => 0, 'error' => 0];
+    foreach ($g->fetchAll(PDO::FETCH_ASSOC) as $row) $gs[$row['status']] = (int)$row['c'];
+    $prev = NaverPlaceCollector::prevPeriod($period);
+
+    echo "<pre style='font-family:monospace;font-size:14px;line-height:1.6'>";
+    echo "🔧 네이버 {$catLabel} 정합(reconcile) — 회차 {$period} (전월 {$prev} 대비)\n";
+    echo str_repeat('─', 52) . "\n";
+    if (array_sum($gs) === 0 || $gs['pending'] > 0 || $gs['error'] > 0) {
+        echo "정합 보류: 이 회차 지역수집 미완료 (done {$gs['done']} / pending {$gs['pending']} / error {$gs['error']}).\n";
+        echo "→ 지역수집 완료 후 다시 호출하세요.\n</pre>";
+        exit;
+    }
+    $deadline = $START + $maxSec;
+    try {
+    $R = $col->reconcile($period, $category, !$dry, $maxReg, $delaySec, $deadline, (int)($_GET['min'] ?? 0));
+    } catch (\Throwable $e) { echo "RECON ERROR: ".$e->getMessage()." @ ".basename($e->getFile()).":".$e->getLine()."\n</pre>"; exit; }
+    echo "복구(나옴) {$R['recovered']} / 감시등록 1차 {$R['watched']} / 삭제(2차 폐업) {$R['deleted']}"
+       . " / fetch실패 {$R['failed']}" . ($dry ? "  (DRY)" : "") . "\n";
+    echo "이번 호출 처리 {$R['processed']}건 · 남은 작업 {$R['remaining']}건"
+       . ($R['rate'] ? "  ⚠️429 감지—중단(다음 호출 재시도)" : ($R['budget'] ? "  (예산 도달—이어받기)" : "")) . "\n";
+    if ($R['lines']) echo str_repeat('─', 52) . "\n" . implode("\n", array_map('htmlspecialchars', $R['lines'])) . "\n";
+
+    // 드레인 완료 알림(Pushover): 남은 0 & 이번 호출에 실제 작업 & 비dry & Notify 존재.
+    if (!$dry && $R['remaining'] === 0 && ($R['recovered'] + $R['deleted'] + $R['watched']) > 0 && class_exists('Notify')) {
+        $msg = "🔧 네이버 {$catLabel} 정합 완료 — 회차 {$period}\n"
+             . "복구 {$R['recovered']} / 감시 {$R['watched']} / 폐업삭제 {$R['deleted']}";
+        Notify::send($msg, "https://economist.kr/naver_trend.php?cat={$category}", [
+            "title" => "네이버 {$catLabel} 정합 완료 ({$period})",
+        ]);
+        echo "📲 정합 완료 알림(Pushover) 발송함.\n";
+    }
+    echo "</pre>";
+    exit;
+}
+
 // 지역 마스터 시드(이 카테고리만, 최초 1회 자동·reseed=1 이면 재확인)
 $seeded = $col->seedRegions($category);
 
@@ -331,6 +380,36 @@ if ($stat['pending'] === 0 && $stat['error'] === 0) {
             "title" => "네이버 {$catLabel} 수집 완료 ({$period})",
         ]);
         echo "📲 완료 알림(Pushover) 발송함.\n";
+    }
+
+    // ── 자동 정합(reconcile): 수집이 끝난 뒤 남는 시간예산으로 소멸 유명점 재분류 ─────
+    //    별도 크론 등록 없이, 이 수집 크론의 "완료 이후" fire 들이 정합까지 마무리한다.
+    //    (완료 분기 안이라 게이트=수집완료는 이미 충족.) self-drain 이라 여러 fire 로 나눠
+    //    처리되고, 다 끝나면 이후 fire 에선 처리 0(조용). dry·시간예산 초과 시엔 건너뜀.
+    if (!$dry && !$budgetHit && (microtime(true) - $START) < $maxSec - 5) {
+        try {
+            $deadline = $START + $maxSec;
+            $R = $col->reconcile($period, $category, true, max(1, $maxReg), $delaySec, $deadline, (int)($_GET['min'] ?? 0));
+            if (($R['processed'] > 0) || ($R['remaining'] > 0)) {
+                echo str_repeat('─', 52) . "\n";
+                echo "🔧 자동 정합: 복구 {$R['recovered']} / 감시 1차 {$R['watched']} / 삭제 2차 {$R['deleted']}"
+                   . " / 실패 {$R['failed']} · 남은 {$R['remaining']}"
+                   . ($R['rate'] ? "  ⚠️429" : ($R['budget'] ? "  (예산도달)" : "")) . "\n";
+                if ($R['lines']) echo implode("\n", array_map('htmlspecialchars', $R['lines'])) . "\n";
+            }
+            // 드레인 완료 + 이번에 실제 작업 → Pushover 1회(삭제/복구가 있었음을 알림)
+            if ($R['remaining'] === 0 && ($R['recovered'] + $R['deleted'] + $R['watched']) > 0 && class_exists('Notify')) {
+                Notify::send(
+                    "🔧 네이버 {$catLabel} 정합 완료 — 회차 {$period}\n"
+                    . "복구 {$R['recovered']} / 감시 {$R['watched']} / 폐업삭제 {$R['deleted']}",
+                    "https://economist.kr/naver_trend.php?cat={$category}",
+                    ["title" => "네이버 {$catLabel} 정합 완료 ({$period})"]
+                );
+                echo "📲 정합 완료 알림(Pushover) 발송함.\n";
+            }
+        } catch (\Throwable $e) {
+            echo "⚠️ 자동 정합 오류(수집엔 영향 없음): " . htmlspecialchars($e->getMessage()) . "\n";
+        }
     }
 } elseif ($stat['pending'] > 0) {
     echo "↻ pending {$stat['pending']}개 남음. 같은 URL 을 다시 호출해 이어서 처리하세요.\n";

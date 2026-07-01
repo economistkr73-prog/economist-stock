@@ -2137,10 +2137,14 @@ function plRenderList(feats) {
     body.innerHTML = secHtml;
     // 통합검색에서 우리 DB 장소를 골랐으면, 그 마커를 강조 + 상세패널 표시
     if (plPendingFocusId != null) {
+        var pfFound = false;
         for (var k = 0; k < feats.length; k++) {
-            if (feats[k].properties && feats[k].properties.id == plPendingFocusId) { plFocus(k); break; }
+            if (feats[k].properties && feats[k].properties.id == plPendingFocusId) { plFocus(k); pfFound = true; break; }
         }
+        var pfId = plPendingFocusId;
         plPendingFocusId = null;
+        // 리뷰 큐레이션 필터에 걸려 결과에 없으면 → 그 장소만 강제로 가져와 표시(검색한 곳은 항상 보이게)
+        if (!pfFound) plForceShowPlace(pfId);
     }
     plMergeHeadRender();   // 상단 병합 버튼 상태 동기화 (행 mc-sel 은 렌더 시 반영됨)
     // 경로 모드 중 혹시 새 베이스 마커가 생기면 즉시 숨김(경로 주변 오버레이는 건드리지 않음)
@@ -2308,6 +2312,33 @@ function plRehighlight(id) {
         }
     }
     plActive = -1;   // 결과에서 사라졌으면 강조 해제
+}
+
+// 통합검색으로 지목한 장소가 리뷰 큐레이션 필터에 걸려 검색 결과에 없을 때,
+// 그 장소만 단건 조회해 마커+리스트에 강제 추가하고 포커스한다(검색한 곳은 항상 보이도록).
+function plForceShowPlace(id) {
+    if (!id) return;
+    fetch(plApiUrl({ module: 'place', action: 'place_one', id: id }))
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+            if (!j || !j.ok || !j.feature) return;
+            for (var k = 0; k < plFeatures.length; k++) {   // 이미 있으면(경합) 그냥 포커스
+                if (plFeatures[k].properties && plFeatures[k].properties.id == id) { plFocus(k); return; }
+            }
+            plFeatures.push(j.feature);
+            plFeatures = plSortFeatures(plFeatures);
+            var rank = {};   // 분류 내 순위 재부여(마커·리스트 번호 일관)
+            plFeatures.forEach(function (f) { var c = f.properties.category || 'etc'; rank[c] = (rank[c] || 0) + 1; f.properties._n = rank[c]; });
+            plClearMarkers();
+            plFeatures.forEach(plAddMarker);
+            plUpdateLabels();
+            plRenderList(plFeatures);
+            plToggleList(true);
+            for (var m = 0; m < plFeatures.length; m++) {
+                if (plFeatures[m].properties && plFeatures[m].properties.id == id) { plFocus(m); break; }
+            }
+        })
+        .catch(function () {});
 }
 
 var CAT_KO = { travel: '여행지', stay: '숙소', restaurant: '맛집', camping: '캠핑장', etc: '기타' };
