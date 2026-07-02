@@ -593,27 +593,18 @@ function api_contacts(string $action, PDO $pdo): void {
             echo json_encode($contact->deleteGroup($d['name'] ?? ''));
             break;
 
-        // CSV(紐낇븿) ?쇨큵 ?깅줉
-        case 'import_csv':
-            $d    = json_decode(file_get_contents('php://input'), true);
-            $rows = $d['rows'] ?? [];
-            if (!is_array($rows) || empty($rows)) {
-                echo json_encode(['ok' => false, 'msg' => '?깅줉???곗씠?곌? ?놁뒿?덈떎.']); break;
-            }
-            echo json_encode(['ok' => true, 'data' => $contact->importRows($rows)]);
-            break;
-
-        // 구글 드라이브 CSV 자동 가져오기
-        case 'import_drive':
-            if (file_exists("./env/kakao.inc")) require_once "./env/kakao.inc";
-            $r = $contact->importFromDrive();
-            if (isset($r['error'])) { echo json_encode(['ok'=>false,'msg'=>$r['error']]); break; }
-            echo json_encode(['ok' => true, 'data' => $r]);
-            break;
-
-        case 'get':
-            $id = (int)($_GET['id'] ?? 0);
-            echo json_encode(['ok' => true, 'data' => $contact->getById($id)]);
+        // 구글 드라이브 명함 이미지 → Claude Vision 추출 → 주소록 적재
+        case 'scan_cards':
+            if (file_exists("./env/gdrive.inc"))    require_once "./env/gdrive.inc";
+            if (file_exists("./env/anthropic.inc")) require_once "./env/anthropic.inc";
+            @set_time_limit(300);
+            @ignore_user_abort(true); // 배치 도중 클라이언트가 끊겨도 그 배치는 끝까지 처리·기록
+            if (function_exists('session_write_close')) session_write_close(); // 긴작업 세션락 해제
+            $d   = json_decode(file_get_contents('php://input'), true);
+            $lim = (int)($d['limit'] ?? 15);
+            $r2  = $contact->scanCardsFromDrive($lim);
+            if (isset($r2['error'])) { echo json_encode(['ok'=>false,'msg'=>$r2['error']]); break; }
+            echo json_encode(['ok' => true, 'data' => $r2]);
             break;
 
         case 'create':
@@ -641,12 +632,6 @@ function api_contacts(string $action, PDO $pdo): void {
         case 'history':
             $id = (int)($_GET['id'] ?? 0);
             echo json_encode(['ok' => true, 'data' => $contact->getScheduleHistory($id)]);
-            break;
-
-        // ?쇱젙??李몄꽍??紐⑸줉
-        case 'attendees':
-            $sid = (int)($_GET['schedule_id'] ?? 0);
-            echo json_encode(['ok' => true, 'data' => $contact->getAttendees($sid)]);
             break;
 
         // ?몃Ъ蹂?湲곕뀗??紐⑸줉

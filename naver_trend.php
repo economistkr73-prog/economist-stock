@@ -9,7 +9,7 @@ $NT_NAVER_KEY = defined('NAVER_MAPS_CLIENT_ID') ? NAVER_MAPS_CLIENT_ID : '';
 
 // ── 한시적 공개 공유: 비로그인 게스트 읽기전용 보기 (로그인 게이트보다 먼저) ──
 $NT_SHARE = false; $NT_SHARE_CAT = 'food'; $NT_SHARE_EXP = '';
-$NT_SHARE_REGION = ''; $NT_SHARE_MINREV = 0; $NT_SHARE_SORT = 'total_score';
+$NT_SHARE_REGION = ''; $NT_SHARE_MINREV = 0; $NT_SHARE_SORT = 'total_score'; $NT_SHARE_TAGS = [];
 $shareToken = $_GET['share'] ?? '';
 if ($shareToken !== '') {
     $col = new NaverPlaceCollector($pdo);
@@ -22,6 +22,8 @@ if ($shareToken !== '') {
         $NT_SHARE_REGION = (string)($sh['region'] ?? '');
         $NT_SHARE_MINREV = (int)($sh['min_review'] ?? 0);
         $NT_SHARE_SORT = (string)($sh['sort'] ?? 'total_score');
+        // 공유시점 태그(파이프 조인) → 배열. 게스트 헤더·목록 필터 고정용.
+        $NT_SHARE_TAGS = array_values(array_filter(explode('|', (string)($sh['tags'] ?? '')), fn($t) => $t !== ''));
     } else {
         // 만료/무효 링크
         echo '<!DOCTYPE html><meta charset="utf-8"><title>공유 링크 만료</title>';
@@ -43,6 +45,7 @@ echo '<meta charset="utf-8"/><meta name="viewport" content="width=device-width, 
 if ($NT_SHARE) {
     $catLbl = NaverPlaceCollector::CATS[$NT_SHARE_CAT]['label'] ?? '맛집';
     $pgTitle = trim(($NT_SHARE_REGION !== '' ? $NT_SHARE_REGION . ' ' : '') . $catLbl);
+    if ($NT_SHARE_TAGS) $pgTitle .= '(' . implode('·', $NT_SHARE_TAGS) . ')';   // 예: 영등포구 맛집(한식)
     echo '<title>' . htmlspecialchars($pgTitle) . '</title>';
 } else {
     echo '<title>네이버 추이</title>';
@@ -106,6 +109,18 @@ echo <<<'HEAD'
   .nt-tbl th .sar.don { color: #e1234a; font-weight: 700; }                      /* 증가순(Δ)·급등 정렬 */
   .nt-tbl th .sar.down2 { color: #2979ff; font-weight: 700; }                    /* 급락 정렬 */
   .nt-sorthint { color: #9aa6b2; font-size: 12px; }
+  .nt-sortline { text-align: right; margin: -6px 2px 12px; }
+  /* 태그(칩) 필터 바 */
+  .nt-tagbar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: -6px 0 14px; }
+  .nt-tagbar:empty { display: none; }
+  .nt-tagbar .ntt-lbl { font-size: 12px; color: #6a7686; font-weight: 700; margin-right: 2px; }
+  .ntt-chip { font: inherit; font-size: 12.5px; padding: 5px 11px; border: 1px solid #d4dae2; background: #fff;
+              color: #4a5663; border-radius: 999px; cursor: pointer; transition: all .12s; white-space: nowrap; }
+  .ntt-chip:hover { border-color: #2979ff; color: #2979ff; }
+  .ntt-chip.on { background: #2979ff; border-color: #2979ff; color: #fff; font-weight: 700; }
+  .ntt-chip .ntt-c { margin-left: 5px; font-size: 11px; opacity: .65; font-variant-numeric: tabular-nums; }
+  .ntt-more { font: inherit; font-size: 12.5px; padding: 5px 10px; border: none; background: none;
+              color: #2979ff; cursor: pointer; font-weight: 700; }
   .nt-tbl th:first-child, .nt-tbl td:first-child { text-align: center; color: #aab3bf; width: 48px; }
   .nt-tbl td.rank { line-height: 1.2; font-weight: 700; color: #6a7686; }
   .rkmv { display: block; font-size: 10.5px; font-weight: 800; margin-top: 1px; font-variant-numeric: tabular-nums; }
@@ -172,7 +187,7 @@ echo <<<'HEAD'
   .ntiw-b { margin-top: 8px; display: flex; gap: 12px; }
   .ntiw-b a { font-size: 12.5px; color: #2979ff; text-decoration: none; font-weight: 700; cursor: pointer; }
   /* 게스트(공유) 화면: 분류 탭·컨트롤바(회차·지역·최소리뷰·정렬·지도 기준·공유) 전부 숨김 — 공유시점 고정 보기 */
-  body.nt-guest #ntTabs, body.nt-guest .nt-ctl { display: none !important; }
+  body.nt-guest #ntTabs, body.nt-guest .nt-ctl, body.nt-guest .nt-sortline, body.nt-guest .nt-tagbar { display: none !important; }
   @media (max-width: 720px) {
     .nt-tbl .col-opt { display: none; }   /* 좁은 화면: 방문/블로그 숨김 */
   }
@@ -187,6 +202,7 @@ echo '<script>var NT_SHARE=' . ($NT_SHARE ? 'true' : 'false')
    . ', NT_SHARE_REGION=' . json_encode($NT_SHARE_REGION)
    . ', NT_SHARE_MINREV=' . (int)$NT_SHARE_MINREV
    . ', NT_SHARE_SORT=' . json_encode($NT_SHARE_SORT)
+   . ', NT_SHARE_TAGS=' . json_encode($NT_SHARE_TAGS, JSON_UNESCAPED_UNICODE)
    . ', NT_NAVER_KEY=' . json_encode($NT_NAVER_KEY) . ';</script>';
 echo <<<'BODY'
 <div class="nt-wrap">
@@ -213,12 +229,13 @@ echo <<<'BODY'
       </select>
     </span>
     <span class="nt-cnt" id="ntCount" title="현재 표(최소리뷰·지역) 필터에 해당하는 곳수"></span>
-    <span class="nt-sorthint">정렬: 헤더 클릭(재클릭=증가순 Δ) · <b>#</b> 클릭=순위 급등/급락순</span>
     <span class="grow"></span>
     <span class="nt-cnt nt-mapcnt" id="ntMapCount" title="지도 표시 기준에 해당하는 마커 곳수(고정)"></span>
     <button type="button" id="ntMapBtn" class="nt-mapbtn" onclick="ntMapModalOpen()" title="지도에 표시할 기준(분류·최소리뷰)을 선택">🗺️ 지도 기준 설정</button>
     <button type="button" id="ntShareBtn" class="nt-sharebtn" onclick="ntShareOpen()" title="이 분류 추이를 비로그인 공개 링크로 공유">🔗 공유</button>
   </div>
+  <div class="nt-sortline"><span class="nt-sorthint">정렬: 헤더 클릭(재클릭=증가순 Δ) · <b>#</b> 클릭=순위 급등/급락순</span></div>
+  <div class="nt-tagbar" id="ntTagBar"></div>
 
   <div id="ntBody"></div>
   <div id="ntMapWrap"><div id="ntMap"></div><div class="nt-mapnote" id="ntMapNote"></div></div>
@@ -254,6 +271,8 @@ var API = '/naver_trend_api.php';
 var ntChart = null;
 var ntView = 'list', ntRows = [];                       // 현재 표시 행(표·지도 공용)
 var ntSort = 'total_score';                             // 현재 정렬 키(헤더 클릭으로 변경 · 값⇄증가순 토글)
+var ntSelTags = [], ntAllTags = [], ntTagsExpanded = false;   // 태그(칩) 필터 상태
+var NT_TAG_TOPN = 18;                                   // 칩 기본 노출 개수(초과분은 더보기)
 // 표 헤더 정의: 값 정렬(v) ⇄ 증가순 델타 정렬(d) 토글. 종합점수는 델타 정렬 없음.
 var NT_COLS = [
   { label:'종합점수', v:'total_score', d:null,        cls:'tot',     title:'평점·리뷰·저장·방문·블로그 가중 종합(0~100)' },
@@ -265,7 +284,7 @@ var NT_COLS = [
 ];
 var ntMap = null, ntMapMarkers = [], ntInfo = null, ntSelRow = null;
 // 게스트(공유) 모드 — PHP 가 주입(미주입 시 false)
-if (typeof NT_SHARE === 'undefined') { var NT_SHARE = false, NT_SHARE_CAT = 'food', NT_SHARE_TOKEN = '', NT_SHARE_REGION = '', NT_SHARE_MINREV = 0, NT_SHARE_SORT = 'total_score'; }
+if (typeof NT_SHARE === 'undefined') { var NT_SHARE = false, NT_SHARE_CAT = 'food', NT_SHARE_TOKEN = '', NT_SHARE_REGION = '', NT_SHARE_MINREV = 0, NT_SHARE_SORT = 'total_score', NT_SHARE_TAGS = []; }
 var SHARE_Q = NT_SHARE ? ('&share=' + encodeURIComponent(NT_SHARE_TOKEN)) : '';   // 게스트 fetch 인증용
 var CAT = NT_SHARE ? NT_SHARE_CAT : ((new URLSearchParams(location.search).get('cat')) || 'food');
 var CAT_LABELS = { food: '맛집', stay: '스테이', camping: '캠핑장' };   // cats API 응답으로 갱신
@@ -287,6 +306,67 @@ function ntCell(val, d, isFloat){
   return '<span class="val">'+nv+'</span>'+ntDelta(d, isFloat);
 }
 
+// onclick 인라인 인자용 이스케이프(백슬래시·작은따옴표) — 태그에 콤마·공백 있어도 안전
+function ntEscAttr(s){ return String(s==null?'':s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+
+// 헤더 문구: "[지역 ]분류[(태그·태그)]" (예: 영등포구 맛집(한식) · 캠핑장(오토캠핑))
+function ntHeadLabel(region, tags){
+  var s = (region ? region + ' ' : '') + ntCatLabel(CAT);
+  if (tags && tags.length) s += '(' + tags.join('·') + ')';
+  return s;
+}
+function ntUpdateHead(){
+  var region = NT_SHARE ? (NT_SHARE_REGION || '') : document.getElementById('ntRegion').value.trim();
+  var lbl = ntHeadLabel(region, ntSelTags);
+  // 소유자 & 필터 없음 → 랜딩 느낌의 "OO 추이" 유지
+  document.getElementById('ntTitle').textContent =
+    (!NT_SHARE && !region && !ntSelTags.length) ? (ntCatLabel(CAT) + ' 추이') : lbl;
+}
+
+// 태그(칩) 목록 로드 — 현 분류·회차의 cuisine 태그를 곳수순으로. 게스트는 칩바 숨김이라 로드 안 함.
+function ntLoadTags(){
+  if (NT_SHARE) return;
+  var p = document.getElementById('ntPeriod').value || '';
+  fetch(API + '?action=tags&cat=' + encodeURIComponent(CAT) + '&period=' + encodeURIComponent(p))
+    .then(function(r){ return r.json(); })
+    .then(function(j){ ntAllTags = j.tags || []; ntRenderTags(); })
+    .catch(function(){ ntAllTags = []; ntRenderTags(); });
+}
+function ntRenderTags(){
+  var bar = document.getElementById('ntTagBar');
+  if (!bar) return;
+  if (NT_SHARE || !ntAllTags.length){ bar.innerHTML = ''; return; }
+  var shown = ntTagsExpanded ? ntAllTags : ntAllTags.slice(0, NT_TAG_TOPN);
+  var inShown = {}; shown.forEach(function(t){ inShown[t.tag] = true; });
+  // 선택됐지만 상위 목록에 없는(접힘·회차변경) 태그도 칩으로 유지
+  var extraSel = ntSelTags.filter(function(t){ return !inShown[t]; });
+  var html = '<span class="ntt-lbl">태그</span>'
+           + '<button class="ntt-chip' + (ntSelTags.length ? '' : ' on') + '" onclick="ntClearTags()">전체</button>';
+  extraSel.forEach(function(tg){
+    html += '<button class="ntt-chip on" onclick="ntToggleTag(\'' + ntEscAttr(tg) + '\')">' + ntEsc(tg) + '</button>';
+  });
+  shown.forEach(function(t){
+    var on = ntSelTags.indexOf(t.tag) >= 0;
+    html += '<button class="ntt-chip' + (on ? ' on' : '') + '" onclick="ntToggleTag(\'' + ntEscAttr(t.tag) + '\')">'
+          + ntEsc(t.tag) + '<span class="ntt-c">' + ntFmt(t.c) + '</span></button>';
+  });
+  if (ntAllTags.length > NT_TAG_TOPN){
+    html += '<button class="ntt-more" onclick="ntToggleTagsExpand()">'
+          + (ntTagsExpanded ? '접기' : ('더보기 +' + (ntAllTags.length - NT_TAG_TOPN))) + '</button>';
+  }
+  bar.innerHTML = html;
+}
+function ntToggleTag(tg){
+  var i = ntSelTags.indexOf(tg);
+  if (i >= 0) ntSelTags.splice(i, 1); else ntSelTags.push(tg);
+  ntRenderTags(); ntLoad();                              // ntLoad 가 ntUpdateHead 호출
+}
+function ntClearTags(){
+  if (!ntSelTags.length) return;
+  ntSelTags = []; ntRenderTags(); ntLoad();
+}
+function ntToggleTagsExpand(){ ntTagsExpanded = !ntTagsExpanded; ntRenderTags(); }
+
 function ntLoad(){
   var p   = document.getElementById('ntPeriod').value;
   var rg  = document.getElementById('ntRegion').value.trim();
@@ -295,8 +375,10 @@ function ntLoad(){
   var q = API + '?action=list&cat=' + encodeURIComponent(CAT)
         + '&period=' + encodeURIComponent(p)
         + '&region=' + encodeURIComponent(rg)
+        + '&tags=' + encodeURIComponent(ntSelTags.join('|'))
         + '&min_review=' + encodeURIComponent(mr)
         + '&sort=' + encodeURIComponent(srt) + '&limit=100' + SHARE_Q;
+  ntUpdateHead();                                        // 헤더에 지역·분류·태그 반영
   document.getElementById('ntBody').innerHTML = '<div class="nt-empty">불러오는 중…</div>';
   fetch(q).then(function(r){ return r.json(); }).then(function(j){
     if (j.error) { document.getElementById('ntBody').innerHTML = '<div class="nt-empty">오류: '+ntEsc(j.error)+'</div>'; return; }
@@ -393,8 +475,8 @@ function ntShareOpen(){
 }
 function ntShareClose(){ document.getElementById('ntShareModal').classList.remove('on'); }
 function ntShareUrl(token){ return location.origin + '/naver_trend.php?share=' + token; }
-// 공유될 제목 미리보기 = "지역 분류"(예: 관악구 맛집) / 지역 없으면 분류만
-function ntShareTitle(region){ return (region ? region + ' ' : '') + ntCatLabel(CAT); }
+// 공유될 제목 미리보기 = "[지역 ]분류[(태그)]"(예: 관악구 맛집(한식))
+function ntShareTitle(region){ return ntHeadLabel(region, ntSelTags); }
 function ntShareRender(token, exp, region){
   var b = document.getElementById('nsBody');
   if (token){
@@ -420,6 +502,7 @@ function ntShareCreate(){
   var ttl = el ? el.value : 604800;
   var q = API + '?action=share_create&cat=' + encodeURIComponent(CAT) + '&ttl=' + encodeURIComponent(ttl)
         + '&region=' + encodeURIComponent(document.getElementById('ntRegion').value.trim())
+        + '&tags=' + encodeURIComponent(ntSelTags.join('|'))
         + '&min_review=' + encodeURIComponent(document.getElementById('ntMinRev').value)
         + '&sort=' + encodeURIComponent(ntSort);
   fetch(q).then(function(r){ return r.json(); })
@@ -551,10 +634,12 @@ document.addEventListener('keydown', function(e){ if(e.key==='Escape'){ ntCloseC
 
 // 카테고리 탭 적용 → 제목·회차 갱신
 function ntApplyCat(){
-  // 제목: 게스트(공유)는 "지역 분류"(예: 관악구 맛집) / 소유자는 "분류 추이"
-  document.getElementById('ntTitle').textContent = NT_SHARE
-    ? ((NT_SHARE_REGION ? NT_SHARE_REGION + ' ' : '') + ntCatLabel(CAT))
-    : (ntCatLabel(CAT) + ' 추이');
+  // 태그(칩)는 분류마다 다르므로 전환 시 초기화. 게스트는 공유시점 태그로 고정.
+  ntSelTags = NT_SHARE ? (NT_SHARE_TAGS || []).slice() : [];
+  ntTagsExpanded = false;
+  ntAllTags = [];
+  ntRenderTags();
+  ntUpdateHead();            // 헤더: "[지역 ]분류[(태그)]" (게스트 공유·소유자 공통)
   Array.prototype.forEach.call(document.querySelectorAll('#ntTabs button'), function(b){
     b.classList.toggle('on', b.getAttribute('data-cat') === CAT);
   });
@@ -567,7 +652,7 @@ function ntApplyCat(){
   ntRenderMapCrit();         // 지도 기준 버튼 라벨 = 현재 탭 분류 기준
   ntLoadMapCount();          // 지도 기준 곳수 = 현재 탭 분류
   ntLoadRegions();           // 지역창 자동완성 목록(현 카테고리 시군구)
-  ntLoadPeriods();
+  ntLoadPeriods();           // 회차 로드 → 확정 후 태그·표 로드(태그는 회차별이라 순서 중요)
 }
 function ntSwitchCat(k){
   if (k === CAT) return;
@@ -590,6 +675,7 @@ function ntLoadPeriods(){
     }
     sel.innerHTML = ps.map(function(p){ return '<option value="'+p+'">'+p+'</option>'; }).join('');
     ntLoad();
+    ntLoadTags();   // 회차 확정 후 태그(칩) 로드 — 캠핑처럼 최신 회차가 다른 분류도 정확히 반영
   });
 }
 
@@ -682,7 +768,8 @@ function ntRenderMapCrit(){
 }
 
 // 컨트롤 이벤트
-['ntPeriod','ntMinRev'].forEach(function(id){ document.getElementById(id).addEventListener('change', ntLoad); });
+document.getElementById('ntMinRev').addEventListener('change', ntLoad);
+document.getElementById('ntPeriod').addEventListener('change', function(){ ntLoadTags(); ntLoad(); });   // 회차 바뀌면 태그 분포도 갱신
 var rgTimer = null;
 document.getElementById('ntRegion').addEventListener('input', function(){
   ntFillRegionList(this.value);                              // 자동완성 후보 갱신(최대 12)

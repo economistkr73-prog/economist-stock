@@ -230,17 +230,6 @@ class Contact {
 
 
     // ── 참석자 연결 ───────────────────────────────────────────
-    // 일정의 참석자 목록 (contact 정보 포함)
-    public function getAttendees(int $scheduleId): array {
-        $stmt = $this->pdo->prepare(
-            "SELECT c.* FROM tbl_schedule_attendee sa
-             JOIN tbl_contact c ON sa.contact_id = c.id
-             WHERE sa.schedule_id = :sid
-             ORDER BY c.name ASC"
-        );
-        $stmt->execute([':sid' => $scheduleId]);
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
-    }
 
     // 여러 일정의 참석자를 한 번에 (id => [contacts])
     public function getAttendeesMap(array $scheduleIds): array {
@@ -296,9 +285,16 @@ class Contact {
             $existId = null;
 
             if ($phone !== '') {
-                $chk = $this->pdo->prepare("SELECT id FROM tbl_contact WHERE phone = :p LIMIT 1");
-                $chk->execute([':p' => $phone]);
-                $existId = $chk->fetchColumn() ?: null;
+                // 형식 차이(하이픈/공백) 무시 — 숫자만 비교
+                $pdigits = preg_replace('/\D+/', '', $phone);
+                if ($pdigits !== '') {
+                    $chk = $this->pdo->prepare(
+                        "SELECT id FROM tbl_contact
+                          WHERE REGEXP_REPLACE(IFNULL(phone,''), '[^0-9]', '') = :p LIMIT 1"
+                    );
+                    $chk->execute([':p' => $pdigits]);
+                    $existId = $chk->fetchColumn() ?: null;
+                }
             }
             if (!$existId && $email !== '') {
                 $chk = $this->pdo->prepare("SELECT id FROM tbl_contact WHERE email = :e LIMIT 1");
@@ -315,10 +311,15 @@ class Contact {
             }
 
             if ($existId) {
-                // 기존 인물: 이미 등록된 그룹은 보존 (공란으로 덮어쓰지 않음)
-                $old = $this->getById((int)$existId);
-                if ($old && trim($old['group_name'] ?? '') !== '') {
-                    $d['group_name'] = $old['group_name'];
+                // 기존 인물: CSV에 값이 있는 필드만 갱신하고,
+                // 비었거나 CSV에 없는 필드는 기존 DB 값을 보존한다
+                // (드라이브 재동기화가 앱에서 입력한 memo·회사전화 등을 덮어쓰지 않도록)
+                $old = $this->getById((int)$existId) ?: [];
+                $keepFields = ['eng_name','phone','tel','email','organization','department',
+                               'position','address','corp_phone','fax','website','group_name','memo'];
+                foreach ($keepFields as $f) {
+                    $new = isset($d[$f]) ? trim((string)$d[$f]) : '';
+                    if ($new === '' && isset($old[$f])) $d[$f] = $old[$f];
                 }
                 $d['id'] = (int)$existId;
                 $this->update($d);
@@ -329,77 +330,6 @@ class Contact {
             }
         }
         return $res;
-    }
-
-    // ── 구글드라이브 CSV 가져오기 ─────────────────────────────
-    public function importFromDrive(?string $fileId = null): array {
-        $fileId = $fileId ?: (defined('GDRIVE_CONTACT_CSV_ID') ? GDRIVE_CONTACT_CSV_ID : '');
-        if (!$fileId) return ['error' => '드라이브 파일 ID가 설정되지 않았습니다.'];
-
-        $url = "https://drive.google.com/uc?export=download&id=" . urlencode($fileId);
-
-        // CSV 다운로드 (curl)
-        $csv = false;
-        if (function_exists('curl_init')) {
-            $ch = curl_init($url);
-            curl_setopt_array($ch, [
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_FOLLOWLOCATION => true,
-                CURLOPT_TIMEOUT        => 20,
-                CURLOPT_SSL_VERIFYPEER => false,
-                CURLOPT_USERAGENT      => 'Mozilla/5.0',
-            ]);
-            $csv  = curl_exec($ch);
-            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            curl_close($ch);
-            if ($csv === false || $code !== 200) $csv = false;
-        }
-        if ($csv === false) return ['error' => '드라이브에서 파일을 가져오지 못했습니다. (공유 설정 확인)'];
-
-        // HTML(바이러스 검사 페이지 등)이면 실패 처리
-        if (stripos(substr($csv, 0, 200), '<html') !== false) {
-            return ['error' => '파일을 직접 받을 수 없습니다. 공유 권한을 "링크가 있는 모든 사용자"로 설정했는지 확인하세요.'];
-        }
-
-        $rows = $this->parseCsv($csv);
-        if (count($rows) < 2) return ['error' => 'CSV에 데이터가 없습니다.'];
-
-        // 헤더 매핑
-        $map = [
-            '이름'=>'name', '영문이름'=>'eng_name', '직책'=>'position', '소속부서'=>'department',
-            '회사명'=>'organization', '모바일'=>'phone', '이메일'=>'email', '웹사이트'=>'website',
-            '주소'=>'address', '전화'=>'tel', '팩스'=>'fax', '그룹'=>'group_name',
-        ];
-        $header = array_map(fn($h)=>trim($h), $rows[0]);
-        $idx    = array_map(fn($h)=>$map[$h] ?? null, $header);
-
-        $data = [];
-        foreach (array_slice($rows, 1) as $r) {
-            $obj = ['group_name' => '']; // 그룹 공란 → 신규 표시
-            foreach ($idx as $i => $field) {
-                if ($field) $obj[$field] = trim($r[$i] ?? '');
-            }
-            if (!empty($obj['name'])) $data[] = $obj;
-        }
-        if (empty($data)) return ['error' => '등록할 인물이 없습니다.'];
-
-        return $this->importRows($data);
-    }
-
-    // 서버측 CSV 파서 (BOM/따옴표/줄바꿈 처리)
-    private function parseCsv(string $text): array {
-        $text = preg_replace('/^\xEF\xBB\xBF/', '', $text); // BOM 제거
-        $fh = fopen('php://temp', 'r+');
-        fwrite($fh, $text);
-        rewind($fh);
-        $rows = [];
-        while (($row = fgetcsv($fh)) !== false) {
-            // 전부 빈 줄은 skip
-            if (count(array_filter($row, fn($c)=>trim((string)$c) !== '')) === 0) continue;
-            $rows[] = $row;
-        }
-        fclose($fh);
-        return $rows;
     }
 
     // ── 인물별 일정 히스토리 ──────────────────────────────────
@@ -456,5 +386,298 @@ class Contact {
             ':memo'       => $d['memo'] ?? '',
         ];
     }
+
+    // ── 명함 이미지 → 주소록 (구글드라이브 서비스계정 + Claude Vision) ──
+    // env/gdrive.inc(CONTACT_CARD_DRIVE_FOLDER_ID + GDRIVE_SA_JSON) 와
+    // env/anthropic.inc(ANTHROPIC_API_KEY) 가 있어야 동작한다.
+    // 서비스 계정(폴더 '편집자' 공유)으로 목록·다운로드·'스캔완료' 폴더 이동을 모두 처리한다.
+    private static ?string $saToken = null;   // 요청 단위 액세스 토큰 캐시
+
+    private function cardDriveEnabled(): bool {
+        return defined('CONTACT_CARD_DRIVE_FOLDER_ID') && CONTACT_CARD_DRIVE_FOLDER_ID !== ''
+            && defined('GDRIVE_SA_JSON') && GDRIVE_SA_JSON !== '' && file_exists(GDRIVE_SA_JSON);
+    }
+
+    // 서비스 계정 JSON → JWT(RS256) → 액세스 토큰 (drive 스코프). 실패 시 null.
+    private function saAccessToken(): ?string {
+        if (self::$saToken !== null) return self::$saToken !== '' ? self::$saToken : null;
+        self::$saToken = '';
+        if (!$this->cardDriveEnabled()) return null;
+        $sa = json_decode((string)file_get_contents(GDRIVE_SA_JSON), true);
+        if (!$sa || empty($sa['client_email']) || empty($sa['private_key'])) return null;
+
+        $b64 = fn($x) => rtrim(strtr(base64_encode($x), '+/', '-_'), '=');
+        $now = time();
+        $signInput = $b64(json_encode(['alg' => 'RS256', 'typ' => 'JWT'])) . '.' .
+            $b64(json_encode([
+                'iss'   => $sa['client_email'],
+                'scope' => 'https://www.googleapis.com/auth/drive',
+                'aud'   => $sa['token_uri'] ?? 'https://oauth2.googleapis.com/token',
+                'iat'   => $now,
+                'exp'   => $now + 3600,
+            ]));
+        if (!openssl_sign($signInput, $sig, $sa['private_key'], OPENSSL_ALGO_SHA256)) return null;
+        $jwt = $signInput . '.' . $b64($sig);
+
+        $ch = curl_init($sa['token_uri'] ?? 'https://oauth2.googleapis.com/token');
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true, CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_TIMEOUT => 30,
+            CURLOPT_POSTFIELDS => http_build_query([
+                'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer', 'assertion' => $jwt,
+            ]),
+        ]);
+        $res = curl_exec($ch); curl_close($ch);
+        $d = json_decode((string)$res, true);
+        if (empty($d['access_token'])) return null;
+        self::$saToken = $d['access_token'];
+        return self::$saToken;
+    }
+
+    // Bearer 토큰으로 Drive API 호출 (GET 기본, POST/PATCH 지원). 실패 시 ''.
+    private function driveApi(string $url, string $method = 'GET', ?string $body = null): string {
+        $tok = $this->saAccessToken();
+        if ($tok === null) return '';
+        $hdr = ['Authorization: Bearer ' . $tok];
+        if ($body !== null) $hdr[] = 'Content-Type: application/json';
+        $opt = [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_TIMEOUT        => 60,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_HTTPHEADER     => $hdr,
+        ];
+        if ($method !== 'GET') $opt[CURLOPT_CUSTOMREQUEST] = $method;
+        if ($body !== null)    $opt[CURLOPT_POSTFIELDS]    = $body;
+        $ch = curl_init($url);
+        curl_setopt_array($ch, $opt);
+        $res = curl_exec($ch);
+        curl_close($ch);
+        return $res === false ? '' : $res;
+    }
+
+    // 명함 폴더 안 이미지 목록 ('스캔완료'로 옮긴 파일은 상위폴더가 바뀌어 자동 제외됨)
+    private function listCardImages(): array {
+        $q = "'" . CONTACT_CARD_DRIVE_FOLDER_ID . "' in parents and mimeType contains 'image/' and trashed=false";
+        $files = []; $pageToken = '';
+        do {
+            $params = [
+                'q'        => $q,
+                'fields'   => 'nextPageToken,files(id,name,mimeType)',
+                'pageSize' => 100,
+                'orderBy'  => 'createdTime',
+            ];
+            if ($pageToken !== '') $params['pageToken'] = $pageToken;
+            $json = $this->driveApi('https://www.googleapis.com/drive/v3/files?' . http_build_query($params));
+            $data = json_decode($json, true);
+            if (isset($data['error'])) {
+                throw new RuntimeException('Drive API: ' . ($data['error']['message'] ?? 'unknown'));
+            }
+            foreach ($data['files'] ?? [] as $f) $files[] = $f;
+            $pageToken = $data['nextPageToken'] ?? '';
+        } while ($pageToken !== '');
+        return $files;
+    }
+
+    private function downloadDriveFile(string $fileId): string {
+        return $this->driveApi('https://www.googleapis.com/drive/v3/files/' . rawurlencode($fileId) . '?alt=media');
+    }
+
+    // '스캔완료' 하위폴더 id (없으면 생성). 실패 시 null.
+    private function ensureDoneFolder(): ?string {
+        static $doneId = null;
+        if ($doneId !== null) return $doneId !== '' ? $doneId : null;
+        $doneId = '';
+        $parent = CONTACT_CARD_DRIVE_FOLDER_ID;
+        $q = rawurlencode("'$parent' in parents and mimeType='application/vnd.google-apps.folder' and name='스캔완료' and trashed=false");
+        $data = json_decode($this->driveApi("https://www.googleapis.com/drive/v3/files?q=$q&fields=files(id,name)"), true);
+        if (!empty($data['files'][0]['id'])) { $doneId = $data['files'][0]['id']; return $doneId; }
+        $body = json_encode(['name' => '스캔완료', 'mimeType' => 'application/vnd.google-apps.folder', 'parents' => [$parent]]);
+        $data = json_decode($this->driveApi('https://www.googleapis.com/drive/v3/files?fields=id', 'POST', $body), true);
+        if (!empty($data['id'])) { $doneId = $data['id']; return $doneId; }
+        return null;
+    }
+
+    // 파일을 '스캔완료' 폴더로 이동 (best-effort). 성공 시 true.
+    private function moveToDoneFolder(string $fileId, string $newName = ''): bool {
+        $done = $this->ensureDoneFolder();
+        if (!$done) return false;
+        $url = 'https://www.googleapis.com/drive/v3/files/' . rawurlencode($fileId)
+             . '?addParents=' . rawurlencode($done)
+             . '&removeParents=' . rawurlencode(CONTACT_CARD_DRIVE_FOLDER_ID)
+             . '&fields=id';
+        $body = ($newName !== '') ? json_encode(['name' => $newName]) : '{}';
+        $data = json_decode($this->driveApi($url, 'PATCH', $body), true);
+        return !empty($data['id']) && empty($data['error']);
+    }
+
+    // 저장 파일명: 업체명_이름_전화번호 (빈 항목은 건너뜀, 원본 확장자 보존)
+    private function buildCardFileName(array $d, string $origName): string {
+        $san = function ($s) {
+            $s = preg_replace('/[\/\\\\\r\n\t]+/', ' ', (string)$s);
+            return trim(preg_replace('/\s+/', ' ', $s));
+        };
+        $parts = array_values(array_filter(
+            [$san($d['organization'] ?? ''), $san($d['name'] ?? ''), $san($d['phone'] ?? '')],
+            fn($x) => $x !== ''
+        ));
+        $base = $parts ? implode('_', $parts) : ($san($origName) ?: 'card');
+        $ext = '';
+        if (preg_match('/\.(jpe?g|png|gif|webp)$/i', $origName, $m)) $ext = $m[0];
+        return $base . $ext;
+    }
+
+    // Claude Vision 으로 명함 이미지에서 연락처 필드 추출
+    private function extractCardWithClaude(string $imageBytes, string $mime): ?array {
+        if (!defined('ANTHROPIC_API_KEY') || ANTHROPIC_API_KEY === '') return null;
+        if (!in_array($mime, ['image/jpeg', 'image/png', 'image/gif', 'image/webp'], true)) {
+            $mime = 'image/jpeg';
+        }
+        $sys = "너는 명함(business card) 이미지에서 연락처 정보를 추출하는 도우미다. "
+             . "반드시 아래 키를 가진 JSON 객체 하나만 출력한다. 설명 문장이나 코드펜스(```)는 절대 쓰지 마라. "
+             . "값을 못 찾으면 빈 문자열로 둔다. "
+             . "키: name, eng_name, phone, tel, email, organization, department, position, address, website, fax. "
+             . "phone=휴대폰번호, tel=유선(사무실)전화, organization=회사/기관명, position=직책. "
+             . "한글 이름은 name 에, 영문 이름은 eng_name 에 넣는다.";
+        $payload = [
+            'model'      => 'claude-haiku-4-5',
+            'max_tokens' => 1024,
+            'system'     => $sys,
+            'messages'   => [[
+                'role'    => 'user',
+                'content' => [
+                    ['type' => 'image', 'source' => ['type' => 'base64', 'media_type' => $mime, 'data' => base64_encode($imageBytes)]],
+                    ['type' => 'text', 'text' => '이 명함의 정보를 위 규칙대로 JSON 으로만 출력해줘.'],
+                ],
+            ]],
+        ];
+        $ch = curl_init('https://api.anthropic.com/v1/messages');
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST           => true,
+            CURLOPT_HTTPHEADER     => [
+                'x-api-key: ' . ANTHROPIC_API_KEY,
+                'anthropic-version: 2023-06-01',
+                'content-type: application/json',
+            ],
+            CURLOPT_POSTFIELDS     => json_encode($payload),
+            CURLOPT_TIMEOUT        => 60,
+            CURLOPT_SSL_VERIFYPEER => false,
+        ]);
+        $res  = curl_exec($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        if ($res === false || $code !== 200) return null;
+
+        $data = json_decode($res, true);
+        $text = '';
+        foreach ($data['content'] ?? [] as $blk) {
+            if (($blk['type'] ?? '') === 'text') { $text = (string)($blk['text'] ?? ''); break; }
+        }
+        if (trim($text) === '') return null;
+
+        $text   = trim($text);
+        $text   = preg_replace('/^```(?:json)?\s*|\s*```$/', '', $text);
+        $fields = json_decode($text, true);
+        if (!is_array($fields) && preg_match('/\{.*\}/s', $text, $m)) {
+            $fields = json_decode($m[0], true);
+        }
+        return is_array($fields) ? $fields : null;
+    }
+
+    // 방금 적재/갱신된 연락처 id 찾기 (전화 숫자비교 → 이메일)
+    private function findContactIdFor(array $d): ?int {
+        $phone = trim($d['phone'] ?? '');
+        if ($phone !== '') {
+            $pd = preg_replace('/\D+/', '', $phone);
+            if ($pd !== '') {
+                $st = $this->pdo->prepare(
+                    "SELECT id FROM tbl_contact WHERE REGEXP_REPLACE(IFNULL(phone,''), '[^0-9]', '') = :p LIMIT 1"
+                );
+                $st->execute([':p' => $pd]);
+                $id = $st->fetchColumn();
+                if ($id) return (int)$id;
+            }
+        }
+        $email = trim($d['email'] ?? '');
+        if ($email !== '') {
+            $st = $this->pdo->prepare("SELECT id FROM tbl_contact WHERE email = :e LIMIT 1");
+            $st->execute([':e' => $email]);
+            $id = $st->fetchColumn();
+            if ($id) return (int)$id;
+        }
+        return null;
+    }
+
+    // 명함 폴더 스캔 → Vision 추출 → 주소록 적재 → '스캔완료' 폴더로 이동
+    // $limit>0 이면 이번 호출에서 최대 그만큼만 새로 처리 (타임아웃 방지, 반복 호출 가능)
+    public function scanCardsFromDrive(int $limit = 0): array {
+        if (!$this->cardDriveEnabled()) {
+            return ['error' => '명함 스캔 설정이 없습니다. (env/gdrive.inc 의 CONTACT_CARD_DRIVE_FOLDER_ID / GDRIVE_SA_JSON)'];
+        }
+        if (!defined('ANTHROPIC_API_KEY') || ANTHROPIC_API_KEY === '') {
+            return ['error' => 'Claude API 키가 없습니다. (env/anthropic.inc 의 ANTHROPIC_API_KEY)'];
+        }
+        if ($this->saAccessToken() === null) {
+            return ['error' => '구글 서비스계정 인증 실패. env/gdrive_sa.json 확인 및 폴더를 SA 이메일에 "편집자"로 공유했는지 확인하세요.'];
+        }
+
+        // 스캔 이력 (이동 실패해도 재스캔 방지 — 이중 안전장치)
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS tbl_contact_card_scan (
+                drive_file_id VARCHAR(120) PRIMARY KEY,
+                file_name     VARCHAR(255) DEFAULT NULL,
+                contact_id    INT          DEFAULT NULL,
+                status        VARCHAR(20)  DEFAULT 'ok',
+                scanned_at    DATETIME     DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        $images = $this->listCardImages();
+        $res = ['total_files' => count($images), 'scanned' => 0, 'imported' => 0,
+                'updated' => 0, 'moved' => 0, 'skipped' => 0, 'failed' => 0];
+
+        $chk = $this->pdo->prepare("SELECT 1 FROM tbl_contact_card_scan WHERE drive_file_id = :id");
+        $rec = $this->pdo->prepare(
+            "INSERT IGNORE INTO tbl_contact_card_scan (drive_file_id, file_name, contact_id, status)
+             VALUES (:id, :fn, :cid, :st)"
+        );
+
+        $done = 0;
+        foreach ($images as $img) {
+            $fid = $img['id'] ?? '';
+            if ($fid === '') continue;
+
+            $chk->execute([':id' => $fid]);
+            if ($chk->fetchColumn()) { $res['skipped']++; continue; }
+            if ($limit > 0 && $done >= $limit) break;
+            $done++; $res['scanned']++;
+
+            $bytes = $this->downloadDriveFile($fid);
+            if ($bytes === '') {
+                $rec->execute([':id' => $fid, ':fn' => $img['name'] ?? '', ':cid' => null, ':st' => 'download_fail']);
+                $res['failed']++; continue;
+            }
+
+            $fields = $this->extractCardWithClaude($bytes, $img['mimeType'] ?? 'image/jpeg');
+            if (!$fields || trim($fields['name'] ?? '') === '') {
+                $rec->execute([':id' => $fid, ':fn' => $img['name'] ?? '', ':cid' => null, ':st' => 'extract_fail']);
+                $res['failed']++; continue;
+            }
+
+            $fields['group_name'] = '';                 // 그룹 공란 → '신규'로 적재
+            $imp = $this->importRows([$fields]);        // dedup(전화정규화)+기존값 보존 재사용
+            $res['imported'] += $imp['imported'];
+            $res['updated']  += $imp['updated'];
+
+            $cid   = $this->findContactIdFor($fields);
+            $rename = $this->buildCardFileName($fields, $img['name'] ?? '');
+            $moved  = $this->moveToDoneFolder($fid, $rename);   // 이름변경+이동(best-effort)
+            if ($moved) $res['moved']++;
+            $rec->execute([':id' => $fid, ':fn' => $img['name'] ?? '', ':cid' => $cid, ':st' => $moved ? 'ok_moved' : 'ok']);
+        }
+        return $res;
+    }
+
 }
 

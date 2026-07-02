@@ -19,7 +19,6 @@ if (isset($routes[$mode]) && function_exists($routes[$mode])) {
 // ##########################################################
 function contact_list(PDO $pdo): void {
     (new Contact($pdo))->ensureTable();
-    global $current_user, $expire_date;
 ?>
 <!DOCTYPE html>
 <html lang="ko">
@@ -147,6 +146,13 @@ body.is-mobile.detail-open #right { transform:translateX(0); }
 body.is-mobile.detail-open { overflow:hidden; }
 body.is-mobile .detail-head h2 { font-size:20px; }
 body.is-mobile .history-item .h-date { min-width:auto; }
+/* 명함 스캔 진행 오버레이 */
+#scan-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:4000; align-items:center; justify-content:center; }
+#scan-overlay .so-box { background:#fff; border-radius:12px; padding:28px 34px; text-align:center; box-shadow:0 8px 32px rgba(0,0,0,.25); min-width:260px; max-width:90vw; }
+#scan-overlay .so-spin { width:38px; height:38px; border:4px solid #e2e7ec; border-top-color:#3498db; border-radius:50%; margin:0 auto 14px; animation:soSpin .8s linear infinite; }
+@keyframes soSpin { to { transform:rotate(360deg); } }
+#scan-overlay .so-msg { font-size:15px; font-weight:600; color:#2c3e50; white-space:pre-line; line-height:1.5; }
+#scan-overlay .so-hint { font-size:12px; color:#999; margin-top:10px; }
 </style>
 <?php nav_css(); ?>
 </head>
@@ -165,7 +171,7 @@ body.is-mobile .history-item .h-date { min-width:auto; }
         <div class="left-head">
             <h2>주소록
                 <span style="display:flex;gap:6px;">
-                    <button class="btn btn-outline" onclick="importDrive()" title="구글드라이브 명함 CSV 동기화">☁ 드라이브</button>
+                    <button class="btn btn-outline" onclick="scanCards()" title="구글드라이브 명함 이미지를 AI로 읽어 등록">📇 명함스캔</button>
                     <button class="btn btn-primary" onclick="openContactModal()">+ 추가</button>
                 </span>
             </h2>
@@ -560,14 +566,42 @@ async function deleteContact() {
     await loadGroups(); await loadContacts();
 }
 
-// ━━━ 구글드라이브 자동 동기화 ━━━
-async function importDrive() {
-    if (!confirm('구글드라이브의 명함 인명록 CSV를 가져옵니다.\n동일 인물(이름+모바일)은 최신 정보로 갱신됩니다. 진행할까요?')) return;
-    const res = await api('import_drive', {}, 'POST');
-    if (!res || !res.ok) { alert('드라이브 가져오기 실패:\n'+(res?.msg||'알 수 없는 오류')); return; }
-    const d = res.data;
-    alert(`드라이브 동기화 완료\n신규: ${d.imported}건 / 갱신: ${d.updated}건 (전체 ${d.total}건)`);
+// ━━━ 구글드라이브 명함 이미지 스캔 (Claude Vision · 소량 배치 + 진행률) ━━━
+let _scanning = false;
+async function scanCards() {
+    if (_scanning) return;
+    if (!confirm('구글드라이브 명함 폴더의 이미지를 AI로 읽어 주소록에 추가합니다.\n이미 처리한 이미지는 건너뜁니다.\n진행할까요?')) return;
+    _scanning = true;
+    scanProgress('명함 스캔 준비 중…', true);
+    let imp=0, upd=0, mv=0, fail=0, doneCnt=0, rounds=0;
+    try {
+        while (true) {
+            const res = await api('scan_cards', {limit:3}, 'POST');   // 3장씩 처리
+            if (!res || !res.ok) { alert('명함 스캔 실패:\n'+(res?.msg||'알 수 없는 오류')); return; }
+            const d = res.data;
+            imp+=d.imported; upd+=d.updated; mv+=d.moved; fail+=d.failed; doneCnt+=d.scanned;
+            scanProgress(`명함 스캔 중… (처리 ${doneCnt}장)\n신규 ${imp} · 갱신 ${upd}` + (fail?` · 실패 ${fail}`:''), true);
+            await loadGroups(); await loadContacts();   // 목록에 실시간 반영
+            if (d.scanned === 0) break;                 // 남은 미처리 없음 → 종료
+            if (++rounds > 1000) break;                 // 안전장치
+        }
+    } finally {
+        _scanning = false;
+        scanProgress('', false);
+    }
+    alert(`명함 스캔 완료 ✅\n신규 ${imp}명 / 갱신 ${upd}명 / 이동 ${mv}장` + (fail?` / 실패 ${fail}장`:''));
     await loadGroups(); await loadContacts();
+}
+function scanProgress(msg, show) {
+    let el = document.getElementById('scan-overlay');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'scan-overlay';
+        el.innerHTML = '<div class="so-box"><div class="so-spin"></div><div class="so-msg"></div><div class="so-hint">완료될 때까지 잠시만 기다려주세요. (새로고침 불필요)</div></div>';
+        document.body.appendChild(el);
+    }
+    el.querySelector('.so-msg').textContent = msg;
+    el.style.display = show ? 'flex' : 'none';
 }
 
 // ━━━ 그룹 관리 ━━━

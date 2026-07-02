@@ -59,6 +59,11 @@ try {
             echo json_encode(['regions' => $col->regions($category)], JSON_UNESCAPED_UNICODE);
             break;
         }
+        case 'tags': {      // 태그(칩) 목록 — 현 분류(+회차)의 cuisine 태그를 곳수순으로
+            $period = (string)($_GET['period'] ?? '');
+            echo json_encode(['tags' => $col->catTags($category, $period)], JSON_UNESCAPED_UNICODE);
+            break;
+        }
         case 'list': {
             $periods = $col->periods($category);
             $period  = (string)($_GET['period'] ?? '');
@@ -68,6 +73,8 @@ try {
                 'category'   => $category,
                 // 게스트(공유)는 공유시점 지역으로 고정(클라이언트 변조 방지)
                 'region'     => $isGuest ? (string)($guestShare['region'] ?? '') : trim((string)($_GET['region'] ?? '')),
+                // 게스트(공유)는 공유시점 태그로 고정(변조 방지) · 소유자는 GET 파라미터
+                'tags'       => $isGuest ? (string)($guestShare['tags'] ?? '') : (string)($_GET['tags'] ?? ''),
                 'min_review' => (int)($_GET['min_review'] ?? 0),
                 'sort'       => (string)($_GET['sort'] ?? 'd_review'),
                 'dir'        => (string)($_GET['dir'] ?? 'desc'),
@@ -109,6 +116,7 @@ try {
                 'region'     => (string)($_POST['region'] ?? $_GET['region'] ?? ''),
                 'min_review' => (int)($_POST['min_review'] ?? $_GET['min_review'] ?? 0),
                 'sort'       => (string)($_POST['sort'] ?? $_GET['sort'] ?? 'total_score'),
+                'tags'       => (string)($_POST['tags'] ?? $_GET['tags'] ?? ''),
             ]);
             echo json_encode(['ok' => true] + $sh, JSON_UNESCAPED_UNICODE);
             break;
@@ -119,7 +127,7 @@ try {
             echo json_encode(['ok' => true, 'token' => $sh['token'] ?? null,
                               'expires_at' => $sh['expires_at'] ?? null,
                               'region' => $sh['region'] ?? '', 'min_review' => (int)($sh['min_review'] ?? 0),
-                              'sort' => $sh['sort'] ?? 'total_score'], JSON_UNESCAPED_UNICODE);
+                              'sort' => $sh['sort'] ?? 'total_score', 'tags' => $sh['tags'] ?? ''], JSON_UNESCAPED_UNICODE);
             break;
         }
         case 'share_revoke': {   // 현재 (분류,지역) 공유만 즉시 중단(다른 지역 링크는 유지)

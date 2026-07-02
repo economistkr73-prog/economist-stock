@@ -224,6 +224,8 @@ class NaverPlaceCollector
             "ALTER TABLE naver_trend_share ADD COLUMN IF NOT EXISTS region VARCHAR(80) NULL AFTER cat",
             "ALTER TABLE naver_trend_share ADD COLUMN IF NOT EXISTS min_review INT NOT NULL DEFAULT 0 AFTER region",
             "ALTER TABLE naver_trend_share ADD COLUMN IF NOT EXISTS sort VARCHAR(20) NOT NULL DEFAULT 'total_score' AFTER min_review",
+            // 공유시점 태그(칩) 필터 — 콤마로 이어붙인 cuisine 태그 목록(빈 문자열=태그필터 없음)
+            "ALTER TABLE naver_trend_share ADD COLUMN IF NOT EXISTS tags VARCHAR(255) NOT NULL DEFAULT '' AFTER sort",
         ];
         foreach ($alters as $sql) {
             try { $this->pdo->exec($sql); } catch (\PDOException $e) { /* 이미 적용됨 등 — 무시 */ }
@@ -979,15 +981,20 @@ class NaverPlaceCollector
         $region = isset($opt['region']) ? mb_substr(trim((string)$opt['region']), 0, 80) : '';
         $minr   = max(0, (int)($opt['min_review'] ?? 0));
         $sort   = mb_substr((string)($opt['sort'] ?? 'total_score'), 0, 20);
+        // 공유시점 태그(칩) 고정 — 파이프(|) 조인 문자열로 정규화(네이버 태그에 콤마 있음·공백제거·최대 255자)
+        $tagsIn = $opt['tags'] ?? '';
+        if (!is_array($tagsIn)) $tagsIn = preg_split('/\|/', (string)$tagsIn, -1, PREG_SPLIT_NO_EMPTY);
+        $tagsIn = array_values(array_filter(array_map('trim', $tagsIn), fn($t) => $t !== ''));
+        $tags   = mb_substr(implode('|', array_slice($tagsIn, 0, 20)), 0, 255);
         // 같은 (분류, 지역) 의 기존 링크만 무효화 → 다른 지역(예: 관악구·성동구)은 동시 공유 유지
         $this->revokeShares($cat, $region);
         $this->pdo->prepare(
-            "INSERT INTO naver_trend_share (cat, region, min_review, sort, token, expires_at)
-             VALUES (?, ?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL ? SECOND))"
-        )->execute([$cat, $region, $minr, $sort, $token, $ttl]);
+            "INSERT INTO naver_trend_share (cat, region, min_review, sort, tags, token, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL ? SECOND))"
+        )->execute([$cat, $region, $minr, $sort, $tags, $token, $ttl]);
         $row = $this->getShareByToken($token);
         return ['token' => $token, 'expires_at' => $row['expires_at'] ?? null,
-                'cat' => $cat, 'region' => $region, 'min_review' => $minr, 'sort' => $sort];
+                'cat' => $cat, 'region' => $region, 'min_review' => $minr, 'sort' => $sort, 'tags' => $tags];
     }
 
     /** 토큰으로 유효한(미만료·미취소) 공유 조회 — 게스트 접근 검증용 */
@@ -1072,6 +1079,17 @@ class NaverPlaceCollector
             $where[] = '(' . implode(' OR ', $conds) . ')';
         }
         if (!empty($opt['min_review'])) { $where[] = 'review >= :minr'; $args[':minr'] = (int)$opt['min_review']; }
+        // 태그(칩) 필터 — place_tag(kind=cuisine) 에 선택 태그가 하나라도 있으면 통과(OR).
+        //   맛집=음식종류·스테이=숙박유형·캠핑=캠핑유형 이 모두 kind=cuisine 이라 category 는 이미 위에서 걸러짐.
+        //   ★구분자는 파이프(|) — 네이버 태그에 콤마가 들어감("카페,디저트"·"칼국수,만두" 등)이라 콤마 불가.
+        $tags = $opt['tags'] ?? '';
+        if (!is_array($tags)) $tags = preg_split('/\|/', (string)$tags, -1, PREG_SPLIT_NO_EMPTY);
+        $tags = array_values(array_filter(array_map('trim', $tags), fn($t) => $t !== ''));
+        if ($tags) {
+            $ph = [];
+            foreach (array_slice($tags, 0, 20) as $i => $tg) { $k = ':tag' . $i; $ph[] = $k; $args[$k] = mb_substr($tg, 0, 40); }
+            $where[] = "EXISTS(SELECT 1 FROM place_tag pt WHERE pt.place_id = t.place_id AND pt.kind = 'cuisine' AND pt.tag IN (" . implode(',', $ph) . "))";
+        }
         $whereSql = implode(' AND ', $where);
 
         // 종합점수(0~100): 평점·리뷰·저장·방문·블로그를 가중 합산.
@@ -1165,6 +1183,29 @@ class NaverPlaceCollector
         }
         $rows = $this->prepRun($sql, $args)->fetchAll(PDO::FETCH_ASSOC);
         return ['period' => $period, 'rows' => $rows, 'total' => $total];
+    }
+
+    /**
+     * 한 분류(+회차)의 태그(칩) 목록 — place_tag(kind=cuisine) 을 곳수 많은 순으로.
+     * 칩바 채우기용. period 를 주면 그 회차에 실제 존재하는 태그만(빈 결과 칩 방지).
+     * @return [{tag, c}, ...]
+     */
+    public function catTags(string $cat, string $period = ''): array
+    {
+        $cat  = self::cat($cat);
+        $args = [':c' => $cat];
+        $perW = '';
+        if ($period !== '') { $perW = ' AND s.period = :p'; $args[':p'] = $period; }
+        $sql = "SELECT pt.tag AS tag, COUNT(DISTINCT s.place_id) AS c
+                  FROM place_naver_stat s
+                  JOIN place_tag pt ON pt.place_id = s.place_id AND pt.kind = 'cuisine'
+                 WHERE s.category = :c{$perW}
+                 GROUP BY pt.tag
+                HAVING c > 0
+                ORDER BY c DESC, pt.tag ASC";
+        $st = $this->pdo->prepare($sql);
+        $st->execute($args);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
     }
 
     /** 한 곳(place_id)의 전 회차 시계열 — 오래된 순. */
