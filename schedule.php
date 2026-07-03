@@ -200,6 +200,10 @@ function sch_calendar(PDO $pdo): void {
 body.is-mobile .hab-dot { width: 6px; height: 6px; }
 body.is-mobile .hab-x { font-size: 8px; line-height: 6px; }
 /* 일정 메모 이미지 첨부 */
+/* 메모 행: 메모칸을 전체폭으로 늘리고 이미지 첨부를 그 아래로 배치 */
+.form-row-memo label { flex-basis: 100%; }
+.form-row-memo #f-attach-area { flex-basis: 100%; width: 100%; }
+.form-row-memo textarea { height: 110px; }
 #f-attach-area { margin-top: 8px; }
 #f-attach-list { display: flex; flex-wrap: wrap; gap: 8px; }
 #f-attach-list:not(:empty) { margin-bottom: 8px; }
@@ -216,8 +220,11 @@ body.is-mobile .hab-x { font-size: 8px; line-height: 6px; }
 .va-thumb { width: 72px; height: 72px; border-radius: 6px; overflow: hidden; border: 1px solid #dde3ea; cursor: pointer; flex: none; }
 .va-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 /* 이미지 라이트박스 */
-#img-lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.85); z-index: 9999; display: none; align-items: center; justify-content: center; cursor: zoom-out; }
-#img-lightbox img { max-width: 92vw; max-height: 92vh; border-radius: 6px; box-shadow: 0 6px 30px rgba(0,0,0,.5); }
+#img-lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.85); z-index: 9999; display: none; overflow: hidden; }
+#img-lightbox img { position: absolute; top: 0; left: 0; max-width: none; max-height: none; transform-origin: 0 0; border-radius: 6px; box-shadow: 0 6px 30px rgba(0,0,0,.5); cursor: zoom-in; user-select: none; -webkit-user-drag: none; }
+#img-lightbox img.zoomed { cursor: grab; }
+#img-lightbox img.panning { cursor: grabbing; }
+#img-lightbox .lb-hint { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); color: rgba(255,255,255,.7); font-size: 12px; background: rgba(0,0,0,.4); padding: 5px 12px; border-radius: 14px; pointer-events: none; }
 .cal-cell:hover { background: #f8f9fa; }
 .cal-cell.other-month { background: #f8f8f8; }
 .cal-cell.today { background: #eaf4ff; }
@@ -583,6 +590,15 @@ body.is-mobile #view-week { --wk-gutter: 44px; } body.is-mobile .week-head .wkn 
 .chip-trip-mark { cursor: pointer; }
 .chip-trip-mark:hover { filter: brightness(1.15); }
 .chip-log-mark { font-size: .7em; opacity: .85; white-space: nowrap; }
+/* ── 메모 체크리스트 (보기모달 #view-memo) ── */
+.memo-chk-head { font-size: 12px; font-weight: 600; color: #888; margin-bottom: 4px; }
+.memo-chk-head .memo-chk-count { color: #3498db; }
+.memo-chk-item { display: flex; align-items: flex-start; gap: 8px; padding: 5px 4px; border-radius: 6px; cursor: pointer; line-height: 1.45; }
+.memo-chk-item:hover { background: #eef1f5; }
+.memo-chk-item input { margin: 2px 0 0; flex-shrink: 0; width: 16px; height: 16px; cursor: pointer; accent-color: #3498db; }
+.memo-chk-item .memo-chk-txt { flex: 1; color: #444; word-break: break-word; }
+.memo-chk-item.on .memo-chk-txt { text-decoration: line-through; color: #aab2bd; }
+.memo-plain { padding: 3px 4px; color: #666; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 .pdp-dday { display:inline-block; background:#fdecea; color:#c0392b; font-size:11px; font-weight:700; padding:1px 8px; border-radius:10px; margin-left:6px; }
 .proj-bar, .travel-bar { font-size: var(--fs-xs); line-height: 16px; height: 16px; color:#fff; padding: 0 4px; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; font-weight: 600; }
 /* ── 모바일 일정 입력 모달 → 풀스크린 ── */
@@ -1406,7 +1422,7 @@ body.is-mobile #scheduler .event-chip.done{ width:10px; height:10px; padding:0; 
         </div>
 
         <!-- 메모 -->
-        <div class="form-row">
+        <div class="form-row form-row-memo">
             <label>메모 <textarea id="f-memo" placeholder="메모 (선택) — 이미지를 붙여넣기(Ctrl+V)하면 첨부됩니다"></textarea></label>
             <div id="f-attach-area">
                 <div id="f-attach-list"></div>
@@ -2106,11 +2122,15 @@ async function api(action, payload={}, method='GET', module='calendar') {
 }
 
 // ===== 메모 이미지 첨부 (클립보드 붙여넣기 / 파일 선택) — DB(BLOB) 저장 =====
-// MODAL_ATTACH 항목: 기존={id,w,h}(DB에 있음) / 신규={dataURL}(저장 시 일괄 삽입)
+// MODAL_ATTACH 항목: 기존={id,w,h}(DB에 있음) / 신규={blob}(저장 후 multipart 업로드)
 let MODAL_ATTACH = [];
 
 const ATTACH_IMG = id => `/schedule_api.php?module=attach&action=img&id=${id}`;
-function attachSrc(a){ return a.dataURL ? a.dataURL : ATTACH_IMG(a.id); }
+function attachSrc(a){
+    if (a.blob)    return a._url || (a._url = URL.createObjectURL(a.blob));  // 신규(원본 blob) 미리보기
+    if (a.dataURL) return a.dataURL;                                         // 레거시 호환
+    return ATTACH_IMG(a.id);                                                 // 기존(DB 저장분)
+}
 
 function renderAttachList(){
     const box = document.getElementById('f-attach-list');
@@ -2122,45 +2142,82 @@ function renderAttachList(){
         d.className = 'f-att-thumb';
         d.innerHTML = `<img src="${esc(src)}" alt=""><button type="button" class="f-att-x" title="삭제">×</button>`;
         d.querySelector('img').onclick = () => openLightbox(src);
-        d.querySelector('.f-att-x').onclick = () => { MODAL_ATTACH.splice(i,1); renderAttachList(); };
+        d.querySelector('.f-att-x').onclick = () => {
+            const rm = MODAL_ATTACH.splice(i, 1)[0];
+            if (rm && rm._url) URL.revokeObjectURL(rm._url);
+            renderAttachList();
+        };
         box.appendChild(d);
     });
 }
 
-// 큰 이미지는 캔버스로 축소(긴 변 1600px 상한) → dataURL
-function attachToDataURL(blob){
+// ★화질 보존: multipart로 큰 파일도 올라가므로 KEEP_LIMIT 이하는 원본 그대로 업로드(축소·재인코딩 없음).
+//   초대형(>6MB)/미지원 형식만 캔버스로 축소해 6MB 안쪽으로 맞춤(DB max_allowed_packet 16MB 대비 여유).
+const ATTACH_KEEP_LIMIT = 6 * 1024 * 1024;
+const ATTACH_TYPES = ['image/png','image/jpeg','image/gif','image/webp'];
+
+function loadImageEl(blob){
     return new Promise((resolve, reject) => {
-        const img = new Image();
-        const u = URL.createObjectURL(blob);
-        img.onload = () => {
-            URL.revokeObjectURL(u);
-            const MAX = 1600;
-            let w = img.width, h = img.height;
-            if (w > MAX || h > MAX){ const r = Math.min(MAX/w, MAX/h); w = Math.round(w*r); h = Math.round(h*r); }
-            const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
-            cv.getContext('2d').drawImage(img, 0, 0, w, h);
-            const isPng = blob.type === 'image/png';   // PNG는 스크린샷/투명 보존, 그 외 JPEG로 용량절감
-            resolve(cv.toDataURL(isPng ? 'image/png' : 'image/jpeg', isPng ? undefined : 0.88));
-        };
+        const img = new Image(); const u = URL.createObjectURL(blob);
+        img.onload  = () => resolve({ img, revoke: () => URL.revokeObjectURL(u) });
         img.onerror = () => { URL.revokeObjectURL(u); reject(new Error('이미지 로드 실패')); };
         img.src = u;
     });
 }
 
-// 붙여넣기/선택 이미지를 (서버 전송 없이) 모달 목록에 추가 — 저장 시 일괄 삽입
+async function attachPrepare(blob){
+    // 지원 형식 + 용량 여유 → 원본 그대로 (화질 손실 없음)
+    if (ATTACH_TYPES.includes(blob.type) && blob.size <= ATTACH_KEEP_LIMIT) return blob;
+    // 그 외 → 축소/재인코딩(JPEG)해서 한도 안쪽으로
+    const { img, revoke } = await loadImageEl(blob);
+    try {
+        let maxSide = 4000, last = null;
+        for (let k = 0; k < 5; k++){
+            let w = img.width, h = img.height;
+            if (w > maxSide || h > maxSide){ const r = Math.min(maxSide/w, maxSide/h); w = Math.round(w*r); h = Math.round(h*r); }
+            const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+            cv.getContext('2d').drawImage(img, 0, 0, w, h);
+            last = await new Promise(res => cv.toBlob(res, 'image/jpeg', Math.max(0.5, 0.9 - k*0.12)));
+            if (last && last.size <= ATTACH_KEEP_LIMIT) return last;
+            maxSide = Math.round(maxSide * 0.8);
+        }
+        return last || blob;
+    } finally { revoke(); }
+}
+
+// 붙여넣기/선택 이미지를 (서버 전송 없이) 모달 목록에 추가 — 저장 시 업로드
 async function addAttachBlob(blob){
     const box = document.getElementById('f-attach-list');
     const ph = document.createElement('div'); ph.className = 'f-att-thumb loading'; ph.textContent = '…';
     if (box) box.appendChild(ph);
     try {
-        const dataURL = await attachToDataURL(blob);
-        MODAL_ATTACH.push({ dataURL });
+        const finalBlob = await attachPrepare(blob);
+        MODAL_ATTACH.push({ blob: finalBlob });
     } catch(e){ showToast('이미지 처리 실패'); }
     finally { renderAttachList(); }   // placeholder 제거 + 목록 갱신
 }
 
 function attachFromFiles(files){
     [...files].filter(f => f.type.startsWith('image/')).forEach(addAttachBlob);
+}
+
+// 새 이미지 첨부를 개별 multipart 업로드 (JSON 저장에서 분리 — openresty가 128KB 초과 JSON 본문을 차단)
+async function uploadPendingAttachments(scheduleId){
+    const news = MODAL_ATTACH.filter(a => a.blob);
+    for (const a of news){
+        const t = a.blob.type;
+        const ext = t === 'image/png' ? 'png' : t === 'image/webp' ? 'webp' : t === 'image/gif' ? 'gif' : 'jpg';
+        const fd = new FormData();
+        fd.append('schedule_id', scheduleId);
+        fd.append('file', a.blob, 'attach.' + ext);
+        let j;
+        try {
+            const r = await fetch('/schedule_api.php?module=attach&action=upload', { method:'POST', body: fd });
+            j = await r.json();
+        } catch(e){ return { ok:false, msg:'이미지 전송 실패' }; }
+        if (!j || !j.ok) return { ok:false, msg:(j && j.msg) || '이미지 저장 실패' };
+    }
+    return { ok:true };
 }
 
 // 메모창 붙여넣기 → 클립보드 이미지만 가로채 첨부 (텍스트 붙여넣기는 그대로)
@@ -2172,10 +2229,92 @@ function attachPasteHandler(e){
     imgs.forEach(it => { const b = it.getAsFile(); if (b) addAttachBlob(b); });
 }
 
+// ── 이미지 라이트박스: 휠 확대/축소(커서 중심) · 드래그 이동 · 클릭 닫기 ──
+// ★확대는 CSS scale이 아니라 실제 표시 width를 키움 → 브라우저가 원본에서 다시 렌더 = 선명
+//   (좌상단 절대배치 모델: tx/ty=이미지 좌상단 화면좌표, 표시폭 = fitW*zoom)
+let LB = { natW:0, natH:0, fitW:0, fitH:0, zoom:1, min:1, max:8, tx:0, ty:0,
+           bound:false, down:false, moved:false, sx:0, sy:0, stx:0, sty:0 };
+function lbImg(){ return document.querySelector('#img-lightbox img'); }
+function lbApply(){
+    const img = lbImg(); if (!img) return;
+    img.style.width = (LB.fitW * LB.zoom) + 'px';
+    img.style.transform = `translate(${LB.tx}px,${LB.ty}px)`;
+    img.classList.toggle('zoomed', LB.zoom > 1.001);
+}
+function lbComputeFit(){
+    const vw = window.innerWidth * 0.94, vh = window.innerHeight * 0.94;
+    const fitScale = Math.min(vw / LB.natW, vh / LB.natH, 1);   // 화면보다 크면 축소, 작으면 원본
+    LB.fitW = LB.natW * fitScale;
+    LB.fitH = LB.natH * fitScale;
+    LB.min  = 1;
+    LB.max  = Math.max(3, (LB.natW * 1.5) / LB.fitW);           // 원본의 ~150%까지 확대 허용
+}
+function lbCenter(){
+    LB.tx = (window.innerWidth  - LB.fitW * LB.zoom) / 2;
+    LB.ty = (window.innerHeight - LB.fitH * LB.zoom) / 2;
+}
+function lbInitView(){
+    const img = lbImg(); if (!img) return;
+    LB.natW = img.naturalWidth  || img.width  || 1;
+    LB.natH = img.naturalHeight || img.height || 1;
+    LB.zoom = 1;
+    lbComputeFit();
+    lbCenter();
+    lbApply();
+}
+function closeLightbox(){ document.getElementById('img-lightbox').style.display = 'none'; }
+function bindLightbox(){
+    if (LB.bound) return; LB.bound = true;
+    const lb  = document.getElementById('img-lightbox');
+    const img = lb.querySelector('img');
+
+    // 휠: 커서 지점을 고정한 채 확대/축소 (표시 width 변경 → 재렌더로 선명)
+    lb.addEventListener('wheel', e => {
+        e.preventDefault();
+        if (!LB.natW) return;
+        const W = LB.fitW * LB.zoom, H = LB.fitH * LB.zoom;
+        const fx = (e.clientX - LB.tx) / W;     // 커서 밑 지점의 이미지 내 비율
+        const fy = (e.clientY - LB.ty) / H;
+        const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
+        const nz = Math.min(LB.max, Math.max(LB.min, LB.zoom * factor));
+        if (nz === LB.zoom) return;
+        LB.zoom = nz;
+        if (LB.zoom <= 1.001) { LB.zoom = 1; lbCenter(); }
+        else { LB.tx = e.clientX - fx * LB.fitW * nz; LB.ty = e.clientY - fy * LB.fitH * nz; }
+        lbApply();
+    }, { passive:false });
+
+    // 드래그: 확대 상태에서 이동 (움직였으면 클릭 닫기 취소)
+    img.addEventListener('mousedown', e => {
+        LB.down = true; LB.moved = false;
+        LB.sx = e.clientX; LB.sy = e.clientY; LB.stx = LB.tx; LB.sty = LB.ty;
+        if (LB.zoom > 1.001) img.classList.add('panning');
+        e.preventDefault();
+    });
+    window.addEventListener('mousemove', e => {
+        if (!LB.down) return;
+        const mdx = e.clientX - LB.sx, mdy = e.clientY - LB.sy;
+        if (Math.abs(mdx) > 4 || Math.abs(mdy) > 4) LB.moved = true;
+        if (LB.zoom > 1.001) { LB.tx = LB.stx + mdx; LB.ty = LB.sty + mdy; lbApply(); }
+    });
+    window.addEventListener('mouseup', () => { LB.down = false; img.classList.remove('panning'); });
+
+    // 클릭: 닫기 (단, 드래그로 이동한 경우는 제외)
+    lb.addEventListener('click', () => {
+        if (LB.moved) { LB.moved = false; return; }
+        closeLightbox();
+    });
+}
 function openLightbox(src){
-    const lb = document.getElementById('img-lightbox');
-    lb.querySelector('img').src = src;
-    lb.style.display = 'flex';
+    bindLightbox();
+    const lb  = document.getElementById('img-lightbox');
+    const img = lb.querySelector('img');
+    img.classList.remove('zoomed', 'panning');
+    img.style.width = 'auto'; img.style.transform = '';
+    lb.style.display = 'block';
+    img.onload = lbInitView;
+    img.src = src;
+    if (img.complete && img.naturalWidth) lbInitView();   // 캐시된 경우 onload 미발화 대비
 }
 
 // 일정 id로 기존 첨부 메타를 불러와 수정 모달 목록 채우기
@@ -2989,7 +3128,8 @@ async function saveEvent() {
         color:     S.color,
         memo:      document.getElementById('f-memo').value,
         attach_keep: MODAL_ATTACH.filter(a=>a.id).map(a=>a.id),
-        attach_new:  MODAL_ATTACH.filter(a=>a.dataURL).map(a=>a.dataURL),
+        // 새 이미지(attach_new)는 JSON에 싣지 않고 저장 후 multipart로 개별 업로드
+        // (openresty가 128KB 초과 JSON POST를 404 차단하기 때문)
         recur_rule: RECUR||null,
         alert_mins: [...document.querySelectorAll('.f-alert:checked')].map(cb=>+cb.value),
         attendees: SEL_ATTENDEES.map(a=>a.id),
@@ -3047,6 +3187,7 @@ async function saveEvent() {
         payload.is_allday = 1;
     }
 
+    let savedId = null;
     if (S.editId) {
         payload.id = S.editId;
         // 반복 인스턴스 수정
@@ -3059,6 +3200,7 @@ async function saveEvent() {
         const upRes = await api('update', payload, 'POST');
         if (upRes && !upRes.ok) { alert('저장 실패: ' + (upRes.msg||'')); return; }
         if (upRes?.shifted?.length) showToast(`겹치는 일정 ${upRes.shifted.length}건 시간이 자동 조정됐습니다.`);
+        savedId = S.editId;
     } else {
         let crRes = await api('create', payload, 'POST');
         if (crRes?.dup) {
@@ -3067,6 +3209,12 @@ async function saveEvent() {
         }
         if (crRes && !crRes.ok) { alert('저장 실패: ' + (crRes.msg||'')); return; }
         if (crRes?.shifted?.length) showToast(`겹치는 일정 ${crRes.shifted.length}건 시간이 자동 조정됐습니다.`);
+        savedId = crRes.id;
+    }
+    // 이미지 첨부: 저장된 일정 id로 multipart 업로드
+    if (savedId) {
+        const upl = await uploadPendingAttachments(savedId);
+        if (!upl.ok) alert('일정은 저장됐으나 일부 이미지 첨부에 실패했습니다: ' + (upl.msg||''));
     }
     closeModal(); loadEvents();
 }
@@ -3157,14 +3305,8 @@ function openView(ev) {
         attEl.style.display = 'none';
     }
 
-    // 메모
-    const memoEl = document.getElementById('view-memo');
-    if (ev.memo && ev.memo.trim()) {
-        memoEl.textContent = ev.memo;
-        memoEl.style.display = '';
-    } else {
-        memoEl.style.display = 'none';
-    }
+    // 메모 → 체크리스트(줄 단위, 회차별 체크 상태)
+    renderMemoChecklist(ev);
 
     // 첨부 이미지
     renderViewAttach(ev);
@@ -3199,6 +3341,89 @@ function viewOccDate(ev) {
     if (ev.origin_dt) return ev.origin_dt;
     const base = ev.start_dt || ev.due_dt || '';
     return base ? base.substr(0, 10) : '';
+}
+
+// ── 메모 체크리스트 ─────────────────────────────────────────
+// 메모 줄 앞에 체크표시(ㅁ / [] / [ ] / - [ ] / □ / ☐)가 있으면 체크박스 항목,
+// 없으면 일반 설명 텍스트로 렌더. 체크 상태는 (schedule_id, occ_date)별 저장 →
+// 반복 일정은 회차(날짜)마다 독립. 매월 반복이면 다음 달엔 초기화됨.
+let MEMO_CHK_ITEMS = [];
+
+// 줄 앞 체크표시 감지: 매칭되면 표시부를 떼어낸 나머지가 항목 텍스트
+const MEMO_CHK_RE = /^\s*(?:-\s*)?(?:\[\s*[xXvV]?\s*\]|ㅁ|□|☐|☑|✔|✓)\s*/;
+function parseMemoItem(raw) {
+    const m = raw.match(MEMO_CHK_RE);
+    if (m) return { isCheck: true, text: raw.slice(m[0].length).trim() };
+    return { isCheck: false, text: raw.trim() };
+}
+
+async function renderMemoChecklist(ev) {
+    const memoEl = document.getElementById('view-memo');
+    const lines = (ev.memo || '').split(/\r?\n/).filter(l => l.trim() !== '');
+    if (!lines.length) { memoEl.style.display = 'none'; memoEl.innerHTML = ''; return; }
+    const parsed = lines.map(parseMemoItem);
+    const hasCheck = parsed.some(p => p.isCheck && p.text);
+
+    memoEl.style.display = '';
+    memoEl.style.whiteSpace = 'normal';
+
+    // 체크 상태 조회 (체크 항목이 있을 때만)
+    let checked = new Set();
+    if (hasCheck && ev.id) {
+        const res = await api('check_list', { schedule_id: ev.id, occ_date: viewOccDate(ev) });
+        if (res.ok) checked = new Set((res.data || []).map(String));
+    }
+    // 조회 중 다른 일정이 열렸으면 폐기
+    if (VIEW_EV !== ev) return;
+
+    MEMO_CHK_ITEMS = [];
+    let doneN = 0, total = 0, body = '';
+    for (const p of parsed) {
+        if (p.isCheck && p.text) {
+            const idx = MEMO_CHK_ITEMS.length;
+            MEMO_CHK_ITEMS.push(p.text);
+            const on = checked.has(p.text);
+            total++; if (on) doneN++;
+            body += `<label class="memo-chk-item${on ? ' on' : ''}" data-idx="${idx}">`
+                 +  `<input type="checkbox"${on ? ' checked' : ''}>`
+                 +  `<span class="memo-chk-txt">${esc(p.text)}</span></label>`;
+        } else if (p.text) {
+            body += `<div class="memo-plain">${esc(p.text)}</div>`;
+        }
+    }
+    const head = total
+        ? `<div class="memo-chk-head">✅ 체크리스트 <span class="memo-chk-count">${doneN}/${total}</span></div>`
+        : '';
+    memoEl.innerHTML = head + body;
+    memoEl.querySelectorAll('.memo-chk-item input').forEach(cb =>
+        cb.addEventListener('change', () => toggleMemoCheck(cb)));
+}
+
+async function toggleMemoCheck(cb) {
+    const item = cb.closest('.memo-chk-item');
+    const txt  = MEMO_CHK_ITEMS[+item.dataset.idx];
+    const on   = cb.checked;
+    item.classList.toggle('on', on);
+    updateMemoCheckCount();
+    if (!VIEW_EV || !VIEW_EV.id || txt == null) return;
+    const res = await api('check_toggle', {
+        schedule_id: VIEW_EV.id, occ_date: viewOccDate(VIEW_EV), item: txt, checked: on ? 1 : 0
+    }, 'POST');
+    if (!res.ok) {   // 실패 시 원복
+        cb.checked = !on;
+        item.classList.toggle('on', !on);
+        updateMemoCheckCount();
+        alert(res.msg || '체크 저장에 실패했습니다.');
+    }
+}
+
+function updateMemoCheckCount() {
+    const memoEl = document.getElementById('view-memo');
+    const cntEl = memoEl.querySelector('.memo-chk-count');
+    if (!cntEl) return;
+    const total = memoEl.querySelectorAll('.memo-chk-item').length;
+    const done  = memoEl.querySelectorAll('.memo-chk-item.on').length;
+    cntEl.textContent = `${done}/${total}`;
 }
 
 async function loadLogs() {
@@ -3329,6 +3554,9 @@ async function confirmScope(scope) {
         SCOPE_PAYLOAD.scope     = scope;
         const res = await api('update_scoped', SCOPE_PAYLOAD, 'POST');
         if (!res.ok) { alert('저장 실패: ' + (res.msg||'알 수 없는 오류')); return; }
+        // 이미지 첨부: 저장된 일정 id로 multipart 업로드
+        const upl = await uploadPendingAttachments(S.editId);
+        if (!upl.ok) alert('일정은 저장됐으나 일부 이미지 첨부에 실패했습니다: ' + (upl.msg||''));
         closeModal();
     } else if (SCOPE_ACTION === 'done') {
         // 완료 범위 처리
@@ -5124,6 +5352,65 @@ function fillProjSelect() {
 }
 
 // 그룹/프로젝트 클릭 → 상세 모달
+// ── 프로젝트 메모 체크리스트 (일정과 동일 포맷 · (project_id, 항목) 단위) ──
+let PROJ_CHK_ITEMS = [];
+async function renderProjMemoChecklist(projId, memo){
+    const el = document.getElementById('pdp-memo-content');
+    if (!el) return;
+    const lines  = (memo || '').split(/\r?\n/).filter(l => l.trim() !== '');
+    const parsed = lines.map(parseMemoItem);
+    const hasCheck = parsed.some(p => p.isCheck && p.text);
+
+    let checked = new Set();
+    if (hasCheck && projId){
+        const res = await api('check_list', { id: projId }, 'GET', 'projects');
+        if (res.ok) checked = new Set((res.data || []).map(String));
+    }
+    // 렌더 대상이 사라졌으면(모달 닫힘/재오픈) 폐기
+    if (document.getElementById('pdp-memo-content') !== el) return;
+
+    el.style.whiteSpace = 'normal';
+    PROJ_CHK_ITEMS = [];
+    let done = 0, total = 0, body = '';
+    for (const p of parsed){
+        if (p.isCheck && p.text){
+            const idx = PROJ_CHK_ITEMS.length; PROJ_CHK_ITEMS.push(p.text);
+            const on = checked.has(p.text); total++; if (on) done++;
+            body += `<label class="memo-chk-item${on ? ' on' : ''}" data-idx="${idx}">`
+                 +  `<input type="checkbox"${on ? ' checked' : ''}>`
+                 +  `<span class="memo-chk-txt">${esc(p.text)}</span></label>`;
+        } else if (p.text){
+            body += `<div class="memo-plain">${esc(p.text)}</div>`;
+        }
+    }
+    const head = total
+        ? `<div class="memo-chk-head">✅ 체크리스트 <span class="memo-chk-count">${done}/${total}</span></div>`
+        : '';
+    el.innerHTML = head + body;
+    el.querySelectorAll('.memo-chk-item input').forEach(cb =>
+        cb.addEventListener('change', () => toggleProjMemoCheck(projId, cb)));
+}
+
+async function toggleProjMemoCheck(projId, cb){
+    const item = cb.closest('.memo-chk-item');
+    const txt  = PROJ_CHK_ITEMS[+item.dataset.idx];
+    const on   = cb.checked;
+    item.classList.toggle('on', on);
+    updateProjMemoCount();
+    if (!projId || txt == null) return;
+    const res = await api('check_toggle', { id: projId, item: txt, checked: on ? 1 : 0 }, 'POST', 'projects');
+    if (!res.ok){
+        cb.checked = !on; item.classList.toggle('on', !on); updateProjMemoCount();
+        alert(res.msg || '체크 저장에 실패했습니다.');
+    }
+}
+
+function updateProjMemoCount(){
+    const el = document.getElementById('pdp-memo-content'); if (!el) return;
+    const c  = el.querySelector('.memo-chk-count'); if (!c) return;
+    c.textContent = `${el.querySelectorAll('.memo-chk-item.on').length}/${el.querySelectorAll('.memo-chk-item').length}`;
+}
+
 function openProjDetail(e, id) {
     e.stopPropagation();
     document.getElementById('proj-detail-overlay')?.remove();
@@ -5187,7 +5474,7 @@ function openProjDetail(e, id) {
 
     // 텍스트 안전 삽입
     document.getElementById('pdp-title-el').textContent = (p.icon || '') + p.title;
-    if (hasMemo) document.getElementById('pdp-memo-content').textContent = p.memo;
+    if (hasMemo) renderProjMemoChecklist(id, p.memo);   // 메모 → 체크리스트(일정과 동일 포맷)
 
     overlay.querySelector('#pdp-btn-close').onclick = () => overlay.remove();
     overlay.querySelector('#pdp-btn-edit').onclick  = () => { overlay.remove(); openProjModal(id); };
@@ -6092,7 +6379,7 @@ function confirmMapPick() {
         </div>
     </div>
 </div>
-<div id="img-lightbox" onclick="this.style.display='none'"><img src="" alt=""></div>
+<div id="img-lightbox"><img src="" alt=""><div class="lb-hint">휠: 확대/축소 · 드래그: 이동 · 클릭: 닫기</div></div>
 </body>
 </html>
 <?php

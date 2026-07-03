@@ -36,6 +36,17 @@ if (isset($routes[$mode]) && function_exists($routes[$mode])) {
     travel_list($pdo);
 }
 
+/**
+ * 이미지 프록시 URL. 비공개 드라이브 → travel_thumb.php 가 인증 후 SA 로 서빙.
+ * 게스트 보기($GLOBALS['TV_SHARE'] 설정 시)에는 공유토큰을 붙여 이미지도 인가되게 한다.
+ */
+function tvImg(string $fileId, int $w = 400): string {
+    $u   = 'travel_thumb.php?id=' . rawurlencode($fileId) . '&w=' . $w;
+    $tok = (string)($GLOBALS['TV_SHARE'] ?? '');
+    if ($tok !== '') $u .= '&share=' . rawurlencode($tok);
+    return $u;
+}
+
 // ##########################################################
 // 공통 chrome (nav + 기본 스타일)
 // ##########################################################
@@ -372,8 +383,8 @@ function tv_group_by_place(array $shots, float $maxMeters = 100.0): array {
 /** 장소 카드 안의 사진 1장 = [썸네일 | 시각+메모] (소유자는 메모 편집 가능) */
 function tv_render_pshot(array $s, bool $guest, bool $mapsActive = false): void {
     $time = $s['taken_at'] ? substr($s['taken_at'], 11, 5) : '';
-    $bg   = "background-image:url('" . htmlspecialchars($s['thumb_url']) . "')";
-    $big  = htmlspecialchars(Travel::thumbUrl($s['drive_file_id'], 1600), ENT_QUOTES);
+    $bg   = "background-image:url('" . htmlspecialchars(tvImg($s['drive_file_id'], 800), ENT_QUOTES) . "')";
+    $big  = htmlspecialchars(tvImg($s['drive_file_id'],1600), ENT_QUOTES);
     $isVid = (($s['media_type'] ?? 'image') === 'video');
     $fid   = htmlspecialchars($s['drive_file_id'], ENT_QUOTES);
     $vw    = (int)($s['vid_w'] ?? 0); $vh = (int)($s['vid_h'] ?? 0);
@@ -382,7 +393,7 @@ function tv_render_pshot(array $s, bool $guest, bool $mapsActive = false): void 
     if ($isVid) {
         $click = "tvOpenVideo('{$fid}',{$vw},{$vh})";
     } else {
-        $click = "tvOpenPhoto('{$big}')";
+        $click = "tvOpenPhoto('{$big}','" . htmlspecialchars(tvImg($s['drive_file_id'], 800), ENT_QUOTES) . "')";
     }
     $vidCls = $isVid ? ' is-vid' : '';
     $noGps  = ($s['lat'] === null || $s['lng'] === null);   // GPS 없는 사진 = 위치 지정 대상
@@ -446,15 +457,15 @@ function tv_render_shots(array $gShots, bool $guest, bool $mapsActive): void {
 /** 메모 없는 사진 1장 = 컴팩트 썸네일(시각 라벨 + 편집모드 연필·숨김) */
 function tv_render_chip(array $s, bool $guest, bool $mapsActive): void {
     $time  = $s['taken_at'] ? substr($s['taken_at'], 11, 5) : '';
-    $bg    = "background-image:url('" . htmlspecialchars($s['thumb_url']) . "')";
-    $big   = htmlspecialchars(Travel::thumbUrl($s['drive_file_id'], 1600), ENT_QUOTES);
+    $bg    = "background-image:url('" . htmlspecialchars(tvImg($s['drive_file_id'], 800), ENT_QUOTES) . "')";
+    $big   = htmlspecialchars(tvImg($s['drive_file_id'],1600), ENT_QUOTES);
     $isVid = (($s['media_type'] ?? 'image') === 'video');
     $fid   = htmlspecialchars($s['drive_file_id'], ENT_QUOTES);
     $vw    = (int)($s['vid_w'] ?? 0); $vh = (int)($s['vid_h'] ?? 0);
     if ($isVid) {
         $click = "tvOpenVideo('{$fid}',{$vw},{$vh})";   // 동영상은 전체화면 재생
     } else {
-        $click = "tvOpenPhoto('{$big}')";
+        $click = "tvOpenPhoto('{$big}','" . htmlspecialchars(tvImg($s['drive_file_id'], 800), ENT_QUOTES) . "')";
     }
     $vidCls = $isVid ? ' is-vid' : '';
     $noGps  = ($s['lat'] === null || $s['lng'] === null);   // GPS 없는 사진 = 위치 지정 대상
@@ -596,6 +607,8 @@ JS;
 function travel_view(PDO $pdo, bool $guest = false, ?int $forceId = null, ?string $shareExpiry = null): void {
     // 게스트(공유 링크)는 토큰에 묶인 여행만 본다 — $_GET['id'] 는 무시
     $id = $forceId ?? (int)($_GET['id'] ?? 0);
+    // 게스트 보기: 이미지·동영상 프록시 URL 에 붙일 공유토큰 (tvImg / 비디오 JS 가 참조)
+    $GLOBALS['TV_SHARE'] = $guest ? (string)($_GET['share'] ?? '') : '';
     $travel = new Travel($pdo);
     $travel->ensureTable();
     $t = $travel->getTravel($id);
@@ -642,7 +655,7 @@ function travel_view(PDO $pdo, bool $guest = false, ?int $forceId = null, ?strin
                         'lng'    => $lng,
                         'time'   => $s['taken_at'] ? substr($s['taken_at'], 11, 5) : '',
                         'addr'   => (string)($s['addr'] ?? ''),
-                        'thumb'  => Travel::thumbUrl($s['drive_file_id'], 1000),
+                        'thumb'  => tvImg($s['drive_file_id'],1000),
                         'count'  => 1,
                         'photo0' => count($routePhotos),
                     ];
@@ -657,7 +670,7 @@ function travel_view(PDO $pdo, bool $guest = false, ?int $forceId = null, ?strin
                     'lng'   => $lng,
                     'time'  => $s['taken_at'] ? substr($s['taken_at'], 11, 5) : '',
                     'addr'  => (string)($s['addr'] ?? ''),
-                    'thumb' => Travel::thumbUrl($s['drive_file_id'], 1000),
+                    'thumb' => tvImg($s['drive_file_id'],1000),
                     'place' => $placeIdx + 1,   // 속한 장소 핀 번호
                     'pi'    => $pi,             // 장소 내 순번
                     'memo'  => trim((string)($s['memo'] ?? '')),  // 사진별 메모(모달 오버레이용)
@@ -909,13 +922,17 @@ function travel_view(PDO $pdo, bool $guest = false, ?int $forceId = null, ?strin
     travel_foot();
 
     // ── 사진 라이트박스 (공통: 소유자·게스트) ──
+    // 게스트면 미디어 프록시 URL 에 붙일 공유토큰을 JS 로 전달(동영상 <video> src 조립용)
+    echo "<script>window.TV_SHARE='" . htmlspecialchars((string)($GLOBALS['TV_SHARE'] ?? ''), ENT_QUOTES) . "';</script>";
     echo "<script>"
-       . "function tvOpenPhoto(u){var m=document.getElementById('tv-pmodal');document.getElementById('tv-pimg').src=u;m.classList.add('on');}"
+       // 저해상(카드에 이미 캐시된 800px)을 즉시 표시 → 고해상(1600px) 로드되면 교체(빈 팝업 대기 제거)
+       . "function tvOpenPhoto(u,ph){var m=document.getElementById('tv-pmodal');var img=document.getElementById('tv-pimg');if(ph){img.src=ph;img.classList.add('tv-loading');}else{img.classList.remove('tv-loading');}m.classList.add('on');if(u&&u!==ph){var hi=new Image();hi.onload=function(){img.src=u;img.classList.remove('tv-loading');};hi.onerror=function(){img.classList.remove('tv-loading');};hi.src=u;}else{img.src=u;img.classList.remove('tv-loading');}}"
        . "function tvClosePhoto(e){if(e&&e.target&&e.target.id!=='tv-pmodal'&&!e.target.classList.contains('tv-modal-x'))return;document.getElementById('tv-pmodal').classList.remove('on');}"
        // 영상 비율(w:h)을 가용영역(maxW×maxH)에 맞춰 픽셀 크기 산출 — 검은 여백 제거(없으면 16:9 폴백)
        . "function tvFitBox(maxW,maxH,w,h){var ar=(w>0&&h>0)?(w/h):(16/9);var fw=maxW,fh=maxW/ar;if(fh>maxH){fh=maxH;fw=maxH*ar;}return{w:Math.round(fw),h:Math.round(fh)};}"
        // 동영상 재생 모달 (drive preview iframe). 터치기기(폰·와이드)=화면 가득 채운 iframe → 드라이브 플레이어가 영상 방향/비율 알아서 배치(회전 메타 한계 회피) / PC=창(비율 맞춤). 좁은 폰(≤560)만 네이티브 풀스크린(컨트롤 자동숨김)
-       . "function tvOpenVideo(fid,w,h){var m=document.getElementById('tv-vmodal');var fr=document.getElementById('tv-vframe');var touch=!!(window.matchMedia&&window.matchMedia('(pointer:coarse)').matches);var phone=touch&&window.innerWidth<=560;m.classList.toggle('full',touch);if(touch){fr.style.width=window.innerWidth+'px';fr.style.height=Math.round(window.innerHeight*0.95)+'px';}else{var b=tvFitBox(Math.min(window.innerWidth*0.96,820),window.innerHeight*0.86,w,h);fr.style.width=b.w+'px';fr.style.height=b.h+'px';}fr.innerHTML=\"<iframe src='https://drive.google.com/file/d/\"+fid+\"/preview' allow='autoplay; fullscreen' allowfullscreen></iframe>\";m.classList.add('on');if(phone){var ifr=fr.querySelector('iframe');var rq=ifr.requestFullscreen||ifr.webkitRequestFullscreen;if(rq){try{var pr=rq.call(ifr);if(pr&&pr.catch)pr.catch(function(){});}catch(e){}}}}"
+       // 비공개 드라이브 → travel_video.php(인증+SA Range 스트리밍) 를 <video> 로 재생. 게스트는 공유토큰 부착. 네이티브 video 컨트롤이 전체화면 처리.
+       . "function tvOpenVideo(fid,w,h){var m=document.getElementById('tv-vmodal');var fr=document.getElementById('tv-vframe');var touch=!!(window.matchMedia&&window.matchMedia('(pointer:coarse)').matches);m.classList.toggle('full',touch);if(touch){fr.style.width=window.innerWidth+'px';fr.style.height=Math.round(window.innerHeight*0.95)+'px';}else{var b=tvFitBox(Math.min(window.innerWidth*0.96,820),window.innerHeight*0.86,w,h);fr.style.width=b.w+'px';fr.style.height=b.h+'px';}var src='travel_video.php?id='+encodeURIComponent(fid)+(window.TV_SHARE?'&share='+encodeURIComponent(window.TV_SHARE):'');fr.innerHTML=\"<video src='\"+src+\"' controls autoplay playsinline controlslist='nodownload' style='width:100%;height:100%;background:#000'></video>\";m.classList.add('on');}"
        . "function tvCloseVideo(e){if(e&&e.target&&e.target.id!=='tv-vmodal'&&!e.target.classList.contains('tv-modal-x'))return;if(document.fullscreenElement&&document.exitFullscreen){document.exitFullscreen().catch(function(){});}document.getElementById('tv-vframe').innerHTML='';document.getElementById('tv-vmodal').classList.remove('on');}"
        // 네이티브 전체화면을 빠져나오면(시스템 뒤로가기 등) 동영상 모달도 함께 닫고 재생 중지
        . "function tvVfsChange(){if(!(document.fullscreenElement||document.webkitFullscreenElement)){var m=document.getElementById('tv-vmodal');if(m&&m.classList.contains('on')){document.getElementById('tv-vframe').innerHTML='';m.classList.remove('on');}}}"

@@ -3,11 +3,11 @@
  * Travel.class — 여행 사진 갤러리 (DB 전담 + 구글 드라이브 연동)
  *
  * 구조(B안): 여행 = tbl_travel 1행 (프로젝트/캘린더와 완전 분리)
- *   - 부모폴더 1개(TRAVEL_DRIVE_PARENT_ID)만 읽기전용 API 키로 조회
+ *   - 부모폴더 1개(TRAVEL_DRIVE_PARENT_ID)를 서비스계정(GDriveSA)으로 조회 — 비공개 폴더 지원
  *   - 하위 여행폴더 자동 발견 → 사진 메타(촬영시각/GPS/썸네일)만 DB 저장
  *   - 원본은 드라이브에 그대로, 서버엔 메타데이터만 (cafe24 용량 회피)
  *
- * 의존: env/gdrive.inc (GOOGLE_DRIVE_API_KEY, TRAVEL_DRIVE_PARENT_ID)
+ * 의존: env/gdrive.inc (GDRIVE_SA_JSON, TRAVEL_DRIVE_PARENT_ID) + GDriveSA.class
  */
 class Travel
 {
@@ -92,7 +92,7 @@ class Travel
     // ======================================================
     private function driveEnabled(): bool
     {
-        return defined('GOOGLE_DRIVE_API_KEY') && GOOGLE_DRIVE_API_KEY !== ''
+        return GDriveSA::enabled()
             && defined('TRAVEL_DRIVE_PARENT_ID') && TRAVEL_DRIVE_PARENT_ID !== '';
     }
 
@@ -104,14 +104,13 @@ class Travel
         do {
             $params = [
                 'q'        => $q . ' and trashed=false',
-                'key'      => GOOGLE_DRIVE_API_KEY,
                 'fields'   => "nextPageToken,files({$fields})",
                 'pageSize' => 100,
                 'orderBy'  => 'name',
             ];
             if ($pageToken !== '') $params['pageToken'] = $pageToken;
 
-            $json = $this->curlGet(self::DRIVE_API . '?' . http_build_query($params));
+            $json = $this->curlGet(self::DRIVE_API . '?' . http_build_query($params), 0, GDriveSA::authHeader());
             $data = json_decode($json, true);
             if (isset($data['error'])) {
                 throw new RuntimeException('Drive API: ' . ($data['error']['message'] ?? 'unknown'));
@@ -141,9 +140,8 @@ class Travel
     /** 부분 다운로드(앞 128KB) + EXIF → [lat, lng] | null */
     public function extractGps(string $fileId): ?array
     {
-        $url = self::DRIVE_API . '/' . rawurlencode($fileId)
-             . '?alt=media&key=' . GOOGLE_DRIVE_API_KEY;
-        $bytes = $this->curlGet($url, self::EXIF_BYTES);
+        $url = self::DRIVE_API . '/' . rawurlencode($fileId) . '?alt=media';
+        $bytes = $this->curlGet($url, self::EXIF_BYTES, GDriveSA::authHeader());
         if ($bytes === '') return null;
 
         // exif_read_data 는 파일/스트림 필요 → 임시파일 경유
@@ -171,12 +169,13 @@ class Travel
     public function extractVideoMeta(string $fileId, int $size = 0): array
     {
         $out = ['lat' => null, 'lng' => null, 'taken_at' => null];
-        $url = self::DRIVE_API . '/' . rawurlencode($fileId) . '?alt=media&key=' . GOOGLE_DRIVE_API_KEY;
+        $url = self::DRIVE_API . '/' . rawurlencode($fileId) . '?alt=media';
+        $ah    = GDriveSA::authHeader();
         $chunk = 3 * 1024 * 1024;                          // 앞/뒤 각 3MB
 
-        $buf = $this->curlRange($url, 0, $chunk);
+        $buf = $this->curlRange($url, 0, $chunk, $ah);
         if ($size > $chunk) {                              // 앞 3MB 초과면 뒤쪽(아이폰 moov 위치)도 스캔 (3~6MB 짧은 클립도 포함)
-            $buf .= $this->curlRange($url, max($chunk, $size - $chunk), $chunk);
+            $buf .= $this->curlRange($url, max($chunk, $size - $chunk), $chunk, $ah);
         }
         if ($buf === '') return $out;
 
@@ -263,10 +262,10 @@ class Travel
     }
 
     /** 임의 범위 부분 다운로드 (start 바이트부터 len 바이트) — 동영상 atom 스캔용 */
-    private function curlRange(string $url, int $start, int $len): string
+    private function curlRange(string $url, int $start, int $len, array $headers = []): string
     {
         $ch = curl_init($url);
-        curl_setopt_array($ch, [
+        $opt = [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_CONNECTTIMEOUT => 8,
@@ -274,7 +273,9 @@ class Travel
             CURLOPT_SSL_VERIFYPEER => false,
             CURLOPT_USERAGENT      => 'Mozilla/5.0',
             CURLOPT_RANGE          => $start . '-' . ($start + $len - 1),
-        ]);
+        ];
+        if ($headers) $opt[CURLOPT_HTTPHEADER] = $headers;
+        curl_setopt_array($ch, $opt);
         $res = curl_exec($ch);
         curl_close($ch);
         return $res === false ? '' : $res;
@@ -314,7 +315,7 @@ class Travel
         return null;
     }
 
-    private function curlGet(string $url, int $rangeBytes = 0): string
+    private function curlGet(string $url, int $rangeBytes = 0, array $headers = []): string
     {
         $ch = curl_init($url);
         $opts = [
@@ -324,7 +325,8 @@ class Travel
             CURLOPT_SSL_VERIFYPEER => false,
             CURLOPT_USERAGENT      => 'Mozilla/5.0',
         ];
-        if ($rangeBytes > 0) $opts[CURLOPT_RANGE] = '0-' . $rangeBytes;
+        if ($rangeBytes > 0)  $opts[CURLOPT_RANGE]      = '0-' . $rangeBytes;
+        if ($headers)         $opts[CURLOPT_HTTPHEADER] = $headers;
         curl_setopt_array($ch, $opts);
         $res  = curl_exec($ch);
         curl_close($ch);
@@ -334,7 +336,8 @@ class Travel
     /** 드라이브 fileId → 안정적 공개 썸네일 URL (만료 없음) */
     public static function thumbUrl(string $fileId, int $w = 400): string
     {
-        return 'https://drive.google.com/thumbnail?id=' . rawurlencode($fileId) . '&sz=w' . $w;
+        // 鍮꾧났媛??대뜑 ???몄쬆 ?꾨줉??travel_thumb.php)媛 ?몄뀡/怨듭쑀?좏겙 寃利???SA 濡??쒕튃
+        return 'travel_thumb.php?id=' . rawurlencode($fileId) . '&w=' . $w;
     }
 
     /** 드라이브 fileId → 원본 보기 URL */
@@ -417,9 +420,8 @@ class Travel
     /** 드라이브 폴더 ID → 현재 폴더명 (조회 실패 시 null) */
     private function getDriveFolderName(string $folderId): ?string
     {
-        $url = self::DRIVE_API . '/' . rawurlencode($folderId)
-             . '?key=' . GOOGLE_DRIVE_API_KEY . '&fields=name';
-        $data = json_decode($this->curlGet($url), true);
+        $url = self::DRIVE_API . '/' . rawurlencode($folderId) . '?fields=name';
+        $data = json_decode($this->curlGet($url, 0, GDriveSA::authHeader()), true);
         return $data['name'] ?? null;
     }
 
@@ -429,8 +431,7 @@ class Travel
      */
     private function driveFolderExists(string $folderId): ?bool
     {
-        $url = self::DRIVE_API . '/' . rawurlencode($folderId)
-             . '?key=' . GOOGLE_DRIVE_API_KEY . '&fields=id,trashed';
+        $url = self::DRIVE_API . '/' . rawurlencode($folderId) . '?fields=id,trashed';
         $ch  = curl_init($url);
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
@@ -438,6 +439,7 @@ class Travel
             CURLOPT_TIMEOUT        => 30,
             CURLOPT_SSL_VERIFYPEER => false,
             CURLOPT_USERAGENT      => 'Mozilla/5.0',
+            CURLOPT_HTTPHEADER     => GDriveSA::authHeader(),
         ]);
         $res  = curl_exec($ch);
         $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -931,6 +933,29 @@ class Travel
         $stmt = $this->pdo->prepare("SELECT * FROM tbl_travel_share WHERE token = ? LIMIT 1");
         $stmt->execute([$token]);
         return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * 誘몃뵒???꾨줉??travel_thumb.php / travel_video.php) ?묎렐 ?멸?.
+     *   - ?뚯쑀??濡쒓렇???몄뀡): 紐⑤뱺 ?뚯씪 ?덉슜
+     *   - 寃뚯뒪?? ?좏슚??怨듭쑀?좏겙 + 洹??좏겙??媛由ы궎???ы뻾?????뚯씪???ㅼ젣濡??랁븷 ?뚮쭔 ?덉슜
+     *     (?ㅻⅨ ?ы뻾??fileId 瑜?異붿륫??鍮쇨???寃?李⑤떒)
+     * ??諛?荑쇰━濡??좏겙 ?좏슚??誘몃쭔猷뙿룸?痍⑥냼) + ?뚯씪 ?뚯냽???숈떆??寃利앺븳??
+     */
+    public static function mediaAuthorized(PDO $pdo, bool $owner, string $fileId, string $token): bool
+    {
+        if ($owner) return true;
+        if ($token === '' || $fileId === '') return false;
+        $st = $pdo->prepare(
+            "SELECT 1
+               FROM tbl_travel_share s
+               JOIN tbl_travel_photo p ON p.travel_id = s.travel_id
+              WHERE s.token = ? AND s.revoked = 0 AND s.expires_at > NOW()
+                AND p.drive_file_id = ?
+              LIMIT 1"
+        );
+        $st->execute([$token, $fileId]);
+        return (bool)$st->fetchColumn();
     }
 }
 ?>

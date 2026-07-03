@@ -65,6 +65,20 @@ function api_attach(string $action, PDO $pdo): void {
         echo $row['data'];
         return;
     }
+    // 이미지 업로드(multipart) — openresty가 JSON 큰 본문(>128KB)을 404 차단하므로
+    // 첨부는 일정 저장 JSON에서 분리해 파일 업로드로 받는다
+    if ($action === 'upload') {
+        $sid = (int)($_POST['schedule_id'] ?? 0);
+        if ($sid <= 0) { echo json_encode(['ok'=>false, 'msg'=>'schedule_id 누락']); return; }
+        $f = $_FILES['file'] ?? null;
+        if (!$f || ($f['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+            echo json_encode(['ok'=>false, 'msg'=>'파일 업로드 실패(error='.($f['error'] ?? 'none').')']); return;
+        }
+        $bin = @file_get_contents($f['tmp_name']);
+        if ($bin === false || $bin === '') { echo json_encode(['ok'=>false, 'msg'=>'빈 파일']); return; }
+        echo json_encode($sch->addAttachBinary($sid, $bin));
+        return;
+    }
     echo json_encode(['ok'=>false, 'msg'=>'unknown action']);
 }
 
@@ -289,6 +303,26 @@ function api_calendar(string $action, PDO $pdo): void {
         case 'log_delete':
             $id = (int)($_GET['id'] ?? $_POST['id'] ?? 0);
             if ($id > 0) $sch->logDelete($id);
+            echo json_encode(['ok' => true]);
+            break;
+
+        // 메모 체크리스트 — 메모 줄(항목)별 체크 상태, 발생일(occ_date)별 독립
+        case 'check_list':
+            $sid = (int)($_GET['schedule_id'] ?? 0);
+            $od  = $_GET['occ_date'] ?? date('Y-m-d');
+            echo json_encode(['ok' => true, 'data' => $sid > 0 ? $sch->checkList($sid, $od) : []]);
+            break;
+
+        case 'check_toggle':
+            $d   = json_decode(file_get_contents('php://input'), true);
+            $sid = (int)($d['schedule_id'] ?? 0);
+            $od  = $d['occ_date'] ?? date('Y-m-d');
+            $it  = (string)($d['item'] ?? '');
+            if ($sid <= 0 || trim($it) === '') {
+                echo json_encode(['ok' => false, 'msg' => '항목이 비었습니다.']);
+                break;
+            }
+            $sch->checkToggle($sid, $od, $it, !empty($d['checked']));
             echo json_encode(['ok' => true]);
             break;
 
@@ -889,6 +923,21 @@ function api_projects(string $action, PDO $pdo): void {
         case 'toggle_done':
             $d = json_decode(file_get_contents('php://input'), true);
             echo json_encode($proj->toggleDone((int)($d['id'] ?? 0)));
+            break;
+
+        // 메모 체크리스트 — 프로젝트/분류 메모 항목별 체크 상태 (project_id 단위)
+        case 'check_list':
+            $id = (int)($_GET['id'] ?? 0);
+            echo json_encode(['ok' => true, 'data' => $id > 0 ? $proj->checkList($id) : []]);
+            break;
+
+        case 'check_toggle':
+            $d  = json_decode(file_get_contents('php://input'), true);
+            $id = (int)($d['id'] ?? 0);
+            $it = (string)($d['item'] ?? '');
+            if ($id <= 0 || trim($it) === '') { echo json_encode(['ok'=>false, 'msg'=>'항목이 비었습니다.']); break; }
+            $proj->checkToggle($id, $it, !empty($d['checked']));
+            echo json_encode(['ok' => true]);
             break;
 
         // 프로젝트/그룹에 직접 속한 일정 목록 (+ 그룹이면 포함 프로젝트 목록)

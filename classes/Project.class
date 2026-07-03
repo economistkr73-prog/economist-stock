@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 // classes/Project.class — 프로젝트/그룹 DB 전담
 
 class Project {
@@ -158,6 +158,43 @@ class Project {
 
     // ── 프로젝트/그룹에 "직접" 속한 일정 목록 ────────────────
     // 그룹이면 그룹 직속(별도) 일정만. 하위 프로젝트 소속 일정은 포함하지 않음
+    // Memo checklist for a project/group: check state keyed by (project_id, item_txt).
+    private function ensureCheckTable(): void {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS tbl_project_check (
+                id          INT AUTO_INCREMENT PRIMARY KEY,
+                project_id  INT NOT NULL,
+                item_txt    VARCHAR(191) NOT NULL,
+                checked_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (project_id) REFERENCES tbl_project(id) ON DELETE CASCADE,
+                UNIQUE KEY uniq_projcheck (project_id, item_txt),
+                INDEX idx_projcheck (project_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+    }
+
+    public function checkList(int $projectId): array {
+        $this->ensureCheckTable();
+        $st = $this->pdo->prepare("SELECT item_txt FROM tbl_project_check WHERE project_id=:pid");
+        $st->execute([':pid' => $projectId]);
+        return $st->fetchAll(PDO::FETCH_COLUMN);
+    }
+
+    public function checkToggle(int $projectId, string $item, bool $on): void {
+        $this->ensureCheckTable();
+        $item = mb_substr(trim($item), 0, 191);
+        if ($item === '') return;
+        if ($on) {
+            $st = $this->pdo->prepare(
+                "INSERT IGNORE INTO tbl_project_check (project_id, item_txt) VALUES (:pid, :it)"
+            );
+        } else {
+            $st = $this->pdo->prepare(
+                "DELETE FROM tbl_project_check WHERE project_id=:pid AND item_txt=:it"
+            );
+        }
+        $st->execute([':pid' => $projectId, ':it' => $item]);
+    }
     public function getItems(int $projectId): array {
         $stmt = $this->pdo->prepare("
             SELECT s.id, s.event_type, s.title, s.start_dt, s.end_dt, s.due_dt,
