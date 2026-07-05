@@ -35,6 +35,77 @@ while (ob_get_level() > 0) @ob_end_flush();
 $cacheDir = sys_get_temp_dir() . '/ardent_cache';
 $crawler  = new ArdentNews($cacheDir);
 
+// ── AI 파이프라인(dry_ai / run_ai) 공통: 키·지오코딩·중복판정 ──────────────
+if (file_exists("./env/anthropic.inc")) require_once "./env/anthropic.inc";
+if (file_exists("./env/kakao.inc"))     require_once "./env/kakao.inc";
+$AI_KEY = getenv('ANTHROPIC_API_KEY') ?: (defined('ANTHROPIC_API_KEY') ? ANTHROPIC_API_KEY : '');
+$CATKO  = ['restaurant'=>'맛집','stay'=>'스테이','camping'=>'캠핑','travel'=>'여행지','event'=>'행사','etc'=>'기타','cafe'=>'카페'];
+
+/** 시도 표기 통일(강원특별자치도→강원 등). address 접두 검증·저장용. */
+function ai_sidoNorm(string $s): string {
+    $map = ['서울특별시'=>'서울','부산광역시'=>'부산','대구광역시'=>'대구','인천광역시'=>'인천','광주광역시'=>'광주',
+        '대전광역시'=>'대전','울산광역시'=>'울산','세종특별자치시'=>'세종','경기도'=>'경기','강원도'=>'강원',
+        '강원특별자치도'=>'강원','충청북도'=>'충북','충청남도'=>'충남','전라북도'=>'전북','전북특별자치도'=>'전북',
+        '전라남도'=>'전남','경상북도'=>'경북','경상남도'=>'경남','제주특별자치도'=>'제주','제주도'=>'제주'];
+    return $map[$s] ?? preg_replace('/(특별자치도|특별자치시|특별시|광역시|도)$/u', '', $s);
+}
+function ai_dupNorm(string $s): string { return preg_replace('/[\s\-·,()\[\]]+/u', '', mb_strtolower(trim($s))); }
+
+/** 카카오 주소 문자열 → [region_lv1(시도 단축), region_lv2(시군구)]. */
+function ai_addrRegion(string $addr): array {
+    $t = preg_split('/\s+/u', trim($addr));
+    $lv1 = isset($t[0]) && $t[0] !== '' ? ai_sidoNorm($t[0]) : null;
+    $lv2 = null;
+    for ($i = 1; $i < count($t); $i++) { if (preg_match('/(시|군|구)$/u', $t[$i])) { $lv2 = $t[$i]; break; } }
+    return [$lv1, $lv2];
+}
+
+/**
+ * 장소명+지역 → 카카오 POI 지오코딩(+지역검증으로 오도시 방지).
+ * @return array ['ok'=>bool, 'lat','lng','kakao_name','address','sido','sigungu', 'msg'=>?str]
+ */
+function ai_geocode(string $name, string $region): array {
+    $region = trim($region);
+    $toks   = $region !== '' ? preg_split('/\s+/u', $region) : [];
+    $sido   = $toks ? ai_sidoNorm($toks[0]) : '';
+    $sigungu = '';
+    foreach ($toks as $i => $t) { if ($i > 0 && preg_match('/(시|군|구)$/u', $t)) { $sigungu = $t; break; } }
+    if ($sigungu === '' && count($toks) === 1 && preg_match('/(시|군|구)$/u', $toks[0])) { $sigungu = $toks[0]; $sido = ''; }
+
+    $q = $name . ($sigungu !== '' ? ' ' . $sigungu : ($sido !== '' ? ' ' . $sido : ''));
+    $res = GeoCoder::searchKeyword($q, 6);
+    if (empty($res['ok']))     return ['ok' => false, 'msg' => '검색실패'];
+    $items = $res['items'];
+    if (!$items)               return ['ok' => false, 'msg' => '결과0'];
+
+    $pick = function (array $it) use ($sido, $sigungu): array {
+        return ['ok'=>true, 'lat'=>$it['lat'], 'lng'=>$it['lng'], 'kakao_name'=>$it['name'],
+                'address'=>$it['address'], 'sido'=>$sido, 'sigungu'=>$sigungu];
+    };
+    // 1순위: 주소에 시군구 포함
+    if ($sigungu !== '') foreach ($items as $it) if (mb_strpos($it['address'], $sigungu) !== false) return $pick($it);
+    // 2순위: 주소에 시도 포함
+    if ($sido !== '')    foreach ($items as $it) if (mb_strpos($it['address'], $sido) !== false)    return $pick($it);
+    // 지역 힌트 없으면 top 채택(최선)
+    if ($region === '')  return $pick($items[0]);
+    return ['ok' => false, 'msg' => '지역불일치(top:' . ($items[0]['address'] ?? '') . ')'];
+}
+
+/** 엄격 중복판정: 좌표 250m + 정규화 이름 '완전 일치' (분류무관 → 네이버 맛집/캠핑 포함). */
+function ai_match(Place $place, string $name, float $lat, float $lng): ?array {
+    $tn = ai_dupNorm($name); if ($tn === '') return null;
+    $fc = $place->searchNearby($lat, $lng, 0.3, null, null, 50);
+    $best = null;
+    foreach (($fc['features'] ?? []) as $f) {
+        $p = $f['properties']; $dm = (float)($p['dist_km'] ?? 9) * 1000;
+        if ($dm > 250) continue;
+        if (ai_dupNorm($p['name'] ?? '') !== $tn) continue;
+        if ($best === null || $dm < $best['dist_m'])
+            $best = ['id'=>(int)$p['id'], 'name'=>$p['name'], 'cat'=>$p['category'], 'dist_m'=>(int)round($dm)];
+    }
+    return $best;
+}
+
 // bg 모드(run=1&bg=1)는 즉시 헤더(Connection:close)를 보내야 하므로 <pre> 출력 안 함.
 $IS_BG = !empty($_GET['run']) && !empty($_GET['bg']);
 if (!$IS_BG) echo "<pre style='font-family:monospace;font-size:13px;line-height:1.55;white-space:pre-wrap'>";
@@ -367,8 +438,176 @@ if (!empty($_GET['run'])) {
     exit;
 }
 
+// ── 모드: AI dry-run (추출→지오코딩→엄격매칭 리포트, 저장 없음) ────────────
+if (isset($_GET['dry_ai'])) {
+    if ($AI_KEY === '') { echo "ANTHROPIC_API_KEY 없음\n</pre>"; exit; }
+    $limit = max(1, min(30, (int)($_GET['dry_ai'] ?: 8)));
+    $place = new Place($pdo); $place->ensureTable();
+    $pdo->exec("CREATE TABLE IF NOT EXISTS tbl_ardent_crawl (idxno BIGINT UNSIGNED PRIMARY KEY, status ENUM('done','skip') NOT NULL, place_id BIGINT UNSIGNED NULL, reason VARCHAR(255) NULL, crawled_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    $done = array_flip($pdo->query("SELECT idxno FROM tbl_ardent_crawl")->fetchAll(PDO::FETCH_COLUMN));
+
+    echo "🤖 AI dry-run — 신규 {$limit}건 (저장 없음)\n" . str_repeat('─', 64) . "\n";
+    $proc = 0; $tin = 0; $tout = 0; $c = ['new'=>0,'enr'=>0,'ovl'=>0,'geo'=>0];
+    for ($p = 1; $p <= 40 && $proc < $limit; $p++) {
+        $ids = $crawler->fetchListIdxnos($p);
+        foreach ($ids as $idxno) {
+            if (isset($done[$idxno])) continue;
+            if ($proc >= $limit) break 2;
+            $proc++;
+            $html  = $crawler->fetchArticle($idxno);
+            $meta  = $html ? ArdentNews::extractMeta($html) : [];
+            $title = $meta['og:title'] ?? "#$idxno";
+            $body  = $html ? ArdentNews::extractBodyText($html) : '';
+            echo "\n■ #{$idxno} " . mb_strimwidth($title, 0, 58, '…') . "\n";
+            if ($body === '') { echo "  본문 실패\n"; continue; }
+            $ex = ArdentNews::extractPlacesAI($title, $body, $AI_KEY);
+            $tin += $ex['in'] ?? 0; $tout += $ex['out'] ?? 0;
+            if (empty($ex['ok'])) { echo "  추출실패: {$ex['error']}\n"; continue; }
+            echo "  채택 " . count($ex['places']) . "곳 / 제외 " . count($ex['excluded'] ?? []) . "곳\n";
+            foreach ($ex['places'] as $pl) {
+                $feat = implode('·', $pl['features']); $mon = implode(',', $pl['months']);
+                $g = ai_geocode($pl['name'], $pl['region']);
+                if (empty($g['ok'])) { $c['geo']++; echo "   ⏸ {$pl['name']} — 지오코딩 보류({$g['msg']})\n"; continue; }
+                $m = ai_match($place, $pl['name'], $g['lat'], $g['lng']);
+                if ($m) {
+                    $ck = $CATKO[$m['cat']] ?? $m['cat'];
+                    if (in_array($m['cat'], ['restaurant','stay','camping'], true)) { $c['ovl']++; $lab = "🟠겹침→기존 {$ck} #{$m['id']} 링크"; }
+                    else { $c['enr']++; $lab = "🔵기존 {$ck} #{$m['id']} 보강+링크"; }
+                    echo "   {$lab} ← {$pl['name']} ({$m['dist_m']}m)\n";
+                } else {
+                    $c['new']++;
+                    echo "   🟢신규 {$pl['name']} [{$pl['category']}] " . number_format($g['lat'],5) . "," . number_format($g['lng'],5)
+                       . ($feat ? " · {$feat}" : '') . ($mon ? " · {$mon}월" : '') . "\n";
+                }
+                if (!empty($pl['summary'])) echo "      └ 요약: {$pl['summary']}\n";
+            }
+            sleep(2);
+        }
+    }
+    $cost = $tin/1e6*2 + $tout/1e6*10;
+    echo "\n" . str_repeat('─', 64) . "\n";
+    echo "처리 {$proc}건 · 🟢신규 {$c['new']} · 🔵보강 {$c['enr']} · 🟠겹침 {$c['ovl']} · ⏸지오보류 {$c['geo']}\n";
+    echo "토큰 in " . number_format($tin) . " / out " . number_format($tout) . " · 비용≈$" . number_format($cost, 4) . " (485건 환산 ≈$" . number_format($cost/max(1,$proc)*485, 2) . ")\n";
+    echo "</pre>"; exit;
+}
+
+// ── 모드: AI 실적재 (추출→지오코딩→엄격매칭→적재) — 신규 전부(=지난 기간) 처리 ──
+//   수동:  run_ai=1                (화면출력, 22초)
+//   크론:  run_ai=1&bg=1&budget=180  (즉시응답+백그라운드 장시간, 매월초 실행)
+if (!empty($_GET['run_ai'])) {
+    if ($AI_KEY === '') { echo "ANTHROPIC_API_KEY 없음\n</pre>"; exit; }
+    $place = new Place($pdo); $place->ensureTable();
+    $pdo->exec("CREATE TABLE IF NOT EXISTS tbl_ardent_crawl (idxno BIGINT UNSIGNED PRIMARY KEY, status ENUM('done','skip') NOT NULL, place_id BIGINT UNSIGNED NULL, reason VARCHAR(255) NULL, crawled_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS tbl_ardent_state (k VARCHAR(40) PRIMARY KEY, v VARCHAR(255) NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+    $bg     = !empty($_GET['bg']);
+    $BUDGET = $bg ? max(30, min(3000, (int)($_GET['budget'] ?? 180))) : 22;
+    if ($bg) {
+        ignore_user_abort(true);
+        while (ob_get_level() > 0) @ob_end_clean();
+        $ok = "OK ardent AI 수집 bg — budget {$BUDGET}s\n";
+        header('Content-Type: text/plain; charset=utf-8'); header('Content-Length: ' . strlen($ok)); header('Connection: close');
+        echo $ok; @flush();
+    }
+
+    $catMap  = ['cafe' => 'restaurant'];   // place enum 에 cafe 없음 → restaurant
+    $recAi   = $pdo->prepare("INSERT INTO tbl_ardent_crawl (idxno,status,place_id,reason) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE status=VALUES(status), place_id=VALUES(place_id), reason=VALUES(reason)");
+    $insTag  = $pdo->prepare("INSERT IGNORE INTO place_tag (place_id,kind,tag) VALUES (?,?,?)");
+    $selAttr = $pdo->prepare("SELECT attributes FROM place WHERE id=?");
+    $updEnr  = $pdo->prepare("UPDATE place SET attributes=:a, address=COALESCE(address,:addr), updated_at=CURRENT_TIMESTAMP WHERE id=:id");
+    $done    = array_flip($pdo->query("SELECT idxno FROM tbl_ardent_crawl")->fetchAll(PDO::FETCH_COLUMN));
+
+    $START = microtime(true); $budgetHit = false; $doneStreak = 0;
+    $proc = 0; $tin = 0; $tout = 0; $c = ['new'=>0,'enr'=>0,'ovl'=>0,'geo'=>0,'skip'=>0];
+    if (!$bg) echo "🤖 AI 실적재 — 신규 전부(예산 {$BUDGET}s)\n" . str_repeat('─', 60) . "\n";
+
+    // 신규 국내여행 기사는 앞쪽 페이지(1~26)에 분포. done 은 빠르게 skip 하며 훑고 예산까지 처리.
+    // ★조기중단 금지: 앞쪽 done-front(이미 처리분)가 커져도 뒤쪽 신규에 도달해야 함(resume 정확성).
+    for ($p = 1; $p <= 30; $p++) {
+        $ids = $crawler->fetchListIdxnos($p);
+        if (!$ids) break;
+        foreach ($ids as $idxno) {
+            if (isset($done[$idxno])) continue;
+            $html  = $crawler->fetchArticle($idxno);
+            $meta  = $html ? ArdentNews::extractMeta($html) : [];
+            $title = $meta['og:title'] ?? "#$idxno";
+            $body  = $html ? ArdentNews::extractBodyText($html) : '';
+            $pub   = !empty($meta['article:published_time']) ? date('Y-m-d', strtotime($meta['article:published_time'])) : null;
+            $url   = sprintf(ArdentNews::VIEW_URL, $idxno);
+
+            if ($body === '') { $recAi->execute([$idxno,'skip',null,'본문 실패']); $done[$idxno]=true; $c['skip']++; continue; }
+            $ex = ArdentNews::extractPlacesAI($title, $body, $AI_KEY);
+            $tin += $ex['in'] ?? 0; $tout += $ex['out'] ?? 0;
+            if (empty($ex['ok'])) { $recAi->execute([$idxno,'skip',null,mb_substr('추출:'.$ex['error'],0,240)]); $done[$idxno]=true; $c['skip']++; continue; }
+
+            $firstPid = null; $ingested = 0;
+            foreach ($ex['places'] as $pl) {
+                $g = ai_geocode($pl['name'], $pl['region']);
+                if (empty($g['ok'])) { $c['geo']++; continue; }
+                [$lv1, $lv2] = ai_addrRegion($g['address']);
+                $ref = ['source_type'=>'article','title'=>$title,'url'=>$url,'summary'=>null,
+                        'published_at'=>$pub,'extra'=>['idxno'=>$idxno,'ai'=>1]];
+                $m = ai_match($place, $pl['name'], $g['lat'], $g['lng']);
+                if ($m) {
+                    // 기존 마커 보강: 기사 링크 + 요약/특성/월 (분류·좌표·리뷰 불변)
+                    $place->addRef($m['id'], $ref);
+                    $selAttr->execute([$m['id']]);
+                    $at = json_decode((string)$selAttr->fetchColumn() ?: '{}', true) ?: [];
+                    $at['summary']  = $pl['summary'];
+                    $at['features'] = array_values(array_unique(array_merge((array)($at['features'] ?? []), $pl['features'])));
+                    $updEnr->execute([':a'=>json_encode($at, JSON_UNESCAPED_UNICODE), ':addr'=>($g['address'] ?: null), ':id'=>$m['id']]);
+                    foreach ($pl['months'] as $mm) $insTag->execute([$m['id'],'month',(string)$mm]);
+                    $pid = $m['id'];
+                    if (in_array($m['cat'], ['restaurant','stay','camping'], true)) $c['ovl']++; else $c['enr']++;
+                    if (!$bg) echo "  🔗 #{$idxno} → #{$pid} 보강 ← {$pl['name']}\n";
+                } else {
+                    // 신규 여행지
+                    $cat = $catMap[$pl['category']] ?? $pl['category'];
+                    $pid = $place->upsertPlace([
+                        'name'=>$pl['name'], 'category'=>$cat,
+                        'address'=>($g['address'] ?: ($pl['address'] ?: null)),
+                        'region_lv1'=>$lv1, 'region_lv2'=>$lv2,
+                        'lat'=>$g['lat'], 'lng'=>$g['lng'], 'geocode_status'=>'ok',
+                        'attributes'=>['source_site'=>'ardentnews','summary'=>$pl['summary'],'features'=>$pl['features']],
+                    ]);
+                    $place->addRef($pid, $ref);
+                    foreach ($pl['months'] as $mm) $insTag->execute([$pid,'month',(string)$mm]);
+                    $c['new']++;
+                    if (!$bg) echo "  🟢 #{$idxno} 신규 #{$pid} {$pl['name']} [{$cat}]\n";
+                }
+                if ($firstPid === null) $firstPid = $pid;
+                $ingested++;
+            }
+            $recAi->execute([$idxno, $ingested > 0 ? 'done' : 'skip', $firstPid, 'AI:' . $ingested . '곳']);
+            $done[$idxno] = true; $proc++;
+
+            if (microtime(true) - $START > $BUDGET) { $budgetHit = true; break 2; }
+            sleep(2);   // 매너: 아덴트 요청 간격(블록 회피)
+        }
+        usleep(300000);   // 페이지 간 짧은 간격(리스트 연속 fetch 완충)
+    }
+
+    $pdo->prepare("INSERT INTO tbl_ardent_state (k,v) VALUES ('ai_last_run',?) ON DUPLICATE KEY UPDATE v=VALUES(v)")
+        ->execute([date('Y-m-d H:i') . " +{$c['new']}/보강{$c['enr']}/겹침{$c['ovl']}/skip{$c['skip']}" . ($budgetHit ? " (예산중단)" : " (완료)")]);
+
+    // 완료(예산중단 아님)+실적 있으면 Pushover 1회
+    if (!$budgetHit && $proc > 0 && class_exists('Notify')) {
+        try { Notify::send("아덴트 AI 수집 완료 — 신규 {$c['new']} · 보강 {$c['enr']} · 겹침 {$c['ovl']}", "https://economist.kr/places.php", ['아덴트 AI 수집']); } catch (Throwable $e) {}
+    }
+    if (!$bg) {
+        $cost = $tin/1e6*2 + $tout/1e6*10;
+        echo str_repeat('─', 60) . "\n";
+        echo "처리 {$proc}건 · 🟢신규 {$c['new']} · 🔵보강 {$c['enr']} · 🟠겹침 {$c['ovl']} · ⏸지오보류 {$c['geo']} · skip {$c['skip']}\n";
+        echo "토큰 in " . number_format($tin) . "/out " . number_format($tout) . " · 비용≈$" . number_format($cost, 4) . ($budgetHit ? "\n(예산 도달 — 다음 호출 이어서)" : "\n(완료)") . "\n";
+        echo "</pre>";
+    }
+    exit;
+}
+
 echo "모드를 지정하세요:\n";
 echo "  ?key={$TOKEN}&status=1            (진행 상태 모니터링)\n";
+echo "  ?key={$TOKEN}&dry_ai=8            (AI추출→지오코딩→매칭 리포트, 저장X)\n";
+echo "  ?key={$TOKEN}&run_ai=1&bg=1&budget=180 (AI 실적재: 크론용, 매월초)\n";
 echo "  ?key={$TOKEN}&test=15288         (단일 기사 검증, 저장X)\n";
 echo "  ?key={$TOKEN}&list=1             (목록 idxno 추출, 저장X)\n";
 echo "  ?key={$TOKEN}&dry=1&pages=1      (파싱 덤프, 저장X)\n";

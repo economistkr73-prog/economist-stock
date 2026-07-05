@@ -485,6 +485,28 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
             break;
         }
 
+        // 경로 주변 '추천' — 회랑 안에서 리뷰 많은 순 상위 N(뷰포트 무관·경로 전 구간). 자동 찜용, 소유자 전용.
+        case 'route_recommend': {
+            $rawPath = (string)($_POST['path'] ?? $_GET['path'] ?? '');
+            $path    = json_decode($rawPath, true);
+            if (!is_array($path) || count($path) < 2) {
+                http_response_code(400);
+                echo json_encode(['ok' => false, 'msg' => 'path(=[[경도,위도],...]) 가 필요합니다.']);
+                return;
+            }
+            $radius    = max(0.3, min(30.0, (float)($_POST['radius'] ?? $_GET['radius'] ?? 5)));
+            $limit     = max(20, min(1000, (int)($_POST['limit'] ?? $_GET['limit'] ?? 300)));
+            $minReview = max(0, (int)($_POST['min_review'] ?? $_GET['min_review'] ?? 0));
+            $cats = [];
+            foreach (explode(',', (string)($_POST['cats'] ?? $_GET['cats'] ?? 'restaurant')) as $cv) {
+                $cv = trim($cv);
+                if ($cv !== '') $cats[] = $cv;
+            }
+            $geojson = $place->recommendAlongRoute($path, $radius, $cats ?: null, $minReview, $limit);
+            echo json_encode($geojson, JSON_UNESCAPED_UNICODE);
+            break;
+        }
+
         // ── 여행지도 저장함(트립) — 소유자 전용(게스트 화이트리스트 제외) ──
         case 'trip_save': {
             $name  = trim((string)($_POST['name'] ?? $_GET['name'] ?? ''));

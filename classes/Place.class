@@ -657,6 +657,133 @@ class Place
         return ['type' => 'FeatureCollection', 'features' => $features];
     }
 
+    // ══ 경로 주변 '추천' — 회랑 안에서 분류별 상위 N (뷰포트 무관·경로 전 구간) ══
+    //  자동 찜 추천용. 분류마다 순위 기준이 다르다:
+    //   · 맛집·숙소·캠핑 = 네이버 리뷰(review_count) 많은 순
+    //   · 여행지 등      = 리뷰가 없어 연결 기사 수(ref_count) 많은 순
+    //  뷰포트 미적용(경로 전체 대상)·분류마다 상위 $limit 를 유명순으로 뽑아 거리컷에 안 잘리게 한다.
+    function recommendAlongRoute(array $path, float $radiusKm = 5.0, ?array $categoriesIn = null, int $minReview = 0, int $limit = 300): array {
+        $pts = [];
+        foreach ($path as $p) {
+            if (is_array($p) && count($p) >= 2 && is_numeric($p[0]) && is_numeric($p[1])) $pts[] = [(float)$p[0], (float)$p[1]];
+        }
+        if (count($pts) < 2) return ['type' => 'FeatureCollection', 'features' => []];
+        $maxPts = 300;
+        if (count($pts) > $maxPts) {
+            $stride = (int)ceil(count($pts) / $maxPts);
+            $tmp = [];
+            for ($i = 0; $i < count($pts); $i += $stride) $tmp[] = $pts[$i];
+            $tmp[] = $pts[count($pts) - 1];
+            $pts = $tmp;
+        }
+        $radiusKm = max(0.3, min(30.0, $radiusKm));
+        // 경로 bbox + 반경 패딩
+        $minLat = $minLng = INF; $maxLat = $maxLng = -INF;
+        foreach ($pts as $p) {
+            $minLng = min($minLng, $p[0]); $maxLng = max($maxLng, $p[0]);
+            $minLat = min($minLat, $p[1]); $maxLat = max($maxLat, $p[1]);
+        }
+        $midLat = ($minLat + $maxLat) / 2;
+        $latPad = $radiusKm / 111.0; $cos = max(cos(deg2rad($midLat)), 0.01); $lngPad = $radiusKm / (111.0 * $cos);
+        $minLat -= $latPad; $maxLat += $latPad; $minLng -= $lngPad; $maxLng += $lngPad;
+        // 분류(기본 맛집). 리뷰 기준 분류 vs 기사수 기준 분류.
+        $allowed    = ['travel', 'stay', 'restaurant', 'camping', 'etc'];
+        $reviewCats = ['restaurant', 'stay', 'camping'];
+        $cats = [];
+        foreach (($categoriesIn ?: ['restaurant']) as $c) { $c = trim((string)$c); if ($c !== '' && in_array($c, $allowed, true) && !in_array($c, $cats, true)) $cats[] = $c; }
+        if (!$cats) $cats = ['restaurant'];
+        $bbox = [':latmin' => $minLat, ':latmax' => $maxLat, ':lngmin' => $minLng, ':lngmax' => $maxLng];
+        // 분류별로 회랑(경로선 ≤ 반경) 안 상위 후보 수집. 회랑 판정은 PHP(pathDistKm).
+        $cand = [];
+        foreach ($cats as $cat) {
+            $isReview = in_array($cat, $reviewCats, true);
+            $args = $bbox; $args[':cat'] = $cat;
+            if ($isReview) {
+                $revF = '';
+                if ($minReview > 0) { $revF = " AND p.review_count >= :minrev"; $args[':minrev'] = $minReview; }
+                $sql = "SELECT p.id, p.lat, p.lng
+                        FROM place p
+                        WHERE p.is_active = 1 AND p.geocode_status = 'ok'
+                          AND p.category = :cat AND p.review_count IS NOT NULL" . $revF . "
+                          AND p.lat BETWEEN :latmin AND :latmax
+                          AND p.lng BETWEEN :lngmin AND :lngmax
+                        ORDER BY p.review_count DESC
+                        LIMIT 5000";
+            } else {
+                // 여행지 등: 연결 기사 수(ref_count) 많은 순
+                $sql = "SELECT p.id, p.lat, p.lng,
+                               (SELECT COUNT(*) FROM place_ref r WHERE r.place_id = p.id) AS refc
+                        FROM place p
+                        WHERE p.is_active = 1 AND p.geocode_status = 'ok'
+                          AND p.category = :cat
+                          AND p.lat BETWEEN :latmin AND :latmax
+                          AND p.lng BETWEEN :lngmin AND :lngmax
+                        ORDER BY refc DESC
+                        LIMIT 5000";
+            }
+            $st = $this->pdo->prepare($sql);
+            $st->execute($args);
+            $got = 0;
+            while ($row = $st->fetch(PDO::FETCH_ASSOC)) {
+                $d = self::pathDistKm((float)$row['lat'], (float)$row['lng'], $pts);
+                if ($d > $radiusKm) continue;                 // 경로선에서 반경 밖 제외
+                $cand[] = ['id' => (int)$row['id'], 'd' => round($d, 3), 'cat' => $cat];
+                if (++$got >= $limit) break;                  // 분류별 상위 $limit (이미 유명순)
+            }
+        }
+        if (!$cand) return ['type' => 'FeatureCollection', 'features' => []];
+        // 2단계: 선정 id 상세(태그·가이드 서브쿼리는 이들에만)
+        $distById = [];
+        foreach ($cand as $c) { $distById[$c['id']] = $c['d']; }
+        $in = []; $a2 = [];
+        foreach (array_values($cand) as $k => $c) { $pp = ":p{$k}"; $in[] = $pp; $a2[$pp] = $c['id']; }
+        $sql2 = "SELECT p.id, p.name, p.category, p.lat, p.lng, p.phone,
+                        p.address, p.region_lv1, p.region_lv2,
+                        p.period_start, p.period_end, p.attributes, p.updated_at,
+                        p.review_count, p.score, p.save_count,
+                        (SELECT COUNT(*) FROM place_ref r WHERE r.place_id = p.id) AS ref_count,
+                        (SELECT GROUP_CONCAT(t.tag ORDER BY t.tag SEPARATOR ',') FROM place_tag t WHERE t.place_id = p.id AND t.kind <> 'month') AS tags,
+                        (SELECT GROUP_CONCAT(CONCAT(g.guide, ':', COALESCE(g.grade, '')) ORDER BY g.guide SEPARATOR ',') FROM place_guide g WHERE g.place_id = p.id) AS guides
+                 FROM place p
+                 WHERE p.id IN (" . implode(',', $in) . ")";
+        $st2 = $this->pdo->prepare($sql2);
+        $st2->execute($a2);
+        $rowById = [];
+        while ($r = $st2->fetch(PDO::FETCH_ASSOC)) $rowById[(int)$r['id']] = $r;
+        // cand 순서(분류별 유명순) 유지
+        $features = [];
+        $seen = [];
+        foreach ($cand as $c) {
+            if (isset($seen[$c['id']])) continue;             // 분류 겹침 방지(안전)
+            $row = $rowById[$c['id']] ?? null;
+            if (!$row) continue;
+            $seen[$c['id']] = 1;
+            $features[] = [
+                'type' => 'Feature',
+                'geometry' => ['type' => 'Point', 'coordinates' => [(float)$row['lng'], (float)$row['lat']]],
+                'properties' => [
+                    'id'           => (int)$row['id'],
+                    'name'         => $row['name'],
+                    'category'     => $row['category'],
+                    'phone'        => $row['phone'],
+                    'address'      => $row['address'],
+                    'region_lv1'   => $row['region_lv1'],
+                    'region_lv2'   => $row['region_lv2'],
+                    'period_start' => $row['period_start'],
+                    'period_end'   => $row['period_end'],
+                    'attributes'   => $row['attributes'] ? json_decode($row['attributes'], true) : null,
+                    'updated_at'   => $row['updated_at'],
+                    'ref_count'    => (int)$row['ref_count'],
+                    'review_count' => $row['review_count'] !== null ? (int)$row['review_count'] : null,
+                    'tags'         => $row['tags'] ? explode(',', $row['tags']) : [],
+                    'guides'       => self::parseGuides($row['guides'] ?? null),
+                    'dist_km'      => $distById[$c['id']] ?? null,
+                ],
+            ];
+        }
+        return ['type' => 'FeatureCollection', 'features' => $features];
+    }
+
     // ══ 여행지도 저장함(트립) — 경로(route)+찜(picks)을 이름 붙여 여러 개 저장 ══
     private static $tripTableReady = false;
     private function ensureTripTable(): void {

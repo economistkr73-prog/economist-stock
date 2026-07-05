@@ -361,6 +361,9 @@ body.trip-view .pl-fbar { display: none !important; }
 .panel-head .pl-nv .nvt-flat { font-size: 11.5px; color: #9aa6a2; }
 .panel-head .tags { margin-top: 8px; display: flex; gap: 5px; flex-wrap: wrap; }
 .panel-head .tags em { font-style: normal; font-size: 11px; background: #eef2f6; color: #5b6b7b; padding: 2px 8px; border-radius: 10px; }
+/* 🤖 Claude AI 요약 박스 (마커 상세 — 원문 기사와 구분) */
+.ai-summary { margin: 10px 0 2px; padding: 10px 12px; background: #f3f0fb; border: 1px solid #e0d7f5; border-left: 3px solid #7c5cd6; border-radius: 8px; font-size: 13px; line-height: 1.6; color: #3a3550; }
+.ai-summary .ai-badge { display: inline-block; font-size: 10.5px; font-weight: 700; color: #fff; background: #7c5cd6; padding: 2px 8px; border-radius: 10px; margin-bottom: 6px; letter-spacing: .2px; }
 .panel-close { float: right; background: none; border: none; font-size: 22px; color: #aaa; cursor: pointer; line-height: 1; }
 .panel-refs { flex: 1; overflow-y: auto; padding: 12px 14px; }
 .panel-refs h4 { font-size: 13px; color: #7f8c8d; margin-bottom: 8px; }
@@ -422,13 +425,30 @@ body.rt-on #rt-dock { transform: translateX(0); }
 .rt-rq { font-size: 12px; font-weight: 600; padding: 5px 9px; border-radius: 13px; background: #f4f6f8; border: 1px solid #e2e7ec; color: #5a6b7b; cursor: pointer; }
 .rt-rq:hover { background: #eef0fb; border-color: #cfc8f3; color: #5a4cd0; }
 .rt-rq.on { background: #6c5ce7; border-color: #5a4cd0; color: #fff; }
-.rt-rnum { width: 56px; font-size: 12px; padding: 5px 7px; border: 1px solid #d8dde3; border-radius: 6px; }
 .rt-chk { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: #5b6b7b; cursor: pointer; user-select: none; }
 .rt-chk input { margin: 0; cursor: pointer; }
 .rt-go { background: #6c5ce7; border: none; color: #fff; font-size: 12.5px; font-weight: 700; padding: 7px 12px; border-radius: 7px; cursor: pointer; margin-left: auto; }
 .rt-go:hover { background: #5a4cd0; }
 .rt-go.on { background: #2c3e50; }
 .rt-go.on:hover { background: #1f2c39; }
+/* '찜·경로만' 토글을 '경로 주변 장소' 헤더 밑으로 이동 */
+.rt-sum-toolbar { padding: 8px 12px; background: #fafbfc; }
+.rt-sum-toolbar .rt-go { margin-left: 0; width: 100%; }
+/* 3번째 줄: 반경·곳수 요약 */
+.rt-sum-count { padding: 6px 12px 8px; font-size: 12px; font-weight: 700; color: #6c5ce7; border-bottom: 1px solid #f0f1f5; background: #fafbfc; }
+.rt-sum-count:empty { display: none; }
+/* 🌟 맛집 자동 추천(찜) 줄 */
+.rt-rec-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 8px 14px; border-bottom: 1px solid #f0f1f5; background: #fffdf5; }
+.rt-recbtn { background: linear-gradient(135deg,#f6a623,#f5842a); border: none; color: #fff; font-size: 12.5px; font-weight: 800; padding: 8px 13px; border-radius: 8px; cursor: pointer; box-shadow: 0 1px 3px rgba(240,140,20,.35); }
+.rt-recbtn:hover { filter: brightness(1.05); }
+.rt-recbtn:disabled { opacity: .6; cursor: default; }
+.rt-rec-cats { flex-basis: 100%; display: flex; gap: 5px; }
+.rt-recq { font-size: 12px; font-weight: 700; padding: 5px 10px; border-radius: 13px; background: #fff; border: 1px solid #e6d6ab; color: #a07a1e; cursor: pointer; }
+.rt-recq:hover { background: #fdf6e3; }
+.rt-recq.on { background: linear-gradient(135deg,#f6a623,#f5842a); border-color: #e0851c; color: #fff; }
+.rt-recn-lbl { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: #7a5a10; font-weight: 700; }
+.rt-recn { width: 46px; font-size: 12px; padding: 5px 6px; border: 1px solid #e2cfa0; border-radius: 6px; text-align: center; }
+.rt-rec-hint { flex-basis: 100%; font-size: 11px; color: #b08526; line-height: 1.4; }
 
 /* 패널 본문 스크롤 + 섹션 헤더 */
 .rt-scroll { flex: 1; overflow-y: auto; min-height: 0; }
@@ -461,6 +481,12 @@ body.rt-on #rt-dock { transform: translateX(0); }
 .rt-pcat { font-size: 11px; color: #8a97a3; }
 .rt-pdist { flex-shrink: 0; font-size: 11px; font-weight: 700; color: #6c5ce7; }
 .rt-wp-none { padding: 8px 11px; font-size: 11.5px; color: #b0b8bf; }
+/* 분류 소그룹 헤더(맛집/숙소/여행지…) */
+.rt-catgrp { margin-top: 2px; }
+.rt-catgrp:first-child { margin-top: 0; }
+.rt-cathd { display: flex; align-items: center; gap: 5px; padding: 5px 8px 3px; font-size: 11.5px; font-weight: 800; }
+.rt-cathd-ic { font-size: 12px; }
+.rt-cathd-n { margin-left: 2px; min-width: 16px; height: 16px; padding: 0 5px; border-radius: 9px; color: #fff; font-size: 10.5px; font-weight: 800; display: inline-flex; align-items: center; justify-content: center; }
 /* ⭐ 찜 — 목록 별 토글 버튼 */
 .rt-star { flex-shrink: 0; background: none; border: none; cursor: pointer; font-size: 16px; line-height: 1; color: #cfd6dd; padding: 2px 4px; }
 .rt-star.on { color: #f1c40f; }
@@ -835,7 +861,11 @@ a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
     <div id="rt-dock">
     <button id="rtDockTab" onclick="rtCollapse()" title="패널 접기/펼치기(경로는 유지)">▶</button>
     <div id="rt-sum-panel">
-        <div class="rt-head"><h3>📋 경로 주변 장소</h3><span class="rt-sub" id="rtSumCnt"></span></div>
+        <div class="rt-head"><h3>📋 경로 주변 장소</h3></div>
+        <div class="rt-sum-toolbar">
+            <button class="rt-go" id="rtFinalBtn" onclick="rtFinalize()" title="반경 밖 마커를 숨기거나 다시 표시합니다">🙈 마크 숨기기</button>
+        </div>
+        <div class="rt-sum-count" id="rtSumCnt"></div>
         <div class="rt-sum" id="rtSum">
             <div class="rt-sum-empty">지점을 2곳 이상 추가하면<br>경로 주변(반경 안)의 장소가<br>자동으로 여기에 모입니다.</div>
         </div>
@@ -844,8 +874,8 @@ a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
         <div class="rt-head"><h3>🧭 경로 만들기</h3><button class="rt-x" onclick="rtToggleMode()" title="닫기">×</button></div>
         <div class="rt-cur-name" id="rtCurName" style="display:none"></div>
         <div class="rt-save-row">
-            <button class="rt-savebtn" onclick="rtTripSave()" title="현재 경로+찜을 이름 붙여 저장">💾 지도 저장</button>
-            <button class="rt-savebtn rt-loadbtn" onclick="rtTripOpen()" title="저장한 여행지도 불러오기">📂 저장함</button>
+            <button class="rt-savebtn" onclick="rtTripSave()" title="현재 경로+찜을 이름 붙여 저장">💾 경로 저장</button>
+            <button class="rt-savebtn rt-loadbtn" onclick="rtTripOpen()" title="저장한 경로 불러오기">📂 경로 리스트</button>
         </div>
         <div class="rt-controls">
             <span class="rt-clbl">반경</span>
@@ -854,10 +884,16 @@ a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
                 <button type="button" class="rt-rq on" data-r="5" onclick="rtSetRadius(5)">5km</button>
                 <button type="button" class="rt-rq" data-r="10" onclick="rtSetRadius(10)">10km</button>
             </span>
-            <input type="number" id="rtRadius" class="rt-rnum" min="0.5" max="50" step="0.5" value="5" onchange="rtRadiusInput()" title="직접 입력(km)">
-            <label class="rt-chk"><input type="checkbox" id="rtCircleChk" checked onchange="rtToggleCircles()"> 반경 원</label>
-            <label class="rt-chk"><input type="checkbox" id="rtDistChk" checked onchange="rtRenderSummary()"> 거리</label>
-            <button class="rt-go" id="rtFinalBtn" onclick="rtFinalize()" title="반경 밖 마커를 숨기거나 다시 표시합니다">🙈 마크 숨기기</button>
+        </div>
+        <div class="rt-rec-row">
+            <div class="rt-rec-cats">
+                <button type="button" class="rt-recq on" data-cat="restaurant" onclick="rtRecCatToggle(this)">🍴 맛집</button>
+                <button type="button" class="rt-recq" data-cat="stay" onclick="rtRecCatToggle(this)">🛏️ 숙소</button>
+                <button type="button" class="rt-recq" data-cat="travel" onclick="rtRecCatToggle(this)">🏞️ 여행지</button>
+            </div>
+            <button class="rt-recbtn" id="rtRecBtn" onclick="rtRecommend()" title="켠 분류에서 유명한 곳을 경로 지점당 상위 N개 자동으로 찜합니다">🌟 추천 찜 담기</button>
+            <label class="rt-recn-lbl">지점당 <input type="number" id="rtRecN" class="rt-recn" min="1" max="20" step="1" value="5"> 개</label>
+            <div class="rt-rec-hint">켠 분류에서 <b>리뷰(맛집·숙소)</b>·<b>기사 수(여행지)</b>가 많은 곳을 각 경로 지점마다 상위 N곳씩 자동으로 ⭐찜에 담습니다. 기존 찜은 유지됩니다.</div>
         </div>
         <div class="rt-tip">지점을 2곳 이상 추가하면 <b>실제 도로 경로·소요시간</b>이 그려지고, <b>전국 DB에서 경로선 반경 안</b>의 맛집·여행지를 찾아(지도 필터와 무관) 작은 원으로 표시하고 오른쪽에 정리합니다. <b>주소 직접 입력</b>으로 지점 추가, 주변 마커 클릭 → <b>➕ 경로에 추가</b>, <b>≡</b> 드래그로 순서변경. <b>🙈 마크 숨기기</b>로 주변 마커를 감출 수 있습니다.</div>
         <div class="rt-input-row">
@@ -1960,7 +1996,7 @@ var plLastMode = '';   // 직전 검색 공간모드(전국 진입 시 1회만 f
 //  결과 = 선택 분류들의 합집합. 각 도메인은 자기 태그로만 좁힘(서로·분류 초기화 없음).
 //  expandFrom 숫자면 그 반경(뷰포트 0건시 자동확장). viewport=true 면 화면반경·확장 안 함.
 function plSearch(lat, lng, expandFrom, viewport) {
-    if (typeof rtMode !== 'undefined' && rtMode) return;   // 경로 모드: 베이스 검색 정지(경로 주변=서버 회랑이 plOvFeats 로 전담, 오버레이 보존)
+    if (typeof rtMode !== 'undefined' && rtMode && !rtFinalized) return;   // 주변 회랑 '가동 중'에만 베이스 검색 정지. 미가동(rtFinalized=진입/스캔 전)이면 필터로 베이스 마커 갱신 허용.
     plClearOverlay();                      // 베이스 재검색 → 주변 오버레이 해제
     plMergeSel = [];                                       // 새 검색 시 병합 선택 초기화
     plLastSearchAt = Date.now();                           // idle 자동검색 중복 방지용 타임스탬프
@@ -2019,7 +2055,8 @@ function plSearch(lat, lng, expandFrom, viewport) {
             //  지역(시도)·뷰포트·필터 추가는 보던 화면을 유지(보던 장소가 사라지지 않게).
             var enteredNation = (mode === 'nation' && plLastMode !== 'nation');
             plLastMode = mode;
-            if (enteredNation && feats.length) plFitToFeatures(feats);
+            // 경로 모드(엔진 미가동 베이스 브라우징)에선 자동 줌아웃 안 함 — 경로 시야 유지, 마커만 갱신
+            if (enteredNation && feats.length && !(typeof rtMode !== 'undefined' && rtMode)) plFitToFeatures(feats);
             // 재검색 후에도 보고 있던 장소를 계속 강조(지도 이동 없이)
             if (plPendingFocusId == null && keepId != null) plRehighlight(keepId);
             // 안내 라벨: {범위} · {태그} N곳
@@ -2147,8 +2184,8 @@ function plRenderList(feats) {
         if (!pfFound) plForceShowPlace(pfId);
     }
     plMergeHeadRender();   // 상단 병합 버튼 상태 동기화 (행 mc-sel 은 렌더 시 반영됨)
-    // 경로 모드 중 혹시 새 베이스 마커가 생기면 즉시 숨김(경로 주변 오버레이는 건드리지 않음)
-    if (typeof rtMode !== 'undefined' && rtMode) rtHideBaseMarkers();
+    // 주변 회랑 가동 중(!rtFinalized)에만 새 베이스 마커를 숨김. 미가동(진입/스캔 전)이면 필터 검색 결과를 그대로 보여줌.
+    if (typeof rtMode !== 'undefined' && rtMode && !rtFinalized) rtHideBaseMarkers();
 }
 
 // 거리(km) 표기: 1km 미만은 m, 그 이상은 소수1자리 km
@@ -2375,6 +2412,9 @@ function plOpenPanel(pr) {
         (plGuideBadges(pr) ? '<div class="panel-guides">' + plGuideBadges(pr) + '</div>' : '') +
         '<h3>' + plEsc(pr.name) + '</h3>' +
         '<div class="meta">' + meta.join('<br>') + '</div>' +
+        ((pr.attributes && pr.attributes.summary)
+            ? '<div class="ai-summary"><span class="ai-badge">🤖 Claude 요약</span>' + plEsc(pr.attributes.summary) + '</div>'
+            : '') +
         plNaverHtml(pr) +
         (tags.length ? '<div class="tags">' + tags.map(function (t) { return '<em>' + plEsc(t) + '</em>'; }).join('') + '</div>' : '') +
         addBtn + navBtns;
@@ -3318,7 +3358,6 @@ var rtNearby = [];                // 지점별 주변 장소: rtNearby[wi] = [re
 var rtNearbyActive = false;       // 종합을 계산했는지
 var rtAssign = {};                // 마커 인덱스 → 배정된 지점(반경 안)
 var rtFinalized = false;          // '지도 만들기'(영역 밖 마커 숨김) 상태
-var rtCircles = [];
 var RT_WP_MAX = 5;                // 네이버 Directions 경유지 최대 5 → 1콜당 최대 7지점
 var rtRoadPath = null;            // [naver.maps.LatLng...] 실제 도로 경로(없으면 직선 fallback)
 var rtRouteInfo = null;           // {duration(ms), distance(m), toll(원)}
@@ -3334,6 +3373,15 @@ var rtSelId = null;               // 현재 선택(강조) 중인 장소 id — 
 var rtShareSel = -1;              // 공유(트립) 게스트 슬라이드 바에서 선택된 경로 지점 index
 var RT_COLORS = ['#e74c3c','#2980b9','#27ae60','#e67e22','#8e44ad','#16a085','#d35400','#2c3e50','#c0392b','#1abc9c','#9b59b6','#f39c12'];
 function rtColor(i) { return RT_COLORS[i % RT_COLORS.length]; }
+// 경로 주변 목록 분류 소그룹: 표시 순서 + 분류 색/아이콘(지도 마커색과 동일)
+var RT_CAT_SEQ  = ['restaurant', 'stay', 'travel', 'camping', 'etc'];
+var RT_CAT_META = {
+    restaurant: { ko: '맛집',   ic: '🍴',  col: '#e74c3c' },
+    stay:       { ko: '숙소',   ic: '🛏️', col: '#8e44ad' },
+    travel:     { ko: '여행지', ic: '🏞️', col: '#3498db' },
+    camping:    { ko: '캠핑장', ic: '⛺',  col: '#27ae60' },
+    etc:        { ko: '기타',   ic: '📍',  col: '#7f8c8d' }
+};
 
 function rtToggleMode() {
     // 종료(끄기) 시 데이터가 있으면 확인 — 종료 = 초기화(경로·찜 모두 비움). 저장한 여행지도는 보존.
@@ -3347,15 +3395,19 @@ function rtToggleMode() {
     var b = document.getElementById('rtModeBtn');
     if (b) { b.classList.toggle('active', rtMode); b.textContent = rtMode ? '🧭 경로 만들기 종료' : '🧭 여행 경로 만들기'; }
     if (rtMode) {
+        // ★진입 기본 = 주변 미가동(rtFinalized). 경로 지점만 추가·도로 경로만 그림.
+        //  '추천 찜 담기' 또는 '주변 다시 보기'를 눌러야 비로소 경로 주변(회랑) 스캔이 돈다.
+        //  (불러오기/길찾기 경로가 이미 true 로 세팅했으면 그대로 유지)
+        rtFinalized = true;
         plClosePanel();              // 상세패널 닫고 경로패널로
         plToggleList(false);         // 좌측은 '주변 종합' 패널 차지 → 검색 목록 닫음
-        rtUpdateFinalBtn();          // 진입 시 버튼 라벨 동기화(기본=마크보기 → '마크 숨기기')
-        rtHideBase();                // 베이스·오버레이 마커 숨김(경로 모드는 경로 주변 마커만 표시)
+        rtUpdateFinalBtn();          // 진입 시 버튼 라벨 동기화(주변 미가동 → '주변 다시 보기')
+        plExitOverlay();             // ★베이스 마커(현재 검색결과)는 유지 — 줌 오버레이만 정리. 베이스 숨김은 엔진 가동(추천/주변보기) 때로 미룸
         rtUpdateTripName();          // 불러온 여행지도 이름 표시(있으면)
         rtRenderRows();
         rtDrawPicks();               // ⭐ 찜한 곳 마커(영구·화면 무관) 표시
-        rtFetchRoute();              // 진입 즉시 도로 경로 + 서버 회랑 주변검색
-        plHint('지도 마커를 클릭하거나 주소를 입력해 경로 지점을 추가하세요');
+        rtFetchRoute();              // 도로 경로만 즉시(회랑 스캔은 rtFinalized 라 skip)
+        plHint('경로 지점을 추가한 뒤 “추천 찜 담기”를 누르면 주변 맛집·숙소·여행지를 찾습니다');
         setTimeout(plBumpResize, 60);
     } else {
         // 종료 = 초기화: 경로·찜·이름 전부 비우고 localStorage 도 비움(다음 진입 시 깨끗)
@@ -3364,7 +3416,7 @@ function rtToggleMode() {
         rtNearby = []; rtFinalized = false; rtSelId = null; rtShareSel = -1; rtLoadedName = ''; rtUpdateTripName();
         rtRoadPath = null; rtRouteInfo = null; rtRouting = false; rtRouteSeq++;
         rtSrvFeats = []; rtSrvRadius = 0; rtNearbyBusy = false; rtNearbySeq++;
-        rtClearLayer(); rtClearCircles(); plExitOverlay(); rtClearPicks(); rtRestoreMarkers();  // 경로/원/주변·찜마커 제거 + 베이스 복원
+        rtClearLayer(); plExitOverlay(); rtClearPicks(); rtRestoreMarkers();  // 경로/주변·찜마커 제거 + 베이스 복원
         rtRenderRows();     // 비운 경로 목록 반영
         plUpdateLabels();   // 베이스 라벨 복원(rtMode 해제됐으므로 plFeatures 기준)
         setTimeout(plBumpResize, 60);
@@ -3461,7 +3513,7 @@ function rtClear() {
     rtPicks = []; rtPicksSave(); rtClearPicks();   // ⭐ 찜도 함께 비움(전체 삭제)
     rtRoadPath = null; rtRouteInfo = null; rtRouting = false; rtRouteSeq++;
     rtSrvFeats = []; rtSrvRadius = 0; rtNearbyBusy = false; rtNearbySeq++;
-    rtClearCircles(); plExitOverlay();         // 경로 모드 유지 — 베이스는 계속 숨김
+    plExitOverlay();                           // 경로 모드 유지 — 베이스는 계속 숨김
     rtRenderRows(); rtRenderSummary(); rtDraw(); rtSave();
 }
 
@@ -3717,17 +3769,7 @@ function rtRadiusChanged() {
 }
 function rtSetRadius(km) {
     rtRadius = km;
-    var inp = document.getElementById('rtRadius'); if (inp) inp.value = km;
     document.querySelectorAll('.rt-rq').forEach(function (b) { b.classList.toggle('on', +b.getAttribute('data-r') === km); });
-    rtRadiusChanged();
-}
-function rtRadiusInput() {
-    var v = parseFloat(document.getElementById('rtRadius').value);
-    if (isNaN(v) || v <= 0) v = 5;
-    v = Math.min(50, Math.max(0.5, v));
-    rtRadius = v;
-    document.getElementById('rtRadius').value = v;
-    document.querySelectorAll('.rt-rq').forEach(function (b) { b.classList.toggle('on', +b.getAttribute('data-r') === v); });
     rtRadiusChanged();
 }
 
@@ -3831,7 +3873,6 @@ function rtRefresh() {
     rtNearbyActive = true;
     rtComputeNearby();    // 우측 패널(지점별 그룹) 계산
     rtRenderNearby();     // 지도 마커+라벨 = 기존 오버레이 로직 그대로
-    rtDrawCircles();
     rtRenderSummary();
     rtRenderShareInfo();  // 공유 게스트 경로 요약(거리/시간) 갱신
 }
@@ -3845,6 +3886,7 @@ function rtFinalize() {
         rtRefresh();
         plHint('⭐ 찜·경로만 표시합니다 (주변 숨김)');
     } else {
+        rtHideBase();      // 주변 가동 = 베이스 마커 숨기고 회랑으로 교체
         rtFetchNearby();   // 주변 회랑 다시 로드
         plHint('주변 장소를 다시 표시합니다');
     }
@@ -3856,21 +3898,114 @@ function rtUpdateFinalBtn() {
     b.classList.toggle('on', rtFinalized);
 }
 
-// 반경 원(지점 색상)
-function rtToggleCircles() { rtDrawCircles(); }
-function rtDrawCircles() {
-    rtClearCircles();
-    var chk = document.getElementById('rtCircleChk');
-    if (!rtMode || !chk || !chk.checked) return;
-    rtRoute.forEach(function (wp, i) {
-        rtCircles.push(new naver.maps.Circle({
-            map: plMap, center: new naver.maps.LatLng(wp.lat, wp.lng), radius: rtRadius * 1000,
-            strokeColor: rtColor(i), strokeWeight: 1.5, strokeOpacity: 0.7,
-            fillColor: rtColor(i), fillOpacity: 0.06, zIndex: 60
-        }));
+// 🌟 리뷰 많은 맛집 자동 추천 — 서버(경로 전 구간 회랑, 뷰포트 무관)에서 review_count DESC 로 받아
+//  각 경로 지점(waypoint)에 가장 가까운 곳끼리 묶어 지점당 상위 N개를 ⭐찜에 추가(기존 찜 유지·중복 제외)
+function rtRevOf(f) {
+    var p = (f && f.properties) || {};
+    if (p.review_count != null) return Number(p.review_count) || 0;
+    var nv = p.attributes && p.attributes.naver;
+    return (nv && nv.review) ? Number(nv.review) : 0;
+}
+// 분류별 순위값 — 맛집·숙소·캠핑=리뷰수, 여행지 등=기사수(ref_count)
+function rtRankVal(f) {
+    var p = (f && f.properties) || {};
+    var c = p.category;
+    if (c === 'restaurant' || c === 'stay' || c === 'camping') return rtRevOf(f);
+    return Number(p.ref_count) || 0;
+}
+// 추천 분류 칩 토글
+//  · 끄기 = 그 분류의 '추천 찜(_rec)'만 즉시 제거. 내가 직접 ☆ 찜한 곳은 보존.
+//  · 켜기 = 다음 '추천 찜 담기'에 포함(즉시 추가하진 않음). 최소 1개는 켜져 있어야 함.
+function rtRecCatToggle(btn) {
+    var cat = btn.getAttribute('data-cat');
+    var on = btn.classList.contains('on');
+    if (on) {
+        if (document.querySelectorAll('.rt-recq.on').length <= 1) { plHint('추천 분류를 최소 1개는 선택해야 합니다'); return; }
+        btn.classList.remove('on');
+        var before = rtPicks.length;
+        rtPicks = rtPicks.filter(function (p) { return !(p._rec && p.category === cat); });   // 추천 찜만 제거·직접 찜 보존
+        var removed = before - rtPicks.length;
+        var ko = CAT_KO[cat] || '기타';
+        if (removed) {
+            rtPicksSave(); rtDrawPicks(); plUpdateLabels(); rtRenderSummary();
+            plHint(ko + ' 추천 찜 ' + removed + '곳 제거 (직접 찜은 유지)');
+        } else {
+            plHint(ko + ' 분류 추천 제외 (제거할 추천 찜 없음·직접 찜은 유지)');
+        }
+    } else {
+        btn.classList.add('on');
+        plHint((CAT_KO[cat] || '기타') + ' 분류 추천 포함 — “추천 찜 담기”를 누르면 채워집니다');
+    }
+}
+function rtRecSelectedCats() {
+    var cats = [];
+    document.querySelectorAll('.rt-recq.on').forEach(function (b) { cats.push(b.getAttribute('data-cat')); });
+    return cats.length ? cats : ['restaurant'];
+}
+function rtRecommend() {
+    if (rtRoute.length < 2) { plHint('경로 지점을 2곳 이상 추가한 뒤 추천을 눌러 주세요'); return; }
+    var per = parseInt((document.getElementById('rtRecN') || {}).value, 10);
+    if (isNaN(per) || per < 1) per = 5;
+    per = Math.min(20, per);
+    var cats = rtRecSelectedCats();
+    // ★엔진 가동: 여태 미가동(rtFinalized)이었으면 이때 베이스 마커를 숨기고 주변 회랑 스캔을 켠다(좌측 '경로 주변 장소' 채움)
+    if (rtFinalized) { rtFinalized = false; rtUpdateFinalBtn(); rtHideBase(); rtFetchNearby(); }
+    // 경로선(도로경로 우선, 없으면 지점 직선)을 보냄 — 서버가 회랑 판정
+    var raw = (rtRoadPath && rtRoadPath.length >= 2)
+        ? rtRoadPath.map(function (ll) { return [ll.lng(), ll.lat()]; })
+        : rtRoute.map(function (w) { return [w.lng, w.lat]; });
+    var maxPts = 250;
+    if (raw.length > maxPts) {
+        var stride = Math.ceil(raw.length / maxPts), t = [];
+        for (var i = 0; i < raw.length; i += stride) t.push(raw[i]);
+        t.push(raw[raw.length - 1]); raw = t;
+    }
+    var btn = document.getElementById('rtRecBtn');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ 추천 찾는 중…'; }
+    plHint('경로 전 구간에서 유명한 곳을 찾는 중…');
+    var body = { path: JSON.stringify(raw), radius: String(Math.max(rtRadius, 3)), cats: cats.join(','), limit: '600' };
+    fetch(plApiUrl({ module: 'place', action: 'route_recommend' }), {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(body)
+    }).then(function (r) { return r.json(); }).then(function (geo) {
+        if (btn) { btn.disabled = false; btn.textContent = '🌟 추천 찜 담기'; }
+        var feats = (geo && geo.features) || [];
+        if (!feats.length) { plHint('추천할 곳을 찾지 못했습니다 (반경·분류를 바꿔 보세요)'); return; }
+        // 각 후보를 가장 가까운 경로 지점 그룹에 배정
+        var groups = rtRoute.map(function () { return []; });
+        feats.forEach(function (f) {
+            var co = f.geometry.coordinates, la = co[1], lo = co[0];
+            var best = 0, bestD = Infinity;
+            for (var w = 0; w < rtRoute.length; w++) {
+                var dw = rtHaversine(la, lo, rtRoute[w].lat, rtRoute[w].lng);
+                if (dw < bestD) { bestD = dw; best = w; }
+            }
+            groups[best].push(f);
+        });
+        // 지점별 × 분류별로 상위 per개 → 찜 추가(중복 제외)
+        var added = 0, dup = 0;
+        groups.forEach(function (arr) {
+            cats.forEach(function (cat) {
+                var catFeats = arr.filter(function (f) { return f.properties.category === cat; });
+                catFeats.sort(function (a, b) { return rtRankVal(b) - rtRankVal(a); });
+                catFeats.slice(0, per).forEach(function (f) {
+                    var pr = f.properties, id = pr.id;
+                    if (id == null) return;
+                    if (rtIsPicked(id)) { dup++; return; }
+                    var co = f.geometry.coordinates;
+                    rtPicks.push(Object.assign({}, pr, { lat: co[1], lng: co[0], _rec: true }));   // _rec=추천 출처(칩 끄면 이것만 제거·직접 찜은 보존)
+                    added++;
+                });
+            });
+        });
+        rtPicksSave(); rtDrawPicks(); plUpdateLabels(); rtRenderSummary();
+        if (added) plHint('🌟 추천 ' + added + '곳 찜 추가' + (dup ? ' (이미 찜 ' + dup + '곳 제외)' : ''));
+        else plHint(dup ? '추천 후보가 이미 모두 찜되어 있습니다' : '추천할 곳이 없습니다');
+    }).catch(function () {
+        if (btn) { btn.disabled = false; btn.textContent = '🌟 추천 찜 담기'; }
+        plHint('추천 검색 실패');
     });
 }
-function rtClearCircles() { rtCircles.forEach(function (c) { c.setMap(null); }); rtCircles = []; }
 
 // 도로 경로 요약(🚗 소요시간 · 거리 · 통행료)
 function rtFmtRoute(info) {
@@ -3886,36 +4021,58 @@ function rtFmtRoute(info) {
 function rtRenderSummary() {
     var box = document.getElementById('rtSum'); if (!box) return;
     var cnt = document.getElementById('rtSumCnt');
-    var showDist = (function () { var c = document.getElementById('rtDistChk'); return !c || c.checked; })();
+    var showDist = true;   // 거리 항상 표시(체크박스 제거)
     if (!rtNearbyActive || !rtRoute.length) {
         if (cnt) cnt.textContent = '';
         box.innerHTML = '<div class="rt-sum-empty">지점을 2곳 이상 추가하면<br>경로 주변(반경 안)의 장소가<br>자동으로 여기에 모입니다.</div>';
         return;
     }
     var total = 0; rtNearby.forEach(function (a) { total += (a ? a.length : 0); });
-    if (cnt) cnt.textContent = rtNearbyBusy ? '주변 검색 중…' : ('반경 ' + rtRadius + 'km · ' + total + '곳' + (rtPicks.length ? ' · ⭐' + rtPicks.length : ''));
+    if (cnt) cnt.textContent = (rtFinalized && !rtPicks.length) ? '' : (rtNearbyBusy ? '주변 검색 중…' : ('반경 ' + rtRadius + 'km · ' + total + '곳' + (rtPicks.length ? ' · ⭐' + rtPicks.length : '')));
     // 경로 요약 헤더(소요시간/거리/통행료 또는 계산중/직선 안내)
     var info = '';
     if (rtRouting) info = '<div class="rt-route-info">⏳ 도로 경로 계산 중…</div>';
     else if (rtRouteInfo) info = '<div class="rt-route-info">' + rtFmtRoute(rtRouteInfo) + '</div>';
     else if (rtRoute.length >= 2) info = '<div class="rt-route-info muted">직선 거리 기준 (도로 경로를 받지 못했습니다)</div>';
     if (rtNearbyBusy) info += '<div class="rt-route-info muted">⏳ 경로 주변 장소를 전국 DB에서 찾는 중…</div>';
+    // ★주변 미가동(rtFinalized) + 찜 없음 = 아직 스캔 전. 자동 스캔 대신 안내만.
+    if (rtFinalized && !rtPicks.length) {
+        box.innerHTML = info + '<div class="rt-sum-empty" style="margin-top:8px">🔍 아직 경로 주변을 찾지 않았습니다.<br><b>“🌟 추천 찜 담기”</b>를 누르면 경로 주변에서<br>맛집·숙소·여행지를 찾아 담습니다.<br><span style="color:#8a97a3;font-size:11px">(“👁️ 주변 다시 보기”로 전체 목록만 볼 수도 있어요)</span></div>';
+        return;
+    }
     box.innerHTML = info + rtRoute.map(function (wp, wi) {
         var col = rtColor(wi);
         var arr = rtNearby[wi] || [];
-        var places = arr.length
-            ? arr.map(function (s) {
-                var d = showDist ? '<span class="rt-pdist">~' + plFmtDist(s.dist) + '</span>' : '';
-                var pk = rtIsPicked(s.id);
-                var star = '<button class="rt-star' + (pk ? ' on' : '') + '" title="' + (pk ? '찜 해제' : '찜') + '" onclick="event.stopPropagation();rtTogglePickById(' + s.id + ')">' + (pk ? '★' : '☆') + '</button>';
-                return '<div class="rt-place' + (s.id == rtSelId ? ' active' : '') + '" id="rt-pl-' + wi + '-' + s.id + '" onclick="rtSpotFocusById(' + wi + ',' + s.id + ')">' +
-                    '<span class="rt-pdot" style="background:' + col + '"></span>' +
-                    '<div class="rt-pbody"><div class="rt-pname">' + plEsc(s.name) + '</div>' +
-                        '<div class="rt-pcat">' + plEsc(CAT_KO[s.category] || '기타') + (s.ref_count ? ' · 기사 ' + s.ref_count : '') + '</div>' +
-                    '</div>' + d + star +
+        // 한 장소 행 렌더(분류 색 점 사용)
+        var renderPlace = function (s, dotCol) {
+            var d = showDist ? '<span class="rt-pdist">~' + plFmtDist(s.dist) + '</span>' : '';
+            var pk = rtIsPicked(s.id);
+            var star = '<button class="rt-star' + (pk ? ' on' : '') + '" title="' + (pk ? '찜 해제' : '찜') + '" onclick="event.stopPropagation();rtTogglePickById(' + s.id + ')">' + (pk ? '★' : '☆') + '</button>';
+            return '<div class="rt-place' + (s.id == rtSelId ? ' active' : '') + '" id="rt-pl-' + wi + '-' + s.id + '" onclick="rtSpotFocusById(' + wi + ',' + s.id + ')">' +
+                '<span class="rt-pdot" style="background:' + dotCol + '"></span>' +
+                '<div class="rt-pbody"><div class="rt-pname">' + plEsc(s.name) + '</div>' +
+                    '<div class="rt-pcat">' + plEsc(CAT_KO[s.category] || '기타') + (s.ref_count ? ' · 기사 ' + s.ref_count : '') + '</div>' +
+                '</div>' + d + star +
+            '</div>';
+        };
+        // 분류별 소그룹(맛집→숙소→여행지→캠핑→기타). 그룹 내 순서는 rtComputeNearby 정렬(찜 먼저→거리순) 유지.
+        var places;
+        if (!arr.length) {
+            places = '<div class="rt-wp-none">반경 ' + rtRadius + 'km 안에 등록된 장소가 없습니다</div>';
+        } else {
+            var byCat = {};
+            arr.forEach(function (s) { var c = s.category || 'etc'; (byCat[c] = byCat[c] || []).push(s); });
+            places = RT_CAT_SEQ.map(function (cat) {
+                var list = byCat[cat]; if (!list || !list.length) return '';
+                var m = RT_CAT_META[cat] || RT_CAT_META.etc;
+                var rows = list.map(function (s) { return renderPlace(s, m.col); }).join('');
+                return '<div class="rt-catgrp">' +
+                    '<div class="rt-cathd" style="color:' + m.col + '"><span class="rt-cathd-ic">' + m.ic + '</span>' + m.ko +
+                        '<span class="rt-cathd-n" style="background:' + m.col + '">' + list.length + '</span></div>' +
+                    rows +
                 '</div>';
-            }).join('')
-            : '<div class="rt-wp-none">반경 ' + rtRadius + 'km 안에 등록된 장소가 없습니다</div>';
+            }).join('');
+        }
         return '<div class="rt-wp">' +
             '<div class="rt-wp-head" onclick="rtFocusWaypoint(' + wi + ')">' +
                 '<span class="rt-wp-num" style="background:' + col + '">' + (wi + 1) + '</span>' +
@@ -4006,9 +4163,12 @@ function rtDrawPicks() {
         var nv = p.attributes && p.attributes.naver;
         var rev = (nv && nv.review) ? Number(nv.review) : 0;
         var revHtml = rev ? '<span class="rt-pick-rev">📝' + rev.toLocaleString() + '</span>' : '';
+        // 라벨 배경 = 분류 색(맛집🔴·숙소🟣·여행지🔵·캠핑🟢). 선택(active)이면 CSS 파랑이 덮도록 인라인 미적용.
+        var cm = RT_CAT_META[p.category] || RT_CAT_META.etc;
+        var lblStyle = act ? '' : ' style="background:' + cm.col + '"';
         var lbl = new naver.maps.Marker({
             position: pos, map: plMap, zIndex: act ? 230 : 220, clickable: true,
-            icon: { content: '<div class="rt-pick-label' + act + '">⭐ ' + plEsc(p.name) + revHtml + '</div>',
+            icon: { content: '<div class="rt-pick-label' + act + '"' + lblStyle + '>⭐ ' + plEsc(p.name) + revHtml + '</div>',
                     anchor: new naver.maps.Point(0, 0) }
         });
         naver.maps.Event.addListener(lbl, 'click', (function (id) { return function () { rtPickFocus(id); }; })(p.id));

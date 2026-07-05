@@ -26,6 +26,46 @@ class ArdentNews
     const UA        = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
     const CONTACT   = 'economist.kr73@gmail.com';
 
+    // ── Claude 추출 규칙(system 프롬프트). 기사→방문장소 정밀 추출. (2026-07) ──
+    //  ★규칙 수정은 이 상수만 고치면 다음 수집부터 반영(Claude 에 매 호출 system 으로 전송).
+    const EXTRACT_MODEL  = 'claude-sonnet-5';
+    const EXTRACT_SYSTEM = <<<'SYS'
+당신은 국내 여행 기사에서 '기사가 비중 있게 소개하는 방문 장소'만 정확히 추출하는 전문가입니다.
+
+[채택 기준 — 매우 중요]
+- 기사가 실제로 3개 문장(약 3줄) 이상, 또는 하나의 독립된 문단으로 '구체적으로 설명'하는 장소만 채택합니다.
+- 총정리·베스트N·목록형 기사도 같은 기준을 적용합니다(이름만 짧게 나열된 곳은 제외).
+- 다음은 모두 제외합니다:
+  · 한두 줄만 스쳐 언급된 곳(위치·교통 설명 중 이름만, 인근 연계 소개)
+  · 향후 계획/예정으로만 언급된 곳
+  · 행정기관·터미널·일반명사 등 방문 여행지가 아닌 것
+- 이미 채택한 상위 장소의 내부/부속 요소(같은 경내·부지 안의 다리·누각·전시관·정원 내 조형물 등)는
+  별도로 채택하지 말고 상위 장소에 포함합니다. (예: 사찰 안 돌다리 → 사찰 하나로)
+
+[각 채택 장소 필드]
+- name: 기사 표기 그대로의 장소명
+- category: travel | restaurant | cafe | stay | etc  (방문 목적 기준)
+- address: 기사에 명시된 주소가 있으면 그대로, 없으면 ""  (절대 추측 금지)
+- region: "시도 시군구" 형식 (예: "강원 춘천시", "제주 서귀포시")
+- desc: 그 장소를 한 문장으로 압축(마커·목록 표시용, 40~60자)
+- summary: 추천 판단용 요약. 3~5문장(200~350자). 아래 6개 축을 '기사에 있는 만큼' 일관되게 담습니다
+  (없는 정보는 지어내지 말고 생략). 자연스러운 문장으로 씁니다.
+    ① 유형·지형(무엇인가: 호숫가 정원/용암동굴/해변 등)
+    ② 핵심 볼거리·활동(왜 가는가)
+    ③ 추천 시기·소요·난이도(계절/월, 걷는 거리, 등산 여부)
+    ④ 비용·주차·접근(무료/유료, 주차, 차·대중교통·캠핑카 진입 가능 여부)
+    ⑤ 분위기·대상(가족/연인/혼자/반려동물)
+    ⑥ 이 곳만의 차별점
+- features: 특성 태그 배열. 아래 어휘에서 해당하는 것만 고름(없으면 []).
+    지형: 호수, 바다, 해변, 계곡, 강, 산, 숲, 섬, 동굴, 폭포, 정원, 습지, 도심
+    활동: 물놀이, 산책, 트레킹, 전망, 야경, 일출, 일몰, 캠핑, 오토캠핑, 드라이브, 사진, 축제
+    편의: 무료, 유료, 반려동물, 아이동반, 주차, 실내, 대중교통
+- months: 방문하기 좋은 월 숫자 배열(1~12). 기사에 계절·시기 단서가 있으면 반영(없으면 []).
+
+[출력] 오직 아래 JSON만 출력(설명·코드펜스 금지):
+{"places":[{"name":"","category":"","address":"","region":"","desc":"","summary":"","features":[""],"months":[]}],"excluded":[{"name":"","reason":""}]}
+SYS;
+
     private ?string $cacheDir;
     private string  $cookieJar;   // 세션 쿠키 저장 파일 (페이지네이션이 세션에 의존)
     private bool    $warmed = false;
@@ -260,6 +300,79 @@ class ArdentNews
             'meta'   => $meta,
             'item'   => ['place' => $place, 'ref' => $ref],
         ];
+    }
+
+    // ======================================================
+    // Claude(AI) 추출 — 기사 본문 → 방문장소 목록(JSON)
+    // ======================================================
+    /**
+     * 기사 제목+본문을 Claude 에 넣어 '비중 있게 소개된 방문 장소'만 추출.
+     * @return array ['ok'=>bool, 'places'=>[{name,category,address,region,desc,features[],months[]}],
+     *                'excluded'=>[{name,reason}], 'in'=>int, 'out'=>int, 'error'=>?string]
+     */
+    public static function extractPlacesAI(string $title, string $bodyText, string $apiKey, ?string $model = null): array
+    {
+        $user = trim($title . "\n\n" . $bodyText);
+        if ($user === '')   return ['ok' => false, 'error' => '빈 본문', 'places' => [], 'excluded' => []];
+        if ($apiKey === '') return ['ok' => false, 'error' => 'API 키 없음', 'places' => [], 'excluded' => []];
+
+        $r = self::claudeCall($apiKey, $model ?: self::EXTRACT_MODEL, self::EXTRACT_SYSTEM, $user);
+        if (!$r['ok']) return ['ok' => false, 'error' => $r['error'], 'places' => [], 'excluded' => []];
+
+        $txt = trim(preg_replace('/^```json|```$/m', '', trim($r['text'])));
+        $j = json_decode($txt, true);
+        if (!is_array($j) || !isset($j['places'])) {
+            return ['ok' => false, 'error' => 'JSON 파싱 실패', 'raw' => $r['text'],
+                    'places' => [], 'excluded' => [], 'in' => $r['in'], 'out' => $r['out']];
+        }
+        // 최소 정규화
+        $places = [];
+        foreach (($j['places'] ?? []) as $p) {
+            $nm = trim((string)($p['name'] ?? ''));
+            if ($nm === '') continue;
+            $places[] = [
+                'name'     => $nm,
+                'category' => in_array(($p['category'] ?? ''), ['travel','restaurant','cafe','stay','etc'], true) ? $p['category'] : 'travel',
+                'address'  => trim((string)($p['address'] ?? '')),
+                'region'   => trim((string)($p['region'] ?? '')),
+                'desc'     => trim((string)($p['desc'] ?? '')),
+                'summary'  => trim((string)($p['summary'] ?? '')),
+                'features' => array_values(array_filter(array_map('trim', (array)($p['features'] ?? [])), fn($s) => $s !== '')),
+                'months'   => array_values(array_filter(array_map('intval', (array)($p['months'] ?? [])), fn($m) => $m >= 1 && $m <= 12)),
+            ];
+        }
+        return ['ok' => true, 'places' => $places, 'excluded' => $j['excluded'] ?? [],
+                'in' => $r['in'], 'out' => $r['out']];
+    }
+
+    /** Anthropic Messages API 호출(raw cURL). @return ['ok'=>bool,'text'=>str,'in'=>int,'out'=>int,'error'=>?str] */
+    private static function claudeCall(string $key, string $model, string $system, string $user): array
+    {
+        $body = ['model' => $model, 'max_tokens' => 2048, 'system' => $system,
+                 'messages' => [['role' => 'user', 'content' => $user]]];
+        // 추출은 사고 불필요 → Sonnet/Opus 는 thinking off(비용·지연 절감). Haiku 는 파라미터 불필요.
+        if (strpos($model, 'sonnet') !== false || strpos($model, 'opus') !== false) {
+            $body['thinking'] = ['type' => 'disabled'];
+        }
+        $ch = curl_init('https://api.anthropic.com/v1/messages');
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => json_encode($body, JSON_UNESCAPED_UNICODE), CURLOPT_TIMEOUT => 120,
+            CURLOPT_HTTPHEADER => ['x-api-key: ' . $key, 'anthropic-version: 2023-06-01', 'content-type: application/json'],
+        ]);
+        $resp = curl_exec($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $cerr = curl_error($ch);
+        curl_close($ch);
+        if ($resp === false) return ['ok' => false, 'error' => 'cURL: ' . $cerr];
+        $j = json_decode($resp, true);
+        if ($code !== 200 || !is_array($j)) {
+            return ['ok' => false, 'error' => ($j['error']['message'] ?? ('HTTP ' . $code . ' ' . substr((string)$resp, 0, 200)))];
+        }
+        $t = '';
+        foreach (($j['content'] ?? []) as $b) if (($b['type'] ?? '') === 'text') $t .= $b['text'];
+        return ['ok' => true, 'text' => $t,
+                'in' => (int)($j['usage']['input_tokens'] ?? 0), 'out' => (int)($j['usage']['output_tokens'] ?? 0)];
     }
 
     // ======================================================
