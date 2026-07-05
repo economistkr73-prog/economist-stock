@@ -107,7 +107,7 @@ function ai_match(Place $place, string $name, float $lat, float $lng): ?array {
 }
 
 // bg 모드(run=1&bg=1)는 즉시 헤더(Connection:close)를 보내야 하므로 <pre> 출력 안 함.
-$IS_BG = !empty($_GET['run']) && !empty($_GET['bg']);
+$IS_BG = (!empty($_GET['run']) || !empty($_GET['run_ai'])) && !empty($_GET['bg']);
 if (!$IS_BG) echo "<pre style='font-family:monospace;font-size:13px;line-height:1.55;white-space:pre-wrap'>";
 
 // ── 모드 0: 처리이력 리셋 (개선 후 재크롤용) ──────────────
@@ -549,11 +549,12 @@ if (!empty($_GET['run_ai'])) {
                         'published_at'=>$pub,'extra'=>['idxno'=>$idxno,'ai'=>1]];
                 $m = ai_match($place, $pl['name'], $g['lat'], $g['lng']);
                 if ($m) {
-                    // 기존 마커 보강: 기사 링크 + 요약/특성/월 (분류·좌표·리뷰 불변)
+                    // 기존 마커 보강: 기사 링크 + 특성/월 축적 (분류·좌표·리뷰 불변)
+                    // ★요약은 최초 1회만 고정 — 이미 있으면 덮어쓰지 않음(같은 장소 반복 기사 → 중복 재요약·churn 방지)
                     $place->addRef($m['id'], $ref);
                     $selAttr->execute([$m['id']]);
                     $at = json_decode((string)$selAttr->fetchColumn() ?: '{}', true) ?: [];
-                    $at['summary']  = $pl['summary'];
+                    if (empty($at['summary'])) $at['summary'] = $pl['summary'];
                     $at['features'] = array_values(array_unique(array_merge((array)($at['features'] ?? []), $pl['features'])));
                     $updEnr->execute([':a'=>json_encode($at, JSON_UNESCAPED_UNICODE), ':addr'=>($g['address'] ?: null), ':id'=>$m['id']]);
                     foreach ($pl['months'] as $mm) $insTag->execute([$m['id'],'month',(string)$mm]);

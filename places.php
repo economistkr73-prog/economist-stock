@@ -335,7 +335,7 @@ body.trip-view .pl-fbar { display: none !important; }
 }
 
 /* 우측 상세 패널 (마커 클릭 시) */
-#pl-panel { position: absolute; top: 0; right: 0; bottom: 0; width: 340px; max-width: 88vw; background: #fff; box-shadow: -3px 0 14px rgba(0,0,0,.15); z-index: 30; transform: translateX(100%); transition: transform .25s; display: flex; flex-direction: column; }
+#pl-panel { position: absolute; top: 0; right: 0; bottom: 0; width: 340px; max-width: 88vw; background: #fff; box-shadow: -3px 0 14px rgba(0,0,0,.15); z-index: 30; transform: translateX(100%); transition: transform .25s; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; }
 #pl-panel.open { transform: translateX(0); }
 .panel-head { padding: 16px 18px 12px; border-bottom: 1px solid #eee; }
 .panel-head .cat-badge { font-size: 11px; font-weight: 700; color: #fff; padding: 2px 8px; border-radius: 10px; }
@@ -364,8 +364,39 @@ body.trip-view .pl-fbar { display: none !important; }
 /* 🤖 Claude AI 요약 박스 (마커 상세 — 원문 기사와 구분) */
 .ai-summary { margin: 10px 0 2px; padding: 10px 12px; background: #f3f0fb; border: 1px solid #e0d7f5; border-left: 3px solid #7c5cd6; border-radius: 8px; font-size: 13px; line-height: 1.6; color: #3a3550; }
 .ai-summary .ai-badge { display: inline-block; font-size: 10.5px; font-weight: 700; color: #fff; background: #7c5cd6; padding: 2px 8px; border-radius: 10px; margin-bottom: 6px; letter-spacing: .2px; }
-.panel-close { float: right; background: none; border: none; font-size: 22px; color: #aaa; cursor: pointer; line-height: 1; }
-.panel-refs { flex: 1; overflow-y: auto; padding: 12px 14px; }
+/* 제목 옆 Claude 요약 칩 배지(클릭 시 모달) */
+.ai-sum-chip { display: inline-flex; align-items: center; gap: 3px; vertical-align: middle; margin-left: 8px; padding: 3px 9px; background: #7c5cd6; color: #fff; border: none; border-radius: 11px; font-size: 11px; font-weight: 700; letter-spacing: .2px; line-height: 1.35; cursor: pointer; white-space: nowrap; }
+.ai-sum-chip:hover { background: #6a4cc0; }
+#pl-aisum .aisum-name { font-weight: 700; font-size: 15px; color: #2c2540; margin-bottom: 8px; }
+#pl-aisum .aisum-text { font-size: 14px; line-height: 1.75; color: #3a3550; white-space: pre-wrap; }
+#pl-aisum .aisum-sub { font-size: 11.5px; color: #9b8fc4; margin-top: 12px; }
+/* AI 추천 */
+.btn-reco { background: #7c5cd6; color: #fff; border: none; }
+.btn-reco:hover { background: #6a4cc0; }
+.reco-inrow { display: flex; gap: 8px; }
+.reco-inrow .pem-inp { flex: 1; }
+.reco-ex { font-size: 11.5px; color: #8a94a0; margin-top: 8px; }
+.reco-ex a { color: #7c5cd6; cursor: pointer; text-decoration: none; font-weight: 600; }
+.reco-ex a:hover { text-decoration: underline; }
+.reco-result { margin-top: 14px; }
+.reco-intro { font-size: 13.5px; color: #3a3550; background: #f3f0fb; border-left: 3px solid #7c5cd6; border-radius: 6px; padding: 9px 12px; margin-bottom: 10px; line-height: 1.55; }
+.reco-item { border: 1px solid #e7e2f3; border-radius: 9px; padding: 10px 12px; margin-bottom: 8px; cursor: pointer; transition: background .12s; }
+.reco-item:hover { background: #f7f5fc; }
+.reco-item .ri-top { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.reco-item .ri-name { font-weight: 700; font-size: 14.5px; color: #2c2540; }
+.reco-item .ri-cat { font-size: 10.5px; font-weight: 700; color: #fff; background: #9385c0; padding: 1px 7px; border-radius: 9px; }
+.reco-item .ri-reg { font-size: 11.5px; color: #8a94a0; }
+.reco-item .ri-rev { font-size: 11.5px; color: #e8843f; font-weight: 700; }
+.reco-item .ri-reason { font-size: 12.5px; color: #4a5560; margin-top: 5px; line-height: 1.5; }
+.reco-item .ri-go { font-size: 11px; color: #7c5cd6; font-weight: 700; margin-top: 4px; }
+.reco-empty { color: #98a2ad; font-size: 13px; text-align: center; padding: 24px 0; }
+.reco-loading { color: #7c5cd6; font-size: 13px; text-align: center; padding: 24px 0; }
+/* 요약 없는 장소: 온디맨드 생성 버튼 */
+.ai-gen-btn { display: inline-block; margin: 10px 0 2px; padding: 7px 13px; background: #fff; color: #7c5cd6; border: 1px solid #cdbdf0; border-radius: 8px; font-size: 12.5px; font-weight: 700; cursor: pointer; }
+.ai-gen-btn:hover:not(:disabled) { background: #f3f0fb; }
+.ai-gen-btn:disabled { color: #9a90bb; border-color: #e2daf3; cursor: default; }
+.panel-close { position: sticky; top: 6px; float: right; background: rgba(255,255,255,.9); border: none; font-size: 22px; color: #aaa; cursor: pointer; line-height: 1; z-index: 3; width: 26px; height: 26px; border-radius: 50%; box-shadow: 0 0 0 1px #eee; }
+.panel-refs { padding: 12px 14px 40px; }
 .panel-refs h4 { font-size: 13px; color: #7f8c8d; margin-bottom: 8px; }
 .ref-item { display: block; text-decoration: none; color: inherit; border: 1px solid #eceff2; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; transition: .12s; }
 .ref-item:hover { border-color: #3498db; background: #f7fbff; }
@@ -732,6 +763,7 @@ a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
     <!-- 반경 선택 UI 제거(줌인/아웃으로 영역 조절). 주소검색·자동확장 등 내부 로직용 기본값만 숨김 보관 -->
     <input type="hidden" id="radius" value="5">
 <?php if (!$isGuest): ?>
+    <button class="btn btn-reco" onclick="plRecoOpen()" title="자연어로 물어보면 Claude 요약을 근거로 장소를 추천합니다">🤖 AI 추천</button>
     <button class="btn btn-route" id="rtModeBtn" onclick="rtToggleMode()" title="여러 지점을 잇는 실제 도로 경로와 경로 주변 맛집·여행지를 봅니다">🧭 여행 경로 만들기</button>
     <div class="pl-share-wrap">
         <button class="btn btn-share" onclick="plShareToggle()">🔗 공유</button>
@@ -990,6 +1022,31 @@ a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
         </div>
         <div id="tmGrid" class="tm-grid"></div>
         <div id="tmAction" class="tm-action"></div>
+    </div>
+</div>
+
+<div id="pl-aisum" class="pl-modal" onclick="if(event.target===this)plCloseAiSummary()">
+    <div class="pem-box" style="width:460px;max-width:94vw;">
+        <div class="pem-head"><span>🤖 Claude 요약</span><button class="pem-x" onclick="plCloseAiSummary()">×</button></div>
+        <div class="pem-body">
+            <div class="aisum-name" id="aisumName"></div>
+            <div class="aisum-text" id="aisumText"></div>
+            <div class="aisum-sub">※ 기사 내용을 바탕으로 Claude가 정리한 요약입니다.</div>
+        </div>
+    </div>
+</div>
+
+<div id="pl-reco" class="pl-modal" onclick="if(event.target===this)plRecoClose()">
+    <div class="pem-box" style="width:520px;max-width:94vw;">
+        <div class="pem-head"><span>🤖 AI 장소 추천</span><button class="pem-x" onclick="plRecoClose()">×</button></div>
+        <div class="pem-body">
+            <div class="reco-inrow">
+                <input type="text" id="recoQ" class="pem-inp" placeholder="예: 8월에 캠핑카로 갈 물놀이 좋은 계곡 / 제주 비 오는 날 실내 맛집" autocomplete="off" onkeydown="if(event.key==='Enter')plRecoRun()">
+                <button class="tm-btn primary" id="recoBtn" onclick="plRecoRun()">추천</button>
+            </div>
+            <div class="reco-ex">예시: <a onclick="plRecoEx('여름에 아이랑 물놀이하기 좋은 계곡')">여름 계곡 물놀이</a> · <a onclick="plRecoEx('반려동물 동반 가능한 캠핑장')">반려동물 캠핑</a> · <a onclick="plRecoEx('제주 저수지나 호수가 있는 조용한 여행지')">제주 호수</a></div>
+            <div id="recoResult" class="reco-result"></div>
+        </div>
     </div>
 </div>
 
@@ -2410,10 +2467,14 @@ function plOpenPanel(pr) {
         '<button class="panel-close" onclick="plClosePanel()">×</button>' +
         '<span class="cat-badge ' + (pr.category || 'etc') + '">' + (CAT_KO[pr.category] || '기타') + '</span>' +
         (plGuideBadges(pr) ? '<div class="panel-guides">' + plGuideBadges(pr) + '</div>' : '') +
-        '<h3>' + plEsc(pr.name) + '</h3>' +
+        '<h3>' + plEsc(pr.name) +
+            ((pr.attributes && pr.attributes.summary)
+                ? ' <button type="button" class="ai-sum-chip" onclick="plShowAiSummary()" title="Claude 요약 보기">🤖 Claude</button>'
+                : '') +
+        '</h3>' +
         '<div class="meta">' + meta.join('<br>') + '</div>' +
-        ((pr.attributes && pr.attributes.summary)
-            ? '<div class="ai-summary"><span class="ai-badge">🤖 Claude 요약</span>' + plEsc(pr.attributes.summary) + '</div>'
+        ((!PL_GUEST && !(pr.attributes && pr.attributes.summary) && pr.ref_count > 0)
+            ? '<button type="button" class="ai-gen-btn" id="aiGenBtn" onclick="plGenSummary(' + pr.id + ')">🤖 AI 요약 생성</button>'
             : '') +
         plNaverHtml(pr) +
         (tags.length ? '<div class="tags">' + tags.map(function (t) { return '<em>' + plEsc(t) + '</em>'; }).join('') + '</div>' : '') +
@@ -2443,12 +2504,105 @@ function plRenderRefs(refs) {
             '<span class="rt ' + r.source_type + '">' + (RT[r.source_type] || r.source_type) + '</span>' +
             (r.published_at ? '<span class="rsum">' + plEsc(r.published_at) + '</span>' : '') +
             '<div class="rtitle">' + plEsc(r.title || '(제목 없음)') + '</div>' +
-            (r.summary ? '<div class="rsum">' + plEsc(r.summary) + '</div>' : '') +
             '</a>';
     }).join('');
 }
 
 function plClosePanel() { document.getElementById('pl-panel').classList.remove('open'); }
+
+// 🤖 Claude 요약 배지 클릭 → 모달로 전체 요약 표시
+function plShowAiSummary() {
+    var pr = plPanelPlace;
+    if (!pr || !pr.attributes || !pr.attributes.summary) return;
+    document.getElementById('aisumName').textContent = pr.name || '';
+    // 저장된 요약은 한 덩어리 → 문장 끝(.!?)마다 줄바꿈해 가독성 확보(pre-wrap이 \n 렌더)
+    document.getElementById('aisumText').textContent =
+        String(pr.attributes.summary).replace(/\s+/g, ' ').trim().replace(/([.!?])\s+/g, '$1\n');
+    document.getElementById('pl-aisum').classList.add('open');
+}
+function plCloseAiSummary() { document.getElementById('pl-aisum').classList.remove('open'); }
+
+// ── 🤖 AI 추천: 자연어 질의 → Claude 랭킹(요약 근거) → 클릭 시 마커로 이동 ──
+function plRecoOpen() {
+    document.getElementById('pl-reco').classList.add('open');
+    setTimeout(function () { var i = document.getElementById('recoQ'); if (i) i.focus(); }, 50);
+}
+function plRecoClose() { document.getElementById('pl-reco').classList.remove('open'); }
+function plRecoEx(t) { document.getElementById('recoQ').value = t; plRecoRun(); }
+var plRecoBusy = false;
+function plRecoRun() {
+    if (plRecoBusy) return;
+    var q = (document.getElementById('recoQ').value || '').trim();
+    var box = document.getElementById('recoResult');
+    if (!q) { box.innerHTML = '<div class="reco-empty">질문을 입력해 주세요.</div>'; return; }
+    plRecoBusy = true;
+    document.getElementById('recoBtn').disabled = true;
+    box.innerHTML = '<div class="reco-loading">🤖 Claude가 요약을 살펴보는 중…</div>';
+    fetch('place_api.php', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ module: 'place', action: 'recommend', q: q })
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+        plRecoBusy = false; document.getElementById('recoBtn').disabled = false;
+        if (!d || !d.ok) { box.innerHTML = '<div class="reco-empty">' + plEsc((d && d.msg) || '추천 실패') + '</div>'; return; }
+        plRecoRender(d);
+    })
+    .catch(function () {
+        plRecoBusy = false; document.getElementById('recoBtn').disabled = false;
+        box.innerHTML = '<div class="reco-empty">네트워크 오류. 다시 시도해 주세요.</div>';
+    });
+}
+function plRecoRender(d) {
+    var box = document.getElementById('recoResult');
+    var html = '';
+    if (d.intro) html += '<div class="reco-intro">' + plEsc(d.intro) + '</div>';
+    if (!d.items || !d.items.length) { box.innerHTML = html + '<div class="reco-empty">딱 맞는 곳을 못 찾았어요. 조건을 바꿔 물어봐 주세요.</div>'; return; }
+    var CATK = { travel: '여행지', restaurant: '맛집', stay: '숙소', camping: '캠핑', etc: '기타' };
+    html += d.items.map(function (it) {
+        var rev = (it.review_count != null) ? '<span class="ri-rev">리뷰 ' + Number(it.review_count).toLocaleString() + '</span>' : '';
+        return '<div class="reco-item" onclick="plRecoGo(' + it.id + ')">' +
+            '<div class="ri-top"><span class="ri-name">' + plEsc(it.name) + '</span>' +
+            '<span class="ri-cat">' + (CATK[it.category] || '기타') + '</span>' +
+            '<span class="ri-reg">' + plEsc(it.region || '') + '</span>' + rev + '</div>' +
+            (it.reason ? '<div class="ri-reason">' + plEsc(it.reason) + '</div>' : '') +
+            '<div class="ri-go">지도에서 보기 →</div>' +
+        '</div>';
+    }).join('');
+    box.innerHTML = html;
+}
+function plRecoGo(id) { plRecoClose(); plForceShowPlace(id); }
+
+// 요약 없는 장소: 연결 기사를 읽어 6축 요약을 생성·저장(온디맨드)
+function plGenSummary(id) {
+    var btn = document.getElementById('aiGenBtn');
+    if (btn) { btn.disabled = true; btn.textContent = '🤖 요약 생성 중… (10초 내외)'; }
+    fetch('place_api.php', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ module: 'place', action: 'summarize', id: id })
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+        if (!d || !d.ok) {
+            if (btn) { btn.disabled = false; btn.textContent = '🤖 AI 요약 생성'; }
+            alert((d && d.msg) || '요약 생성 실패');
+            return;
+        }
+        if (plPanelPlace && plPanelPlace.id == id) {
+            plPanelPlace.attributes = plPanelPlace.attributes || {};
+            plPanelPlace.attributes.summary = d.summary;
+            if (d.features) plPanelPlace.attributes.features = d.features;
+            plOpenPanel(plPanelPlace);   // 재렌더 → '🤖 Claude' 칩으로 전환
+            plShowAiSummary();           // 생성된 요약을 바로 모달로 표시
+        }
+    })
+    .catch(function () {
+        if (btn) { btn.disabled = false; btn.textContent = '🤖 AI 요약 생성'; }
+        alert('네트워크 오류. 다시 시도해 주세요.');
+    });
+}
 
 // 기사 원문 → JS 팝업창
 function plOpenArticle(url) {

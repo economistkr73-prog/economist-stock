@@ -13,6 +13,7 @@ require_once "./env/auth_fnc.php";
 // 지오코딩 키 (없으면 GeoCoder 가 안내 메시지 반환)
 if (file_exists("./env/maps.inc"))  require_once "./env/maps.inc";
 if (file_exists("./env/kakao.inc")) require_once "./env/kakao.inc";
+if (file_exists("./env/anthropic.inc")) require_once "./env/anthropic.inc";   // AI 추천(action=recommend)
 
 $placeBoot = new Place($pdo);
 $placeBoot->ensureTable();
@@ -137,6 +138,153 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
             $id = (int)($_GET['id'] ?? $_POST['id'] ?? 0);
             $f  = $id > 0 ? $place->featureById($id) : null;
             echo json_encode(['ok' => (bool)$f, 'feature' => $f], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+
+        // ── AI 추천: 자연어 질의 → (분류·지역·월 사전필터) → 요약 후보를 Claude 랭킹 ──
+        //  소유자 전용(게스트 차단). 재료 = place.attributes.summary(6축 요약) + features + 기본정보.
+        case 'recommend': {
+            $q = trim((string)($_POST['q'] ?? $_GET['q'] ?? ''));
+            if ($q === '') { http_response_code(400); echo json_encode(['ok'=>false,'msg'=>'질문을 입력하세요.']); return; }
+            if (mb_strlen($q) > 300) $q = mb_substr($q, 0, 300);
+            if (!defined('ANTHROPIC_API_KEY') || ANTHROPIC_API_KEY === '') { echo json_encode(['ok'=>false,'msg'=>'AI 키가 없습니다.']); return; }
+
+            // 1) 저비용 사전필터(Claude 없이): 질의에서 분류/시도/월 감지
+            $ff = place_reco_filters($q);
+            $where = ["JSON_EXTRACT(p.attributes,'$.summary') IS NOT NULL",
+                      "JSON_UNQUOTE(JSON_EXTRACT(p.attributes,'$.summary')) <> ''"];
+            $args = [];
+            if ($ff['cats']) {
+                $ph = implode(',', array_fill(0, count($ff['cats']), '?'));
+                $where[] = "p.category IN ($ph)";
+                foreach ($ff['cats'] as $c) $args[] = $c;
+            }
+            if ($ff['sido']) {   // region_lv1 이 축약(경남)/전체(경상남도) 혼재 → 둘 다 매칭
+                $where[] = "(p.region_lv1 LIKE ? OR p.region_lv1 LIKE ?)";
+                $args[] = '%' . $ff['sido'][0] . '%';
+                $args[] = '%' . $ff['sido'][1] . '%';
+            }
+            if ($ff['months']) {
+                $ph = implode(',', array_fill(0, count($ff['months']), '?'));
+                $where[] = "EXISTS(SELECT 1 FROM place_tag pt WHERE pt.place_id=p.id AND pt.kind='month' AND pt.tag IN ($ph))";
+                foreach ($ff['months'] as $m) $args[] = (string)$m;
+            }
+            $sql = "SELECT p.id, p.name, p.category, p.region_lv1, p.region_lv2, p.review_count,
+                           JSON_UNQUOTE(JSON_EXTRACT(p.attributes,'$.summary')) AS summary,
+                           JSON_EXTRACT(p.attributes,'$.features') AS features
+                    FROM place p
+                    WHERE " . implode(' AND ', $where) . "
+                    ORDER BY (p.review_count IS NOT NULL) DESC, p.review_count DESC, p.id DESC
+                    LIMIT 60";
+            $st = $pdo->prepare($sql); $st->execute($args);
+            $cand = $st->fetchAll(PDO::FETCH_ASSOC);
+            if (!$cand) { echo json_encode(['ok'=>true,'intro'=>'아직 조건에 맞는 요약 장소가 없어요. 더 넓게(예: "여름 계곡", "제주 맛집") 물어봐 주세요.','items'=>[]], JSON_UNESCAPED_UNICODE); return; }
+
+            // 2) 후보 다이제스트(#id | 이름 | 분류 | 지역 | 특성 | 요약)
+            $CATK = ['travel'=>'여행지','restaurant'=>'맛집','stay'=>'숙소','camping'=>'캠핑','etc'=>'기타'];
+            $byId = []; $lines = [];
+            foreach ($cand as $c) {
+                $byId[(int)$c['id']] = $c;
+                $fa = $c['features'] ? json_decode($c['features'], true) : [];
+                $feat = (is_array($fa) && $fa) ? implode('·', array_slice($fa, 0, 10)) : '';
+                $reg  = trim(($c['region_lv1'] ?? '') . ' ' . ($c['region_lv2'] ?? ''));
+                $lines[] = "#{$c['id']} | {$c['name']} | " . ($CATK[$c['category']] ?? $c['category']) . " | {$reg}"
+                         . ($feat ? " | 특성:{$feat}" : '') . " | " . mb_substr((string)$c['summary'], 0, 220);
+            }
+            $digest = implode("\n", $lines);
+
+            // 3) Claude 랭킹
+            $sys = "너는 국내 여행/맛집/숙소/캠핑 추천 도우미다. 아래 '후보 목록'에 있는 장소만 근거로 사용자 질의에 가장 잘 맞는 곳을 최대 6곳 고른다. "
+                 . "각 후보의 요약·특성·지역만 사용하고, 목록에 없는 장소는 절대 만들지 마라. 잘 맞는 곳이 적으면 적게, 없으면 빈 목록을 반환한다. "
+                 . "reason 은 '왜 이 질의에 맞는지'를 요약 근거로 한 문장(한국어)으로. 반드시 JSON만 출력: "
+                 . '{"intro":"한 줄 총평","picks":[{"id":숫자,"reason":"한 문장"}]}';
+            $usr = "사용자 질의: {$q}\n\n후보 목록:\n{$digest}";
+            $r = place_reco_claude(ANTHROPIC_API_KEY, $sys, $usr);
+            if (!$r['ok']) { echo json_encode(['ok'=>false,'msg'=>'추천 실패: ' . $r['error']], JSON_UNESCAPED_UNICODE); return; }
+            $txt = trim(preg_replace('/^```json|```$/m', '', trim($r['text'])));
+            $j = json_decode($txt, true);
+            if (!is_array($j) || !isset($j['picks']) || !is_array($j['picks'])) {
+                echo json_encode(['ok'=>false,'msg'=>'추천 결과 해석 실패'], JSON_UNESCAPED_UNICODE); return;
+            }
+
+            // 4) picks → 후보 정보 매핑(목록 밖 id 방어)
+            $items = [];
+            foreach ($j['picks'] as $pk) {
+                $pid = (int)($pk['id'] ?? 0);
+                if (!isset($byId[$pid])) continue;
+                $c = $byId[$pid];
+                $items[] = [
+                    'id'=>$pid, 'name'=>$c['name'], 'category'=>$c['category'],
+                    'region'=>trim(($c['region_lv1'] ?? '') . ' ' . ($c['region_lv2'] ?? '')),
+                    'review_count'=>$c['review_count']!==null ? (int)$c['review_count'] : null,
+                    'summary'=>$c['summary'], 'reason'=>trim((string)($pk['reason'] ?? '')),
+                ];
+            }
+            echo json_encode(['ok'=>true, 'intro'=>trim((string)($j['intro'] ?? '')), 'items'=>$items, 'cand'=>count($cand)], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+
+        // ── AI 요약 생성(온디맨드): 요약 없는 장소의 연결 기사를 읽어 6축 요약 생성·저장 ──
+        //  소유자 전용. 재료 = 연결된 기사(place_ref, source_type=article) 본문.
+        case 'summarize': {
+            $id = (int)($_POST['id'] ?? $_GET['id'] ?? 0);
+            if ($id <= 0) { http_response_code(400); echo json_encode(['ok'=>false,'msg'=>'id 가 필요합니다.']); return; }
+            if (!defined('ANTHROPIC_API_KEY') || ANTHROPIC_API_KEY === '') { echo json_encode(['ok'=>false,'msg'=>'AI 키가 없습니다.']); return; }
+
+            $ps = $pdo->prepare("SELECT id, name, category, attributes FROM place WHERE id=?");
+            $ps->execute([$id]);
+            $pl = $ps->fetch(PDO::FETCH_ASSOC);
+            if (!$pl) { http_response_code(404); echo json_encode(['ok'=>false,'msg'=>'장소를 찾을 수 없습니다.']); return; }
+            $at = $pl['attributes'] ? (json_decode($pl['attributes'], true) ?: []) : [];
+
+            // 연결 기사(최신 3건)
+            $rs = $pdo->prepare("SELECT title, url, summary FROM place_ref
+                                 WHERE place_id=? AND source_type='article'
+                                 ORDER BY published_at DESC, id DESC LIMIT 3");
+            $rs->execute([$id]);
+            $refs = $rs->fetchAll(PDO::FETCH_ASSOC);
+            if (!$refs) { echo json_encode(['ok'=>false,'msg'=>'요약할 연결 기사가 없습니다.']); return; }
+
+            // 본문 수집(아덴트 기사=idxno로 재fetch, 실패 시 저장된 리드문 fallback)
+            $crawler = new ArdentNews(sys_get_temp_dir() . '/ardent_cache');
+            $texts = [];
+            foreach ($refs as $rf) {
+                $body = '';
+                if (preg_match('/idxno=(\d+)/', (string)$rf['url'], $mm)) {
+                    $html = $crawler->fetchArticle((int)$mm[1]);
+                    if ($html) $body = ArdentNews::extractBodyText($html);
+                }
+                if ($body === '') $body = trim((string)($rf['summary'] ?? ''));
+                if ($body !== '') $texts[] = "[기사] " . trim((string)$rf['title']) . "\n" . mb_substr($body, 0, 4000);
+            }
+            if (!$texts) { echo json_encode(['ok'=>false,'msg'=>'기사 본문을 가져오지 못했습니다.']); return; }
+            $joined = implode("\n\n----\n\n", $texts);
+
+            $sys = "당신은 국내 여행/맛집/숙소 정보를 정리하는 전문가입니다. 아래 기사들에서 지정된 '대상 장소'에 대한 내용만 근거로 6축 요약을 작성하세요.\n"
+                 . "- summary: 3~5문장(200~350자)로 아래 6축을 자연스러운 문장에 녹여서. 없는 정보는 지어내지 말고 생략.\n"
+                 . "  ①유형·지형 ②볼거리·활동 ③시기·소요·난이도 ④비용·주차·접근(차/대중교통/캠핑카) ⑤분위기·대상(가족/반려동물) ⑥차별점\n"
+                 . "- features: 다음 어휘 중 해당하는 것만 배열. 지형(호수·바다·해변·계곡·강·산·숲·섬·동굴·폭포·정원·습지·도심)·활동(물놀이·산책·트레킹·전망·야경·일출·일몰·캠핑·오토캠핑·드라이브·사진·축제)·편의(무료·유료·반려동물·아이동반·주차·실내·대중교통)\n"
+                 . "- months: 방문 적기 월 숫자 배열(1~12). 명확하지 않으면 빈 배열.\n"
+                 . "대상 장소 외 다른 장소는 요약하지 마세요. 반드시 JSON만 출력: {\"summary\":\"...\",\"features\":[\"...\"],\"months\":[6,7,8]}";
+            $usr = "대상 장소: {$pl['name']}\n\n기사들:\n{$joined}";
+            $r = place_reco_claude(ANTHROPIC_API_KEY, $sys, $usr);
+            if (!$r['ok']) { echo json_encode(['ok'=>false,'msg'=>'요약 실패: ' . $r['error']]); return; }
+            $txt = trim(preg_replace('/^```json|```$/m', '', trim($r['text'])));
+            $j = json_decode($txt, true);
+            $summary = is_array($j) ? trim((string)($j['summary'] ?? '')) : '';
+            if ($summary === '') { echo json_encode(['ok'=>false,'msg'=>'요약 결과 해석 실패']); return; }
+
+            // 저장: summary 세팅 + features 합집합 + 월 태그(분류·좌표·리뷰 불변)
+            $feats = [];
+            foreach ((array)($j['features'] ?? []) as $f) { $f = trim((string)$f); if ($f !== '') $feats[] = $f; }
+            $at['summary']  = $summary;
+            $at['features'] = array_values(array_unique(array_merge((array)($at['features'] ?? []), $feats)));
+            $up = $pdo->prepare("UPDATE place SET attributes=:a, updated_at=CURRENT_TIMESTAMP WHERE id=:id");
+            $up->execute([':a' => json_encode($at, JSON_UNESCAPED_UNICODE), ':id' => $id]);
+            $insTag = $pdo->prepare("INSERT IGNORE INTO place_tag (place_id,kind,tag) VALUES (?,?,?)");
+            foreach ((array)($j['months'] ?? []) as $mm2) { $mm2 = (int)$mm2; if ($mm2 >= 1 && $mm2 <= 12) $insTag->execute([$id, 'month', (string)$mm2]); }
+
+            echo json_encode(['ok'=>true, 'summary'=>$summary, 'features'=>$at['features']], JSON_UNESCAPED_UNICODE);
             break;
         }
 
@@ -785,5 +933,61 @@ function naver_directions(string $start, string $goal, string $option = 'trafast
         'fuel'     => (int)($s['fuelPrice'] ?? 0),  // 원
         'path'     => $leg['path'] ?? [],           // [[경도,위도], ...]
     ];
+}
+
+// ── AI 추천 헬퍼 ─────────────────────────────────────────────
+// 질의에서 저비용으로 분류/시도/월 감지(Claude 호출 전 후보 축소용)
+function place_reco_filters(string $q): array
+{
+    // 분류 키워드 → category
+    $catMap = [
+        '맛집'=>'restaurant','식당'=>'restaurant','음식'=>'restaurant','먹거리'=>'restaurant','밥집'=>'restaurant','카페'=>'restaurant',
+        '숙소'=>'stay','펜션'=>'stay','호텔'=>'stay','리조트'=>'stay','스테이'=>'stay','글램핑'=>'stay','한옥'=>'stay',
+        '캠핑'=>'camping','오토캠핑'=>'camping','야영'=>'camping','차박'=>'camping',
+        '여행'=>'travel','명소'=>'travel','관광'=>'travel','나들이'=>'travel','가볼만'=>'travel','갈만한'=>'travel','드라이브'=>'travel',
+    ];
+    $cats = [];
+    foreach ($catMap as $k => $v) if (mb_strpos($q, $k) !== false && !in_array($v, $cats, true)) $cats[] = $v;
+
+    // 시도 감지 → [축약, 전체] 두 표기 반환(region_lv1 혼재 대응)
+    $sidoMap = [
+        '서울'=>'서울','부산'=>'부산','대구'=>'대구','인천'=>'인천','광주'=>'광주','대전'=>'대전','울산'=>'울산','세종'=>'세종',
+        '경기'=>'경기','강원'=>'강원','충북'=>'충청북도','충남'=>'충청남도','전북'=>'전라북도','전남'=>'전라남도',
+        '경북'=>'경상북도','경남'=>'경상남도','제주'=>'제주',
+    ];
+    $sido = null;
+    foreach ($sidoMap as $short => $full) {
+        if (mb_strpos($q, $short) !== false || mb_strpos($q, $full) !== false) { $sido = [$short, $full]; break; }
+    }
+
+    // 월 감지: 'N월' + 계절어
+    $months = [];
+    if (preg_match_all('/(\d{1,2})\s*월/u', $q, $mm)) {
+        foreach ($mm[1] as $x) { $x = (int)$x; if ($x >= 1 && $x <= 12 && !in_array($x, $months, true)) $months[] = $x; }
+    }
+    $season = ['봄'=>[3,4,5], '여름'=>[6,7,8], '가을'=>[9,10,11], '겨울'=>[12,1,2]];
+    foreach ($season as $s => $ms) if (mb_strpos($q, $s) !== false) foreach ($ms as $x) if (!in_array($x, $months, true)) $months[] = $x;
+
+    return ['cats' => $cats, 'sido' => $sido, 'months' => $months];
+}
+
+// Claude Messages API 호출(raw cURL) — 추천 랭킹용. @return ['ok'=>bool,'text'=>str,'error'=>?str]
+function place_reco_claude(string $key, string $system, string $user): array
+{
+    $body = ['model' => 'claude-sonnet-5', 'max_tokens' => 1500, 'system' => $system,
+             'messages' => [['role' => 'user', 'content' => $user]],
+             'thinking' => ['type' => 'disabled']];
+    $ch = curl_init('https://api.anthropic.com/v1/messages');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => json_encode($body, JSON_UNESCAPED_UNICODE), CURLOPT_TIMEOUT => 120,
+        CURLOPT_HTTPHEADER => ['x-api-key: ' . $key, 'anthropic-version: 2023-06-01', 'content-type: application/json'],
+    ]);
+    $resp = curl_exec($ch); $code = curl_getinfo($ch, CURLINFO_HTTP_CODE); $cerr = curl_error($ch); curl_close($ch);
+    if ($resp === false) return ['ok' => false, 'error' => 'cURL: ' . $cerr];
+    $j = json_decode($resp, true);
+    if ($code !== 200 || !is_array($j)) return ['ok' => false, 'error' => ($j['error']['message'] ?? ('HTTP ' . $code . ' ' . substr((string)$resp, 0, 160)))];
+    $t = ''; foreach (($j['content'] ?? []) as $b) if (($b['type'] ?? '') === 'text') $t .= $b['text'];
+    return ['ok' => true, 'text' => $t];
 }
 ?>
