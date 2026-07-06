@@ -349,13 +349,18 @@ if (!empty($_GET['add'])) {
         }
         if ($addr !== '') { $pp = preg_split('/\s+/', $addr); $lv1 = $pp[0] ?? ''; $lv2 = $pp[1] ?? ''; }
 
-        // attributes(요약·특성)
-        $attrs = ['source_site' => 'ardentnews'];
+        // attributes(요약·특성) — ★dedup 이 기존 장소에 매칭될 수 있으므로, upsertPlace 가 attributes 를
+        // 통째로 덮어쓰기 전에 기존 값을 먼저 읽어와 병합한다(신규 생성이면 조회결과 없음=빈 배열에서 시작).
+        $dedupKey = Place::makeDedupKey($name, $lv2);
+        $exSel = $pdo->prepare("SELECT attributes FROM place WHERE dedup_key = ?");
+        $exSel->execute([$dedupKey]);
+        $attrs = ($exAttr = $exSel->fetchColumn()) ? (json_decode((string)$exAttr, true) ?: []) : [];
+        $attrs['source_site'] = $attrs['source_site'] ?? 'ardentnews';
         $sum   = trim((string)($it['summary'] ?? ''));
         if ($sum !== '') $attrs['summary'] = $sum;
         $feats = [];
         foreach ((array)($it['features'] ?? []) as $f) { $f = trim((string)$f); if ($f !== '') $feats[] = $f; }
-        if ($feats) $attrs['features'] = array_values(array_unique($feats));
+        if ($feats) $attrs['features'] = array_values(array_unique(array_merge((array)($attrs['features'] ?? []), $feats)));
 
         $pid = $place->upsertPlace([
             'name' => $name, 'category' => $cat, 'address' => $addr,
