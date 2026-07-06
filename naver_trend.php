@@ -134,6 +134,12 @@ echo <<<'HEAD'
   .nt-tbl td.name a.nm:hover { color: #2979ff; text-decoration: underline; }
   .nt-tbl td.name .addr { display: block; color: #9aa6b2; font-size: 11.5px; margin-top: 2px; max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
   .nt-tbl td.name .rg { color: #9aa6b2; font-size: 11.5px; margin-left: 6px; }
+  /* 🤖 Claude 요약 칩 (이름 옆 · 클릭 시 요약 모달, 행 클릭=차트와 분리) */
+  .nt-tbl td.name .nt-sum-chip { display: inline-flex; align-items: center; vertical-align: middle; margin-left: 6px; padding: 1px 7px; background: #7c5cd6; color: #fff; border: none; border-radius: 9px; font-size: 10px; font-weight: 700; line-height: 1.4; cursor: pointer; white-space: nowrap; }
+  .nt-tbl td.name .nt-sum-chip:hover { background: #6a4cc0; }
+  #ntSumModal .ntsum-name { font-weight: 700; font-size: 15px; color: #2c2540; margin-bottom: 8px; }
+  #ntSumModal .ntsum-text { font-size: 14px; line-height: 1.75; color: #3a3550; white-space: pre-wrap; }
+  #ntSumModal .ntsum-sub { font-size: 11.5px; color: #9b8fc4; margin-top: 12px; }
   .nt-tbl tbody tr { cursor: pointer; }
   .nt-tbl tbody tr:hover { background: #f3f8ff; }
   .val { font-variant-numeric: tabular-nums; font-weight: 600; }
@@ -263,6 +269,17 @@ echo <<<'BODY'
   <div class="nt-card" style="width:460px">
     <div class="nt-card-h"><span class="t">🔗 <span id="nsTitle">맛집</span> 추이 공유</span><button class="x" onclick="ntShareClose()">&times;</button></div>
     <div class="nt-card-b"><div id="nsBody"></div></div>
+  </div>
+</div>
+
+<div class="nt-modal" id="ntSumModal" onclick="if(event.target===this)ntSumClose()">
+  <div class="nt-card" style="width:460px">
+    <div class="nt-card-h"><span class="t">🤖 Claude 요약</span><button class="x" onclick="ntSumClose()">&times;</button></div>
+    <div class="nt-card-b">
+      <div class="ntsum-name" id="ntSumName"></div>
+      <div class="ntsum-text" id="ntSumText"></div>
+      <div class="ntsum-sub">※ 기사·웹검색 내용을 바탕으로 Claude가 정리한 요약입니다.</div>
+    </div>
   </div>
 </div>
 
@@ -435,6 +452,7 @@ function ntRender(rows){
          + (r.naver_id
              ? '<a class="nm" href="https://map.naver.com/p/entry/place/'+ntEsc(String(r.naver_id))+'" onclick="return ntOpenNaver(event,\''+ntEsc(String(r.naver_id))+'\')" title="네이버 플레이스에서 자세히 보기">'+ntEsc(r.name)+'</a>'
              : '<span class="nm">'+ntEsc(r.name)+'</span>')
+         + (r.summary ? '<button type="button" class="nt-sum-chip" title="Claude 요약 보기" onclick="event.stopPropagation();ntShowSummary('+i+')">🤖 Claude</button>' : '')
          + ((r.address||r.region)?'<div class="addr">'+ntEsc(r.address||r.region)+'</div>':'') + '</td>'
        + '<td class="tot">'+ntCell(r.total_score, dTot, true)+'</td>'
        + '<td>'+ntCell(r.score, r.d_score, true)+'</td>'
@@ -461,6 +479,17 @@ function ntRender(rows){
     ntLoad();
   });
 }
+
+// 🤖 Claude 요약 칩 클릭 → 모달로 전체 요약 표시(행 클릭=차트와 분리). places.php 와 동일 패턴.
+function ntShowSummary(i){
+  var r = ntRows[i]; if (!r || !r.summary) return;
+  document.getElementById('ntSumName').textContent = r.name || '';
+  // 저장된 요약은 한 덩어리 → 문장 끝(.!?)마다 줄바꿈해 가독성 확보(pre-wrap 이 \n 렌더)
+  document.getElementById('ntSumText').textContent =
+    String(r.summary).replace(/\s+/g, ' ').trim().replace(/([.!?])\s+/g, '$1\n');
+  document.getElementById('ntSumModal').classList.add('on');
+}
+function ntSumClose(){ document.getElementById('ntSumModal').classList.remove('on'); }
 
 // ── 공유 링크 (소유자 전용) — travel.php 패턴: 한시적 토큰 발급/복사/중단 ───────────
 function ntShareOpen(){

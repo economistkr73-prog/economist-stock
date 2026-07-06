@@ -367,6 +367,9 @@ body.trip-view .pl-fbar { display: none !important; }
 /* 제목 옆 Claude 요약 칩 배지(클릭 시 모달) */
 .ai-sum-chip { display: inline-flex; align-items: center; gap: 3px; vertical-align: middle; margin-left: 8px; padding: 3px 9px; background: #7c5cd6; color: #fff; border: none; border-radius: 11px; font-size: 11px; font-weight: 700; letter-spacing: .2px; line-height: 1.35; cursor: pointer; white-space: nowrap; }
 .ai-sum-chip:hover { background: #6a4cc0; }
+/* 지도 리스트 항목의 Claude 요약 칩(작게 — 클릭 시 요약 모달, 항목 클릭과 분리) */
+.li-ai-chip { display: inline-flex; align-items: center; vertical-align: middle; margin-left: 5px; padding: 1px 6px; background: #7c5cd6; color: #fff; border: none; border-radius: 9px; font-size: 10px; font-weight: 700; line-height: 1.4; cursor: pointer; white-space: nowrap; }
+.li-ai-chip:hover { background: #6a4cc0; }
 #pl-aisum .aisum-name { font-weight: 700; font-size: 15px; color: #2c2540; margin-bottom: 8px; }
 #pl-aisum .aisum-text { font-size: 14px; line-height: 1.75; color: #3a3550; white-space: pre-wrap; }
 #pl-aisum .aisum-sub { font-size: 11.5px; color: #9b8fc4; margin-top: 12px; }
@@ -908,6 +911,7 @@ a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
         <div class="rt-save-row">
             <button class="rt-savebtn" onclick="rtTripSave()" title="현재 경로+찜을 이름 붙여 저장">💾 경로 저장</button>
             <button class="rt-savebtn rt-loadbtn" onclick="rtTripOpen()" title="저장한 경로 불러오기">📂 경로 리스트</button>
+            <button class="rt-savebtn" onclick="rtCopyCode()" title="경로 지점·찜 장소 목록 요약도구 URL을 클립보드에 복사">🔖 경로코드</button>
         </div>
         <div class="rt-controls">
             <span class="rt-clbl">반경</span>
@@ -1223,7 +1227,7 @@ function plProxPick(i) {
     }
     // 경로 모드: 선택 동기화(찜 라벨 active 해제 + 리스트 강조 유지)
     if (typeof rtMode !== 'undefined' && rtMode) { rtSelId = f.properties.id; rtDrawPicks(); rtRenderSummary(); }
-    plOpenPanel(f.properties);
+    plOpenById(f.properties.id, f.properties.lat, f.properties.lng, f.properties);   // 단일 경로
 }
 // 중심 (lat,lng) 기준 ±km 박스로 지도를 맞춤 → 화면 크기와 무관하게 '중심·반경 km'가 보임
 function plFitRadius(lat, lng, km) {
@@ -2197,10 +2201,15 @@ function plLiHtml(f, i, opts) {
     var selCls = (pr.id && plMergeSel.indexOf(pr.id) >= 0) ? ' mc-sel' : '';
     var noClick = (!PL_SHARE && pr.id) ? ' onclick="plNoClick(event,' + pr.id + ')"' : '';
     var label = opts.num ? (pr._n || (i + 1)) : '';          // 베이스=분류 내 순위 / 주변=빈 색원
+    // 🤖 Claude 요약 칩 — 요약(attributes.summary) 있으면 표시, 클릭 시 항목 클릭과 분리해 요약 모달만 연다.
+    var aiChip = (pr.attributes && pr.attributes.summary)
+        ? '<button type="button" class="li-ai-chip" title="Claude 요약 보기" onclick="event.stopPropagation();plShowAiSummaryFrom(\'' +
+              (opts.onclickFn === 'plProxPick' ? 'ov' : 'base') + '\',' + i + ')">🤖 Claude</button>'
+        : '';
     return '<div class="pl-li' + selCls + '" id="' + opts.prefix + i + '" data-pid="' + (pr.id || 0) + '" onclick="' + opts.onclickFn + '(' + i + ')">' +
         '<span class="li-no cat-' + c + '"' + noClick + '>' + label + '</span>' +
         '<div class="li-body">' +
-            '<div class="li-name"><span class="nm">' + plEsc(pr.name) + '</span>' + refs +
+            '<div class="li-name"><span class="nm">' + plEsc(pr.name) + '</span>' + refs + aiChip +
                 '<span class="li-meta">' + dist + '</span></div>' +
             gbLine + nvLine + sub +
         '</div>' + edit + '</div>';
@@ -2380,7 +2389,7 @@ function plFocus(idx) {
     // 좌표는 geometry 에만 있고 properties 엔 없음 → 패널 버튼·주변검색용으로 주입
     f.properties.lat = co[1];
     f.properties.lng = co[0];
-    plOpenPanel(f.properties);
+    plOpenById(f.properties.id, co[1], co[0], f.properties);   // 단일 경로 — 서버 최신정보로 열기(캐시 fallback)
 
     // 선택 → 반경 3km 지도로 포커스(클릭한 곳이 중심).
     //  단, 이미 그보다 더 확대(줌인)된 상태면 줌아웃하지 않고 현재 줌 유지 + 중심만 이동.
@@ -2436,6 +2445,25 @@ function plForceShowPlace(id) {
 }
 
 var CAT_KO = { travel: '여행지', stay: '숙소', restaurant: '맛집', camping: '캠핑장', etc: '기타' };
+
+// ── 상세패널을 여는 단일 경로 ───────────────────────────────
+// 어느 진입점(지도 마커·주변 오버레이·경로 번호핀·⭐찜)에서 열어도 id로 서버 최신정보(place_one)를
+// 조회해 동일하게 연다 → 캐시(특히 localStorage 저장 찜)의 staleness로 요약·태그·네이버가 누락되는
+// 문제를 원천 차단(평행 구현 금지). 못 받으면(id 없음·오류) fallback(호출부가 가진 객체)으로 연다.
+function plOpenById(id, lat, lng, fallback) {
+    if (id == null) { if (fallback) plOpenPanel(fallback); return; }
+    fetch(plApiUrl({ module: 'place', action: 'place_one', id: id }))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            if (d && d.ok && d.feature && d.feature.properties) {
+                var pr = d.feature.properties;
+                if (lat != null) pr.lat = lat;   // 패널 버튼·네이버검색·주변검색용 좌표 주입
+                if (lng != null) pr.lng = lng;
+                plOpenPanel(pr);
+            } else if (fallback) { plOpenPanel(fallback); }
+        })
+        .catch(function () { if (fallback) plOpenPanel(fallback); });
+}
 
 var plPanelPlace = null;   // 현재 상세패널에 띄운 장소(경로 추가 버튼용)
 function plOpenPanel(pr) {
@@ -2510,15 +2538,28 @@ function plRenderRefs(refs) {
 
 function plClosePanel() { document.getElementById('pl-panel').classList.remove('open'); }
 
-// 🤖 Claude 요약 배지 클릭 → 모달로 전체 요약 표시
+// 🤖 Claude 요약 모달 열기(공용) — 이름·요약 텍스트를 받아 표시
+function plOpenAiSummaryModal(name, summary) {
+    if (!summary) return;
+    document.getElementById('aisumName').textContent = name || '';
+    // 저장된 요약은 한 덩어리 → 문장 끝(.!?)마다 줄바꿈해 가독성 확보(pre-wrap이 \n 렌더)
+    document.getElementById('aisumText').textContent =
+        String(summary).replace(/\s+/g, ' ').trim().replace(/([.!?])\s+/g, '$1\n');
+    document.getElementById('pl-aisum').classList.add('open');
+}
+// 상세패널 제목 옆 칩 클릭 → 현재 패널 장소 요약
 function plShowAiSummary() {
     var pr = plPanelPlace;
     if (!pr || !pr.attributes || !pr.attributes.summary) return;
-    document.getElementById('aisumName').textContent = pr.name || '';
-    // 저장된 요약은 한 덩어리 → 문장 끝(.!?)마다 줄바꿈해 가독성 확보(pre-wrap이 \n 렌더)
-    document.getElementById('aisumText').textContent =
-        String(pr.attributes.summary).replace(/\s+/g, ' ').trim().replace(/([.!?])\s+/g, '$1\n');
-    document.getElementById('pl-aisum').classList.add('open');
+    plOpenAiSummaryModal(pr.name, pr.attributes.summary);
+}
+// 지도 리스트 항목 칩 클릭 → 해당 feature 요약(패널 열지 않고 모달만). which='base'(plFeatures)/'ov'(plOvFeats)
+function plShowAiSummaryFrom(which, i) {
+    var arr = (which === 'ov') ? plOvFeats : plFeatures;
+    var f = arr && arr[i]; if (!f) return;
+    var pr = f.properties;
+    if (!pr || !pr.attributes || !pr.attributes.summary) return;
+    plOpenAiSummaryModal(pr.name, pr.attributes.summary);
 }
 function plCloseAiSummary() { document.getElementById('pl-aisum').classList.remove('open'); }
 
@@ -3796,17 +3837,7 @@ function rtShareFocus(i) {
 // 경로 지점 상세보기 — placeId 있으면 서버에서 전체 정보(분류·태그·네이버·출처), 없으면 이름·주소만
 function rtShareOpenDetail(wp) {
     var fallback = { id: wp.placeId || null, name: wp.name, address: wp.address || '', lat: wp.lat, lng: wp.lng, category: 'etc', tags: [] };
-    if (!wp.placeId) { plOpenPanel(fallback); return; }
-    fetch(plApiUrl({ module: 'place', action: 'place_one', id: wp.placeId }))
-        .then(function (r) { return r.json(); })
-        .then(function (d) {
-            if (d && d.ok && d.feature && d.feature.properties) {
-                var pr = d.feature.properties;
-                pr.lat = wp.lat; pr.lng = wp.lng;   // 패널·네이버검색용 좌표 주입
-                plOpenPanel(pr);
-            } else { plOpenPanel(fallback); }
-        })
-        .catch(function () { plOpenPanel(fallback); });
+    plOpenById(wp.placeId, wp.lat, wp.lng, fallback);   // 단일 경로
 }
 
 // 지점 2곳↑이면 서버 action=route(네이버 Directions)로 실제 도로 경로를 받아 그린다.
@@ -4292,7 +4323,7 @@ function rtPickFocus(id) {
     rtRenderSummary();    // 리스트 선택 강조
     var p = rtPicks[i];
     plMap.panTo(new naver.maps.LatLng(p.lat, p.lng));
-    plOpenPanel(p);
+    plOpenById(p.id, p.lat, p.lng, p);   // 단일 경로 — 저장된 찜 객체(요약 없음) 대신 서버 최신정보로
 }
 // 찜 마커(분류 아이콘 + 금색 ★ 배지) — 항상 표시, 가장 위(zIndex 210)
 function rtPickIcon(pr) {
@@ -4408,6 +4439,20 @@ function rtTripShare(id) {
         if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(done, function () { window.prompt(msg, url); });
         else window.prompt(msg, url);
     }).catch(function () { alert('공유 오류'); });
+}
+// 🔖 경로코드: 현재 경로 지점 + 찜한 곳의 place id 를 모아 요약도구(place_summary_tool) URL 을 클립보드에 복사.
+//  Claude 챗에 이 URL 을 주면 목록을 읽어 요약 JSON 을 만들 수 있다(저장 안 한 경로도 화면 그대로 반영).
+function rtCopyCode() {
+    var ids = [], seen = {};
+    var push = function (v) { var n = parseInt(v, 10); if (n > 0 && !seen[n]) { seen[n] = 1; ids.push(n); } };
+    for (var i = 0; i < rtRoute.length; i++) push(rtRoute[i].placeId);
+    for (var j = 0; j < rtPicks.length; j++) push(rtPicks[j].id);
+    if (!ids.length) { plHint('경로에 등록된 장소가 없습니다'); return; }
+    var url = location.origin + '/place_summary_tool.php?key=econ-sumtool&ids=' + ids.join(',');
+    var msg = '경로코드 URL (Ctrl+C 로 복사)\n※ Claude 챗에 주면 장소 목록을 읽어 요약 JSON 을 만듭니다';
+    var done = function () { plHint('🔖 경로코드 복사됨 · ' + ids.length + '곳'); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(done, function () { window.prompt(msg, url); });
+    else window.prompt(msg, url);
 }
 function rtTripLoad(id) {
     fetch(plApiUrl({ module: 'place', action: 'trip_load', id: id })).then(function (r) { return r.json(); }).then(function (d) {

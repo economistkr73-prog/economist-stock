@@ -1124,7 +1124,9 @@ class NaverPlaceCollector
                    CASE WHEN prev_period IS NULL THEN NULL ELSE {$prevComp} END AS prev_total,
                    (SELECT p.address FROM place p WHERE p.id = t.place_id) AS address,
                    (SELECT p.lat FROM place p WHERE p.id = t.place_id) AS lat,
-                   (SELECT p.lng FROM place p WHERE p.id = t.place_id) AS lng
+                   (SELECT p.lng FROM place p WHERE p.id = t.place_id) AS lng,
+                   (SELECT JSON_UNQUOTE(JSON_EXTRACT(p.attributes, '$.summary'))
+                      FROM place p WHERE p.id = t.place_id) AS summary
             FROM (
                 SELECT naver_id, period, category, place_id, name, region, score, review, visitor, blog, save,
                        LAG(period)  OVER w AS prev_period,
