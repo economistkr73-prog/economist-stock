@@ -283,6 +283,9 @@ if (!empty($_GET['add'])) {
         $toId = (int)($it['to_id'] ?? 0);
         if ($toId > 0) {
             $upd = [];
+            // 이름 교정(제공 시) — 원본 DB에 리스티클 제목("12월여행" 등) 그대로 들어간 오염 케이스 정정용
+            $newName = trim((string)($it['name'] ?? ''));
+            if ($newName !== '' && $place->adminUpdate($toId, $newName, null, null, null, null)) $upd[] = 'name';
             // 좌표·주소 수정(address 또는 lat/lng 제공 시) — 레거시 오주소/오좌표 교정
             $lat = null; $lng = null; $addr = trim((string)($it['address'] ?? ''));
             if (isset($it['lat'], $it['lng']) && $it['lat'] !== null && $it['lng'] !== null) { $lat = (float)$it['lat']; $lng = (float)$it['lng']; }
