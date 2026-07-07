@@ -340,20 +340,46 @@ function api_calendar(string $action, PDO $pdo): void {
             }
             $p = $parsed['parsed'];
 
-            // find/delete: 후보 일정 조회 (제목 키워드 + 기간)
-            $candidates = [];
+            // find(키워드 有): AI 검색과 동일한 다이제스트를 Claude가 의미기반으로 선별(+이유) — 음성 STT의
+            //   부정확한 띄어쓰기·단어선택에도 안 흔들림. find(키워드 無, 순수 기간조회)·delete는 결과가 예측
+            //   가능해야 하므로 결정론적 부분일치 유지(특히 delete는 AI가 애매하게 판단하면 위험)
+            $candidates = []; $intro = '';
             if (in_array($p['intent'] ?? '', ['find', 'delete'], true)) {
                 $from = (!empty($p['date_from']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $p['date_from']))
                         ? $p['date_from'] : date('Y-m-d', strtotime('-31 days'));
                 $to   = (!empty($p['date_to']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $p['date_to']))
                         ? $p['date_to'] : date('Y-m-d', strtotime('+366 days'));
-                $kw   = trim((string)($p['keyword'] ?? ''));
-                $events = $sch->listByRange($from, $to, null);
-                foreach ($events as $ev) {
-                    if (($ev['event_type'] ?? '') === 'holiday' || ($ev['is_holiday'] ?? '') == '1') continue;
-                    if ($kw !== '' && mb_stripos((string)($ev['title'] ?? ''), $kw) === false) continue;
-                    $candidates[] = $ev;
-                    if (count($candidates) >= 50) break;
+                $kw     = trim((string)($p['keyword'] ?? ''));
+                $events = array_values(array_filter($sch->listByRange($from, $to, null),
+                    fn($ev) => ($ev['event_type'] ?? '') !== 'holiday' && ($ev['is_holiday'] ?? '') != '1'));
+
+                $useAi = ($p['intent'] === 'find' && $kw !== '');
+                if ($useAi) {
+                    [$byKey, $lines] = sch_search_digest($events, $pdo);
+                    $r = $lines ? ai_search_claude($text, implode("\n", $lines)) : ['ok' => false];
+                    if (!empty($r['ok'])) {
+                        $intro = $r['intro'] ?? '';
+                        foreach ($r['picks'] as $pk) {
+                            $key = (string)($pk['key'] ?? '');
+                            if (!isset($byKey[$key])) continue;
+                            $ev = $byKey[$key];
+                            $ev['reason']  = trim((string)($pk['reason'] ?? ''));
+                            $ev['matched'] = array_values(array_filter(array_map('strval', (array)($pk['matched'] ?? []))));
+                            $candidates[] = $ev;
+                        }
+                    } else {
+                        $useAi = false;   // AI 실패(키 미설정 등) — 아래 결정론적 매칭으로 폴백
+                    }
+                }
+                if (!$useAi) {
+                    $aMap = (new Contact($pdo))->getAttendeesMap(array_unique(array_column($events, 'id')));
+                    foreach ($events as $ev) {
+                        $names = array_column($aMap[$ev['id']] ?? [], 'name');
+                        if (!sch_kw_match($ev, $kw, $names)) continue;
+                        $ev['attendees'] = $aMap[$ev['id']] ?? [];
+                        $candidates[] = $ev;
+                        if (count($candidates) >= 50) break;
+                    }
                 }
             }
 
@@ -383,7 +409,38 @@ function api_calendar(string $action, PDO $pdo): void {
             }
 
             echo json_encode(['ok' => true, 'parsed' => $p, 'candidates' => $candidates,
-                              'conflicts' => $conflicts, 'heard' => $text],
+                              'conflicts' => $conflicts, 'heard' => $text, 'intro' => $intro],
+                             JSON_UNESCAPED_UNICODE);
+            break;
+
+        // AI 검색: 자연어 질의 → 넓은 기간의 일정 후보를 다이제스트로 만들어 Claude가 의미 기반으로 선별
+        //  (find 키워드가 있으면 음성 조회도 이 방식을 공유함 — sch_search_digest/ai_search_claude 참고)
+        case 'ai_search':
+            $d = json_decode(file_get_contents('php://input'), true);
+            $q = trim((string)($d['q'] ?? ''));
+            if ($q === '') { echo json_encode(['ok' => false, 'msg' => '질문을 입력하세요.']); break; }
+            if (mb_strlen($q) > 300) $q = mb_substr($q, 0, 300);
+
+            $from   = date('Y-m-d', strtotime('-365 days'));
+            $to     = date('Y-m-d', strtotime('+365 days'));
+            $events = $sch->listByRange($from, $to, null);
+
+            [$byKey, $lines] = sch_search_digest($events, $pdo);
+            if (!$lines) { echo json_encode(['ok' => true, 'intro' => '검색할 일정이 없습니다.', 'items' => []]); break; }
+
+            $r = ai_search_claude($q, implode("\n", $lines));
+            if (empty($r['ok'])) { echo json_encode(['ok' => false, 'msg' => $r['msg'] ?? 'AI 검색 실패']); break; }
+
+            $items = [];
+            foreach ($r['picks'] as $pk) {
+                $key = (string)($pk['key'] ?? '');
+                if (!isset($byKey[$key])) continue;
+                $ev = $byKey[$key];
+                $ev['reason']  = trim((string)($pk['reason'] ?? ''));
+                $ev['matched'] = array_values(array_filter(array_map('strval', (array)($pk['matched'] ?? []))));
+                $items[] = $ev;
+            }
+            echo json_encode(['ok' => true, 'intro' => $r['intro'] ?? '', 'items' => $items, 'cand' => count($lines)],
                              JSON_UNESCAPED_UNICODE);
             break;
 
@@ -519,6 +576,106 @@ function voice_parse_claude(string $text): array {
         if (!isset($p[$k]) || $p[$k] === '' || $p[$k] === 'null') $p[$k] = null;
     }
     return ['ok' => true, 'parsed' => $p];
+}
+
+// ==========================================================
+// AI 검색 — 일정 후보 다이제스트 + 사용자 질의 → Claude(Sonnet)가 의미기반으로 선별(이유 포함)
+//   반환: ['ok'=>true,'intro'=>str,'picks'=>[{key,reason}, ...]]
+//        ['ok'=>false,'msg'=>'...']  (키 미설정/호출 실패/파싱 실패)
+// ==========================================================
+function ai_search_claude(string $q, string $digest): array {
+    if (file_exists("./env/anthropic.inc")) require_once "./env/anthropic.inc";
+    $apiKey = getenv('ANTHROPIC_API_KEY') ?: (defined('ANTHROPIC_API_KEY') ? ANTHROPIC_API_KEY : '');
+    if ($apiKey === '') return ['ok' => false, 'msg' => 'AI 검색 키(ANTHROPIC_API_KEY)가 설정되지 않았습니다.'];
+
+    try { $today = (new DateTime('now', new DateTimeZone('Asia/Seoul')))->format('Y-m-d (D)'); }
+    catch (Throwable $e) { $today = date('Y-m-d'); }
+
+    $system = "너는 개인 업무캘린더의 검색 도우미다. 오늘은 {$today} 이다. "
+            . "아래 '일정 후보 목록'에 있는 항목만 근거로 사용자 질의에 맞는 일정을 최대 15개 골라라. "
+            . "목록에 없는 일정은 만들지 마라. '다음주/지난달/이번 분기' 같은 날짜 표현은 오늘 기준으로 판단한다. "
+            . "★장소·상호·인명 같은 고유명사는 띄어쓰기·붙여쓰기 차이를 무시하고 같은 대상으로 간주한다"
+            . "(예: '동경산책'과 '동경 산책'은 같은 곳, '정찬희'와 '정 찬희'는 같은 사람). "
+            . "이런 표기 차이만으로 후보를 제외하지 말고, 띄어쓰기가 다른 후보가 여러 건이면 전부 포함한다(날짜·참석자 등 다른 근거로 구분되면 그 근거로 고른다). "
+            . "질의의 인명·지명이 후보와 완전히 같지 않아도(오타·비슷한 발음·한 글자 차이 등) 명백히 같은 대상으로 보이면 포함한다. "
+            . "잘 맞는 게 적으면 적게, 없으면 빈 목록을 반환한다. "
+            . "reason 은 '왜 이 질의에 맞는지'를 한 문장(한국어)으로. "
+            . "matched 는 화면에서 강조 표시할 부분 — 그 후보를 고른 근거가 된 단어·구를 **후보 목록 원문 표기 그대로**(질의에 쓴 표현이 아니라 후보 줄의 제목/장소/참석자 텍스트 그대로) 배열로. "
+            . "인명으로 찾았으면 그 참석자 이름을, 장소로 찾았으면 그 장소명을 넣는다. "
+            . "질의가 특정 이름 없이 '누구랑/누구와/누구 만났는지'처럼 참석자 자체를 묻는 경우엔, 그 질문에 대한 답인 참석자 이름(들)을 matched 에 넣어 강조되게 한다. 반드시 JSON만 출력: "
+            . '{"intro":"한 줄 총평","picks":[{"key":"후보 목록의 맨 앞 key(예: 1234_2026-07-10)","reason":"한 문장","matched":["후보 원문 그대로의 단어","..."]}]}';
+    $user = "사용자 질의: {$q}\n\n일정 후보 목록:\n{$digest}";
+
+    $payload = json_encode([
+        'model' => 'claude-sonnet-5', 'max_tokens' => 1500, 'system' => $system,
+        'messages' => [['role' => 'user', 'content' => $user]],
+        'thinking' => ['type' => 'disabled'],
+    ], JSON_UNESCAPED_UNICODE);
+
+    $ch = curl_init('https://api.anthropic.com/v1/messages');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true, CURLOPT_POSTFIELDS => $payload, CURLOPT_TIMEOUT => 60,
+        CURLOPT_HTTPHEADER => ['x-api-key: ' . $apiKey, 'anthropic-version: 2023-06-01', 'content-type: application/json'],
+    ]);
+    $resp = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $cerr = curl_error($ch);
+    curl_close($ch);
+
+    if ($resp === false) return ['ok' => false, 'msg' => 'AI 호출 실패: ' . $cerr];
+    $j = json_decode($resp, true);
+    if ($code !== 200 || !is_array($j)) {
+        return ['ok' => false, 'msg' => 'AI 오류: ' . ($j['error']['message'] ?? ('HTTP ' . $code))];
+    }
+    $out = ''; foreach (($j['content'] ?? []) as $b) { if (($b['type'] ?? '') === 'text') $out .= $b['text']; }
+    $out = trim($out);
+    if (preg_match('/\{.*\}/s', $out, $m)) $out = $m[0];
+    $p = json_decode($out, true);
+    if (!is_array($p) || !isset($p['picks']) || !is_array($p['picks'])) return ['ok' => false, 'msg' => '검색 결과 해석 실패'];
+    return ['ok' => true, 'intro' => trim((string)($p['intro'] ?? '')), 'picks' => $p['picks']];
+}
+
+// 결정론적 키워드 매칭 — 제목·장소·참석자(주소록+텍스트)·메모를 합쳐 부분일치(삭제·순수기간조회 전용)
+function sch_kw_match(array $ev, string $kw, array $names): bool {
+    if ($kw === '') return true;
+    $hay = ($ev['title'] ?? '') . ' ' . ($ev['place_name'] ?? '') . ' ' . ($ev['extra_attendees'] ?? '')
+         . ' ' . implode(' ', $names) . ' ' . ($ev['memo'] ?? '');
+    return mb_stripos($hay, $kw) !== false;
+}
+
+// 일정 후보 배열 → AI 검색용 다이제스트(오늘과 가까운 순 $cap건) + 키→원본 매핑(attendees 병합됨)
+//   ai_search 액션과 voice find(키워드 있음)가 공용으로 사용 — 두 경로가 같은 근거로 판단하도록
+function sch_search_digest(array $events, PDO $pdo, int $cap = 400): array {
+    $today = date('Y-m-d');
+    $cand = [];
+    foreach ($events as $ev) {
+        $ds = substr((string)($ev['start_dt'] ?? $ev['due_dt'] ?? ''), 0, 10);
+        if ($ds === '') continue;
+        $cand[] = [abs(strtotime($ds) - strtotime($today)), $ev, $ds];
+    }
+    usort($cand, fn($a, $b) => $a[0] <=> $b[0]);
+    $cand = array_slice($cand, 0, $cap);
+
+    $projRows = $pdo->query("SELECT id, title FROM tbl_project")->fetchAll(PDO::FETCH_KEY_PAIR);
+    $aMap = (new Contact($pdo))->getAttendeesMap(array_unique(array_column(array_column($cand, 1), 'id')));
+
+    $byKey = []; $lines = [];
+    foreach ($cand as [$diff, $ev, $ds]) {
+        $key  = $ev['id'] . '_' . $ds;
+        $proj = !empty($ev['project_id']) ? ($projRows[$ev['project_id']] ?? '') : '';
+        $memo = trim(str_replace(["\r", "\n"], ' ', (string)($ev['memo'] ?? '')));
+        $names = array_column($aMap[$ev['id']] ?? [], 'name');
+        if (!empty($ev['extra_attendees'])) $names[] = $ev['extra_attendees'];
+        $att = implode(', ', array_filter($names));
+        $ev['attendees'] = $aMap[$ev['id']] ?? [];
+        $byKey[$key] = $ev;
+        $lines[] = "{$key} | {$ds} | " . ($ev['title'] !== '' ? $ev['title'] : '(제목없음)')
+                 . (!empty($ev['place_name']) ? " | 장소:{$ev['place_name']}" : '')
+                 . ($proj !== ''              ? " | 분류:{$proj}"             : '')
+                 . ($att !== ''               ? " | 참석:{$att}"              : '')
+                 . ($memo !== ''              ? " | 메모:" . mb_substr($memo, 0, 80) : '');
+    }
+    return [$byKey, $lines];
 }
 
 function adjust_overlaps(PDO $pdo, int $newId, string $newStart, string $newEnd): array {

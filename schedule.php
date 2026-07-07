@@ -794,6 +794,28 @@ body.is-mobile #m-mic {
 @keyframes micPulse { 0%,100%{ box-shadow:0 4px 14px rgba(231,76,60,.5);} 50%{ box-shadow:0 4px 22px rgba(231,76,60,.9);} }
 .listening { animation: micPulse 1s ease-in-out infinite; }
 
+/* 🔍 AI 검색 버튼 (모바일 플로팅, 음성 위) */
+#m-aisearch { display: none; }
+body.is-mobile #m-aisearch {
+    display: flex; align-items: center; justify-content: center;
+    position: fixed; right: 18px; bottom: 154px; width: 56px; height: 56px;
+    border-radius: 50%; border: none; background: #7c5cd6; color: #fff;
+    font-size: 24px; line-height: 1; cursor: pointer; z-index: 1000;
+    box-shadow: 0 4px 14px rgba(124,92,214,.45);
+}
+#m-aisearch:active { background: #6a4cc0; }
+body.is-mobile #btn-ai-search { display: none; }
+
+/* AI 검색 결과 오버레이 */
+.as-inrow { display: flex; gap: 8px; margin-bottom: 8px; }
+.as-inrow input { flex: 1; padding: 9px 11px; border: 1px solid #dfe4e9; border-radius: 8px; font-size: 14px; }
+.as-ex { font-size: 11.5px; color: #8a94a0; margin-bottom: 12px; }
+.as-ex a { color: #7c5cd6; cursor: pointer; text-decoration: none; font-weight: 600; }
+.as-ex a:hover { text-decoration: underline; }
+.as-intro { background: #f3f0fb; border-left: 3px solid #7c5cd6; color: #3a3550; }
+.ai-meta { color: #7a8590; }
+mark.ai-hl { background: #fff2a8; color: #7a5b00; font-weight: 700; padding: 0 2px; border-radius: 3px; }
+
 /* 음성 결과 오버레이 */
 .vo-heard { background:#f3f0f8; border:1px solid #e0d5ef; color:#6c3483; border-radius:8px;
     padding:9px 12px; font-size:14px; margin-bottom:12px; }
@@ -915,6 +937,7 @@ body.is-mobile #scheduler .event-chip.done{ width:10px; height:10px; padding:0; 
             <button data-view="day">일</button>
             <button data-view="list">목록</button>
         </div>
+        <button class="btn" id="btn-ai-search" onclick="aiSearchOpen()" title="자연어로 물어보면 Claude가 일정을 찾아줍니다">🔍 AI 검색</button>
         <button class="btn" id="btn-voice" onclick="voiceStart()" title="음성으로 일정 등록·조회·삭제">🎤 음성</button>
         <button class="btn btn-primary" id="btn-new">+ 일정 추가</button>
     </div>
@@ -956,6 +979,8 @@ body.is-mobile #scheduler .event-chip.done{ width:10px; height:10px; padding:0; 
             <div id="m-day-detail"></div>
         </div>
     </div>
+    <!-- 모바일 전용: AI 검색 플로팅 버튼 -->
+    <button id="m-aisearch" onclick="aiSearchOpen()" title="AI 검색">🔍</button>
     <!-- 모바일 전용: 음성 명령 플로팅 버튼 -->
     <button id="m-mic" onclick="voiceStart()" title="음성 명령">🎤</button>
     <!-- 모바일 전용: 일정 추가 플로팅 버튼 -->
@@ -970,6 +995,26 @@ body.is-mobile #scheduler .event-chip.done{ width:10px; height:10px; padding:0; 
         <div id="vo-body"></div>
         <div class="modal-footer" style="margin-top:14px;text-align:right;">
             <button class="btn" onclick="voiceClose()">닫기</button>
+        </div>
+    </div>
+</div>
+
+<!-- 🔍 AI 검색 결과 오버레이 -->
+<div class="modal-overlay" id="ai-search-overlay">
+    <div class="modal" style="max-width:460px">
+        <h3 style="margin:14px 0 12px;font-size:16px;">🔍 AI 검색</h3>
+        <div class="as-inrow">
+            <input type="text" id="as-q" placeholder="예: 지난달 노르웨이의숲 관련 일정 / 이번주 병원 예약" autocomplete="off" onkeydown="if(event.key==='Enter')aiSearchRun()">
+            <button class="btn btn-primary" id="as-btn" onclick="aiSearchRun()">검색</button>
+        </div>
+        <div class="as-ex">예시:
+            <a onclick="aiSearchEx('이번달 병원 관련 일정')">병원 일정</a> ·
+            <a onclick="aiSearchEx('노르웨이의숲 관련 일정 찾아줘')">장소로 찾기</a> ·
+            <a onclick="aiSearchEx('다음주 회의 뭐있어')">다음주 회의</a>
+        </div>
+        <div id="as-body"></div>
+        <div class="modal-footer" style="margin-top:14px;text-align:right;">
+            <button class="btn" onclick="aiSearchClose()">닫기</button>
         </div>
     </div>
 </div>
@@ -1926,9 +1971,9 @@ async function voiceHandle(text){
     if (p.intent === 'create'){
         voiceCreateChoice(text, p, res.conflicts || []);
     } else if (p.intent === 'find'){
-        voiceRenderList('find', res.candidates || [], p);
+        voiceRenderList('find', res.candidates || [], p, res.intro || '');
     } else if (p.intent === 'delete'){
-        voiceRenderList('delete', res.candidates || [], p);
+        voiceRenderList('delete', res.candidates || [], p, '');
     } else {
         voiceBody('<div class="vo-err">무슨 작업인지 이해하지 못했어요.<br>'
             + '예) "내일 오후 3시 치과 예약 등록", "이번 주 일정 찾아줘", "금요일 회의 삭제"</div>');
@@ -2014,20 +2059,31 @@ function voiceFillCreate(p){
 }
 
 // 조회/삭제: 후보 일정 목록 표시 (탭→상세, 삭제버튼→확인 후 삭제)
-function voiceRenderList(mode, list, p){
+//   find + 키워드는 서버가 AI 검색과 동일한 방식(Claude 의미기반 선별)을 쓰므로 intro/reason이 실려 옴
+function voiceRenderList(mode, list, p, intro){
     document.getElementById('vo-title').textContent = mode === 'find' ? '🔍 검색 결과' : '🗑 삭제할 일정 선택';
     const kw = (p.keyword || '').trim();
     if (!list.length){
         voiceBody('<div class="vo-empty">해당하는 일정이 없습니다.' + (kw ? ' (검색어: ' + esc(kw) + ')' : '') + '</div>');
         return;
     }
-    let h = '<div class="vo-sub">' + (kw ? '"' + esc(kw) + '" ' : '') + list.length + '건' + '</div>';
+    let h = intro ? '<div class="vo-sub as-intro">' + esc(intro) + '</div>'
+                  : '<div class="vo-sub">' + (kw ? '"' + esc(kw) + '" ' : '') + list.length + '건' + '</div>';
+    const terms = aiHlTerms(kw);
     h += list.map((ev, i) => {
         const ds = (ev.start_dt || ev.due_dt || '').slice(0, 10);
         const tr = fmtTimeRange(ev).trim();
+        const names = (ev.attendees || []).map(a => a.name)
+            .concat((ev.extra_attendees || '').split(',').map(s => s.trim()).filter(Boolean));
+        const hlTerms = terms.concat(ev.matched || []);   // Claude가 짚어준 원문 표기(오타·유사인명 등) 우선 병합
+        const meta = [];
+        if (ev.place_name) meta.push('📍 ' + aiHl(ev.place_name, hlTerms));
+        if (names.length)  meta.push('👥 ' + names.map(n => aiHl(n, hlTerms)).join(', '));
         return '<div class="vo-item" data-idx="' + i + '">'
-            +   '<div class="vo-it-main"><b>' + esc((ev.icon ? ev.icon + ' ' : '') + (ev.title || '(제목없음)')) + '</b>'
-            +     '<div class="vo-it-sub">' + ds + (tr ? ' · ' + esc(tr) : '') + (ev.is_recur_instance == '1' ? ' · 🔁반복' : '') + '</div></div>'
+            +   '<div class="vo-it-main"><b>' + (ev.icon ? esc(ev.icon) + ' ' : '') + aiHl(ev.title || '(제목없음)', hlTerms) + '</b>'
+            +     '<div class="vo-it-sub">' + ds + (tr ? ' · ' + esc(tr) : '') + (ev.is_recur_instance == '1' ? ' · 🔁반복' : '') + '</div>'
+            +     (meta.length ? '<div class="vo-it-sub ai-meta">' + meta.join(' · ') + '</div>' : '')
+            +   '</div>'
             +   (mode === 'delete' ? '<button class="vo-del" data-idx="' + i + '">삭제</button>' : '')
             + '</div>';
     }).join('');
@@ -2065,6 +2121,107 @@ async function voiceDelete(ev, btn){
     btn.closest('.vo-item')?.remove();
     loadEvents();
     showToast('🗑 삭제되었습니다.');
+}
+
+// ── 🔍 AI 검색: 자연어 질의 → Claude가 넓은 기간의 일정 후보를 의미기반 선별(이유 포함) → 클릭 시 상세 ──
+function aiSearchOpen(){
+    document.getElementById('ai-search-overlay').classList.add('open');
+    setTimeout(() => { const i = document.getElementById('as-q'); if (i) i.focus(); }, 50);
+}
+function aiSearchClose(){ document.getElementById('ai-search-overlay').classList.remove('open'); }
+function aiSearchEx(t){ document.getElementById('as-q').value = t; aiSearchRun(); }
+
+// ── 검색어 하이라이트 — 질의 문장에서 매칭 대상 단어를 뽑아 결과의 제목/장소/참석자에 <mark> 표시 ──
+//   흔한 조사가 붙은 채로 와도("이세라와", "동경산책에서") 매칭되도록 접미사를 순서대로 시도해 뗀다
+const AI_HL_JOSA = ['에서','으로','까지','부터','에게','한테','이랑','와서','랑','와','과','은','는','이','가','을','를','의','에','도','만','로'];
+function aiHlTerms(q){
+    const terms = new Set();
+    (q || '').split(/\s+/).filter(t => t.length >= 2).forEach(t => {
+        terms.add(t);
+        for (const j of AI_HL_JOSA) {
+            if (t.length > j.length + 1 && t.endsWith(j)) { terms.add(t.slice(0, -j.length)); break; }
+        }
+    });
+    return Array.from(terms).sort((a, b) => b.length - a.length);   // 긴 단어부터 매칭
+}
+// 공백 무시 부분일치 위치 탐색 — "동경산책"(term) 이 "동경 산책"(원문, 내부 공백) 안에 있어도 찾아
+// 원문 상의 실제 구간([시작,끝) 공백 포함)을 반환한다. Claude 판단(띄어쓰기 무시)과 하이라이트 기준을 통일.
+function aiHlFind(text, term){
+    const idxMap = []; let stripped = '';
+    for (let i = 0; i < text.length; i++) {
+        if (!/\s/.test(text[i])) { idxMap.push(i); stripped += text[i]; }
+    }
+    const pos = stripped.toLowerCase().indexOf(term.toLowerCase());
+    if (pos === -1) return null;
+    return [idxMap[pos], idxMap[pos + term.length - 1] + 1];
+}
+function aiHl(text, terms){
+    text = text || '';
+    if (!text) return '';
+    let ranges = [];
+    (terms || []).forEach(t => { if (t) { const r = aiHlFind(text, t); if (r) ranges.push(r); } });
+    if (!ranges.length) return esc(text);
+    ranges.sort((a, b) => a[0] - b[0]);
+    const merged = [ranges[0].slice()];
+    for (let i = 1; i < ranges.length; i++) {
+        const last = merged[merged.length - 1];
+        if (ranges[i][0] <= last[1]) last[1] = Math.max(last[1], ranges[i][1]);
+        else merged.push(ranges[i].slice());
+    }
+    let out = '', pos = 0;
+    merged.forEach(([s, e]) => {
+        out += esc(text.slice(pos, s)) + '<mark class="ai-hl">' + esc(text.slice(s, e)) + '</mark>';
+        pos = e;
+    });
+    return out + esc(text.slice(pos));
+}
+let aiSearchBusy = false;
+async function aiSearchRun(){
+    if (aiSearchBusy) return;
+    const q = (document.getElementById('as-q').value || '').trim();
+    const box = document.getElementById('as-body');
+    if (!q){ box.innerHTML = '<div class="vo-empty">질문을 입력해 주세요.</div>'; return; }
+    aiSearchBusy = true;
+    const btn = document.getElementById('as-btn'); if (btn) btn.disabled = true;
+    box.innerHTML = '<div class="vo-loading">🤖 Claude가 일정을 찾는 중…</div>';
+    const res = await api('ai_search', { q }, 'POST');
+    aiSearchBusy = false; if (btn) btn.disabled = false;
+    if (!res || !res.ok){ box.innerHTML = '<div class="vo-err">' + esc((res && res.msg) || '검색 실패') + '</div>'; return; }
+    aiSearchRender(res);
+}
+function aiSearchRender(d){
+    const box = document.getElementById('as-body');
+    const terms = aiHlTerms(document.getElementById('as-q').value);
+    let h = '';
+    if (d.intro) h += '<div class="vo-sub as-intro">' + esc(d.intro) + '</div>';
+    if (!d.items || !d.items.length){
+        box.innerHTML = h + '<div class="vo-empty">딱 맞는 일정을 못 찾았어요. 다르게 물어봐 주세요.</div>';
+        return;
+    }
+    h += d.items.map((ev, i) => {
+        const ds = (ev.start_dt || ev.due_dt || '').slice(0, 10);
+        const tr = fmtTimeRange(ev).trim();
+        const names = (ev.attendees || []).map(a => a.name)
+            .concat((ev.extra_attendees || '').split(',').map(s => s.trim()).filter(Boolean));
+        // Claude가 실제로 근거 삼은 원문 표기(matched)를 우선 사용 — 오타·유사인명(오준석→오준식)처럼
+        // 질의 문구를 그대로 찾아선 하이라이트가 안 되는 경우까지 커버. 질의어 기반 terms는 보조로 합침
+        const hlTerms = terms.concat(ev.matched || []);
+        const meta = [];
+        if (ev.place_name) meta.push('📍 ' + aiHl(ev.place_name, hlTerms));
+        if (names.length)  meta.push('👥 ' + names.map(n => aiHl(n, hlTerms)).join(', '));
+        return '<div class="vo-item" data-idx="' + i + '">'
+            +   '<div class="vo-it-main"><b>' + (ev.icon ? esc(ev.icon) + ' ' : '') + aiHl(ev.title || '(제목없음)', hlTerms) + '</b>'
+            +     '<div class="vo-it-sub">' + ds + (tr ? ' · ' + esc(tr) : '') + (ev.is_recur_instance == '1' ? ' · 🔁반복' : '') + '</div>'
+            +     (meta.length ? '<div class="vo-it-sub ai-meta">' + meta.join(' · ') + '</div>' : '')
+            +   '</div></div>';
+    }).join('');
+    box.innerHTML = h;
+    box.querySelectorAll('.vo-item').forEach(el => {
+        el.addEventListener('click', () => {
+            const ev = d.items[+el.dataset.idx];
+            if (ev){ aiSearchClose(); openView(ev); }
+        });
+    });
 }
 
 function pad(n) { return String(n).padStart(2,'0'); }
