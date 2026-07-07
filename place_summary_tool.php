@@ -170,7 +170,7 @@ if (!empty($_GET['export'])) {
     foreach ($rows as $r) {
         $addr = trim((string)$r['address']);
         if ($addr === '') $addr = trim(($r['region_lv1'] ?? '') . ' ' . ($r['region_lv2'] ?? ''));
-        $out[] = ['id' => (int)$r['id'], 'name' => $r['name'], 'address' => $addr, 'refs' => []];
+        $out[] = ['id' => (int)$r['id'], 'name' => $r['name'], 'address' => $addr, 'review_count' => $r['review_count'] !== null ? (int)$r['review_count'] : null, 'refs' => []];
     }
 
     // ★각 장소의 기존 참고링크(아덴트뉴스 기사 등) 첨부 — 챗이 블라인드 웹검색 대신 실제 출처를 먼저 읽게.
@@ -255,6 +255,31 @@ if (!empty($_GET['import'])) {
     }
     echo json_encode(['ok' => true, 'updated' => count($done), 'skipped' => count($skip),
                       'refs_added' => $refsAdded, 'updated_ids' => $done, 'skips' => $skip], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// ── 요약 지우기(되돌리기용) ────────────────────────────
+//  ?key=econ-sumtool&clear=1&clear_ids=1,2,3  → attributes.summary 만 비움(features/tags/refs는 유지).
+//  ★파라미터명 clear_ids(ids 아님) — 상단의 trip/ids export 라우트와 충돌 방지.
+//  부실한 요약을 재작성 전에 export 의 '요약없는 곳' 집합으로 되돌리는 용도.
+if (!empty($_GET['clear'])) {
+    $ids = [];
+    foreach (preg_split('/[,\s]+/', (string)($_GET['clear_ids'] ?? '')) as $s) {
+        $id = (int)$s; if ($id > 0) $ids[] = $id;
+    }
+    $sel = $pdo->prepare("SELECT attributes FROM place WHERE id=?");
+    $upd = $pdo->prepare("UPDATE place SET attributes=:a, updated_at=CURRENT_TIMESTAMP WHERE id=:id");
+    $done = [];
+    foreach ($ids as $id) {
+        $sel->execute([$id]);
+        $cur = $sel->fetchColumn();
+        if ($cur === false) continue;
+        $at = $cur ? (json_decode((string)$cur, true) ?: []) : [];
+        $at['summary'] = '';
+        $upd->execute([':a' => json_encode($at, JSON_UNESCAPED_UNICODE), ':id' => $id]);
+        $done[] = $id;
+    }
+    echo json_encode(['ok' => true, 'cleared' => count($done), 'ids' => $done], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
