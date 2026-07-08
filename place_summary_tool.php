@@ -97,7 +97,9 @@ if (isset($_GET['trip']) || isset($_GET['ids'])) {
             if ($catF !== '' && $r['category'] !== $catF) continue;
             $addr = trim((string)$r['address']);
             if ($addr === '') $addr = trim(($r['region_lv1'] ?? '') . ' ' . ($r['region_lv2'] ?? ''));
-            $items[] = ['id' => $id, 'name' => $r['name'], 'address' => $addr, 'refs' => []];
+            $item = ['id' => $id, 'name' => $r['name'], 'address' => $addr, 'refs' => []];
+            if (!empty($_GET['showsum'])) $item['summary'] = (string)($r['summary'] ?? '');
+            $items[] = $item;
         }
         // 기존 참고링크 첨부(export 와 동일)
         $iids = array_column($items, 'id');

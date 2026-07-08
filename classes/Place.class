@@ -1032,6 +1032,7 @@ class Place
                     'attributes'   => $row['attributes'] ? json_decode($row['attributes'], true) : null,
                     'updated_at'   => $row['updated_at'],
                     'ref_count'    => (int)$row['ref_count'],
+                    'review_count' => $row['review_count'] !== null ? (int)$row['review_count'] : null,
                     'tags'         => $row['tags'] ? explode(',', $row['tags']) : [],
                     'guides'       => self::parseGuides($row['guides'] ?? null),
                     'dist_km'      => ($mode === 'viewport') ? round((float)$row['dist_km'], 3) : null,

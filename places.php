@@ -382,6 +382,8 @@ body.trip-view .pl-fbar { display: none !important; }
 .reco-ex a { color: #7c5cd6; cursor: pointer; text-decoration: none; font-weight: 600; }
 .reco-ex a:hover { text-decoration: underline; }
 .reco-result { margin-top: 14px; }
+.reco-scope { font-size: 12px; color: #6a6480; background: #f6f4fb; border: 1px dashed #d8cfee; border-radius: 6px; padding: 6px 10px; margin-bottom: 9px; line-height: 1.45; }
+.reco-scope b { color: #5b3fb0; font-weight: 700; }
 .reco-intro { font-size: 13.5px; color: #3a3550; background: #f3f0fb; border-left: 3px solid #7c5cd6; border-radius: 6px; padding: 9px 12px; margin-bottom: 10px; line-height: 1.55; }
 .reco-item { border: 1px solid #e7e2f3; border-radius: 9px; padding: 10px 12px; margin-bottom: 8px; cursor: pointer; transition: background .12s; }
 .reco-item:hover { background: #f7f5fc; }
@@ -2204,7 +2206,7 @@ function plLiHtml(f, i, opts) {
     // 🤖 Claude 요약 칩 — 요약(attributes.summary) 있으면 표시, 클릭 시 항목 클릭과 분리해 요약 모달만 연다.
     var aiChip = (pr.attributes && pr.attributes.summary)
         ? '<button type="button" class="li-ai-chip" title="Claude 요약 보기" onclick="event.stopPropagation();plShowAiSummaryFrom(\'' +
-              (opts.onclickFn === 'plProxPick' ? 'ov' : 'base') + '\',' + i + ')">🤖 Claude</button>'
+              (opts.onclickFn === 'plProxPick' ? 'ov' : 'base') + '\',' + i + ')">🤖</button>'
         : '';
     return '<div class="pl-li' + selCls + '" id="' + opts.prefix + i + '" data-pid="' + (pr.id || 0) + '" onclick="' + opts.onclickFn + '(' + i + ')">' +
         '<span class="li-no cat-' + c + '"' + noClick + '>' + label + '</span>' +
@@ -2570,6 +2572,35 @@ function plRecoOpen() {
 }
 function plRecoClose() { document.getElementById('pl-reco').classList.remove('open'); }
 function plRecoEx(t) { document.getElementById('recoQ').value = t; plRecoRun(); }
+// 현재 화면 필터를 AI 추천 요청에 물려줌 — 후보 스코프를 화면(분류·태그·지역)과 일치시킨다(plSearch 와 동일 파라미터).
+function plRecoFilterParams() {
+    var p = {};
+    if (plCatSel && plCatSel.length) p.categories = plCatSel.join(',');
+    if (plRegionLock)               p.region     = plRegionLock.join(',');
+    var travelTags = plSelTags.slice(); if (plSelMonth) travelTags.push(plSelMonth);
+    if (travelTags.length)                 p.travel_tags  = travelTags.join('\n');
+    if (plSelFood.length)                  p.food_tags    = plSelFood.join('\n');
+    if (plSelGuide)                        p.guide        = plSelGuide;
+    if (PL_SUBBARS.stay.sel.length)        p.stay_tags    = PL_SUBBARS.stay.sel.join('\n');
+    if (PL_SUBBARS.camp.sel.length)        p.camping_tags = PL_SUBBARS.camp.sel.join('\n');
+    return p;
+}
+// 활성 필터 사람이 읽는 라벨(안내 배지용). 없으면 ''.
+function plRecoFilterLabel() {
+    var CATK = { travel: '여행지', restaurant: '맛집', stay: '숙소', camping: '캠핑', etc: '기타' };
+    var parts = [];
+    if (plCatSel && plCatSel.length) parts.push(plCatSel.map(function (c) { return CATK[c] || c; }).join('·'));
+    var tags = [];
+    plSelTags.forEach(function (t) { tags.push(t); });
+    plSelFood.forEach(function (t) { tags.push(t); });
+    PL_SUBBARS.stay.sel.forEach(function (t) { tags.push(t); });
+    PL_SUBBARS.camp.sel.forEach(function (t) { tags.push(t); });
+    if (plSelMonth) tags.push(plSelMonth);
+    if (plSelGuide && PL_GUIDES[plSelGuide]) tags.push(PL_GUIDES[plSelGuide].ko);
+    if (tags.length) parts.push(tags.join('·'));
+    if (plRegionLock && plActiveSido) parts.unshift(plActiveSido);
+    return parts.join(' › ');
+}
 var plRecoBusy = false;
 function plRecoRun() {
     if (plRecoBusy) return;
@@ -2578,11 +2609,16 @@ function plRecoRun() {
     if (!q) { box.innerHTML = '<div class="reco-empty">질문을 입력해 주세요.</div>'; return; }
     plRecoBusy = true;
     document.getElementById('recoBtn').disabled = true;
-    box.innerHTML = '<div class="reco-loading">🤖 Claude가 요약을 살펴보는 중…</div>';
+    var flt = plRecoFilterParams();
+    var lbl = plRecoFilterLabel();
+    var scope = lbl ? '<div class="reco-scope">🔎 현재 필터 <b>' + plEsc(lbl) + '</b> 범위에서 추천</div>' : '';
+    box.innerHTML = scope + '<div class="reco-loading">🤖 Claude가 요약을 살펴보는 중…</div>';
+    var params = { module: 'place', action: 'recommend', q: q };
+    for (var k in flt) params[k] = flt[k];
     fetch('place_api.php', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ module: 'place', action: 'recommend', q: q })
+        body: new URLSearchParams(params)
     })
     .then(function (r) { return r.json(); })
     .then(function (d) {
@@ -2598,6 +2634,8 @@ function plRecoRun() {
 function plRecoRender(d) {
     var box = document.getElementById('recoResult');
     var html = '';
+    var lbl = plRecoFilterLabel();
+    if (lbl) html += '<div class="reco-scope">🔎 현재 필터 <b>' + plEsc(lbl) + '</b> 범위에서 추천</div>';
     if (d.intro) html += '<div class="reco-intro">' + plEsc(d.intro) + '</div>';
     if (!d.items || !d.items.length) { box.innerHTML = html + '<div class="reco-empty">딱 맞는 곳을 못 찾았어요. 조건을 바꿔 물어봐 주세요.</div>'; return; }
     var CATK = { travel: '여행지', restaurant: '맛집', stay: '숙소', camping: '캠핑', etc: '기타' };

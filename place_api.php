@@ -149,44 +149,102 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
             if (mb_strlen($q) > 300) $q = mb_substr($q, 0, 300);
             if (!defined('ANTHROPIC_API_KEY') || ANTHROPIC_API_KEY === '') { echo json_encode(['ok'=>false,'msg'=>'AI 키가 없습니다.']); return; }
 
-            // 1) 저비용 사전필터(Claude 없이): 질의에서 분류/시도/월 감지
-            $ff = place_reco_filters($q);
-            $where = ["JSON_EXTRACT(p.attributes,'$.summary') IS NOT NULL",
-                      "JSON_UNQUOTE(JSON_EXTRACT(p.attributes,'$.summary')) <> ''"];
-            $args = [];
-            if ($ff['cats']) {
-                $ph = implode(',', array_fill(0, count($ff['cats']), '?'));
-                $where[] = "p.category IN ($ph)";
-                foreach ($ff['cats'] as $c) $args[] = $c;
+            // 1) 후보 선정 — ★화면 필터(있으면)를 그대로 물려받아 후보 스코프를 화면과 일치시킨다.
+            //    예: 맛집 > '순대,순댓국' 태그로 좁혀 보던 중이면 그 157곳이 후보(=searchUnified 동일 스코프).
+            //    화면 필터가 하나도 없을 때만 질의에서 분류/시도/월을 저비용 감지해 후보를 좁힌다.
+            $allowedCats = ['travel', 'stay', 'restaurant', 'camping', 'etc'];
+            $uiCats = [];
+            foreach (explode(',', (string)($_POST['categories'] ?? $_GET['categories'] ?? '')) as $cv) {
+                $cv = trim($cv); if ($cv !== '' && in_array($cv, $allowedCats, true)) $uiCats[] = $cv;
             }
-            if ($ff['sido']) {   // region_lv1 이 축약(경남)/전체(경상남도) 혼재 → 둘 다 매칭
-                $where[] = "(p.region_lv1 LIKE ? OR p.region_lv1 LIKE ?)";
-                $args[] = '%' . $ff['sido'][0] . '%';
-                $args[] = '%' . $ff['sido'][1] . '%';
+            $uiRegion = [];
+            foreach (explode(',', (string)($_POST['region'] ?? $_GET['region'] ?? '')) as $rv) {
+                $rv = trim($rv); if ($rv !== '') $uiRegion[] = $rv;
             }
-            if ($ff['months']) {
-                $ph = implode(',', array_fill(0, count($ff['months']), '?'));
-                $where[] = "EXISTS(SELECT 1 FROM place_tag pt WHERE pt.place_id=p.id AND pt.kind='month' AND pt.tag IN ($ph))";
-                foreach ($ff['months'] as $m) $args[] = (string)$m;
+            $rdTags = fn($k) => array_values(array_filter(array_map('trim', explode("\n", (string)($_POST[$k] ?? $_GET[$k] ?? ''))), fn($t) => $t !== ''));
+            $uiTravel = $rdTags('travel_tags'); $uiFood = $rdTags('food_tags');
+            $uiStay   = $rdTags('stay_tags');   $uiCamp = $rdTags('camping_tags');
+            $uiGuide  = trim((string)($_POST['guide'] ?? $_GET['guide'] ?? ''));
+            $hasUi = $uiCats || $uiRegion || $uiTravel || $uiFood || $uiStay || $uiCamp || $uiGuide !== '';
+
+            $CATK = ['travel'=>'여행지','restaurant'=>'맛집','stay'=>'숙소','camping'=>'캠핑','etc'=>'기타'];
+            $cand = [];
+            if ($hasUi) {
+                // 화면과 동일한 통합검색으로 후보 확보(전국 스코프·지역잠금 시 그 지역). 요약 있는 곳만·리뷰순 상위 60.
+                $geo = $place->searchUnified([
+                    'mode'        => $uiRegion ? 'region' : 'nation',
+                    'regionIn'    => $uiRegion,
+                    'categories'  => $uiCats,
+                    'travelTags'  => $uiTravel, 'foodTags'    => $uiFood,
+                    'stayTags'    => $uiStay,   'campingTags' => $uiCamp,
+                    'guide'       => $uiGuide,
+                    'limit'       => 500,
+                ]);
+                foreach (($geo['features'] ?? []) as $f) {
+                    $pr = $f['properties'] ?? [];
+                    $at = is_array($pr['attributes'] ?? null) ? $pr['attributes'] : [];
+                    $sm = $at['summary'] ?? '';
+                    if (!is_string($sm) || trim($sm) === '') continue;   // 요약 없는 곳은 근거가 없어 제외
+                    $cand[] = [
+                        'id'           => (int)$pr['id'],
+                        'name'         => $pr['name'] ?? '',
+                        'category'     => $pr['category'] ?? 'etc',
+                        'region_lv1'   => $pr['region_lv1'] ?? '',
+                        'region_lv2'   => $pr['region_lv2'] ?? '',
+                        'review_count' => $pr['review_count'] ?? null,
+                        'summary'      => $sm,
+                        'features'     => (isset($at['features']) && is_array($at['features'])) ? $at['features'] : [],
+                    ];
+                    if (count($cand) >= 60) break;
+                }
+            } else {
+                // 화면 필터 없음 → 질의에서 분류/시도/월 저비용 감지(Claude 없이)
+                $ff = place_reco_filters($q);
+                $where = ["JSON_EXTRACT(p.attributes,'$.summary') IS NOT NULL",
+                          "JSON_UNQUOTE(JSON_EXTRACT(p.attributes,'$.summary')) <> ''"];
+                $args = [];
+                if ($ff['cats']) {
+                    $ph = implode(',', array_fill(0, count($ff['cats']), '?'));
+                    $where[] = "p.category IN ($ph)";
+                    foreach ($ff['cats'] as $c) $args[] = $c;
+                }
+                if ($ff['sido']) {   // region_lv1 이 축약(경남)/전체(경상남도) 혼재 → 둘 다 매칭
+                    $where[] = "(p.region_lv1 LIKE ? OR p.region_lv1 LIKE ?)";
+                    $args[] = '%' . $ff['sido'][0] . '%';
+                    $args[] = '%' . $ff['sido'][1] . '%';
+                }
+                if ($ff['months']) {
+                    $ph = implode(',', array_fill(0, count($ff['months']), '?'));
+                    $where[] = "EXISTS(SELECT 1 FROM place_tag pt WHERE pt.place_id=p.id AND pt.kind='month' AND pt.tag IN ($ph))";
+                    foreach ($ff['months'] as $m) $args[] = (string)$m;
+                }
+                $sql = "SELECT p.id, p.name, p.category, p.region_lv1, p.region_lv2, p.review_count,
+                               JSON_UNQUOTE(JSON_EXTRACT(p.attributes,'$.summary')) AS summary,
+                               JSON_EXTRACT(p.attributes,'$.features') AS features
+                        FROM place p
+                        WHERE " . implode(' AND ', $where) . "
+                        ORDER BY (p.review_count IS NOT NULL) DESC, p.review_count DESC, p.id DESC
+                        LIMIT 60";
+                $st = $pdo->prepare($sql); $st->execute($args);
+                foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $c) {
+                    $fa = $c['features'] ? json_decode($c['features'], true) : [];
+                    $c['features']     = is_array($fa) ? $fa : [];
+                    $c['review_count'] = $c['review_count'] !== null ? (int)$c['review_count'] : null;
+                    $cand[] = $c;
+                }
             }
-            $sql = "SELECT p.id, p.name, p.category, p.region_lv1, p.region_lv2, p.review_count,
-                           JSON_UNQUOTE(JSON_EXTRACT(p.attributes,'$.summary')) AS summary,
-                           JSON_EXTRACT(p.attributes,'$.features') AS features
-                    FROM place p
-                    WHERE " . implode(' AND ', $where) . "
-                    ORDER BY (p.review_count IS NOT NULL) DESC, p.review_count DESC, p.id DESC
-                    LIMIT 60";
-            $st = $pdo->prepare($sql); $st->execute($args);
-            $cand = $st->fetchAll(PDO::FETCH_ASSOC);
-            if (!$cand) { echo json_encode(['ok'=>true,'intro'=>'아직 조건에 맞는 요약 장소가 없어요. 더 넓게(예: "여름 계곡", "제주 맛집") 물어봐 주세요.','items'=>[]], JSON_UNESCAPED_UNICODE); return; }
+            if (!$cand) {
+                $msg = $hasUi
+                    ? '지금 화면 필터(분류·태그)에 해당하는 요약 장소가 없어요. 필터를 넓히거나 다르게 물어봐 주세요.'
+                    : '아직 조건에 맞는 요약 장소가 없어요. 더 넓게(예: "여름 계곡", "제주 맛집") 물어봐 주세요.';
+                echo json_encode(['ok'=>true,'intro'=>$msg,'items'=>[]], JSON_UNESCAPED_UNICODE); return;
+            }
 
             // 2) 후보 다이제스트(#id | 이름 | 분류 | 지역 | 특성 | 요약)
-            $CATK = ['travel'=>'여행지','restaurant'=>'맛집','stay'=>'숙소','camping'=>'캠핑','etc'=>'기타'];
             $byId = []; $lines = [];
             foreach ($cand as $c) {
                 $byId[(int)$c['id']] = $c;
-                $fa = $c['features'] ? json_decode($c['features'], true) : [];
-                $feat = (is_array($fa) && $fa) ? implode('·', array_slice($fa, 0, 10)) : '';
+                $feat = (is_array($c['features']) && $c['features']) ? implode('·', array_slice($c['features'], 0, 10)) : '';
                 $reg  = trim(($c['region_lv1'] ?? '') . ' ' . ($c['region_lv2'] ?? ''));
                 $lines[] = "#{$c['id']} | {$c['name']} | " . ($CATK[$c['category']] ?? $c['category']) . " | {$reg}"
                          . ($feat ? " | 특성:{$feat}" : '') . " | " . mb_substr((string)$c['summary'], 0, 220);
