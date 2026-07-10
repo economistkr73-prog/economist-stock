@@ -1,0 +1,459 @@
+<?php
+/**
+ * Nw.class — 원룸(노르웨이의숲) 임대 관리 도메인 클래스
+ * 테이블: nw_building(건물) / nw_unit(호실) / nw_contract(임대계약) / nw_payment(월세납부이력)
+ * 구 nw_name/nw_room/nw_renter/nw_renter_fee_history 는 건드리지 않는다(mig_nw_schema.php로 1회 이관).
+ */
+class Nw {
+
+    private PDO $pdo;
+
+    public function __construct(PDO $pdo) {
+        $this->pdo = $pdo;
+    }
+
+    // ==========================================================
+    // 테이블 생성 (idempotent)
+    // ==========================================================
+    public function ensureTable(): void {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS nw_building (
+                id          INT AUTO_INCREMENT PRIMARY KEY,
+                name        VARCHAR(100) NOT NULL,
+                biz_no      VARCHAR(20)  DEFAULT NULL,
+                address     VARCHAR(200) DEFAULT NULL,
+                category    VARCHAR(50)  DEFAULT NULL,
+                purpose     VARCHAR(50)  DEFAULT NULL,
+                land_size   DECIMAL(10,2) DEFAULT 0,
+                floor_size  DECIMAL(10,2) DEFAULT 0,
+                sort_order  INT DEFAULT 0,
+                created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS nw_unit (
+                id           INT AUTO_INCREMENT PRIMARY KEY,
+                building_id  INT NOT NULL,
+                room_no      VARCHAR(20) NOT NULL,
+                room_size    DECIMAL(10,2) DEFAULT 0,
+                bank_loan    BIGINT DEFAULT 0,
+                sort_order   INT DEFAULT 0,
+                created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_building (building_id),
+                FOREIGN KEY (building_id) REFERENCES nw_building(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS nw_contract (
+                id                   INT AUTO_INCREMENT PRIMARY KEY,
+                room_id              INT NOT NULL,
+                status               ENUM('active','ended') NOT NULL DEFAULT 'active',
+                contract_type        ENUM('jeonse','semi_monthly','monthly') NOT NULL DEFAULT 'monthly',
+                tenant_name          VARCHAR(50)  DEFAULT NULL,
+                tenant_ssn           VARCHAR(20)  DEFAULT NULL,
+                tenant_phone         VARCHAR(20)  DEFAULT NULL,
+                co_tenant_name       VARCHAR(50)  DEFAULT NULL,
+                co_tenant_ssn        VARCHAR(20)  DEFAULT NULL,
+                co_tenant_phone      VARCHAR(20)  DEFAULT NULL,
+                deposit              BIGINT DEFAULT 0,
+                deposit_registered   TINYINT(1) DEFAULT 0,
+                down_payment         BIGINT DEFAULT 0,
+                contract_date        DATE DEFAULT NULL,
+                balance_amount       BIGINT DEFAULT 0,
+                balance_date         DATE DEFAULT NULL,
+                contract_end_date    DATE DEFAULT NULL,
+                rent_fee             BIGINT DEFAULT 0,
+                maintenance_fee      BIGINT DEFAULT 0,
+                rent_pay_day         TINYINT DEFAULT NULL,
+                agent_office         VARCHAR(50) DEFAULT NULL,
+                agent_phone          VARCHAR(20) DEFAULT NULL,
+                agent_ceo            VARCHAR(30) DEFAULT NULL,
+                special_terms        TEXT,
+                renewal_type         ENUM('initial','extended','implied') NOT NULL DEFAULT 'initial',
+                first_contract_date  DATE DEFAULT NULL,
+                ended_at             DATETIME DEFAULT NULL,
+                ended_reason         ENUM('expired','terminated_early','renewed') DEFAULT NULL,
+                created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at           DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_room_status (room_id, status),
+                FOREIGN KEY (room_id) REFERENCES nw_unit(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS nw_payment (
+                id             INT AUTO_INCREMENT PRIMARY KEY,
+                contract_id    INT NOT NULL,
+                pay_date       DATE NOT NULL,
+                rent_fee       BIGINT DEFAULT 0,
+                maintenance_fee BIGINT DEFAULT 0,
+                memo           VARCHAR(200) DEFAULT NULL,
+                created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_contract_pay (contract_id, pay_date),
+                FOREIGN KEY (contract_id) REFERENCES nw_contract(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+    }
+
+    // ==========================================================
+    // 건물
+    // ==========================================================
+    public function listBuildings(): array {
+        return $this->pdo->query("SELECT * FROM nw_building ORDER BY sort_order, id")->fetchAll();
+    }
+
+    public function getBuilding(int $id): ?array {
+        $stmt = $this->pdo->prepare("SELECT * FROM nw_building WHERE id=:id");
+        $stmt->execute([':id' => $id]);
+        return $stmt->fetch() ?: null;
+    }
+
+    public function addBuilding(array $d): int {
+        $stmt = $this->pdo->prepare("
+            INSERT INTO nw_building (name, biz_no, address, category, purpose, land_size, floor_size)
+            VALUES (:name, :biz_no, :address, :category, :purpose, :land_size, :floor_size)
+        ");
+        $stmt->execute([
+            ':name'       => $d['name'] ?? '',
+            ':biz_no'     => $d['biz_no'] ?: null,
+            ':address'    => $d['address'] ?: null,
+            ':category'   => $d['category'] ?: null,
+            ':purpose'    => $d['purpose'] ?: null,
+            ':land_size'  => ($d['land_size'] ?? '') !== '' ? (float)$d['land_size'] : 0,
+            ':floor_size' => ($d['floor_size'] ?? '') !== '' ? (float)$d['floor_size'] : 0,
+        ]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    // ==========================================================
+    // 호실
+    // ==========================================================
+    public function listUnits(int $buildingId): array {
+        $stmt = $this->pdo->prepare("SELECT * FROM nw_unit WHERE building_id=:b ORDER BY sort_order, room_no, id");
+        $stmt->execute([':b' => $buildingId]);
+        return $stmt->fetchAll();
+    }
+
+    public function getUnit(int $id): ?array {
+        $stmt = $this->pdo->prepare("SELECT * FROM nw_unit WHERE id=:id");
+        $stmt->execute([':id' => $id]);
+        return $stmt->fetch() ?: null;
+    }
+
+    public function addUnit(array $d): int {
+        $stmt = $this->pdo->prepare("
+            INSERT INTO nw_unit (building_id, room_no, room_size, bank_loan)
+            VALUES (:building_id, :room_no, :room_size, :bank_loan)
+        ");
+        $stmt->execute([
+            ':building_id' => $d['building_id'],
+            ':room_no'     => $d['room_no'] ?? '',
+            ':room_size'   => ($d['room_size'] ?? '') !== '' ? (float)$d['room_size'] : 0,
+            ':bank_loan'   => ($d['bank_loan'] ?? '') !== '' ? (int)$d['bank_loan'] : 0,
+        ]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    // ==========================================================
+    // 계약
+    // ==========================================================
+    public function getActiveContractByRoom(int $roomId): ?array {
+        $stmt = $this->pdo->prepare("SELECT * FROM nw_contract WHERE room_id=:r AND status='active' ORDER BY id DESC LIMIT 1");
+        $stmt->execute([':r' => $roomId]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /** 건물 내 전체 호실의 활성계약을 room_id => 계약 형태로 한 번에 조회 (N+1 방지) */
+    public function listActiveContractsByBuilding(int $buildingId): array {
+        $stmt = $this->pdo->prepare("
+            SELECT c.* FROM nw_contract c
+            JOIN nw_unit u ON u.id = c.room_id
+            WHERE u.building_id = :b AND c.status = 'active'
+        ");
+        $stmt->execute([':b' => $buildingId]);
+        $out = [];
+        foreach ($stmt->fetchAll() as $row) {
+            $out[(int)$row['room_id']] = $row;
+        }
+        return $out;
+    }
+
+    public function getContract(int $id): ?array {
+        $stmt = $this->pdo->prepare("SELECT * FROM nw_contract WHERE id=:id");
+        $stmt->execute([':id' => $id]);
+        return $stmt->fetch() ?: null;
+    }
+
+    public function listContractsByRoom(int $roomId): array {
+        $stmt = $this->pdo->prepare("SELECT * FROM nw_contract WHERE room_id=:r ORDER BY id DESC");
+        $stmt->execute([':r' => $roomId]);
+        return $stmt->fetchAll();
+    }
+
+    /** 빈 문자열/미전달을 0으로, 그 외는 정수로 강제 (strict mode BIGINT 컬럼에 ''가 들어가는 것 방지) */
+    private function num($v): int {
+        return ($v === null || $v === '') ? 0 : (int)$v;
+    }
+
+    private function contractParams(array $d): array {
+        return [
+            ':contract_type'       => $d['contract_type'] ?? 'monthly',
+            ':tenant_name'         => $d['tenant_name'] ?: null,
+            ':tenant_ssn'          => $d['tenant_ssn'] ?: null,
+            ':tenant_phone'        => $d['tenant_phone'] ?: null,
+            ':co_tenant_name'      => $d['co_tenant_name'] ?: null,
+            ':co_tenant_ssn'       => $d['co_tenant_ssn'] ?: null,
+            ':co_tenant_phone'     => $d['co_tenant_phone'] ?: null,
+            ':deposit'             => $this->num($d['deposit'] ?? null),
+            ':deposit_registered'  => !empty($d['deposit_registered']) ? 1 : 0,
+            ':down_payment'        => $this->num($d['down_payment'] ?? null),
+            ':contract_date'       => $d['contract_date'] ?: null,
+            ':balance_amount'      => $this->num($d['balance_amount'] ?? null),
+            ':balance_date'        => $d['balance_date'] ?: null,
+            ':contract_end_date'   => $d['contract_end_date'] ?: null,
+            ':rent_fee'            => $this->num($d['rent_fee'] ?? null),
+            ':maintenance_fee'     => $this->num($d['maintenance_fee'] ?? null),
+            ':rent_pay_day'        => ($d['rent_pay_day'] ?? '') !== '' ? (int)$d['rent_pay_day'] : null,
+            ':agent_office'        => $d['agent_office'] ?: null,
+            ':agent_phone'         => $d['agent_phone'] ?: null,
+            ':agent_ceo'           => $d['agent_ceo'] ?: null,
+            ':special_terms'       => $d['special_terms'] ?: null,
+        ];
+    }
+
+    public function addContract(array $d): int {
+        $stmt = $this->pdo->prepare("
+            INSERT INTO nw_contract
+                (room_id, status, contract_type, tenant_name, tenant_ssn, tenant_phone,
+                 co_tenant_name, co_tenant_ssn, co_tenant_phone,
+                 deposit, deposit_registered, down_payment, contract_date,
+                 balance_amount, balance_date, contract_end_date,
+                 rent_fee, maintenance_fee, rent_pay_day,
+                 agent_office, agent_phone, agent_ceo, special_terms,
+                 renewal_type, first_contract_date)
+            VALUES
+                (:room_id, 'active', :contract_type, :tenant_name, :tenant_ssn, :tenant_phone,
+                 :co_tenant_name, :co_tenant_ssn, :co_tenant_phone,
+                 :deposit, :deposit_registered, :down_payment, :contract_date,
+                 :balance_amount, :balance_date, :contract_end_date,
+                 :rent_fee, :maintenance_fee, :rent_pay_day,
+                 :agent_office, :agent_phone, :agent_ceo, :special_terms,
+                 :renewal_type, :first_contract_date)
+        ");
+        $stmt->execute($this->contractParams($d) + [
+            ':room_id'             => $d['room_id'],
+            ':renewal_type'        => $d['renewal_type'] ?? 'initial',
+            ':first_contract_date' => $d['first_contract_date'] ?: ($d['contract_date'] ?: null),
+        ]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public function updateContract(int $id, array $d): void {
+        $stmt = $this->pdo->prepare("
+            UPDATE nw_contract SET
+                contract_type=:contract_type, tenant_name=:tenant_name, tenant_ssn=:tenant_ssn, tenant_phone=:tenant_phone,
+                co_tenant_name=:co_tenant_name, co_tenant_ssn=:co_tenant_ssn, co_tenant_phone=:co_tenant_phone,
+                deposit=:deposit, deposit_registered=:deposit_registered, down_payment=:down_payment, contract_date=:contract_date,
+                balance_amount=:balance_amount, balance_date=:balance_date, contract_end_date=:contract_end_date,
+                rent_fee=:rent_fee, maintenance_fee=:maintenance_fee, rent_pay_day=:rent_pay_day,
+                agent_office=:agent_office, agent_phone=:agent_phone, agent_ceo=:agent_ceo, special_terms=:special_terms
+            WHERE id=:id
+        ");
+        $stmt->execute($this->contractParams($d) + [':id' => $id]);
+    }
+
+    /** 만기연장: 기존 계약을 renewed로 닫고, 최초계약일을 이어받은 신규 계약을 만든다(이력 보존). */
+    public function renewContract(int $oldId, array $newTerms): int {
+        $old = $this->getContract($oldId);
+        if (!$old) throw new RuntimeException('기존 계약을 찾을 수 없습니다.');
+
+        $this->pdo->beginTransaction();
+        try {
+            $stmt = $this->pdo->prepare("UPDATE nw_contract SET status='ended', ended_at=NOW(), ended_reason='renewed' WHERE id=:id");
+            $stmt->execute([':id' => $oldId]);
+
+            $newTerms['room_id']             = $old['room_id'];
+            $newTerms['renewal_type']        = 'extended';
+            $newTerms['first_contract_date'] = $old['first_contract_date'] ?: $old['contract_date'];
+            $newId = $this->addContract($newTerms);
+
+            $this->pdo->commit();
+            return $newId;
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+    }
+
+    /** 묵시적갱신: 신규행 없이 현재 계약에 표시만 한다. */
+    public function markImpliedRenewal(int $id): void {
+        $stmt = $this->pdo->prepare("UPDATE nw_contract SET renewal_type='implied' WHERE id=:id AND status='active'");
+        $stmt->execute([':id' => $id]);
+    }
+
+    /** 계약종료: 만료 또는 중도해지. */
+    public function endContract(int $id, string $reason): void {
+        $reason = in_array($reason, ['expired', 'terminated_early'], true) ? $reason : 'expired';
+        $stmt = $this->pdo->prepare("UPDATE nw_contract SET status='ended', ended_at=NOW(), ended_reason=:r WHERE id=:id");
+        $stmt->execute([':r' => $reason, ':id' => $id]);
+    }
+
+    // ==========================================================
+    // 월세/관리비 납부이력
+    // ==========================================================
+    public function listPayments(int $contractId): array {
+        $stmt = $this->pdo->prepare("SELECT * FROM nw_payment WHERE contract_id=:c ORDER BY pay_date DESC, id DESC");
+        $stmt->execute([':c' => $contractId]);
+        return $stmt->fetchAll();
+    }
+
+    public function getLastPayment(int $contractId): ?array {
+        $stmt = $this->pdo->prepare("SELECT * FROM nw_payment WHERE contract_id=:c ORDER BY pay_date DESC, id DESC LIMIT 1");
+        $stmt->execute([':c' => $contractId]);
+        return $stmt->fetch() ?: null;
+    }
+
+    public function addPayment(array $d): int {
+        $stmt = $this->pdo->prepare("
+            INSERT INTO nw_payment (contract_id, pay_date, rent_fee, maintenance_fee, memo)
+            VALUES (:contract_id, :pay_date, :rent_fee, :maintenance_fee, :memo)
+        ");
+        $stmt->execute([
+            ':contract_id'     => $d['contract_id'],
+            ':pay_date'        => $d['pay_date'] ?: date('Y-m-d'),
+            ':rent_fee'        => $this->num($d['rent_fee'] ?? null),
+            ':maintenance_fee' => $this->num($d['maintenance_fee'] ?? null),
+            ':memo'            => $d['memo'] ?: null,
+        ]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    // ==========================================================
+    // 모니터링 계산
+    // ==========================================================
+
+    /** 계약만기 상태: implied(묵시적갱신中) / warn(D-30이내) / danger(D-7이내) / ok(여유)
+     *  임대차보호법상 만기일이 지난 활성 계약, 또는 renewal_type='implied' 는 '묵시적 갱신중'으로 본다. */
+    public function expiryStatus(array $contract): array {
+        $implied = (($contract['renewal_type'] ?? '') === 'implied');
+
+        if (empty($contract['contract_end_date'])) {
+            return $implied
+                ? ['level' => 'implied', 'dday' => null, 'label' => '묵시적 갱신중']
+                : ['level' => 'ok', 'dday' => null, 'label' => '-'];
+        }
+        $today = new DateTimeImmutable('today');
+        $end   = new DateTimeImmutable($contract['contract_end_date']);
+        $dday  = (int)$today->diff($end)->format('%r%a');
+
+        if ($implied || $dday < 0) {
+            return ['level' => 'implied', 'dday' => $dday, 'label' => '묵시적 갱신중'];
+        }
+        if ($dday <= 7)       { $level = 'danger'; $label = 'D-' . $dday; }
+        elseif ($dday <= 30)  { $level = 'warn';   $label = 'D-' . $dday; }
+        else                  { $level = 'ok';     $label = 'D-' . $dday; }
+
+        return ['level' => $level, 'dday' => $dday, 'label' => $label];
+    }
+
+    /** 계약 id => 해당 계약의 가장 최근 납부기록, 여러 계약을 한 번의 쿼리로 일괄 조회 (N+1 방지) */
+    public function listLastPayments(array $contractIds): array {
+        $contractIds = array_values(array_unique(array_map('intval', $contractIds)));
+        if (!$contractIds) return [];
+        $ph = implode(',', array_fill(0, count($contractIds), '?'));
+        $stmt = $this->pdo->prepare("
+            SELECT p.* FROM nw_payment p
+            INNER JOIN (
+                SELECT contract_id, MAX(pay_date) AS max_date
+                FROM nw_payment WHERE contract_id IN ($ph)
+                GROUP BY contract_id
+            ) m ON p.contract_id = m.contract_id AND p.pay_date = m.max_date
+        ");
+        $stmt->execute($contractIds);
+        $out = [];
+        foreach ($stmt->fetchAll() as $row) {
+            $out[(int)$row['contract_id']] = $row;
+        }
+        return $out;
+    }
+
+    /** 이번 달 월세 납부 상태: na(전세) / paid(완료) / due(예정) / overdue(연체)
+     *  $lastPayment: false=직접 조회(단건용), null=납부이력 없음, array=미리 조회해온 값(목록 렌더용, N+1 방지) */
+    public function paymentStatus(array $contract, $lastPayment = false): array {
+        if ($contract['contract_type'] === 'jeonse') {
+            return ['level' => 'na', 'days' => 0, 'label' => '전세'];
+        }
+
+        $payDay = (int)($contract['rent_pay_day'] ?? 0) ?: 1;
+        $today  = new DateTimeImmutable('today');
+
+        $daysInMonth = (int)$today->format('t');
+        $dueDay      = min($payDay, $daysInMonth);
+        $dueDate     = new DateTimeImmutable($today->format('Y-m-') . sprintf('%02d', $dueDay));
+
+        $prevMonthAnchor = $dueDate->modify('-1 month');
+        $prevDaysInMonth = (int)$prevMonthAnchor->format('t');
+        $prevDueDay      = min($payDay, $prevDaysInMonth);
+        $prevDue         = new DateTimeImmutable($prevMonthAnchor->format('Y-m-') . sprintf('%02d', $prevDueDay));
+
+        $last = $lastPayment === false ? $this->getLastPayment((int)$contract['id']) : $lastPayment;
+        if ($last) {
+            $payDate = new DateTimeImmutable($last['pay_date']);
+            if ($payDate > $prevDue) {
+                return ['level' => 'paid', 'days' => 0, 'label' => '납부완료(' . $payDate->format('m/d') . ')'];
+            }
+        }
+
+        if ($today <= $dueDate) {
+            $dday = (int)$today->diff($dueDate)->format('%a');
+            return ['level' => 'due', 'days' => $dday, 'label' => '납부예정(D-' . $dday . ')'];
+        }
+
+        $overdueDays = (int)$dueDate->diff($today)->format('%a');
+        return ['level' => 'overdue', 'days' => $overdueDays, 'label' => '연체 ' . $overdueDays . '일'];
+    }
+
+    /** 대시보드 요약: 건물/호실/공실 카운트 + 연체·만기임박 알림 리스트 */
+    public function dashboardSummary(): array {
+        $totalBuildings = (int)$this->pdo->query("SELECT COUNT(*) FROM nw_building")->fetchColumn();
+        $totalUnits     = (int)$this->pdo->query("SELECT COUNT(*) FROM nw_unit")->fetchColumn();
+
+        $activeContracts = $this->pdo->query("
+            SELECT c.*, u.room_no, u.id AS unit_id, b.id AS building_id, b.name AS building_name
+            FROM nw_contract c
+            JOIN nw_unit u ON u.id = c.room_id
+            JOIN nw_building b ON b.id = u.building_id
+            WHERE c.status = 'active'
+        ")->fetchAll();
+
+        $occupiedUnitIds = array_unique(array_column($activeContracts, 'unit_id'));
+        $lastPayments    = $this->listLastPayments(array_column($activeContracts, 'id'));
+
+        $overdueList   = [];
+        $expiringList  = [];
+        foreach ($activeContracts as $c) {
+            $pay = $this->paymentStatus($c, $lastPayments[(int)$c['id']] ?? null);
+            if ($pay['level'] === 'overdue') {
+                $overdueList[] = $c + ['pay' => $pay];
+            }
+            $exp = $this->expiryStatus($c);
+            if (in_array($exp['level'], ['warn', 'danger'], true)) {
+                $expiringList[] = $c + ['exp' => $exp];
+            }
+        }
+        usort($overdueList,  fn($a, $b) => $b['pay']['days'] <=> $a['pay']['days']);
+        usort($expiringList, fn($a, $b) => $a['exp']['dday'] <=> $b['exp']['dday']);
+
+        return [
+            'totalBuildings' => $totalBuildings,
+            'totalUnits'     => $totalUnits,
+            'occupiedUnits'  => count($occupiedUnitIds),
+            'vacantUnits'    => $totalUnits - count($occupiedUnitIds),
+            'overdueList'    => $overdueList,
+            'expiringList'   => $expiringList,
+        ];
+    }
+}
+?>
