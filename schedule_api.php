@@ -1069,6 +1069,15 @@ function api_projects(string $action, PDO $pdo): void {
             echo json_encode(['ok' => true]);
             break;
 
+        // 순서 변경 — 새 순서대로 정렬된 id 배열
+        case 'reorder':
+            $d   = json_decode(file_get_contents('php://input'), true);
+            $ids = $d['ids'] ?? [];
+            if (!is_array($ids) || !$ids) { echo json_encode(['ok' => false, 'msg' => 'ids 없음']); return; }
+            $proj->reorder($ids);
+            echo json_encode(['ok' => true]);
+            break;
+
         // 삭제
         case 'delete':
             $id = (int)($_GET['id'] ?? $_POST['id'] ?? 0);

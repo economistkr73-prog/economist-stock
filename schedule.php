@@ -105,6 +105,10 @@ function sch_calendar(PDO $pdo): void {
 .proj-item .proj-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .proj-item .proj-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .proj-item .proj-count { font-size: 11px; color: #aaa; flex: none; }
+.proj-reorder { display: flex; flex-direction: column; flex: none; gap: 1px; margin-left: 2px; }
+.proj-reorder-btn { border: none; background: none; padding: 0; width: 14px; height: 9px; line-height: 9px; font-size: 8px; color: #bbb; cursor: pointer; }
+.proj-reorder-btn:hover:not(:disabled) { color: #3498db; }
+.proj-reorder-btn:disabled { color: #e6e6e6; cursor: default; }
 .proj-item-all { border-bottom: 1px solid #eee; margin-bottom: 4px; }
 .proj-empty { font-size: var(--fs-xs); color: #bbb; padding: 10px; text-align: center; }
 /* 프로젝트 카드 */
@@ -250,6 +254,8 @@ body.is-mobile .hab-x { font-size: 8px; line-height: 6px; }
 .emoji-btn { font-size: 22px; width: 38px; height: 38px; border: 2px solid transparent; border-radius: 8px; cursor: pointer; background: #f8f9fa; display:flex; align-items:center; justify-content:center; transition:.15s; }
 .emoji-btn:hover { background: #eaf4ff; border-color: #3498db; }
 .emoji-btn.selected { border-color: #3498db; background: #eaf4ff; box-shadow: 0 0 0 2px #3498db40; }
+.emoji-manage-btn { position: relative; }
+.emoji-manage-check { position: absolute; bottom: -3px; right: -3px; background: #2ecc71; color: #fff; border-radius: 50%; width: 14px; height: 14px; font-size: 9px; line-height: 14px; text-align: center; box-shadow: 0 0 0 1px #fff; }
 .more-link { font-size: var(--fs-xs); color: #888; cursor: pointer; }
 .more-link:hover { text-decoration: underline; }
 /* 종일 이벤트 공통 */
@@ -902,8 +908,10 @@ mark.ai-hl { background: #fff2a8; color: #7a5b00; font-weight: 700; padding: 0 2
 #scheduler .cal-cell.saturday .day-num{ color:var(--c-sat); }
 /* 이벤트 칩(소프트 파스텔 + 점) */
 #scheduler .event-chip{ display:flex; align-items:center; gap:5px; border-radius:7px; padding:3px 7px; font-weight:600; letter-spacing:-.2px; }
-#scheduler .event-chip .ev-dot{ width:6px; height:6px; border-radius:50%; flex:none; }
+/* 이모지 글리프는 박스 안에서 자체 여백이 있어 점(원)과 시각적 중심이 안 맞음 → 점을 우측으로 살짝 이동해 배지 중앙과 맞춤 */
+#scheduler .event-chip .ev-dot{ width:6px; height:6px; border-radius:50%; flex:none; margin-left:4px; }
 #scheduler .event-chip .ev-tx{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; flex:1; }
+#scheduler .event-chip .ev-tx .proj-num-badge{ padding-left:0; margin-left:0; }
 #scheduler .event-chip.done{ background:transparent; border:none; text-decoration:none; }
 #scheduler .event-chip.done .ev-tx{ color:#9aa3b5; text-decoration:none; }
 #scheduler .event-chip.done:hover{ background:#f3f5f9; }
@@ -1354,15 +1362,8 @@ body.is-mobile #scheduler .event-chip.done{ width:10px; height:10px; padding:0; 
             <button type="button" id="btn-recur-clear-todo" onclick="clearRecur()" style="display:none;margin-left:4px;background:none;border:none;color:#e74c3c;font-size:13px;cursor:pointer;padding:2px 6px;border-radius:4px;border:1px solid #e74c3c;">× 반복해제</button>
         </div>
 
-        <!-- 카테고리(반) + 그룹 + 프로젝트 (한 줄) -->
+        <!-- 그룹(분류) + 프로젝트 (한 줄) -->
         <div class="form-row">
-            <label style="flex:0.6 1 76px;min-width:76px;">카테고리
-                <select id="f-cat">
-                    <option value="업무">업무</option><option value="개인">개인</option>
-                    <option value="주식">주식</option><option value="회의">회의</option>
-                    <option value="기타">기타</option>
-                </select>
-            </label>
             <label style="min-width:100px;">분류
                 <select id="f-group-id">
                     <option value="">없음</option>
@@ -1752,13 +1753,27 @@ function dashColorSet(hex){
         fill: hslToHex(h, sat, 50),
     };
 }
-// 이벤트 앞 프로젝트 번호(#N) — 배경 없이 대비색 텍스트만
+// 이벤트 앞 프로젝트/분류 아이콘 — 배경 없이 대비색 텍스트만
 function projNumBadge(ev) {
     if (!ev.project_id) return '';
     const p = _projects.find(x => x.id == ev.project_id);
-    if (!p || p.type !== 'project') return '';   // 프로젝트 포함 일정만 표시
-    const ico = p.icon || '📌';                   // 프로젝트 이모지 (없으면 기본)
-    return `<span class="proj-num-badge" title="${esc(p.title)}">${ico} </span>`;
+    if (!p) return '';
+    if (p.type === 'project') {
+        const ico = p.icon || '📌';               // 프로젝트는 아이콘 없으면 기본값 표시
+        return `<span class="proj-num-badge" title="${esc(p.title)}">${ico} </span>`;
+    }
+    if (p.type === 'group' && p.icon) {           // 분류(그룹)는 이모지 지정된 경우만 표시
+        return `<span class="proj-num-badge" title="${esc(p.title)}">${p.icon} </span>`;
+    }
+    return '';
+}
+
+// 카테고리(폐지)를 대체하는 분류 표시용 텍스트 — 기념일은 기존 카테고리(생일/제사 등), 그 외는 소속 분류/프로젝트명
+function catOrOwnerLabel(ev) {
+    if (ev.event_type === 'anniversary') return ev.category || '';
+    if (!ev.project_id) return '';
+    const p = _projects.find(x => x.id == ev.project_id);
+    return p ? (p.icon ? p.icon + ' ' : '') + p.title : '';
 }
 
 // 참석자 표시: 1명이면 (이름), 여러명이면 (이름+N) — 주소록 연락처 + 텍스트 참석자 합산
@@ -2607,6 +2622,10 @@ function renderMonth() {
             const isDone=ev.is_done=='1';
             const isDraft=ev.is_draft=='1';
             chip.className='event-chip'+(isDone?' done':'')+(isDraft?' draft':'');
+            const badge = projNumBadge(ev);
+            // 실제로 화면에 그려지는 아이콘만 인정: badge(분류/프로젝트) 또는 기념일의 ev.icon(timeTxt에 포함되어 그려짐)
+            // 그 외 타입은 ev.icon이 있어도 월간뷰에 그려지지 않으므로 무시(안 그러면 아이콘도 ✓도 둘 다 안 뜨는 버그 발생)
+            const hasIcon = !!(badge || (ev.event_type === 'anniversary' && ev.icon));
             let dotHtml='';
             if (!isDone && !isDraft) {
                 if (mob) {
@@ -2615,11 +2634,17 @@ function renderMonth() {
                     const c = softChip(evBgColor(ev));       // 데스크톱: 파스텔 칩 + 점
                     chip.style.background = c.bg;
                     chip.style.color = c.fg;
-                    dotHtml = `<span class="ev-dot" style="background:${c.dot}"></span>`;
+                    if (!hasIcon) dotHtml = `<span class="ev-dot" style="background:${c.dot}"></span>`;   // 이모지 있으면 점 생략(중복 표시 방지)
                 }
             }
             const draftPfx = isDraft ? '⏳ ' : '';
-            chip.innerHTML=dotHtml+'<span class="ev-tx">'+projNumBadge(ev)+esc(draftPfx+(isDone?'✓ ':'')+fmtTimeRange(ev)+evLabel(ev))+'</span>'+mapMark(ev)+tripMark(ev)+logMark(ev);
+            const doneMark = (isDone && !hasIcon) ? '✓ ' : '';   // 이모지가 이미 있으면 ✓ 생략(중복 표시 방지)
+            const timeTxt  = fmtTimeRange(ev);
+            // 시각(타임드) 일정만 "제목 (시간)" 순서로, 기념일 아이콘·할일 체크 등은 기존처럼 제목 앞에 유지
+            const mainTxt = (ev.event_type === 'timed' && timeTxt)
+                ? draftPfx + doneMark + evLabel(ev) + ' ' + timeTxt.trim()
+                : draftPfx + doneMark + timeTxt + evLabel(ev);
+            chip.innerHTML=dotHtml+'<span class="ev-tx">'+badge+esc(mainTxt)+'</span>'+mapMark(ev)+tripMark(ev)+logMark(ev);
             // 입력대기는 탭하면 바로 편집(나머지 채우기) → 저장 시 정식 등록으로 전환
             chip.onclick=e=>{e.stopPropagation(); if(isMobileView()){showDayDetail(ds);} else if(isDraft){openEdit(ev);} else {openView(ev);}};
             return chip;
@@ -2783,7 +2808,7 @@ function renderWeek() {
             const sty=inR
                 ? `background:${p.color||'#3498db'};color:${contrastColor(p.color||'#3498db')};border-radius:${isStart?'5px':'0'} ${isEnd?'5px':'0'} ${isEnd?'5px':'0'} ${isStart?'5px':'0'};`
                 : '';
-            const nameTxt=showName?`<span class="proj-week-name">${esc((p.icon||'')+p.title)}</span>`:'';
+            const nameTxt=showName?`<span class="proj-week-name">${esc((p.icon?p.icon+' ':'')+p.title)}</span>`:'';
             h+=`<div class="week-allday-cell proj-week-cell${inR?' in-range':''}${i===todayIdx?' today-col':''}" style="${sty}" ${inR?`data-proj="${p.id}" data-date="${ds}"`:''}>${nameTxt}</div>`;
         });
         h+=`</div>`;
@@ -2884,7 +2909,7 @@ function renderDay() {
         .forEach(p=>{
             const bg=p.color||'#3498db';
             h+=`<div class="day-allday-row proj-day-row"><div class="day-allday-label">${p.icon||'📌'}</div>
-                <div class="allday-chip proj-day-chip" style="background:${bg};color:${contrastColor(bg)};border-radius:7px;font-weight:700;" data-proj="${p.id}" data-date="${ds}">${esc((p.icon||'')+p.title)}</div>
+                <div class="allday-chip proj-day-chip" style="background:${bg};color:${contrastColor(bg)};border-radius:7px;font-weight:700;" data-proj="${p.id}" data-date="${ds}">${esc((p.icon?p.icon+' ':'')+p.title)}</div>
             </div>`;
         });
 
@@ -2922,7 +2947,7 @@ function renderDay() {
         const hdone=doneOn(hb,ds);
         h+=`<div class="wk-hev${hdone?' done':''}" style="top:${hTop+1}px;height:${hHt-3}px;" onclick="openTodoModal('habit',${hb.id})">`
           +`<div class="wk-hm">${hm}</div>`
-          +`<div class="wk-htt"><span class="wk-hchk" onclick="habitBlockToggle(event,${hb.id},'${ds}')">${hdone?'☑':'☐'}</span>${esc((hb.icon||'')+hb.title)}<span class="wk-hbadge">습관</span></div>`
+          +`<div class="wk-htt"><span class="wk-hchk" onclick="habitBlockToggle(event,${hb.id},'${ds}')">${hdone?'☑':'☐'}</span>${esc((hb.icon?hb.icon+' ':'')+hb.title)}<span class="wk-hbadge">습관</span></div>`
           +`</div>`;
     });
     h+='</div></div></div></div>'; c.innerHTML=h;
@@ -2947,10 +2972,10 @@ function renderList() {
     const rows=S.events.map(ev=>`<tr class="${ev.is_done=='1'?'done':''}" style="cursor:pointer" data-id="${ev.id}">
         <td><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${ev.color};margin-right:6px"></span>${projNumBadge(ev)}${esc(evLabel(ev))}${mapMark(ev)}${tripMark(ev)}${logMark(ev)}</td>
         <td>${ev.start_dt.slice(0,16).replace('T',' ')}</td>
-        <td>${ev.category}</td>
+        <td>${esc(catOrOwnerLabel(ev))}</td>
         <td style="text-align:center">${ev.is_done=='1'?'✔':'—'}</td>
     </tr>`).join('');
-    c.innerHTML=`<table class="list-table"><thead><tr><th>제목</th><th>시작일시</th><th>카테고리</th><th>완료</th></tr></thead><tbody>${rows}</tbody></table>`;
+    c.innerHTML=`<table class="list-table"><thead><tr><th>제목</th><th>시작일시</th><th>분류</th><th>완료</th></tr></thead><tbody>${rows}</tbody></table>`;
     c.querySelectorAll('tr[data-id]').forEach(tr=>tr.addEventListener('click',()=>{const ev=S.events.find(x=>x.id==tr.dataset.id);if(ev)openView(ev);}));
 }
 
@@ -2978,7 +3003,6 @@ function openNew(dt='', type='timed') {
     document.getElementById('f-title').value='';
     document.getElementById('f-memo').value='';
     MODAL_ATTACH=[]; renderAttachList();
-    document.getElementById('f-cat').value='업무';
     setColor('#3498db');
     closeColorPicker();
     clearRecur();
@@ -3030,7 +3054,6 @@ function openEdit(ev) {
     const type=ev.event_type||'timed';
     document.getElementById('modal-title').textContent='일정 수정';
     document.getElementById('f-title').value=ev.title;
-    document.getElementById('f-cat').value=ev.category;
     document.getElementById('f-memo').value=ev.memo||'';
     loadAttachInto(ev.id);
     setColor(ev.color);
@@ -3280,7 +3303,7 @@ async function saveEvent() {
     const payload={
         event_type: ETYPE,
         title,
-        category:  isAnniv ? document.getElementById('h-anniv-cat').value : document.getElementById('f-cat').value,
+        category:  isAnniv ? document.getElementById('h-anniv-cat').value : '',   // 일반 일정은 분류(그룹)로 통합, 카테고리 폐지
         is_family: isAnniv ? +document.getElementById('h-is-family').value : 0,
         color:     S.color,
         memo:      document.getElementById('f-memo').value,
@@ -3431,10 +3454,10 @@ function openView(ev) {
     }
     document.getElementById('view-datetime').textContent = dtText;
 
-    // 카테고리
-    const cat = ev.category || '';
+    // 분류(카테고리 폐지 후 소속 그룹/프로젝트명 또는 기념일 카테고리)
+    const cat = catOrOwnerLabel(ev);
     const colorDot = `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${ev.color};margin-right:5px;"></span>`;
-    document.getElementById('view-category').innerHTML = colorDot + cat;
+    document.getElementById('view-category').innerHTML = colorDot + esc(cat);
 
     // 반복 정보
     const recurEl = document.getElementById('view-recur');
@@ -3920,13 +3943,6 @@ function selectEmoji(emoji) {
     });
 }
 
-// 카테고리 변경 시 이모지 피커 갱신
-document.getElementById('f-cat').addEventListener('change', function() {
-    if (ETYPE === 'anniversary') {
-        renderEmojiPicker(this.value, '');
-    }
-});
-
 // 음력/양력 전환
 async function onAnnivCalChange() {
     const isLunar = document.querySelector('input[name="anniv-cal"]:checked')?.value === 'lunar';
@@ -4040,8 +4056,6 @@ function setEventType(type) {
     document.getElementById('row-anniversary').style.display = type==='anniversary' ? 'block' : 'none';
     document.getElementById('row-todo').style.display        = type==='todo'        ? 'block' : 'none';
     document.getElementById('row-todo-recur').style.display  = type==='todo'        ? 'flex'  : 'none';
-    // 카테고리 select: 기념일 숨김
-    document.getElementById('f-cat').closest('label').style.display = type==='anniversary' ? 'none' : '';
     document.getElementById('recur-summary-row').style.display = 'none';
 
     // 기념일: 분류·카테고리 버튼 초기화
@@ -4538,13 +4552,17 @@ function renderProjPanel() {
 
     // ── 그룹 행 (단순 분류 라벨) ──
     // 그룹 카운트 = 직속(별도) 일정 + 포함 프로젝트 수
-    const groupItem = g => {
+    const groupItem = (g, idx, arr) => {
         const childProj = _projects.filter(p => p.type === 'project' && p.parent_id == g.id).length;
         const cnt = (+g.item_count || 0) + childProj;
+        const canUp = idx > 0, canDown = idx < arr.length - 1;
         return `<div class="proj-item" onclick="openProjDetail(event,${g.id})" oncontextmenu="openProjDetail(event,${g.id});return false;">
-            <span class="proj-dot" style="background:${g.color||'#3498db'}"></span>
-            <span class="proj-label">${esc((g.icon||'')+g.title)}</span>
+            <span class="proj-label" style="color:${g.color||'#3498db'};font-weight:600;">${esc((g.icon?g.icon+' ':'')+g.title)}</span>
             <span class="proj-count">${cnt}</span>
+            <span class="proj-reorder">
+                <button type="button" class="proj-reorder-btn" ${canUp?'':'disabled'} onclick="event.stopPropagation();reorderGroup(${g.id},-1)" title="위로 이동">▲</button>
+                <button type="button" class="proj-reorder-btn" ${canDown?'':'disabled'} onclick="event.stopPropagation();reorderGroup(${g.id},1)" title="아래로 이동">▼</button>
+            </span>
         </div>`;
     };
 
@@ -4569,8 +4587,7 @@ function renderProjPanel() {
         const dimmed = p.is_done ? ' style="opacity:.55;"' : '';
         return `<div class="proj-card"${dimmed} onclick="openProjDetail(event,${p.id})" oncontextmenu="openProjDetail(event,${p.id});return false;">
             <div class="proj-card-top">
-                <span class="proj-dot" style="background:${p.color||'#3498db'}"></span>
-                <span class="proj-card-name">${esc((p.icon||'')+p.title)}</span>
+                <span class="proj-card-name" style="color:${p.color||'#3498db'};font-weight:600;">${esc((p.icon?p.icon+' ':'')+p.title)}</span>
             </div>
             <div class="proj-card-period">📅 ${period}</div>
             <div class="proj-card-prog">
@@ -4619,7 +4636,7 @@ function renderProjPanel() {
         const streak = sk>0 ? `<span class="th-streak">🔥${sk}</span>` : '';
         const refIcon = h.ref_url ? `<span class="th-ref" data-url="${esc(h.ref_url)}" onclick="openHabitRef(event,this.dataset.url)" title="참고 링크">${ytId(h.ref_url)?'📺':'🔗'}</span>` : '';
         const icon = `<span class="th-check ${done?'on':''}" onclick="habitIconTap(event,${h.id})" title="${measure?'오늘 수치 입력':'오늘 완료'}">${done?'☑':'☐'}</span>`;
-        const lbl  = `<span class="proj-label ${done?'th-done':''}" onclick="openTodoModal('habit',${h.id})">${esc((h.icon||'')+h.title)}</span>`;
+        const lbl  = `<span class="proj-label ${done?'th-done':''}" onclick="openTodoModal('habit',${h.id})">${esc((h.icon?h.icon+' ':'')+h.title)}</span>`;
         const top  = `<div class="proj-item th-row">${icon}${lbl}<span class="th-right">${refIcon}${streak}</span></div>`;
         // 아랫줄: 누적 진행바 (track_total일 때만)
         let bar = '';
@@ -4651,6 +4668,20 @@ function renderProjPanel() {
         html += '<div class="proj-empty">＋ 로 목표·습관 추가</div>';
 
     list.innerHTML = html;
+}
+
+// 분류(그룹) 순서 변경 — 위/아래 인접 항목과 자리를 바꿔 서버에 새 순서 반영
+async function reorderGroup(gid, dir) {
+    const groups = _projects.filter(p => p.type === 'group');   // 서버가 이미 sort_order 순으로 내려줌
+    const idx = groups.findIndex(g => g.id == gid);
+    const swapIdx = idx + dir;
+    if (idx < 0 || swapIdx < 0 || swapIdx >= groups.length) return;
+    [groups[idx], groups[swapIdx]] = [groups[swapIdx], groups[idx]];
+    await fetch('schedule_api.php?module=projects&action=reorder', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ids: groups.map(g => g.id)})
+    });
+    await loadProjPanel();
 }
 
 // ==========================================================
@@ -4757,7 +4788,7 @@ function renderMonthHabitBar(){
         const sub = track ? `<div class="mhb-sub">${(+h.cum_total||0).toLocaleString()}/${(+h.target_total).toLocaleString()}${unit}</div>` : '';
         return `<div class="mhb-chip" onclick="habitIconTap(event,${h.id})">
             <span class="mhb-box">☐</span>
-            <div style="min-width:0;"><div class="mhb-name">${esc((h.icon||'')+h.title)}</div>${sub}</div>
+            <div style="min-width:0;"><div class="mhb-name">${esc((h.icon?h.icon+' ':'')+h.title)}</div>${sub}</div>
         </div>`;
     }).join('');
     host.innerHTML = `<div class="mhb-head"><span>🔁</span><span class="mhb-head-lbl">오늘 남은 습관</span><span class="mhb-cnt">${pending.length}</span></div><div class="mhb-chips">${chips}</div>`;
@@ -5377,7 +5408,7 @@ async function renderDashboard(){
             const cum = (+h.track_total===1 && h.target_total) ? ` · ${(+h.cum_total||0)}/${h.target_total}${unit}` : (h.cum_total>0?` · 누적 ${h.cum_total}${unit}`:'');
             html += `<div class="dash-end-row">
                 <span class="proj-dot" style="background:${h.color||'#3498db'}"></span>
-                <span class="${done?'':'dash-end-stopname'}">${esc((h.icon||'')+h.title)}</span>
+                <span class="${done?'':'dash-end-stopname'}">${esc((h.icon?h.icon+' ':'')+h.title)}</span>
                 <span class="dash-end-meta">${(h.ended_at||'').slice(0,10)}${cum}</span>
                 ${badge}
                 <span class="dash-end-reopen" onclick="reopenHabit(${h.id})" title="다시 시작">↺</span>
@@ -5667,7 +5698,7 @@ function openProjDetail(e, id) {
                         const period = (pr.start_dt||pr.end_dt) ? `${(pr.start_dt||'').slice(5)}~${(pr.end_dt||'').slice(5)}` : '기간 미설정';
                         return `<div class="pdp-proj-row" onclick="openProjDetail(event,${pr.id})">
                             <span class="proj-dot" style="background:${pr.color||'#3498db'}"></span>
-                            <span class="pdp-proj-name">${esc((pr.icon||'')+pr.title)}</span>
+                            <span class="pdp-proj-name">${esc((pr.icon?pr.icon+' ':'')+pr.title)}</span>
                             <span class="pdp-proj-meta">${period} · ${pct}% (${dn}/${tot})</span>
                         </div>`;
                     }).join('');
@@ -5830,8 +5861,14 @@ function openProjModal(id, presetType) {
                 <input type="text" id="pm-title" value="${p?esc(p.title):''}" placeholder="${typeLabel}명 입력">
             </label>
             <label>이모지
-                <input type="text" id="pm-icon" value="${p?p.icon||'':''}" placeholder="${defIcon}" style="width:60px;">
+                <input type="text" id="pm-icon" value="${p?p.icon||'':''}" placeholder="${defIcon}" style="width:60px;" oninput="pmSyncIconHighlight(this.value)">
             </label>
+        </div>
+        <div style="margin:-6px 0 10px;">
+            <div id="pm-emoji-picker" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
+            <div style="text-align:right;margin-top:4px;">
+                <span onclick="openEmojiManageModal()" style="font-size:11px;color:#8a97a3;cursor:pointer;text-decoration:underline;">⚙ 이모지 관리</span>
+            </div>
         </div>
         ${parentRow}
         ${isProject ? `
@@ -5875,7 +5912,113 @@ function openProjModal(id, presetType) {
     pmEditMode = false; pmAssignIndex = null;
     pmRenderSwatches();
     pmSetColor(p ? (p.color || '#3498db') : '#3498db');
+    pmRenderEmojiPicker(p ? (p.icon || '') : '');
     setTimeout(() => overlay.querySelector('#pm-title').focus(), 50);
+}
+
+// ── 그룹/프로젝트 이모지 — 전체 풀(관리 모달용, ~200개) + 사용자가 등록한 활성 세트(선택 피커에만 노출) ──
+const PROJ_EMOJI_POOL_GROUPS = [
+    { h: '업무·문서',   items: ['📁','📌','🚩','⭐','🎯','🏷️','🔖','📎','💼','📊','📈','📉','📋','🧾','📝','🖥️'] },
+    { h: '기기·도구',   items: ['💻','📱','☎️','🗂️','⏰','🗓️','🔔','✅','📅','📇','🗃️','📐','✂️','🔑'] },
+    { h: '이동·여행',   items: ['🚗','✈️','🚌','🚆','🚲','⛵','🧳','🗺️','🚕','🚀','🛳️','🚁','🚉','⛽','🅿️','🧭'] },
+    { h: '집·생활',     items: ['🏠','🏖️','⛰️','🛒','🧹','🛏️','🚿','🛋️','🪴','🧺','💡','🪑','🧯','🧼'] },
+    { h: '음식·음료',   items: ['🍽️','☕','🍔','🍕','🍜','🍰','🍺','🍎','🍇','🍣','🍩','🍫','🥗','🍞','🍷','🧋','🍿','🥘'] },
+    { h: '건강·운동',   items: ['💊','🏥','🩺','🧘','🏃','🚴','🤸','🏋️','🧖','🦷','👓','🩹','💉','🌡️'] },
+    { h: '학업·취미',   items: ['🎓','📚','✏️','🔬','🎨','🎵','🎮','🎬','🧵','📷','🎻','🎹','📖','🧩','🕹️','🎳'] },
+    { h: '스포츠',      items: ['⚽','🏀','🎣','⚾','🏐','🏈','🎾','🏸','🥊','🏓','🥋','⛳'] },
+    { h: '자연·동물',   items: ['🌱','🐾','🌸','🌻','🌈','🌙','🔥','💧','🌊','🐶','🐱','🐦','🦋','🐢','🌵','🍀'] },
+    { h: '가족·기념일', items: ['👨‍👩‍👧‍👦','👶','🎉','💍','🎂','🎈','🎁','🥳','👰','🤵','🍼','🎊','🕯️','💒'] },
+    { h: '도구·수리',   items: ['🛠️','🔧','🔨','📦','🔩','⚙️','🧱','🗝️','🪜','🧨','🎪','🧲'] },
+    { h: '금융',        items: ['💰','🧧','💵','💴','💶','💷','💸','💳','🏦','🧮','💎','🤑','💲','🏧','💱'] },
+    { h: '상징',        items: ['❤️','☀️','❄️','🌧️','🌟','🎗️','✨','💯','🎖️','♻️','🔒','🏆'] },
+    { h: '날씨·계절',   items: ['🌤️','⛅','🌦️','⛈️','🌪️','🌫️','🌬️','☔','🌨️','🍃'] },
+    { h: '표정·감정',   items: ['😀','😊','😍','😎','🤔','😴','😢','😡','🥰','🤩'] },
+];
+const PROJ_EMOJI_POOL = PROJ_EMOJI_POOL_GROUPS.flatMap(g => g.items);
+
+// 최초 방문 시 기본 활성 세트(기존에 쓰던 80개) — 이후는 사용자가 관리 모달에서 등록/해제한 값을 localStorage에서 사용
+const PROJ_EMOJI_DEFAULT_ACTIVE = [
+    '📁','📌','🚩','⭐','🎯','🏷️','🔖','📎',
+    '💼','📊','📈','📉','📋','🧾','📝','🖥️',
+    '💻','📱','☎️','🗂️','⏰','🗓️','🔔','✅',
+    '🚗','✈️','🚌','🚆','🚲','⛵','🧳','🗺️',
+    '🏠','🏖️','⛰️','🛒','🧹','🛏️','🚿','🍽️',
+    '☕','🍔','🍕','🍜','🍰','🍺','💊','🏥',
+    '🩺','🧘','🏃','🎓','📚','✏️','🔬','🎨',
+    '🎵','🎮','⚽','🏀','🎣','🌱','🐾','🌸',
+    '👨‍👩‍👧‍👦','👶','🎉','💍','🎂','🛠️','🔧','📦',
+    '💰','🧧','❤️','🎁','☀️','❄️','🌧️',
+];
+function loadProjEmojiActive() {
+    try {
+        const a = JSON.parse(localStorage.getItem('sch_proj_emoji_active') || '');
+        if (Array.isArray(a) && a.length) return a.filter(e => PROJ_EMOJI_POOL.includes(e));
+    } catch (e) {}
+    return PROJ_EMOJI_DEFAULT_ACTIVE.slice();
+}
+function saveProjEmojiActive() {
+    try { localStorage.setItem('sch_proj_emoji_active', JSON.stringify(PROJ_EMOJI_ACTIVE)); } catch (e) {}
+}
+let PROJ_EMOJI_ACTIVE = loadProjEmojiActive();
+
+function pmRenderEmojiPicker(selected) {
+    const wrap = document.getElementById('pm-emoji-picker');
+    if (!wrap) return;
+    wrap.innerHTML = PROJ_EMOJI_ACTIVE.map(e =>
+        `<button type="button" class="emoji-btn${e===selected?' selected':''}"
+            data-emoji="${e}" onclick="pmSelectIcon('${e}')">${e}</button>`
+    ).join('') || '<div style="font-size:12px;color:#bbb;">⚙ 이모지 관리에서 등록해 주세요</div>';
+}
+function pmSelectIcon(emoji) {
+    const input = document.getElementById('pm-icon');
+    const val = (input.value === emoji) ? '' : emoji;   // 같은 걸 다시 누르면 해제
+    input.value = val;
+    pmSyncIconHighlight(val);
+}
+function pmSyncIconHighlight(val) {
+    document.querySelectorAll('#pm-emoji-picker .emoji-btn').forEach(b => b.classList.toggle('selected', b.dataset.emoji === val));
+}
+
+// ── 이모지 관리 모달 — 전체 풀(~200개)에서 등록(체크)/해제. 클릭 즉시 localStorage 반영 + 선택 피커 갱신 ──
+function openEmojiManageModal() {
+    const overlay = document.createElement('div');
+    overlay.id = 'emoji-manage-overlay';
+    overlay.className = 'modal-overlay open';
+    overlay.style.zIndex = 4500;
+    overlay.innerHTML = `
+    <div class="modal" style="width:460px;">
+        <h3>이모지 관리</h3>
+        <div style="font-size:12px;color:#8a97a3;margin:-10px 0 12px;">체크(✓)된 것만 선택 목록에 표시됩니다. 클릭해서 등록/해제하세요.</div>
+        <div id="emoji-manage-body" style="max-height:400px;overflow-y:auto;padding-right:4px;"></div>
+        <div class="modal-footer">
+            <button class="btn btn-primary" onclick="this.closest('.modal-overlay').remove()">닫기</button>
+        </div>
+    </div>`;
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    renderEmojiManageBody();
+}
+function renderEmojiManageBody() {
+    const body = document.getElementById('emoji-manage-body');
+    if (!body) return;
+    body.innerHTML = PROJ_EMOJI_POOL_GROUPS.map(g => `
+        <div style="font-size:12px;font-weight:700;color:#555;margin:10px 0 6px;">${esc(g.h)}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;">
+            ${g.items.map(e => {
+                const on = PROJ_EMOJI_ACTIVE.includes(e);
+                return `<button type="button" class="emoji-btn emoji-manage-btn${on?' selected':''}"
+                    onclick="toggleProjEmoji('${e}')" title="${on?'등록됨 — 클릭해서 해제':'클릭해서 등록'}">${e}${on?'<span class="emoji-manage-check">✓</span>':''}</button>`;
+            }).join('')}
+        </div>
+    `).join('');
+}
+function toggleProjEmoji(emoji) {
+    const idx = PROJ_EMOJI_ACTIVE.indexOf(emoji);
+    if (idx >= 0) PROJ_EMOJI_ACTIVE.splice(idx, 1);
+    else PROJ_EMOJI_ACTIVE.push(emoji);
+    saveProjEmojiActive();
+    renderEmojiManageBody();
+    pmRenderEmojiPicker(document.getElementById('pm-icon')?.value || '');
 }
 
 // ── 그룹/프로젝트 모달 색상 선택(이벤트 모달과 동일: 팔레트·편집·마지막색 공유) ──

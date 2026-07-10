@@ -156,6 +156,14 @@ class Project {
         return ['ok' => true, 'is_done' => $new];
     }
 
+    // ── 순서 변경 — 새 순서대로 정렬된 id 배열을 받아 sort_order를 0..n-1로 재부여 ──
+    public function reorder(array $ids): void {
+        $stmt = $this->pdo->prepare("UPDATE tbl_project SET sort_order = :o WHERE id = :id");
+        foreach ($ids as $i => $id) {
+            $stmt->execute([':o' => $i, ':id' => (int)$id]);
+        }
+    }
+
     // ── 프로젝트/그룹에 "직접" 속한 일정 목록 ────────────────
     // 그룹이면 그룹 직속(별도) 일정만. 하위 프로젝트 소속 일정은 포함하지 않음
     // Memo checklist for a project/group: check state keyed by (project_id, item_txt).
