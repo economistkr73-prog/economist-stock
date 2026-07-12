@@ -62,6 +62,8 @@ function mh_ensure_table(PDO $pdo): void {
     ");
     // 기존 스크랩 테이블에도 그룹 컬럼 멱등 추가 (스크랩=0 / 유튜브=1 …)
     $pdo->exec("ALTER TABLE `tbl_mh_scrap` ADD COLUMN IF NOT EXISTS `grp` TINYINT NOT NULL DEFAULT 0 AFTER `id`");
+    // 완료(보관) 플래그 멱등 추가 — 체크 시 목록 맨 아래로 정렬
+    $pdo->exec("ALTER TABLE `tbl_mh_scrap` ADD COLUMN IF NOT EXISTS `kg` TINYINT NOT NULL DEFAULT 0 AFTER `ord_no`");
 }
 
 // ── 스크랩 탭 설정 (그룹별 독립 목록). key = mode 값 ──
@@ -97,31 +99,49 @@ mh_ensure_table($pdo);
 // ════════════════════════════════════════════════════════════
 if (isset($_GET['set_latest'])) {
     $url_dir = trim($_GET['url_dir'] ?? '');
-    $latest  = (int)($_GET['latest_no'] ?? 0);
+    $latest  = (int)($_GET['latest_no'] ?? 0);   // 본문 최댓값 = 최신화
+    $read    = (int)($_GET['read_no'] ?? 0);     // 제목 화수 = 지금 보고 있는(읽은) 화
     $wb      = (int)($_GET['wb'] ?? 0);       if (!isset(MH_TYPES[$wb])) $wb = 0;
     $url_no  = (int)($_GET['url_no'] ?? 0);
     $tit     = trim($_GET['tit'] ?? '');
 
-    // url_dir 로 기존 작품 존재 확인 (rowCount 는 값이 같으면 0이라 존재여부로 판단)
-    $exists = false;
+    // url_dir 로 기존 작품 조회
+    $row = null;
     if ($url_dir !== '') {
-        $c = $pdo->prepare("SELECT no FROM tbl_mh WHERE url_dir=:d LIMIT 1");
+        $c = $pdo->prepare("SELECT no, tit, latest_no FROM tbl_mh WHERE url_dir=:d LIMIT 1");
         $c->execute([':d' => $url_dir]);
-        $exists = (bool)$c->fetchColumn();
+        $row = $c->fetch(PDO::FETCH_ASSOC);
     }
 
     header('Content-Type: text/html; charset=utf-8');
 
-    if ($exists) {
-        // 이미 등록된 작품 → 최신화만 갱신
+    if ($row) {
+        // 등록된 작품. 북마클릿이 페이지 종류를 판정해 최신화(목록) 또는 읽은화(뷰어) 중 하나만 보낸다.
+        // 최신화는 목록 페이지가 authoritative → 그대로 덮어쓴다(재실행 시 항상 정정).
         if ($latest > 0) {
-            $st = $pdo->prepare("UPDATE tbl_mh SET latest_no=:l WHERE url_dir=:d");
-            $st->execute([':l' => $latest, ':d' => $url_dir]);
+            $st = $pdo->prepare("UPDATE tbl_mh SET latest_no = :l WHERE no=:no");
+            $st->execute([':l' => $latest, ':no' => (int)$row['no']]);
         }
-        echo "<!doctype html><meta charset=utf-8><body style='font:16px sans-serif;padding:24px;text-align:center'>"
-           . "<p>✓ 최신 {$latest}화 기록됨 (경로 " . htmlspecialchars($url_dir) . ")</p>"
+        if ($read > 0) {
+            $st = $pdo->prepare("UPDATE tbl_mh SET last_no=:r, uDate=CURDATE(), kg=0 WHERE no=:no");
+            $st->execute([':r' => $read, ':no' => (int)$row['no']]);
+        }
+        // 갱신 후 최종 최신화 재조회 (GREATEST 결과 반영)
+        $lt = (int)$pdo->query("SELECT latest_no FROM tbl_mh WHERE no=" . (int)$row['no'])->fetchColumn();
+        $eTitle = htmlspecialchars($row['tit'] ?: '(제목없음)');
+        $lines  = "<p style='font-size:18px'>✓ <b>{$eTitle}</b></p>";
+        if ($read > 0) {
+            $lines .= "<p>읽은 회차 <b>{$read}화</b>로 기록</p>";
+            if ($lt > 0) $lines .= ($read >= $lt)
+                ? "<p style='color:#27ae60;font-weight:700'>최신화까지 다 읽었습니다 👍</p>"
+                : "<p style='color:#e67e22'>최신 {$lt}화 기준 " . ($lt - $read) . "화 남음</p>";
+        } else {
+            $lines .= "<p>최신 <b>{$lt}화</b> 기록</p>";
+        }
+        echo "<!doctype html><meta charset=utf-8><body style='font:16px sans-serif;padding:24px;text-align:center;line-height:1.6'>"
+           . $lines
            . "<p style='color:#888;font-size:13px'>이 창은 잠시 후 닫힙니다.</p>"
-           . "<script>setTimeout(function(){window.close();},1300);</script></body>";
+           . "<script>setTimeout(function(){window.close();},1500);</script></body>";
         exit;
     }
 
@@ -153,6 +173,7 @@ button{flex:1;border:none;border-radius:6px;padding:10px;font-weight:700;cursor:
   <label>경로 (url_dir)</label><input id="url_dir" value="<?= $eDir ?>">
   <label>서버번호 (url_no)</label><input id="url_no" type="number" value="<?= (int)$url_no ?>">
   <label>최신화 (latest_no)</label><input id="latest_no" type="number" value="<?= (int)$latest ?>">
+  <label>읽은 회차 (last_no)</label><input id="last_no" type="number" value="<?= (int)$read ?>">
   <div class="foot">
     <button class="no" onclick="window.close()">취소</button>
     <button class="ok" onclick="reg()">등록</button>
@@ -168,6 +189,7 @@ async function reg(){
     url_dir: g('url_dir').value.trim(),
     url_no: parseInt(g('url_no').value)||0,
     latest_no: parseInt(g('latest_no').value)||0,
+    last_no: parseInt(g('last_no').value)||0,
   };
   if(!p.tit){ alert('제목을 입력하세요'); return; }
   if(!p.url_dir){ alert('경로(url_dir)를 입력하세요'); return; }
@@ -202,13 +224,14 @@ if ($action !== '') {
                 $maxOrd = (int)$pdo->query("SELECT COALESCE(MAX(ord_no),0) FROM tbl_mh")->fetchColumn();
                 $st = $pdo->prepare(
                     "INSERT INTO tbl_mh (tit, wb, url_no, url_dir, ord_no, last_no, latest_no, uDate, kg)
-                     VALUES (:tit, :wb, :url_no, :url_dir, :ord, 0, :latest, CURDATE(), 0)");
+                     VALUES (:tit, :wb, :url_no, :url_dir, :ord, :last, :latest, CURDATE(), 0)");
                 $st->execute([
                     ':tit'     => trim($in['tit'] ?? ''),
                     ':wb'      => $wb,
                     ':url_no'  => (int)($in['url_no'] ?? 0),
                     ':url_dir' => trim($in['url_dir'] ?? ''),
                     ':ord'     => $maxOrd + 1,
+                    ':last'    => (int)($in['last_no'] ?? 0),
                     ':latest'  => (int)($in['latest_no'] ?? 0),
                 ]);
                 break;
@@ -308,6 +331,12 @@ if ($action !== '') {
                 break;
             }
 
+            case 'scrap_toggle_kg': {   // 완료 토글 → 목록 맨 아래로
+                $st = $pdo->prepare("UPDATE tbl_mh_scrap SET kg = 1 - kg WHERE id=:id");
+                $st->execute([':id' => (int)($in['id'] ?? 0)]);
+                break;
+            }
+
             // ── 드래그 순서 저장: 넘어온 id 순서대로 ord_no 재부여 ──
             case 'reorder': {          // 연재추적기 (tbl_mh)
                 $ids = $in['ids'] ?? [];
@@ -348,7 +377,7 @@ $scrapCfg = MH_SCRAP_TABS[$mode] ?? null;   // 스크랩 계열이면 설정, �
 
 // 북마클릿(연재추적기 탭에서 안내)
 $bookmarklet = <<<'BM'
-javascript:(function(){var m=location.pathname.match(/\/([a-z]+)\/(\d+)/);if(!m){alert('작품 회차목록 페이지에서 실행하세요');return;}var seg=m[1],d=m[2];var wb=(seg==='novel')?1:((seg==='mana'||seg==='comic')?2:((seg==='anime')?3:0));var hn=(location.hostname.match(/(\d+)/)||[])[1]||'';var t=document.body.innerText,re=/(\d{1,4})[화회]/g,mx=0,x;while((x=re.exec(t))!==null){var v=parseInt(x[1],10);if(v>mx)mx=v;}if(!mx){alert('화수를 찾지 못했습니다');return;}var tit=(document.title||'').replace(/\s*[-|:｜].*$/,'').trim();var u='https://economist.kr/mh.php?set_latest=1&url_dir='+d+'&latest_no='+mx+'&wb='+wb+'&url_no='+hn+'&tit='+encodeURIComponent(tit);window.open(u,'_blank');})();
+javascript:(function(){var segs=location.pathname.split('/').filter(Boolean);if(segs.length<2||!/^\d+$/.test(segs[1])){alert('작품 페이지에서 실행하세요');return;}var seg=segs[0],d=segs[1];var wb=(seg==='novel')?1:((seg==='mana'||seg==='comic')?2:((seg==='anime')?3:0));var hn=(location.hostname.match(/(\d+)/)||[])[1]||'';var tit=(document.title||'').replace(/\s*[-|:｜].*$/,'').trim();var base='https://economist.kr/mh.php?set_latest=1&url_dir='+d+'&wb='+wb+'&url_no='+hn+'&tit='+encodeURIComponent(tit);var x;if(segs.length>=3){var last=segs[segs.length-1],nums=last.match(/\d+/g)||[],cur=nums.length?parseInt(nums[nums.length-1],10):0;if(!cur){var rt=/(\d{1,4})[화회]/g,tt=document.title||'';while((x=rt.exec(tt))!==null){cur=parseInt(x[1],10);}}if(!cur){alert('현재 화수를 찾지 못했습니다');return;}window.open(base+'&read_no='+cur,'_blank');}else{var t=document.body.innerText,rb=/(\d{1,4})[화회]/g,mx=0;while((x=rb.exec(t))!==null){var v=parseInt(x[1],10);if(v>mx)mx=v;}if(!mx){alert('최신 화수를 찾지 못했습니다');return;}window.open(base+'&latest_no='+mx,'_blank');}})();
 BM;
 
 if ($mode === 'list') {
@@ -371,7 +400,7 @@ if ($mode === 'list') {
     $statOverdue = count(array_filter($rows, fn($r) => $r['_days'] >= 7));
     $statBehind  = count(array_filter($rows, fn($r) => (int)($r['latest_no'] ?? 0) > (int)$r['last_no']));
 } else {
-    $st = $pdo->prepare("SELECT * FROM tbl_mh_scrap WHERE grp=:g ORDER BY ord_no, id");
+    $st = $pdo->prepare("SELECT * FROM tbl_mh_scrap WHERE grp=:g ORDER BY kg ASC, ord_no, id");
     $st->execute([':g' => $scrapCfg['grp']]);
     $scraps = $st->fetchAll(PDO::FETCH_ASSOC);
 }
@@ -469,6 +498,20 @@ details.help code{background:#eef2f5;padding:1px 5px;border-radius:4px;font-size
 .modal .genres label{display:flex;align-items:center;gap:5px;font-weight:600;cursor:pointer;font-size:14px}
 .modal .foot{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
 
+/* 숫자판(키패드) 모달 */
+.kp{max-width:320px}
+.kp .ctx{text-align:center;font-size:13px;color:#95a5a6;margin:-6px 0 10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kp .disp{font-size:42px;font-weight:800;text-align:center;padding:12px;background:#f4f7f9;border-radius:10px;margin-bottom:10px;letter-spacing:1px;min-height:70px;line-height:1}
+.kp .disp .u{font-size:20px;color:#95a5a6;font-weight:700;margin-left:2px}
+.kp .steps{display:flex;gap:8px;margin-bottom:10px}
+.kp .steps button{flex:1;font-size:16px;font-weight:700;padding:11px 0;border:1px solid #e1e7eb;border-radius:9px;background:#fff;cursor:pointer;transition:.1s}
+.kp .steps button:hover{background:#eef2f5}.kp .steps button:active{transform:scale(.97)}
+.kp .steps button.latest{color:#e67e22;border-color:#f0c9a3}
+.kp .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.kp .grid button{font-size:23px;font-weight:700;padding:15px 0;border:1px solid #e1e7eb;border-radius:10px;background:#fff;cursor:pointer;transition:.1s}
+.kp .grid button:hover{background:#eef2f5}.kp .grid button:active{transform:scale(.96);background:#e3ebf0}
+.kp .grid button.util{background:#f4f7f9;font-size:19px;color:#5b6b78}
+
 @media (max-width:640px){
   .card{flex-wrap:wrap;gap:8px}
   .main{flex-basis:100%;order:-1}
@@ -503,7 +546,7 @@ details.help code{background:#eef2f5;padding:1px 5px;border-radius:4px;font-size
   <?php else: ?>
   <div class="list" id="scrapList">
     <?php foreach ($scraps as $s): ?>
-    <div class="card" draggable="true" data-id="<?= (int)$s['id'] ?>">
+    <div class="card <?= !empty($s['kg']) ? 'kg' : '' ?>" draggable="true" data-id="<?= (int)$s['id'] ?>">
       <span class="drag" title="드래그해서 순서변경">⠿</span>
       <div class="main">
         <span class="tit" onclick="openScrap(<?= (int)$s['id'] ?>,'<?= htmlspecialchars($s['url'], ENT_QUOTES) ?>')"><?= htmlspecialchars($s['tit']) ?> ↗</span>
@@ -513,6 +556,7 @@ details.help code{background:#eef2f5;padding:1px 5px;border-radius:4px;font-size
         <span class="scrap-state" id="st_<?= (int)$s['id'] ?>">● 열림</span>
         <button class="btn btn-outline btn-sm" onclick="openScrap(<?= (int)$s['id'] ?>,'<?= htmlspecialchars($s['url'], ENT_QUOTES) ?>')">열기</button>
         <button class="icon" title="열린 팝업 닫기" onclick="closeScrap(<?= (int)$s['id'] ?>)">✖</button>
+        <button class="icon" title="<?= !empty($s['kg']) ? '보관 해제' : '완결/보관' ?>" onclick="scrapToggleKg(<?= (int)$s['id'] ?>)"><?= !empty($s['kg']) ? '📌' : '📎' ?></button>
         <button class="icon" title="삭제" onclick="delScrap(<?= (int)$s['id'] ?>,'<?= htmlspecialchars(addslashes($s['tit']), ENT_QUOTES) ?>')">🗑️</button>
       </div>
     </div>
@@ -543,17 +587,20 @@ details.help code{background:#eef2f5;padding:1px 5px;border-radius:4px;font-size
   </div>
 
   <details class="help">
-    <summary>🔖 최신화 자동 확인 북마클릿 — 사용법</summary>
+    <summary>🔖 최신화·읽은 회차 북마클릿 — 사용법</summary>
     <div class="body">
       사이트는 Cloudflare로 서버 크롤링(외부 요청)을 막습니다. 그래서 <b>이미 그 사이트가 열리는 회원님 브라우저</b>에서
-      최신 화수를 읽어오는 방식이 가장 확실합니다.
+      화수를 읽어오는 방식이 가장 확실합니다. 버튼 하나로 <b>지금 있는 페이지에 맞춰</b> 최신화 또는 읽은 회차를 기록합니다.
       <ol style="margin:8px 0 8px 18px">
         <li>아래 보라색 버튼을 <b>브라우저 즐겨찾기(북마크바)로 드래그</b>해서 등록하세요.</li>
-        <li>작품의 <b>회차 목록 페이지</b>(예: <code>toki30.com/webtoon/776255</code>)를 연 상태에서</li>
-        <li>등록한 북마크를 <b>클릭</b>하면 그 페이지의 최신 화수가 자동으로 이 추적기에 기록됩니다.</li>
+        <li><b>회차 목록 페이지</b>(예: <code>toki30.com/webtoon/807393</code>)에서 누르면 → <b>최신화</b>만 기록됩니다.</li>
+        <li><b>한 화를 보는 중</b>(예: <code>…/807393/nv-807393-73</code>)에 누르면 → 그 화(73)가 <b>읽은 회차</b>로 기록됩니다. (최신화는 안 건드림)</li>
       </ol>
-      <a class="bm-link" href="<?= htmlspecialchars($bookmarklet, ENT_QUOTES) ?>" onclick="alert('클릭이 아니라, 이 버튼을 브라우저 북마크바로 드래그해서 등록하세요.');return false;">📌 최신화 가져오기 (mh)</a>
-      <div style="color:#95a5a6">※ 작품은 경로(url_dir)로 매칭됩니다. <b>등록된 작품이면 최신화가 갱신</b>되고, <b>없는 작품이면 등록 폼</b>이 떠서 바로 추가할 수 있습니다.</div>
+      <a class="bm-link" href="<?= htmlspecialchars($bookmarklet, ENT_QUOTES) ?>" onclick="alert('클릭이 아니라, 이 버튼을 브라우저 북마크바로 드래그해서 등록하세요.');return false;">📌 화수 가져오기 (mh)</a>
+      <div style="color:#95a5a6">
+        ※ 작품은 경로(url_dir)로 매칭됩니다. 기록 후 뜨는 창에 <b>작품 제목·화수</b>가 표시되니 맞게 저장됐는지 바로 확인할 수 있어요.
+        최신화는 <b>목록 페이지</b>가 기준이라 목록에서 다시 누르면 정확한 값으로 갱신됩니다. <b>없는 작품이면 등록 폼</b>이 떠서 바로 추가할 수 있습니다.
+      </div>
     </div>
   </details>
 
@@ -589,7 +636,7 @@ details.help code{background:#eef2f5;padding:1px 5px;border-radius:4px;font-size
         <?php endif; ?>
         <div class="sub"><?= htmlspecialchars($r['url_dir']) ?> · 서버<?= (int)$r['url_no'] ?></div>
       </div>
-      <div class="chap" onclick="readChap(<?= (int)$r['no'] ?>,<?= (int)$r['last_no'] ?>)" title="읽은 화수 갱신">
+      <div class="chap" onclick="readChap(<?= (int)$r['no'] ?>,<?= (int)$r['last_no'] ?>,'<?= htmlspecialchars(addslashes($r['tit']), ENT_QUOTES) ?>',<?= $latest ?>)" title="읽은 화수 갱신">
         <div class="n"><?= (int)$r['last_no'] ?></div><div class="l">읽음</div>
       </div>
       <div class="behind" onclick="setLatest(<?= (int)$r['no'] ?>,<?= $latest ?>)" title="최신화 수동 입력">
@@ -629,6 +676,38 @@ details.help code{background:#eef2f5;padding:1px 5px;border-radius:4px;font-size
     <div class="foot">
       <button class="btn btn-outline" onclick="closeModal()">취소</button>
       <button class="btn btn-primary" onclick="saveModal()">저장</button>
+    </div>
+  </div>
+</div>
+
+<!-- 읽은 화수 숫자판(키패드) 모달 -->
+<div class="modal-bg" id="kpBg" onclick="if(event.target===this)closeKp()">
+  <div class="modal kp">
+    <h2>읽은 화수 입력</h2>
+    <div class="ctx" id="kpCtx"></div>
+    <div class="disp"><span id="kpNum">0</span><span class="u">화</span></div>
+    <div class="steps">
+      <button onclick="kpStep(-1)">－1</button>
+      <button onclick="kpStep(1)">＋1</button>
+      <button class="latest" id="kpLatestBtn" onclick="kpLatest()">최신으로</button>
+    </div>
+    <div class="grid">
+      <button onclick="kpDigit('1')">1</button>
+      <button onclick="kpDigit('2')">2</button>
+      <button onclick="kpDigit('3')">3</button>
+      <button onclick="kpDigit('4')">4</button>
+      <button onclick="kpDigit('5')">5</button>
+      <button onclick="kpDigit('6')">6</button>
+      <button onclick="kpDigit('7')">7</button>
+      <button onclick="kpDigit('8')">8</button>
+      <button onclick="kpDigit('9')">9</button>
+      <button class="util" onclick="kpClear()">C</button>
+      <button onclick="kpDigit('0')">0</button>
+      <button class="util" onclick="kpBack()">←</button>
+    </div>
+    <div class="foot">
+      <button class="btn btn-outline" onclick="closeKp()">취소</button>
+      <button class="btn btn-primary" onclick="kpSave()">저장</button>
     </div>
   </div>
 </div>
@@ -707,15 +786,33 @@ function delScrap(id,tit){
   if(!confirm('스크랩 “'+tit+'” 삭제할까요?')) return;
   reloadIf({action:'scrap_del', id});
 }
+function scrapToggleKg(id){ reloadIf({action:'scrap_toggle_kg', id}); }
 
 /* ── 연재 목록 ── */
 function move(no,dir){ reloadIf({action:'move',no,dir}); }
 function toggleKg(no){ reloadIf({action:'toggle_kg',no}); }
-async function readChap(no,cur){
-  const v = prompt('마지막으로 본 화수', (parseInt(cur)||0)+1);
-  if(v===null) return;
-  reloadIf({action:'update_chapter',no,last_no:parseInt(v)||0});
+/* ── 읽은 화수 숫자판(키패드) ── */
+let _kp = { no:0, val:0, latest:0, touched:false };
+function readChap(no,cur,tit,latest){
+  _kp = { no, val:parseInt(cur)||0, latest:parseInt(latest)||0, touched:false };
+  document.getElementById('kpCtx').textContent =
+    (tit||'') + (_kp.latest>0 ? ' · 최신 '+_kp.latest+'화' : '');
+  document.getElementById('kpLatestBtn').style.display = _kp.latest>0 ? '' : 'none';
+  kpRender();
+  document.getElementById('kpBg').classList.add('on');
 }
+function kpRender(){ document.getElementById('kpNum').textContent = _kp.val; }
+function kpDigit(d){
+  if(!_kp.touched){ _kp.val = 0; _kp.touched = true; }   // 첫 입력은 기존값 덮어쓰기
+  _kp.val = Math.min(9999, _kp.val*10 + parseInt(d));
+  kpRender();
+}
+function kpBack(){ _kp.touched=true; _kp.val = Math.floor(_kp.val/10); kpRender(); }
+function kpClear(){ _kp.touched=true; _kp.val = 0; kpRender(); }
+function kpStep(n){ _kp.touched=true; _kp.val = Math.max(0, _kp.val + n); kpRender(); }
+function kpLatest(){ if(_kp.latest>0){ _kp.touched=true; _kp.val=_kp.latest; kpRender(); } }
+function closeKp(){ document.getElementById('kpBg').classList.remove('on'); }
+function kpSave(){ closeKp(); reloadIf({action:'update_chapter',no:_kp.no,last_no:_kp.val}); }
 function setLatest(no,cur){
   const v = prompt('최신 화수 (사이트에서 확인한 최근 화)', cur||'');
   if(v===null) return;
@@ -761,7 +858,19 @@ async function saveModal(){
   if(!payload.tit){ alert('타이틀을 입력하세요'); return; }
   reloadIf(payload);
 }
-document.addEventListener('keydown', e => { if(e.key==='Escape') closeModal(); });
+document.addEventListener('keydown', e => {
+  const kpBg = document.getElementById('kpBg');
+  if(kpBg && kpBg.classList.contains('on')){
+    if(e.key==='Escape'){ closeKp(); }
+    else if(e.key>='0' && e.key<='9'){ kpDigit(e.key); e.preventDefault(); }
+    else if(e.key==='Backspace'){ kpBack(); e.preventDefault(); }
+    else if(e.key==='Enter'){ kpSave(); e.preventDefault(); }
+    else if(e.key==='+'){ kpStep(1); }
+    else if(e.key==='-'){ kpStep(-1); }
+    return;
+  }
+  if(e.key==='Escape') closeModal();
+});
 
 /* ── 드래그 순서변경 ── */
 function initDrag(sel, action){
