@@ -1,0 +1,298 @@
+<?php
+/**
+ * BankXls.class — 은행 거래내역 파일(.xls BIFF8 / HTML표 위장 .xls)을 파싱해
+ * 정규화된 거래 행 배열로 돌려준다. 외부 라이브러리(PhpSpreadsheet/SheetJS) 없이 순수 PHP.
+ *
+ * 반환 행 형식:
+ *   ['no'=>?, 'datetime'=>'2026.06.25 20:25:09', 'date'=>'2026-06-25',
+ *    'counterparty'=>'박성윤301', 'withdraw'=>0, 'deposit'=>575000, 'balance'=>..,
+ *    'jeokyo'=>'전자금융', 'branch'=>'농협']
+ *
+ * 현재 지원: 우리은행 BIFF8(.xls). 헤더 키워드 매칭이라 컬럼 순서가 달라도 대응.
+ * .xlsx(zip)는 미지원(서버 zip 확장 불확실) — 필요 시 추가.
+ */
+class BankXls {
+
+    /** @return array{rows: array, meta: array, format: string} */
+    public function parse(string $bytes): array {
+        $sig4 = substr($bytes, 0, 4);
+        if (substr($bytes, 0, 8) === "\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1") {
+            $grid = $this->parseBiff($bytes);
+            return $this->interpret($grid, 'xls');
+        }
+        // HTML 표로 위장한 .xls (일부 은행)
+        $head = ltrim($bytes);
+        if (stripos($head, '<html') !== false || stripos($head, '<table') !== false) {
+            $grid = $this->parseHtmlTable($bytes);
+            return $this->interpret($grid, 'html');
+        }
+        // CSV 폴백
+        if (strpos($bytes, ',') !== false && strpos($bytes, "\n") !== false) {
+            $grid = $this->parseCsv($bytes);
+            return $this->interpret($grid, 'csv');
+        }
+        throw new RuntimeException('지원하지 않는 파일 형식입니다. 은행에서 엑셀(.xls)로 다운로드해 주세요.');
+    }
+
+    // ==========================================================
+    // 공통: UTF-16LE 디코드 (mbstring 우선, iconv 폴백)
+    // ==========================================================
+    private function dec16(string $raw): string {
+        if (function_exists('mb_convert_encoding')) return mb_convert_encoding($raw, 'UTF-8', 'UTF-16LE');
+        if (function_exists('iconv'))               return (string)iconv('UTF-16LE', 'UTF-8//IGNORE', $raw);
+        // 수동: 하위 바이트만 (ASCII 한정) — 최후 폴백
+        $out=''; for($i=0;$i+1<strlen($raw);$i+=2){ $out.=$raw[$i]; } return $out;
+    }
+    private function dec8bit(string $raw): string {
+        if (function_exists('mb_convert_encoding')) return mb_convert_encoding($raw, 'UTF-8', 'ISO-8859-1');
+        if (function_exists('iconv'))               return (string)iconv('ISO-8859-1', 'UTF-8//IGNORE', $raw);
+        return $raw;
+    }
+
+    // ==========================================================
+    // BIFF8 (.xls) — OLE2 컨테이너 + BIFF 레코드
+    // ==========================================================
+    private function u16(string $s, int $o): int { return unpack('v', substr($s, $o, 2))[1]; }
+    private function u32(string $s, int $o): int { return unpack('V', substr($s, $o, 4))[1]; }
+
+    /** @return array<int,array<int,mixed>> [row][col] => value */
+    private function parseBiff(string $data): array {
+        $secSize = 1 << $this->u16($data, 30);
+        $miniSize = 1 << $this->u16($data, 32);
+        $dirStart = $this->u32($data, 48);
+        $miniCut  = $this->u32($data, 56);
+        $miniFatStart = $this->u32($data, 60);
+        $difatStart   = $this->u32($data, 68);
+        $numDifat     = $this->u32($data, 72);
+
+        $sector = fn(int $n) => substr($data, 512 + $n * $secSize, $secSize);
+
+        // DIFAT
+        $difat = [];
+        for ($i = 0; $i < 109; $i++) { $v = $this->u32($data, 76 + $i*4); if ($v == 0xFFFFFFFF) break; $difat[] = $v; }
+        $ds = $difatStart;
+        for ($k = 0; $k < $numDifat && $ds != 0xFFFFFFFF && $ds != 0xFFFFFFFE; $k++) {
+            $sec = $sector($ds); $cnt = intdiv($secSize, 4) - 1;
+            for ($i = 0; $i < $cnt; $i++) { $v = $this->u32($sec, $i*4); if ($v != 0xFFFFFFFF) $difat[] = $v; }
+            $ds = $this->u32($sec, $cnt*4);
+        }
+        // FAT
+        $fat = [];
+        foreach ($difat as $fs) { $sec = $sector($fs); for ($i = 0; $i < intdiv($secSize,4); $i++) $fat[] = $this->u32($sec, $i*4); }
+
+        $chain = function(int $start) use ($fat) {
+            $out = []; $s = $start; $g = 0;
+            while ($s != 0xFFFFFFFE && $s != 0xFFFFFFFF && $g++ < 1000000) { $out[] = $s; $s = $fat[$s] ?? 0xFFFFFFFE; }
+            return $out;
+        };
+        $readFat = function(int $start, int $size) use ($chain, $sector) {
+            $b = ''; foreach ($chain($start) as $s) $b .= $sector($s); return substr($b, 0, $size);
+        };
+
+        // Directory
+        $dirBytes = ''; foreach ($chain($dirStart) as $s) $dirBytes .= $sector($s);
+        $entries = []; $rootStart = 0;
+        for ($o = 0; $o + 128 <= strlen($dirBytes); $o += 128) {
+            $nameLen = $this->u16($dirBytes, $o + 64); if ($nameLen < 2) continue;
+            $name = $this->dec16(substr($dirBytes, $o, $nameLen - 2));
+            $type = ord($dirBytes[$o + 66]);
+            $start = $this->u32($dirBytes, $o + 116); $size = $this->u32($dirBytes, $o + 120);
+            $entries[] = compact('name', 'type', 'start', 'size');
+            if ($type == 5) $rootStart = $start;
+        }
+        // mini stream + miniFAT
+        $miniStream = ''; foreach ($chain($rootStart) as $s) $miniStream .= $sector($s);
+        $miniFat = [];
+        if ($miniFatStart != 0xFFFFFFFE) foreach ($chain($miniFatStart) as $s) { $sec = $sector($s); for ($i = 0; $i < intdiv($secSize,4); $i++) $miniFat[] = $this->u32($sec, $i*4); }
+        $readMini = function(int $start, int $size) use ($miniStream, $miniSize, $miniFat) {
+            $b = ''; $s = $start; $g = 0;
+            while ($s != 0xFFFFFFFE && $s != 0xFFFFFFFF && $g++ < 1000000) { $b .= substr($miniStream, $s*$miniSize, $miniSize); $s = $miniFat[$s] ?? 0xFFFFFFFE; }
+            return substr($b, 0, $size);
+        };
+
+        // Workbook / Book 스트림
+        $wb = null;
+        foreach ($entries as $e) {
+            if ($e['type'] == 2 && preg_match('/^(Workbook|Book)$/i', $e['name'])) {
+                $wb = $e['size'] < $miniCut ? $readMini($e['start'], $e['size']) : $readFat($e['start'], $e['size']);
+                break;
+            }
+        }
+        if ($wb === null) throw new RuntimeException('엑셀 워크북 스트림을 찾을 수 없습니다.');
+
+        // BIFF 레코드 파싱
+        $recs = []; $p = 0; $n = strlen($wb);
+        while ($p + 4 <= $n) { $rec = $this->u16($wb, $p); $len = $this->u16($wb, $p+2); $recs[] = [$rec, substr($wb, $p+4, $len)]; $p += 4 + $len; }
+
+        $SST = $this->buildSst($recs);
+
+        $cells = [];
+        foreach ($recs as [$rec, $pl]) {
+            switch ($rec) {
+                case 0x0203: // NUMBER
+                    $cells[$this->u16($pl,0)][$this->u16($pl,2)] = unpack('d', substr($pl,6,8))[1]; break;
+                case 0x027E: // RK
+                    $cells[$this->u16($pl,0)][$this->u16($pl,2)] = $this->rkNum($this->u32($pl,6)); break;
+                case 0x00BD: // MULRK
+                    $row = $this->u16($pl,0); $c0 = $this->u16($pl,2); $cnt = (strlen($pl)-6)/6;
+                    for ($i = 0; $i < $cnt; $i++) $cells[$row][$c0+$i] = $this->rkNum($this->u32($pl, 4 + $i*6 + 2));
+                    break;
+                case 0x00FD: // LABELSST
+                    $cells[$this->u16($pl,0)][$this->u16($pl,2)] = $SST[$this->u32($pl,6)] ?? ''; break;
+                case 0x0204: // LABEL
+                    $row = $this->u16($pl,0); $col = $this->u16($pl,2); $cc = $this->u16($pl,6); $fl = ord($pl[8]); $raw = substr($pl,9);
+                    $cells[$row][$col] = ($fl & 1) ? $this->dec16(substr($raw,0,$cc*2)) : $this->dec8bit(substr($raw,0,$cc));
+                    break;
+            }
+        }
+        ksort($cells);
+        return $cells;
+    }
+
+    private function rkNum(int $rk): float {
+        $isInt = $rk & 0x02; $div = $rk & 0x01; $v = $rk & 0xFFFFFFFC;
+        if ($isInt) { $n = $v >> 2; if ($n & 0x20000000) $n -= 0x40000000; }
+        else { $n = unpack('d', pack('V', 0) . pack('V', $v))[1]; }
+        if ($div) $n /= 100; return (float)$n;
+    }
+
+    /** SST(0x00FC) + CONTINUE(0x003C) 경계에서 문자폭 플래그 재읽기 처리 */
+    private function buildSst(array $recs): array {
+        $sst = [];
+        $idx = null;
+        foreach ($recs as $i => $r) { if ($r[0] == 0x00FC) { $idx = $i; break; } }
+        if ($idx === null) return $sst;
+
+        $chunks = [$recs[$idx][1]];
+        for ($j = $idx + 1; $j < count($recs); $j++) { if ($recs[$j][0] == 0x003C) $chunks[] = $recs[$j][1]; else break; }
+
+        $ci = 0; $co = 8; $cur = $chunks[0]; // total(4)+unique(4) 건너뜀
+        $rd = function(int $len) use (&$ci, &$co, &$cur, &$chunks) {
+            $out = '';
+            while ($len > 0) {
+                $avail = strlen($cur) - $co;
+                if ($avail <= 0) { $ci++; if (!isset($chunks[$ci])) return $out; $cur = $chunks[$ci]; $co = 0; continue; }
+                $take = min($len, $avail); $out .= substr($cur, $co, $take); $co += $take; $len -= $take;
+            }
+            return $out;
+        };
+        $unique = $this->u32($chunks[0], 4);
+        for ($s = 0; $s < $unique; $s++) {
+            $r2 = $rd(2); if (strlen($r2) < 2) break;
+            $cc = unpack('v', $r2)[1];
+            $flags = ord($rd(1));
+            $rich = ($flags & 0x08) ? unpack('v', $rd(2))[1] : 0;
+            $ext  = ($flags & 0x04) ? unpack('V', $rd(4))[1] : 0;
+            $wide = $flags & 0x01;
+            $str = ''; $left = $cc;
+            while ($left > 0) {
+                if ($co >= strlen($cur)) { $ci++; if (!isset($chunks[$ci])) break; $cur = $chunks[$ci]; $co = 0; $wide = ord($rd(1)) & 0x01; }
+                $availChars = strlen($cur) - $co; if ($availChars <= 0) continue;
+                if ($wide) { $t = min($left, intdiv($availChars, 2)); $str .= $this->dec16(substr($cur, $co, $t*2)); $co += $t*2; $left -= $t; }
+                else       { $t = min($left, $availChars); $str .= $this->dec8bit(substr($cur, $co, $t)); $co += $t; $left -= $t; }
+            }
+            if ($rich) $rd($rich * 4);
+            if ($ext)  $rd($ext);
+            $sst[] = $str;
+        }
+        return $sst;
+    }
+
+    // ==========================================================
+    // HTML 표 위장 .xls
+    // ==========================================================
+    private function parseHtmlTable(string $bytes): array {
+        // 인코딩 추정: EUC-KR 흔함
+        if (function_exists('mb_detect_encoding')) {
+            $enc = mb_detect_encoding($bytes, ['UTF-8', 'EUC-KR', 'CP949'], true);
+            if ($enc && strtoupper($enc) !== 'UTF-8') $bytes = mb_convert_encoding($bytes, 'UTF-8', $enc);
+        }
+        $prev = libxml_use_internal_errors(true);
+        $doc = new DOMDocument();
+        $doc->loadHTML('<?xml encoding="UTF-8">' . $bytes);
+        libxml_clear_errors(); libxml_use_internal_errors($prev);
+
+        $grid = []; $r = 0;
+        foreach ($doc->getElementsByTagName('tr') as $tr) {
+            $rowCells = [];
+            foreach ($tr->childNodes as $td) {
+                if (!in_array(strtolower($td->nodeName), ['td', 'th'], true)) continue;
+                $rowCells[] = trim(preg_replace('/\s+/', ' ', $td->textContent));
+            }
+            if ($rowCells) { $grid[$r] = $rowCells; $r++; }
+        }
+        return $grid;
+    }
+
+    private function parseCsv(string $bytes): array {
+        if (function_exists('mb_detect_encoding')) {
+            $enc = mb_detect_encoding($bytes, ['UTF-8', 'EUC-KR', 'CP949'], true);
+            if ($enc && strtoupper($enc) !== 'UTF-8') $bytes = mb_convert_encoding($bytes, 'UTF-8', $enc);
+        }
+        $grid = []; $r = 0;
+        foreach (preg_split('/\r\n|\r|\n/', $bytes) as $line) {
+            if ($line === '') continue;
+            $grid[$r] = str_getcsv($line); $r++;
+        }
+        return $grid;
+    }
+
+    // ==========================================================
+    // 그리드 → 정규화된 거래 행
+    // ==========================================================
+    private function interpret(array $grid, string $format): array {
+        // 헤더 행 탐지: '거래일시/거래일자' 와 '입금' 을 동시에 가진 행
+        $headerRow = null; $headers = [];
+        foreach ($grid as $ri => $row) {
+            $joined = implode('|', array_map('strval', $row));
+            if (preg_match('/거래(일시|일자|일)/u', $joined) && preg_match('/입금/u', $joined)) {
+                $headerRow = $ri; $headers = array_map('strval', $row); break;
+            }
+        }
+        if ($headerRow === null) throw new RuntimeException('거래내역 헤더(거래일시/입금액)를 찾을 수 없습니다. 지원하지 않는 은행 양식일 수 있습니다.');
+
+        // 컬럼 인덱스 매핑 (키워드 기반)
+        $col = ['date'=>null,'counterparty'=>null,'withdraw'=>null,'deposit'=>null,'balance'=>null,'jeokyo'=>null,'no'=>null,'branch'=>null];
+        foreach ($headers as $ci => $h) {
+            $h = (string)$h;
+            if ($col['date']===null       && preg_match('/거래(일시|일자|일)|일자|날짜/u', $h)) $col['date']=$ci;
+            elseif ($col['counterparty']===null && preg_match('/보낸분|받는분|의뢰인|수취인|상대|보낸|받는|내용|기재/u', $h)) $col['counterparty']=$ci;
+            elseif ($col['withdraw']===null && preg_match('/출금|지급|찾으신/u', $h)) $col['withdraw']=$ci;
+            elseif ($col['deposit']===null  && preg_match('/입금|맡기신/u', $h)) $col['deposit']=$ci;
+            elseif ($col['balance']===null  && preg_match('/잔액|거래후/u', $h)) $col['balance']=$ci;
+            elseif ($col['jeokyo']===null   && preg_match('/적요|거래구분|구분/u', $h)) $col['jeokyo']=$ci;
+            elseif ($col['no']===null       && preg_match('/^\s*No\.?\s*$|순번|번호/ui', $h)) $col['no']=$ci;
+            elseif ($col['branch']===null   && preg_match('/처리점|취급점/u', $h)) $col['branch']=$ci;
+        }
+        if ($col['date']===null || $col['deposit']===null || $col['counterparty']===null) {
+            throw new RuntimeException('필수 컬럼(거래일시·입금액·보낸분)을 식별하지 못했습니다.');
+        }
+
+        $rows = [];
+        $get = fn($row,$i) => ($i!==null && isset($row[$i])) ? (string)$row[$i] : '';
+        $toInt = function($v){ $v=preg_replace('/[^\d\-]/','', (string)$v); return $v===''||$v==='-' ? 0 : (int)$v; };
+
+        foreach ($grid as $ri => $row) {
+            if ($ri <= $headerRow) continue;
+            $dt = trim($get($row, $col['date']));
+            if ($dt==='') continue;
+            // 날짜 파싱: 2026.06.25 20:25:09 / 2026-06-25 / 2026/06/25
+            if (!preg_match('/(\d{4})[.\-\/](\d{1,2})[.\-\/](\d{1,2})/', $dt, $m)) continue;
+            $date = sprintf('%04d-%02d-%02d', $m[1], $m[2], $m[3]);
+
+            $rows[] = [
+                'no'           => trim($get($row, $col['no'])),
+                'datetime'     => $dt,
+                'date'         => $date,
+                'counterparty' => trim($get($row, $col['counterparty'])),
+                'withdraw'     => $toInt($get($row, $col['withdraw'])),
+                'deposit'      => $toInt($get($row, $col['deposit'])),
+                'balance'      => $toInt($get($row, $col['balance'])),
+                'jeokyo'       => trim($get($row, $col['jeokyo'])),
+                'branch'       => trim($get($row, $col['branch'])),
+            ];
+        }
+        return ['rows' => $rows, 'meta' => ['columns' => $col, 'header_row' => $headerRow], 'format' => $format];
+    }
+}
+?>

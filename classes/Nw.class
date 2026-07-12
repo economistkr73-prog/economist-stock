@@ -95,6 +95,11 @@ class Nw {
                 FOREIGN KEY (contract_id) REFERENCES nw_contract(id) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         ");
+
+        // 실제 퇴거일(묵시적갱신·중도해지 등 계약서 만료일과 다른 실제 종료). 멱등 추가.
+        $this->pdo->exec("ALTER TABLE nw_contract ADD COLUMN IF NOT EXISTS move_out_date DATE DEFAULT NULL AFTER contract_end_date");
+        // 귀속월(YYYY-MM): 납부일과 별개로 "어느 달 것"인지 — 늦은/선납 처리
+        $this->pdo->exec("ALTER TABLE nw_payment ADD COLUMN IF NOT EXISTS bill_ym VARCHAR(7) DEFAULT NULL AFTER pay_date");
     }
 
     // ==========================================================
@@ -213,6 +218,7 @@ class Nw {
             ':balance_amount'      => $this->num($d['balance_amount'] ?? null),
             ':balance_date'        => $d['balance_date'] ?: null,
             ':contract_end_date'   => $d['contract_end_date'] ?: null,
+            ':move_out_date'       => $d['move_out_date'] ?: null,
             ':rent_fee'            => $this->num($d['rent_fee'] ?? null),
             ':maintenance_fee'     => $this->num($d['maintenance_fee'] ?? null),
             ':rent_pay_day'        => ($d['rent_pay_day'] ?? '') !== '' ? (int)$d['rent_pay_day'] : null,
@@ -229,7 +235,7 @@ class Nw {
                 (room_id, status, contract_type, tenant_name, tenant_ssn, tenant_phone,
                  co_tenant_name, co_tenant_ssn, co_tenant_phone,
                  deposit, deposit_registered, down_payment, contract_date,
-                 balance_amount, balance_date, contract_end_date,
+                 balance_amount, balance_date, contract_end_date, move_out_date,
                  rent_fee, maintenance_fee, rent_pay_day,
                  agent_office, agent_phone, agent_ceo, special_terms,
                  renewal_type, first_contract_date)
@@ -237,7 +243,7 @@ class Nw {
                 (:room_id, 'active', :contract_type, :tenant_name, :tenant_ssn, :tenant_phone,
                  :co_tenant_name, :co_tenant_ssn, :co_tenant_phone,
                  :deposit, :deposit_registered, :down_payment, :contract_date,
-                 :balance_amount, :balance_date, :contract_end_date,
+                 :balance_amount, :balance_date, :contract_end_date, :move_out_date,
                  :rent_fee, :maintenance_fee, :rent_pay_day,
                  :agent_office, :agent_phone, :agent_ceo, :special_terms,
                  :renewal_type, :first_contract_date)
@@ -256,7 +262,7 @@ class Nw {
                 contract_type=:contract_type, tenant_name=:tenant_name, tenant_ssn=:tenant_ssn, tenant_phone=:tenant_phone,
                 co_tenant_name=:co_tenant_name, co_tenant_ssn=:co_tenant_ssn, co_tenant_phone=:co_tenant_phone,
                 deposit=:deposit, deposit_registered=:deposit_registered, down_payment=:down_payment, contract_date=:contract_date,
-                balance_amount=:balance_amount, balance_date=:balance_date, contract_end_date=:contract_end_date,
+                balance_amount=:balance_amount, balance_date=:balance_date, contract_end_date=:contract_end_date, move_out_date=:move_out_date,
                 rent_fee=:rent_fee, maintenance_fee=:maintenance_fee, rent_pay_day=:rent_pay_day,
                 agent_office=:agent_office, agent_phone=:agent_phone, agent_ceo=:agent_ceo, special_terms=:special_terms
             WHERE id=:id
@@ -275,7 +281,7 @@ class Nw {
             $stmt->execute([':id' => $oldId]);
 
             $newTerms['room_id']             = $old['room_id'];
-            $newTerms['renewal_type']        = 'extended';
+            $newTerms['renewal_type']        = (($newTerms['renewal_type'] ?? '') === 'implied') ? 'implied' : 'extended'; // 연장(정식) 또는 묵시적(조건변경 자동연장)
             $newTerms['first_contract_date'] = $old['first_contract_date'] ?: $old['contract_date'];
             $newId = $this->addContract($newTerms);
 
@@ -294,10 +300,14 @@ class Nw {
     }
 
     /** 계약종료: 만료 또는 중도해지. */
-    public function endContract(int $id, string $reason): void {
-        $reason = in_array($reason, ['expired', 'terminated_early'], true) ? $reason : 'expired';
-        $stmt = $this->pdo->prepare("UPDATE nw_contract SET status='ended', ended_at=NOW(), ended_reason=:r WHERE id=:id");
-        $stmt->execute([':r' => $reason, ':id' => $id]);
+    public function endContract(int $id, ?string $moveOutDate = null): void {
+        $mo = ($moveOutDate && preg_match('/^\d{4}-\d{2}-\d{2}$/', $moveOutDate)) ? $moveOutDate : date('Y-m-d');
+        // 실제 퇴거일이 계약 만료일보다 이르면 중도해지, 아니면(만기 도래·경과·만료일 미상) 만료로 자동 판정
+        $c = $this->getContract($id);
+        $end = substr((string)($c['contract_end_date'] ?? ''), 0, 10);
+        $reason = ($end !== '' && $mo < $end) ? 'terminated_early' : 'expired';
+        $stmt = $this->pdo->prepare("UPDATE nw_contract SET status='ended', ended_at=NOW(), ended_reason=:r, move_out_date=:mo WHERE id=:id");
+        $stmt->execute([':r' => $reason, ':mo' => $mo, ':id' => $id]);
     }
 
     // ==========================================================
@@ -309,6 +319,50 @@ class Nw {
         return $stmt->fetchAll();
     }
 
+    /** 건물 내 계약별·연도별 납부합계(월세+관리비): [contract_id][year] => 합계. 미납 계산용. */
+    public function paymentSumsByBuilding(int $buildingId): array {
+        $stmt = $this->pdo->prepare("
+            SELECT p.contract_id, LEFT(COALESCE(p.bill_ym, DATE_FORMAT(p.pay_date, '%Y-%m')), 4) AS y, SUM(p.rent_fee + p.maintenance_fee) AS amt
+            FROM nw_payment p
+            JOIN nw_contract c ON c.id = p.contract_id
+            JOIN nw_unit u ON u.id = c.room_id
+            WHERE u.building_id = :b
+            GROUP BY p.contract_id, y
+        ");
+        $stmt->execute([':b' => $buildingId]);
+        $out = [];
+        foreach ($stmt->fetchAll() as $r) {
+            $out[(int)$r['contract_id']][(int)$r['y']] = (int)$r['amt'];
+        }
+        return $out;
+    }
+
+    /** 건물 내 전체 계약(활성+종료)을 호실정보와 함께. 호실별 납부 이력 집계용(과거 세입자 포함). */
+    public function listAllContractsByBuilding(int $buildingId): array {
+        $stmt = $this->pdo->prepare("
+            SELECT c.*, u.room_no, u.id AS unit_id, u.sort_order AS unit_sort
+            FROM nw_contract c
+            JOIN nw_unit u ON u.id = c.room_id
+            WHERE u.building_id = :b
+            ORDER BY u.sort_order, u.room_no, u.id, c.contract_date, c.id
+        ");
+        $stmt->execute([':b' => $buildingId]);
+        return $stmt->fetchAll();
+    }
+
+    /** 호실의 모든 계약(과거+현재)에 걸친 납부 이력(세입자명 포함), 최신순. */
+    public function listPaymentsByRoom(int $roomId): array {
+        $stmt = $this->pdo->prepare("
+            SELECT p.*, c.tenant_name, c.contract_type
+            FROM nw_payment p
+            JOIN nw_contract c ON c.id = p.contract_id
+            WHERE c.room_id = :r
+            ORDER BY p.pay_date DESC, p.id DESC
+        ");
+        $stmt->execute([':r' => $roomId]);
+        return $stmt->fetchAll();
+    }
+
     public function getLastPayment(int $contractId): ?array {
         $stmt = $this->pdo->prepare("SELECT * FROM nw_payment WHERE contract_id=:c ORDER BY pay_date DESC, id DESC LIMIT 1");
         $stmt->execute([':c' => $contractId]);
@@ -316,18 +370,289 @@ class Nw {
     }
 
     public function addPayment(array $d): int {
+        $payDate = $d['pay_date'] ?: date('Y-m-d');
+        $billYm = (isset($d['bill_ym']) && preg_match('/^\d{4}-\d{2}$/', (string)$d['bill_ym'])) ? $d['bill_ym'] : substr((string)$payDate, 0, 7);
         $stmt = $this->pdo->prepare("
-            INSERT INTO nw_payment (contract_id, pay_date, rent_fee, maintenance_fee, memo)
-            VALUES (:contract_id, :pay_date, :rent_fee, :maintenance_fee, :memo)
+            INSERT INTO nw_payment (contract_id, pay_date, bill_ym, rent_fee, maintenance_fee, memo)
+            VALUES (:contract_id, :pay_date, :bill_ym, :rent_fee, :maintenance_fee, :memo)
         ");
         $stmt->execute([
             ':contract_id'     => $d['contract_id'],
-            ':pay_date'        => $d['pay_date'] ?: date('Y-m-d'),
+            ':pay_date'        => $payDate,
+            ':bill_ym'         => $billYm,
             ':rent_fee'        => $this->num($d['rent_fee'] ?? null),
             ':maintenance_fee' => $this->num($d['maintenance_fee'] ?? null),
             ':memo'            => $d['memo'] ?: null,
         ]);
         return (int)$this->pdo->lastInsertId();
+    }
+
+    /** 납부 수정(금액·날짜·귀속월·메모) */
+    public function updatePayment(int $id, array $d): void {
+        $payDate = $d['pay_date'] ?: date('Y-m-d');
+        $billYm = (isset($d['bill_ym']) && preg_match('/^\d{4}-\d{2}$/', (string)$d['bill_ym'])) ? $d['bill_ym'] : substr((string)$payDate, 0, 7);
+        $stmt = $this->pdo->prepare("
+            UPDATE nw_payment SET pay_date=:pd, bill_ym=:by, rent_fee=:rf, maintenance_fee=:mf, memo=:memo WHERE id=:id
+        ");
+        $stmt->execute([
+            ':pd' => $payDate, ':by' => $billYm,
+            ':rf' => $this->num($d['rent_fee'] ?? null),
+            ':mf' => $this->num($d['maintenance_fee'] ?? null),
+            ':memo' => $d['memo'] ?: null,
+            ':id' => $id,
+        ]);
+    }
+
+    /** 납부 삭제 */
+    public function deletePayment(int $id): void {
+        $stmt = $this->pdo->prepare("DELETE FROM nw_payment WHERE id=:id");
+        $stmt->execute([':id' => $id]);
+    }
+
+    // ==========================================================
+    // 은행 거래내역 → 납부 일괄등록 (매칭 + 벌크 인서트)
+    // ==========================================================
+
+    /** 건물 내 활성계약 목록(호실번호 포함) — 은행내역 매칭용 */
+    public function listActiveContractsForMatch(int $buildingId): array {
+        $stmt = $this->pdo->prepare("
+            SELECT c.id, c.tenant_name, c.co_tenant_name, c.rent_fee, c.maintenance_fee,
+                   c.contract_type, u.room_no, u.id AS unit_id
+            FROM nw_contract c
+            JOIN nw_unit u ON u.id = c.room_id
+            WHERE u.building_id = :b AND c.status = 'active'
+            ORDER BY u.sort_order, u.room_no, u.id
+        ");
+        $stmt->execute([':b' => $buildingId]);
+        return $stmt->fetchAll();
+    }
+
+    /** 호실번호 정규화: 공백/'호' 제거 + 소문자 (예: 'B01호'→'b01', '301'→'301') */
+    private function normRoom(string $s): string {
+        return strtolower(str_replace('호', '', preg_replace('/\s+/', '', $s)));
+    }
+
+    /**
+     * 은행 거래 행들을 건물 활성계약에 자동매칭한다(순수 로직·검토화면용).
+     * @param array $contracts listActiveContractsForMatch() 결과
+     * @param array $rows      BankXls::parse()['rows']
+     * @param array $existKeys "contractId|YYYY-MM-DD" => true (이미 등록된 납부, 중복표시용)
+     * @return array 검토용 행 배열
+     */
+    public function matchBankRows(array $contracts, array $rows, array $existKeys = [], string $fromDate = '', string $toDate = ''): array {
+        // ★원칙: 자료(엑셀)의 거래 기간에 재실이 겹치는 계약만 후보로 (해당 기간에 연관된 것만).
+        if ($fromDate !== '' && $toDate !== '') {
+            $contracts = array_values(array_filter($contracts, function ($c) use ($fromDate, $toDate) {
+                $cd = substr((string)($c['contract_date'] ?? ''), 0, 10);
+                if ($cd === '') return true; // 계약일 미상은 보수적으로 포함
+                $oe = substr((string)(($c['move_out_date'] ?? '') ?: ($c['contract_end_date'] ?? '')), 0, 10);
+                $end = (($c['status'] ?? '') === 'active' || $oe === '') ? '9999-12-31' : $oe;
+                return $cd <= $toDate && $end >= $fromDate; // 재실기간이 파일기간과 겹침
+            }));
+        }
+
+        // 드롭다운 후보(기간 내 계약)
+        $candidates = [];
+        foreach ($contracts as $c) {
+            $ps = $c['contract_date'] ? substr((string)$c['contract_date'], 2, 2) . '.' . substr((string)$c['contract_date'], 5, 2) : '';
+            $oe = ($c['move_out_date'] ?? '') ?: ($c['contract_end_date'] ?? '');
+            $pe = $oe ? substr((string)$oe, 2, 2) . '.' . substr((string)$oe, 5, 2) : '';
+            $per = ($ps || $pe) ? ' (' . $ps . '~' . $pe . ')' : '';
+            $candidates[] = [
+                'contract_id' => (int)$c['id'],
+                'label' => $c['room_no'] . '호 · ' . ($c['tenant_name'] ?: '(무기명)') . $per,
+                'rent_fee' => (int)$c['rent_fee'],
+                'maintenance_fee' => (int)$c['maintenance_fee'],
+            ];
+        }
+
+        $out = [];
+        foreach ($rows as $r) {
+            $cp    = (string)($r['counterparty'] ?? '');
+            $dep   = (int)($r['deposit'] ?? 0);
+            $wd    = (int)($r['withdraw'] ?? 0);
+            $date  = (string)($r['date'] ?? '');
+            $jeok  = (string)($r['jeokyo'] ?? '');
+            $cpLow = strtolower(preg_replace('/\s+/', '', $cp));
+
+            // 귀속월: 입금자/메모의 'N월' → 그 달(늦은납부=작년·선납=내년 보정). 없으면 납부일 월.
+            $billYm = substr($date, 0, 7);
+            if (preg_match('/(\d{1,2})\s*월/u', $cp, $bmm)) {
+                $bm = (int)$bmm[1];
+                if ($bm >= 1 && $bm <= 12) {
+                    $py = (int)substr($date, 0, 4); $pm = (int)substr($date, 5, 2); $by = $py;
+                    if ($bm - $pm >= 6) $by = $py - 1; elseif ($bm - $pm <= -6) $by = $py + 1;
+                    $billYm = sprintf('%04d-%02d', $by, $bm);
+                }
+            }
+            $base = [
+                'date' => $date, 'datetime' => $r['datetime'] ?? $date, 'bill_ym' => $billYm,
+                'counterparty' => $cp, 'deposit' => $dep, 'withdraw' => $wd, 'jeokyo' => $jeok,
+                'contract_id' => null, 'confidence' => 'none', 'match_reason' => '',
+                'rent_fee' => 0, 'maintenance_fee' => 0, 'dup' => false,
+                'include' => false, 'skip_reason' => '',
+            ];
+
+            // 출금·이자·기타는 스킵(입금만 대상)
+            if ($dep <= 0 || $wd > 0) { $base['skip_reason'] = '출금'; $out[] = $base; continue; }
+            if (preg_match('/이자|세금/u', $cp) || preg_match('/이자/u', $jeok)) { $base['skip_reason'] = '이자'; $out[] = $base; continue; }
+
+            $isMgmtOnly = (bool)preg_match('/관리비/u', $cp);
+
+            // 계약별 점수 산정
+            $best = null; $bestScore = 0; $tie = false;
+            foreach ($contracts as $c) {
+                $roomHit = false;
+                $roomN = $this->normRoom((string)$c['room_no']);
+                if ($roomN !== '' && strpos($cpLow, $roomN) !== false) $roomHit = true;
+
+                $nameHit = false;
+                $cpN = preg_replace('/[\s\x{3000}\x{00A0}]+/u', '', $cp); // 공백(전각 　 포함) 제거
+                foreach ([$c['tenant_name'], $c['co_tenant_name']] as $nm) {
+                    $nm = trim((string)$nm);
+                    $nmN = preg_replace('/[\s\x{3000}\x{00A0}]+/u', '', $nm);
+                    if ($nmN === '') continue;
+                    if (mb_strpos($cpN, $nmN) !== false) { $nameHit = true; break; } // 계약명이 입금자에 포함(공백 무시)
+                    // 은행이 긴 이름을 자른 경우(KHAN TATYANA→KHAN TATYA): 한쪽이 다른쪽 접두면 매칭(5자+)
+                    if (mb_strlen($nmN) >= 5 && (mb_strpos($nmN, $cpN) === 0 || mb_strpos($cpN, $nmN) === 0)) { $nameHit = true; break; }
+                }
+
+                $rent = (int)$c['rent_fee']; $mnt = (int)$c['maintenance_fee']; $rmt = $rent + $mnt;
+                $amtHit = ($rmt > 0 && $dep === $rmt) || ($rent > 0 && $dep === $rent) || ($mnt > 0 && $dep === $mnt);
+
+                // 입금일이 계약 재실기간(계약일~퇴거일/만료일, 활성은 진행중)에 포함되는지
+                $dateHit = false;
+                $cd = substr((string)($c['contract_date'] ?? ''), 0, 10);
+                $oe = substr((string)(($c['move_out_date'] ?? '') ?: ($c['contract_end_date'] ?? '')), 0, 10);
+                if ($cd !== '' && $date >= $cd) {
+                    if (($c['status'] ?? '') === 'active' || $oe === '' || $date <= $oe) $dateHit = true;
+                }
+
+                $score = ($roomHit ? 5 : 0) + ($nameHit ? 5 : 0) + ($amtHit ? 2 : 0);
+                if ($score <= 0) continue;             // 호실·이름·금액 중 하나는 있어야 후보
+                if ($dateHit) $score += 3;             // 재실기간 포함이면 가산(같은 호실 여러 계약 중 시점 맞는 것)
+                if ($score > $bestScore) { $bestScore = $score; $best = ['c' => $c, 'room' => $roomHit, 'name' => $nameHit, 'amt' => $amtHit, 'date' => $dateHit]; $tie = false; }
+                elseif ($score === $bestScore) { $tie = true; }
+            }
+
+            if ($best === null) { $out[] = $base; continue; } // 미매칭
+
+            $c = $best['c'];
+            $cid = (int)$c['id'];
+            $rent = (int)$c['rent_fee']; $mnt = (int)$c['maintenance_fee'];
+
+            // 금액 분할(확정 규칙): 관리비는 계약 정액 고정, 차액은 월세로.
+            //   전세(월세=0)·관리비전용 입금은 전액을 관리비로 본다.
+            if ($isMgmtOnly || $rent === 0) { $pm = $dep;            $pr = 0; }
+            else                            { $pm = min($mnt, $dep); $pr = $dep - $pm; }
+
+            // 신뢰도
+            $reasons = [];
+            if ($best['name']) $reasons[] = '이름';
+            if ($best['room']) $reasons[] = '호실';
+            if ($best['amt'])  $reasons[] = '금액';
+            if (!empty($best['date'])) $reasons[] = '기간';
+            $twoStrong = ($best['name'] && $best['room']) || (!empty($best['date']) && ($best['name'] || $best['room']));
+            $strongPlusAmt = ($best['name'] || $best['room']) && $best['amt'];
+            if ($tie && !$twoStrong)       $conf = 'low';
+            elseif ($twoStrong || $strongPlusAmt) $conf = 'high';
+            elseif ($best['name'] || $best['room']) $conf = 'mid';
+            else                            $conf = 'low';
+
+            $roomId = (int)($c['room_id'] ?? $c['unit_id'] ?? 0);
+            $dup = isset($existKeys[$roomId . '|' . $date]); // 같은 호실·같은 날짜면 이미등록
+
+            $out[] = array_merge($base, [
+                'contract_id' => $cid,
+                'confidence' => $conf,
+                'match_reason' => implode('+', $reasons),
+                'rent_fee' => $pr, 'maintenance_fee' => $pm,
+                'dup' => $dup,
+                'include' => !$dup && $conf !== 'low', // 확실한 것만 기본 체크
+            ]);
+        }
+
+        return ['rows' => $out, 'candidates' => $candidates];
+    }
+
+    /** 특정 계약·날짜 범위의 기존 납부키(중복표시용) */
+    public function existingPaymentKeys(array $contractIds, string $fromDate, string $toDate): array {
+        $contractIds = array_values(array_unique(array_map('intval', $contractIds)));
+        if (!$contractIds) return [];
+        $ph = implode(',', array_fill(0, count($contractIds), '?'));
+        $stmt = $this->pdo->prepare("
+            SELECT c.room_id, p.pay_date FROM nw_payment p
+            JOIN nw_contract c ON c.id = p.contract_id
+            WHERE p.contract_id IN ($ph) AND p.pay_date BETWEEN ? AND ?
+        ");
+        $stmt->execute(array_merge($contractIds, [$fromDate, $toDate]));
+        $keys = [];
+        foreach ($stmt->fetchAll() as $row) { $keys[(int)$row['room_id'] . '|' . $row['pay_date']] = true; } // 호실+날짜 기준
+        return $keys;
+    }
+
+    /** 같은 계약·같은 날짜 납부가 이미 있는지(벌크 인서트 안전망) */
+    private function paymentExistsOn(int $contractId, string $payDate): bool {
+        $stmt = $this->pdo->prepare("SELECT 1 FROM nw_payment WHERE contract_id=:c AND pay_date=:d LIMIT 1");
+        $stmt->execute([':c' => $contractId, ':d' => $payDate]);
+        return (bool)$stmt->fetchColumn();
+    }
+
+    /** 같은 호실(계약의 room)·같은 날짜에 이미 납부가 있는지 — 호실 단위 중복 방지(계약 바뀌어도) */
+    private function paymentExistsInRoom(int $contractId, string $payDate): bool {
+        $stmt = $this->pdo->prepare("
+            SELECT 1 FROM nw_payment p
+            JOIN nw_contract c ON c.id = p.contract_id
+            WHERE c.room_id = (SELECT room_id FROM nw_contract WHERE id = :cid) AND p.pay_date = :d
+            LIMIT 1
+        ");
+        $stmt->execute([':cid' => $contractId, ':d' => $payDate]);
+        return (bool)$stmt->fetchColumn();
+    }
+
+    /** 같은 호실·같은 날짜·같은 금액의 중복 납부 제거(가장 오래된 id만 남김). 반환=삭제 건수. */
+    public function dedupeRoomPayments(?int $buildingId = null): int {
+        $where = $buildingId ? "AND cA.room_id IN (SELECT id FROM nw_unit WHERE building_id = :b)" : '';
+        $stmt = $this->pdo->prepare("
+            DELETE pA FROM nw_payment pA
+            JOIN nw_contract cA ON cA.id = pA.contract_id
+            JOIN nw_payment pB ON pB.id < pA.id
+            JOIN nw_contract cB ON cB.id = pB.contract_id AND cB.room_id = cA.room_id
+            WHERE pA.pay_date = pB.pay_date
+              AND pA.rent_fee = pB.rent_fee AND pA.maintenance_fee = pB.maintenance_fee
+              $where
+        ");
+        if ($buildingId) $stmt->bindValue(':b', $buildingId, PDO::PARAM_INT);
+        $stmt->execute();
+        return $stmt->rowCount();
+    }
+
+    /** 검토 확정된 납부들을 트랜잭션으로 일괄 등록(계약·날짜 중복은 스킵) */
+    public function bulkAddPayments(array $items): array {
+        $inserted = 0; $skipped = 0;
+        $this->pdo->beginTransaction();
+        try {
+            foreach ($items as $it) {
+                $cid = (int)($it['contract_id'] ?? 0);
+                $date = (string)($it['pay_date'] ?? '');
+                if (!$cid || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) { $skipped++; continue; }
+                if ($this->paymentExistsInRoom($cid, $date)) { $skipped++; continue; }
+                $this->addPayment([
+                    'contract_id'     => $cid,
+                    'pay_date'        => $date,
+                    'bill_ym'         => $it['bill_ym'] ?? null,
+                    'rent_fee'        => $it['rent_fee'] ?? 0,
+                    'maintenance_fee' => $it['maintenance_fee'] ?? 0,
+                    'memo'            => $it['memo'] ?? null,
+                ]);
+                $inserted++;
+            }
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+        return ['inserted' => $inserted, 'skipped' => $skipped];
     }
 
     // ==========================================================

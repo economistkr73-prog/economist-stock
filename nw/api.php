@@ -85,7 +85,7 @@ function api_nw_contract(string $action, PDO $pdo): void {
     }
 
     if ($action === 'end') {
-        $nw->endContract((int)($_POST['id'] ?? 0), (string)($_POST['reason'] ?? 'expired'));
+        $nw->endContract((int)($_POST['id'] ?? 0), $_POST['move_out_date'] ?? null);
         echo json_encode(['ok' => true]);
         return;
     }
@@ -96,6 +96,7 @@ function api_nw_contract(string $action, PDO $pdo): void {
 
 function api_nw_payment(string $action, PDO $pdo): void {
     $nw = new Nw($pdo);
+    $nw->ensureTable(); // bill_ym 등 스키마 보장(멱등)
     if ($action === 'add') {
         $id = $nw->addPayment([
             'contract_id'     => (int)($_POST['contract_id'] ?? 0),
@@ -107,6 +108,58 @@ function api_nw_payment(string $action, PDO $pdo): void {
         echo json_encode(['ok' => true, 'id' => $id]);
         return;
     }
+
+    // 은행 거래내역(.xls) 업로드 → 파싱 + 건물 활성계약 자동매칭 (검토용 데이터 반환)
+    if ($action === 'importParse') {
+        $buildingId = (int)($_GET['building_id'] ?? $_POST['building_id'] ?? 0);
+        if (!$buildingId) { http_response_code(400); echo json_encode(['ok' => false, 'msg' => '건물이 지정되지 않았습니다.']); return; }
+        if (empty($_FILES['file']['tmp_name']) || !is_uploaded_file($_FILES['file']['tmp_name'])) {
+            http_response_code(400); echo json_encode(['ok' => false, 'msg' => '업로드된 파일이 없습니다.']); return;
+        }
+        $bytes  = file_get_contents($_FILES['file']['tmp_name']);
+        $parsed = (new BankXls())->parse($bytes);
+        $rows   = $parsed['rows'];
+        if (!$rows) { echo json_encode(['ok' => true, 'rows' => [], 'candidates' => [], 'format' => $parsed['format'], 'msg' => '거래 행을 찾지 못했습니다.']); return; }
+
+        $contracts = $nw->listAllContractsByBuilding($buildingId); // 과거(공실전 세입자) 계약도 매칭 후보로
+        $dates = array_column($rows, 'date');
+        $existKeys = $nw->existingPaymentKeys(
+            array_column($contracts, 'id'),
+            min($dates), max($dates)
+        );
+        $match = $nw->matchBankRows($contracts, $rows, $existKeys, min($dates), max($dates));
+
+        echo json_encode([
+            'ok' => true,
+            'format' => $parsed['format'],
+            'file'   => $_FILES['file']['name'] ?? '',
+            'rows'   => $match['rows'],
+            'candidates' => $match['candidates'],
+        ], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    if ($action === 'update') {
+        $nw->updatePayment((int)($_POST['id'] ?? 0), $_POST);
+        echo json_encode(['ok' => true]);
+        return;
+    }
+
+    if ($action === 'delete') {
+        $nw->deletePayment((int)($_POST['id'] ?? 0));
+        echo json_encode(['ok' => true]);
+        return;
+    }
+
+    // 검토 확정된 납부 일괄등록
+    if ($action === 'bulkImport') {
+        $items = json_decode($_POST['items'] ?? '[]', true);
+        if (!is_array($items)) { http_response_code(400); echo json_encode(['ok' => false, 'msg' => '잘못된 데이터입니다.']); return; }
+        $res = $nw->bulkAddPayments($items);
+        echo json_encode(['ok' => true] + $res);
+        return;
+    }
+
     http_response_code(400);
     echo json_encode(['ok' => false, 'msg' => "unknown action: {$action}"]);
 }
