@@ -100,6 +100,20 @@ class Nw {
         $this->pdo->exec("ALTER TABLE nw_contract ADD COLUMN IF NOT EXISTS move_out_date DATE DEFAULT NULL AFTER contract_end_date");
         // 귀속월(YYYY-MM): 납부일과 별개로 "어느 달 것"인지 — 늦은/선납 처리
         $this->pdo->exec("ALTER TABLE nw_payment ADD COLUMN IF NOT EXISTS bill_ym VARCHAR(7) DEFAULT NULL AFTER pay_date");
+
+        // 계약서 원본 이미지(사진). 계약 저장 전 스캔 단계에서 먼저 저장되므로 contract_id는 NULL 허용 후 나중에 링크.
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS nw_contract_image (
+                id           INT AUTO_INCREMENT PRIMARY KEY,
+                contract_id  INT DEFAULT NULL,
+                unit_id      INT DEFAULT NULL,
+                mime         VARCHAR(64) NOT NULL,
+                filename     VARCHAR(255) DEFAULT NULL,
+                image_data   LONGBLOB NOT NULL,
+                created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_contract (contract_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
     }
 
     // ==========================================================
@@ -337,6 +351,21 @@ class Nw {
         return $out;
     }
 
+    /** 건물별 최종 납부일(가장 최근 pay_date) — [building_id => 'YYYY-MM-DD']. 납부 없으면 키 없음. */
+    public function lastPaymentDatesByBuilding(): array {
+        $stmt = $this->pdo->query("
+            SELECT u.building_id AS bid, MAX(p.pay_date) AS last_date
+            FROM nw_payment p
+            JOIN nw_contract c ON c.id = p.contract_id
+            JOIN nw_unit u ON u.id = c.room_id
+            GROUP BY u.building_id
+        ");
+        $out = [];
+        foreach ($stmt->fetchAll() as $r) {
+            $out[(int)$r['bid']] = substr((string)$r['last_date'], 0, 10);
+        }
+        return $out;
+    }
     /** 건물 내 전체 계약(활성+종료)을 호실정보와 함께. 호실별 납부 이력 집계용(과거 세입자 포함). */
     public function listAllContractsByBuilding(int $buildingId): array {
         $stmt = $this->pdo->prepare("
@@ -779,6 +808,113 @@ class Nw {
             'overdueList'    => $overdueList,
             'expiringList'   => $expiringList,
         ];
+    }
+
+    // ==========================================================
+    // 계약서 이미지 (DB 저장 + Claude Vision 자동 판독)
+    // ==========================================================
+
+    /** 계약서 이미지를 DB에 저장하고 id 반환. contract_id는 아직 없으면 null(스캔 시점). */
+    public function saveContractImage(?int $contractId, ?int $unitId, string $mime, string $bytes, ?string $filename): int {
+        $stmt = $this->pdo->prepare("
+            INSERT INTO nw_contract_image (contract_id, unit_id, mime, filename, image_data)
+            VALUES (:cid, :uid, :mime, :fn, :data)
+        ");
+        $stmt->bindValue(':cid',  $contractId, $contractId === null ? PDO::PARAM_NULL : PDO::PARAM_INT);
+        $stmt->bindValue(':uid',  $unitId,     $unitId === null ? PDO::PARAM_NULL : PDO::PARAM_INT);
+        $stmt->bindValue(':mime', $mime);
+        $stmt->bindValue(':fn',   $filename);
+        $stmt->bindValue(':data', $bytes, PDO::PARAM_LOB);
+        $stmt->execute();
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    /** 계약 저장 후 이미지를 그 계약에 연결. */
+    public function linkContractImage(int $imageId, int $contractId): void {
+        $stmt = $this->pdo->prepare("UPDATE nw_contract_image SET contract_id=:cid WHERE id=:id");
+        $stmt->execute([':cid' => $contractId, ':id' => $imageId]);
+    }
+
+    /** 원본 이미지 1건(바이너리 포함) — 이미지 서빙용. */
+    public function getContractImage(int $id): ?array {
+        $stmt = $this->pdo->prepare("SELECT id, contract_id, mime, filename, image_data FROM nw_contract_image WHERE id=:id");
+        $stmt->execute([':id' => $id]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /** 계약에 딸린 이미지 목록(바이너리 제외) — 폼/상세 썸네일용. */
+    public function listContractImages(int $contractId): array {
+        $stmt = $this->pdo->prepare("SELECT id, mime, filename, created_at FROM nw_contract_image WHERE contract_id=:cid ORDER BY id DESC");
+        $stmt->execute([':cid' => $contractId]);
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * 계약서 사진을 Claude Vision(claude-opus-4-8)으로 판독해 폼 필드값 배열을 반환.
+     * env/anthropic.inc(ANTHROPIC_API_KEY)가 로드돼 있어야 한다. 실패 시 null.
+     */
+    public function extractContractFromImage(string $imageBytes, string $mime): ?array {
+        if (!defined('ANTHROPIC_API_KEY') || ANTHROPIC_API_KEY === '') return null;
+        if (!in_array($mime, ['image/jpeg', 'image/png', 'image/gif', 'image/webp'], true)) $mime = 'image/jpeg';
+
+        $sys = "너는 한국 부동산(원룸/오피스텔) 임대차 계약서 이미지에서 정보를 추출하는 도우미다. "
+             . "반드시 아래 키만 가진 JSON 객체 하나만 출력한다. 설명 문장이나 코드펜스(```)는 절대 쓰지 마라. 값을 못 찾으면 빈 문자열로 둔다.\n"
+             . "키: contract_type, tenant_name, tenant_ssn, tenant_phone, co_tenant_name, co_tenant_ssn, co_tenant_phone, "
+             . "deposit, down_payment, balance_amount, contract_date, balance_date, contract_end_date, rent_fee, maintenance_fee, "
+             . "rent_pay_day, deposit_registered, agent_office, agent_phone, agent_ceo, special_terms.\n"
+             . "규칙:\n"
+             . "- contract_type: 월세(차임)가 있으면 'monthly', 차임 없이 보증금만이면 'jeonse', 큰 보증금과 월세가 함께면 'semi_monthly'.\n"
+             . "- 금액(deposit=보증금, down_payment=계약금, balance_amount=잔금, rent_fee=차임/월세, maintenance_fee=관리비): 숫자만(콤마·원·글자 제거). 관리비는 특약에 적힌 월 관리비 금액을 쓴다.\n"
+             . "- 날짜(contract_date=계약체결일, balance_date=잔금지급일, contract_end_date=임대차 존속기간 종료일): 반드시 'YYYY-MM-DD' 형식.\n"
+             . "- tenant_*: 임차인(빌린 사람) 정보. co_tenant_*: 임차인이 둘일 때만. 임대인/공동임대인/공인중개사 정보는 tenant에 넣지 마라.\n"
+             . "- tenant_ssn: 주민등록번호를 '######-#######'(하이픈 포함 13자리) 형식으로. 없으면 빈 문자열.\n"
+             . "- rent_pay_day: 매월 며칠 납부인지 1~31 숫자만.\n"
+             . "- deposit_registered: 전세권설정 문구가 있으면 1, 아니면 0.\n"
+             . "- agent_office=공인중개사 사무소 명칭, agent_phone=중개사 전화, agent_ceo=중개사 대표자/개업공인중개사 이름.\n"
+             . "- special_terms: 특약사항 전체를 줄바꿈 유지해 그대로.";
+
+        $payload = [
+            'model'      => 'claude-opus-4-8',
+            'max_tokens' => 2048,
+            'system'     => $sys,
+            'messages'   => [[
+                'role'    => 'user',
+                'content' => [
+                    ['type' => 'image', 'source' => ['type' => 'base64', 'media_type' => $mime, 'data' => base64_encode($imageBytes)]],
+                    ['type' => 'text', 'text' => '이 계약서 이미지의 정보를 위 규칙대로 JSON 으로만 출력해줘.'],
+                ],
+            ]],
+        ];
+
+        $ch = curl_init('https://api.anthropic.com/v1/messages');
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST           => true,
+            CURLOPT_HTTPHEADER     => [
+                'x-api-key: ' . ANTHROPIC_API_KEY,
+                'anthropic-version: 2023-06-01',
+                'content-type: application/json',
+            ],
+            CURLOPT_POSTFIELDS     => json_encode($payload),
+            CURLOPT_TIMEOUT        => 90,
+            CURLOPT_SSL_VERIFYPEER => false,
+        ]);
+        $res  = curl_exec($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        if ($res === false || $code !== 200) return null;
+
+        $data = json_decode($res, true);
+        $text = '';
+        foreach ($data['content'] ?? [] as $blk) {
+            if (($blk['type'] ?? '') === 'text') { $text = (string)($blk['text'] ?? ''); break; }
+        }
+        $text = trim($text);
+        if ($text === '') return null;
+        $text = preg_replace('/^```(?:json)?\s*|\s*```$/', '', $text);
+        $fields = json_decode($text, true);
+        if (!is_array($fields) && preg_match('/\{.*\}/s', $text, $m)) $fields = json_decode($m[0], true);
+        return is_array($fields) ? $fields : null;
     }
 }
 ?>

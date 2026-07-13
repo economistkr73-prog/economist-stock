@@ -141,6 +141,9 @@ body { font-family: 'Pretendard', 'Malgun Gothic', sans-serif; background: #f0f2
 .occ-bar { background: #ecf0f1; border-radius: 6px; height: 8px; overflow: hidden; margin-bottom: 6px; }
 .occ-bar-fill { background: #3498db; height: 100%; }
 .occ-label { font-size: 12px; color: #7f8c8d; display: flex; justify-content: space-between; }
+.b-lastpay { margin-top: 10px; padding-top: 10px; border-top: 1px solid #eef1f4; font-size: 12px; color: #7f8c8d; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.b-elapsed { font-weight: 700; color: #34495e; white-space: nowrap; }
+.b-elapsed.warn { color: #e67e22; }
 
 .badge { display: inline-block; padding: 3px 9px; border-radius: 12px; font-size: 12px; font-weight: 700; white-space: nowrap; }
 .badge-ok { background: #eafaf1; color: #27ae60; }
@@ -239,11 +242,34 @@ body { font-family: 'Pretendard', 'Malgun Gothic', sans-serif; background: #f0f2
 .modal-box h3 { margin: 0 0 14px; font-size: 16px; }
 .modal-box .form-field { margin-bottom: 10px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.scan-card { max-width: 760px; margin: 0 auto 16px; padding: 16px 18px; border: 1px dashed #bcd7f0; background: #f5f9fe; }
+.scan-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+.scan-title { font-size: 15px; font-weight: 800; color: #2b6cb0; }
+.scan-sub { font-size: 12px; color: #5c6b7a; margin-top: 3px; }
+.scan-btn { cursor: pointer; white-space: nowrap; }
+.scan-status { margin-top: 12px; font-size: 13px; padding: 9px 12px; border-radius: 6px; }
+.scan-status.loading { background: #fff7e6; color: #8a6d3b; }
+.scan-status.ok { background: #eafaf1; color: #1e824c; }
+.scan-status.err { background: #fdecea; color: #c0392b; }
+.doc-chip { vertical-align: middle; margin-left: 8px; padding: 3px 12px; font-size: 13px; font-weight: 700; color: #2b6cb0; background: #eaf2fb; border: 1px solid #bcd7f0; border-radius: 14px; cursor: pointer; white-space: nowrap; }
+.doc-chip:hover { background: #d7e8f8; }
+.doc-overlay { padding: 20px; }
+.doc-box { position: relative; background: #fff; border-radius: 12px; max-width: 92vw; max-height: 92vh; overflow: auto; padding: 14px; }
+.doc-x { position: absolute; top: 8px; right: 8px; width: 34px; height: 34px; border: none; border-radius: 50%; background: rgba(0,0,0,.6); color: #fff; font-size: 16px; cursor: pointer; z-index: 1; }
+.doc-x:hover { background: rgba(0,0,0,.8); }
+.doc-imgs { display: flex; flex-direction: column; gap: 12px; }
+.doc-imgs img { max-width: 100%; max-height: 84vh; border-radius: 6px; display: block; margin: 0 auto; }
+.scan-thumbs { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+.scan-thumb { display: block; width: 84px; height: 84px; border-radius: 8px; overflow: hidden; border: 1px solid #d5dee7; background: #fff; }
+.scan-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.nwend-note { font-size: 12px; margin: 10px 0 0; padding: 8px 10px; border-radius: 6px; line-height: 1.4; color: #7f8c8d; background: #f4f6f8; }
+.nwend-note.early { background: #fdecea; color: #c0392b; }
+.nwend-note.expired { background: #eafaf1; color: #1e824c; }
 
-.pay-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
-.pay-summary .card { text-align: center; padding: 14px 8px; }
-.pay-summary .lbl { font-size: 12px; color: #7f8c8d; }
-.pay-summary .val { font-size: 18px; font-weight: 800; margin-top: 4px; }
+.pay-stat { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: baseline; margin-bottom: 16px; padding: 12px 16px; background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.05); font-size: 14px; }
+.pay-stat span { color: #4a5568; white-space: nowrap; }
+.pay-stat i { font-style: normal; color: #94a3b8; font-size: 12px; margin-right: 5px; }
+.pay-stat b { font-weight: 800; }
 .pay-form { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 16px; }
 .pay-form .form-field { min-width: 0; }
 .pay-form .form-field label { white-space: nowrap; font-size: 12px; }
@@ -340,6 +366,7 @@ function nw_page_dashboard(PDO $pdo): void {
 
     $buildings = $nw->listBuildings();
     $summary   = $nw->dashboardSummary();
+    $lastPays  = $nw->lastPaymentDatesByBuilding(); // [building_id => 'YYYY-MM-DD']
 
     nw_head('원룸관리 대시보드');
 ?>
@@ -392,12 +419,22 @@ function nw_page_dashboard(PDO $pdo): void {
         $total = count($nw->listUnits((int)$b['id']));
         $occ   = count($nw->listActiveContractsByBuilding((int)$b['id']));
         $pct   = $total ? round($occ / $total * 100) : 0;
+        $lastPay = $lastPays[(int)$b['id']] ?? '';
+        $elapsed = $lastPay ? (int)floor((strtotime(date('Y-m-d')) - strtotime($lastPay)) / 86400) : null;
   ?>
   <a class="card b-card" href="/nw/index.php?mode=building&id=<?= (int)$b['id'] ?>">
     <div class="b-name"><?= nw_h($b['name']) ?></div>
     <div class="b-addr"><?= nw_h($b['address']) ?></div>
     <div class="occ-bar"><div class="occ-bar-fill" style="width:<?= $pct ?>%;"></div></div>
     <div class="occ-label"><span><?= $occ ?> / <?= $total ?> 입주</span><span><?= $pct ?>%</span></div>
+    <div class="b-lastpay">
+      <?php if ($lastPay): ?>
+        <span>월세 최종 업데이트 <b><?= nw_h($lastPay) ?></b></span>
+        <span class="b-elapsed<?= $elapsed >= 35 ? ' warn' : '' ?>"><?= $elapsed === 0 ? '오늘' : $elapsed . '일 경과' ?></span>
+      <?php else: ?>
+        <span style="color:#bdc3c7;">납부 이력 없음</span>
+      <?php endif; ?>
+    </div>
   </a>
   <?php endforeach; ?>
 </div>
@@ -457,11 +494,12 @@ function nw_page_building(PDO $pdo): void {
     foreach ($units as $u) { $jsRooms[(int)$u['id']] = []; } // 모든 호실(공실 포함)을 먼저 초기화
     foreach ($allContr as $cc) {
         $uid = (int)$cc['unit_id'];
-        $s = $cc['contract_date'] ?: ($cc['first_contract_date'] ?? '');
+        // 재실/월세 시작 = 입주일(잔금일) 우선, 없으면 계약일 (계약일과 실입주일이 다른 경우 대응)
+        $s = ($cc['balance_date'] ?? '') ?: ($cc['contract_date'] ?: ($cc['first_contract_date'] ?? ''));
         $sy = 0; $sm = 0; if (preg_match('/^(\d{4})-(\d{2})/', (string)$s, $mm)) { $sy = (int)$mm[1]; $sm = (int)$mm[2]; }
         $occEnd = ($cc['move_out_date'] ?? '') ?: ($cc['contract_end_date'] ?? ''); // 재실 종료 = 실제 퇴거일 우선(없으면 계약만료일)
         $ey = 0; $em = 0; if (preg_match('/^(\d{4})-(\d{2})/', (string)$occEnd, $mm)) { $ey = (int)$mm[1]; $em = (int)$mm[2]; }
-        $psS = $cc['contract_date'] ? substr((string)$cc['contract_date'], 2, 2) . '.' . substr((string)$cc['contract_date'], 5, 2) : '';
+        $psS = $s ? substr((string)$s, 2, 2) . '.' . substr((string)$s, 5, 2) : '';
         $psE = $occEnd ? substr((string)$occEnd, 2, 2) . '.' . substr((string)$occEnd, 5, 2) : '';
         $jsRooms[$uid][] = [
             'id'      => (int)$cc['id'],
@@ -714,13 +752,39 @@ function expiryHtml(o){
   else badge = '<span class="badge badge-ok">D-' + d + '</span>';
   return badge + '<br><span style="font-size:11px;color:#95a5a6;">' + o.end + '</span>';
 }
-// 계약 만료/중도해지: 실제 퇴거일을 입력받아 종료 처리
+// 계약 만료/중도해지: 실제 퇴거일을 캘린더로 선택받아 종료 처리
+let NW_END = { id: 0, reloadUrl: '', end: '' };
 function nwEndContract(id, reloadUrl){
-  const d = prompt('계약 종료 — 실제 퇴거일을 입력하세요 (YYYY-MM-DD)\n※ 계약 만료일 전에 나갔다면 자동으로 중도해지로 기록됩니다', NWB.today);
-  if (d === null) return;
-  const date = d.trim();
-  if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) { alert('날짜 형식이 올바르지 않습니다 (예: 2026-05-31)'); return; }
-  nwApi('contract', 'end', { id: id, move_out_date: date }).then(() => { window.location.href = reloadUrl; }).catch(() => {});
+  let end = '', tenant = '';
+  for (const uid in NWB.rooms) {
+    const c = NWB.rooms[uid].find(x => x.id === id);
+    if (c) { end = c.end || ''; tenant = c.tenant || ''; break; }
+  }
+  NW_END = { id: id, reloadUrl: reloadUrl, end: end };
+  document.getElementById('nwEnd_tenant').textContent = tenant || '(무기명)';
+  document.getElementById('nwEnd_expiry').textContent = end ? ('계약 만료일 ' + end) : '계약 만료일 미등록';
+  const inp = document.getElementById('nwEnd_date');
+  inp.value = NWB.today;
+  if (end) inp.max = ''; // 제한 없음(만료 후 퇴거도 허용)
+  nwEndSync();
+  nwOpenModal('nwEndModal');
+}
+function nwEndSync(){
+  const d = document.getElementById('nwEnd_date').value;
+  const msg = document.getElementById('nwEnd_msg');
+  if (!d) { msg.className = 'nwend-note'; msg.textContent = '퇴거일을 선택하세요'; return; }
+  if (NW_END.end && d < NW_END.end) {
+    msg.className = 'nwend-note early';
+    msg.innerHTML = '⚠️ 만료일 이전 퇴거 → <b>중도해지</b>로 기록됩니다';
+  } else {
+    msg.className = 'nwend-note expired';
+    msg.innerHTML = '만료일 당일/이후 → <b>계약 만료</b>로 기록됩니다';
+  }
+}
+function nwEndSubmit(){
+  const date = document.getElementById('nwEnd_date').value;
+  if (!date) { alert('퇴거일을 선택하세요'); return; }
+  nwApi('contract', 'end', { id: NW_END.id, move_out_date: date }).then(() => { window.location.href = NW_END.reloadUrl; }).catch(() => {});
 }
 function nwbSelectYear(sel){
   document.querySelectorAll('.ybchip').forEach(ch => ch.classList.toggle('on', ch.dataset.y === String(sel)));
@@ -796,6 +860,23 @@ function nwImpliedChanged(){
 }
 </script>
 
+<!-- 계약 종료: 실제 퇴거일 캘린더 선택 -->
+<div class="modal-overlay" id="nwEndModal">
+  <div class="modal-box">
+    <h3>🚪 계약 종료</h3>
+    <p style="color:#5c6b7a;font-size:13px;margin:0 0 14px;"><b id="nwEnd_tenant"></b> · <span id="nwEnd_expiry" style="color:#8493a2;"></span></p>
+    <div class="form-field">
+      <label>실제 퇴거일</label>
+      <input type="date" id="nwEnd_date" onchange="nwEndSync()" oninput="nwEndSync()" style="width:100%;">
+    </div>
+    <p id="nwEnd_msg" class="nwend-note"></p>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="nwCloseModal('nwEndModal')">취소</button>
+      <button class="btn btn-primary" onclick="nwEndSubmit()">종료 처리</button>
+    </div>
+  </div>
+</div>
+
 <?php if ($agentNum): ?>
 <div class="agent-legend">
   <span class="al-title">공인중개사</span>
@@ -846,6 +927,8 @@ function nw_page_contract(PDO $pdo): void {
     $unit = $nw->getUnit($roomId);
     if (!$unit) { nw_head('호실 없음'); echo "<p>호실을 찾을 수 없습니다.</p>"; nw_foot(); return; }
     $building = $nw->getBuilding((int)$unit['building_id']);
+    $nw->ensureTable(); // nw_contract_image 존재 보장(멱등)
+    $images = $editId ? $nw->listContractImages($editId) : []; // 이 계약에 첨부된 계약서 사진
 
     $c = null;
     $saveAction = 'add';
@@ -870,7 +953,7 @@ function nw_page_contract(PDO $pdo): void {
 
     nw_head(($editId ? '계약 수정' : ($renewFrom ? '계약 연장' : '임차인 등록')));
 ?>
-<div class="page-head">
+<div class="page-head" style="max-width:760px;margin:0 auto 18px;">
   <div>
     <a class="back-link" href="/nw/index.php?mode=building&id=<?= (int)$unit['building_id'] ?>">← 호실 목록</a>
     <h1 style="margin-top:6px;"><?= nw_h($building['name']) ?> (<?= nw_h($unit['room_no']) ?>호) <?= $renewFrom ? '계약 연장' : ($editId ? '계약 수정' : '임차인 정보 등록') ?></h1>
@@ -878,13 +961,34 @@ function nw_page_contract(PDO $pdo): void {
 </div>
 
 <?php if ($renewFrom): ?>
-<div style="display:flex;flex-wrap:wrap;gap:16px;align-items:center;background:#eaf2fb;border:1px solid #bcd7f0;border-radius:8px;padding:12px 16px;margin-bottom:16px;">
+<div style="max-width:760px;margin:0 auto 16px;display:flex;flex-wrap:wrap;gap:16px;align-items:center;background:#eaf2fb;border:1px solid #bcd7f0;border-radius:8px;padding:12px 16px;">
   <span style="font-weight:700;color:#2b6cb0;">갱신 유형</span>
   <label style="cursor:pointer;"><input type="radio" name="renewal_type" value="extended" <?= $isImplied ? '' : 'checked' ?>> 계약 연장 <span style="color:#7f8c8d;font-size:12px;">(새 계약서)</span></label>
   <label style="cursor:pointer;"><input type="radio" name="renewal_type" value="implied" <?= $isImplied ? 'checked' : '' ?>> 묵시적 갱신 <span style="color:#7f8c8d;font-size:12px;">(무서류 자동연장)</span></label>
   <span style="color:#7f8c8d;font-size:12px;">· 변경된 월세/보증금/관리비는 아래에 입력하면 그 시점부터 적용됩니다</span>
 </div>
 <?php endif; ?>
+
+<div class="card scan-card">
+  <div class="scan-row">
+    <div>
+      <div class="scan-title">📄 계약서 사진으로 자동 채우기</div>
+      <div class="scan-sub">계약서를 촬영하거나 이미지를 올리면 AI가 읽어 아래 항목을 채워줍니다. <b>결과는 반드시 확인·수정</b>하세요.</div>
+    </div>
+    <label class="btn btn-primary scan-btn">
+      <span id="nwScanLabel">📷 사진 선택 / 촬영</span>
+      <input type="file" id="nwScanInput" accept="image/*" capture="environment" style="display:none;" onchange="nwScanContract(this)">
+    </label>
+  </div>
+  <div id="nwScanStatus" class="scan-status" style="display:none;"></div>
+  <div class="scan-thumbs" id="nwScanThumbs">
+    <?php foreach ($images as $im): ?>
+    <a class="scan-thumb" href="/nw/image.php?id=<?= (int)$im['id'] ?>" target="_blank" title="원본 보기">
+      <img src="/nw/image.php?id=<?= (int)$im['id'] ?>" alt="계약서">
+    </a>
+    <?php endforeach; ?>
+  </div>
+</div>
 
 <div class="card form-card">
   <div class="form-card-head">
@@ -956,10 +1060,90 @@ function nw_page_contract(PDO $pdo): void {
 </div>
 
 <script>
+let NW_IMG = 0; // 스캔으로 저장된 계약서 이미지 id (저장 시 계약에 연결)
+
+// 계약서 사진 업로드 → Claude Vision 판독 → 폼 자동 채움
+function nwScanContract(input) {
+  const f = input.files && input.files[0];
+  if (!f) return;
+  const status = document.getElementById('nwScanStatus');
+  document.getElementById('nwScanLabel').textContent = '📷 사진 선택 / 촬영';
+  status.style.display = '';
+  status.className = 'scan-status loading';
+  status.textContent = '⏳ 계약서를 읽는 중입니다… (10~30초)';
+
+  const fd = new FormData();
+  fd.append('module', 'contract');
+  fd.append('action', 'scanImage');
+  fd.append('room_id', '<?= $roomId ?>');
+  <?php if ($editId): ?>fd.append('contract_id', '<?= (int)$editId ?>');<?php endif; ?>
+  fd.append('file', f);
+
+  fetch('/nw/api.php', { method: 'POST', body: fd })
+    .then(r => r.json())
+    .then(j => {
+      if (!j.ok) { status.className = 'scan-status err'; status.textContent = '오류: ' + (j.msg || '실패'); return; }
+      if (j.image_id) { NW_IMG = j.image_id; nwAddScanThumb(j.image_id); }
+      if (!j.fields) { status.className = 'scan-status err'; status.textContent = j.msg || 'AI 판독 실패 — 직접 입력해 주세요. (사진은 저장됨)'; return; }
+      const n = nwFillFromScan(j.fields);
+      status.className = 'scan-status ok';
+      status.textContent = '✅ ' + n + '개 항목을 채웠습니다. 내용을 확인·수정한 뒤 저장하세요.';
+    })
+    .catch(() => { status.className = 'scan-status err'; status.textContent = '네트워크 오류가 발생했습니다.'; });
+}
+
+function nwAddScanThumb(id) {
+  const box = document.getElementById('nwScanThumbs');
+  const a = document.createElement('a');
+  a.className = 'scan-thumb'; a.href = '/nw/image.php?id=' + id; a.target = '_blank'; a.title = '원본 보기';
+  a.innerHTML = '<img src="/nw/image.php?id=' + id + '" alt="계약서">';
+  box.appendChild(a);
+}
+
+// AI가 읽은 필드로 폼 채우기 (빈 값은 건너뜀). 채운 개수 반환.
+function nwFillFromScan(fx) {
+  let cnt = 0;
+  const setV = (id, v) => { if (v === undefined || v === null || v === '') return; const el = document.getElementById(id); if (el) { el.value = v; cnt++; } };
+  const setMoney = (id, v) => { if (v === undefined || v === null || v === '') return; const el = document.getElementById(id); if (!el) return; el.value = String(v).replace(/[^0-9]/g, ''); nwFmtMoney(el); cnt++; };
+  const setSsn = (p1, p2, v) => { if (!v) return; const d = String(v).replace(/\D/g, ''); const a = document.getElementById(p1), b = document.getElementById(p2); if (a && b) { a.value = d.slice(0, 6); b.value = d.slice(6, 13); cnt++; } };
+
+  // 계약형태 라디오
+  if (fx.contract_type) {
+    const r = document.querySelector('input[name=contract_type][value="' + fx.contract_type + '"]');
+    if (r) { r.checked = true; cnt++; }
+  }
+  // 전세권설정 체크박스
+  if (fx.deposit_registered !== undefined && fx.deposit_registered !== '') {
+    const chk = document.getElementById('f_deposit_registered');
+    if (chk) { chk.checked = (String(fx.deposit_registered) === '1' || fx.deposit_registered === true); cnt++; }
+  }
+  setV('f_tenant_name', fx.tenant_name);
+  setSsn('f_tenant_ssn1', 'f_tenant_ssn2', fx.tenant_ssn);
+  setV('f_tenant_phone', fx.tenant_phone);
+  setV('f_co_tenant_name', fx.co_tenant_name);
+  setSsn('f_co_tenant_ssn1', 'f_co_tenant_ssn2', fx.co_tenant_ssn);
+  setV('f_co_tenant_phone', fx.co_tenant_phone);
+  setMoney('f_deposit', fx.deposit);
+  setMoney('f_down_payment', fx.down_payment);
+  setMoney('f_balance_amount', fx.balance_amount);
+  setV('f_contract_date', fx.contract_date);
+  setV('f_balance_date', fx.balance_date);
+  setV('f_contract_end_date', fx.contract_end_date);
+  setMoney('f_rent_fee', fx.rent_fee);
+  setMoney('f_maintenance_fee', fx.maintenance_fee);
+  setV('f_rent_pay_day', fx.rent_pay_day);
+  setV('f_agent_office', fx.agent_office);
+  setV('f_agent_phone', fx.agent_phone);
+  setV('f_agent_ceo', fx.agent_ceo);
+  setV('f_special_terms', fx.special_terms);
+  return cnt;
+}
+
 function nwSubmitContract() {
   const rt = document.querySelector('input[name=contract_type]:checked');
   const d = {
     room_id: <?= $roomId ?>,
+    image_id: NW_IMG,
     contract_type: rt ? rt.value : 'monthly',
     tenant_name: document.getElementById('f_tenant_name').value,
     tenant_ssn: nwSsn('f_tenant_ssn1', 'f_tenant_ssn2'),
@@ -1029,11 +1213,13 @@ function nw_page_payment(PDO $pdo): void {
     if (!$head)    foreach ($contracts as $cc) if ($cc['status'] === 'active') { $head = $cc; break; }
     if (!$head)    $head = $contracts[0] ?? null;
     $focusId = $head ? (int)$head['id'] : 0;
+    $headImages = $focusId ? $nw->listContractImages($focusId) : []; // focus 계약에 첨부된 계약서 사진
 
     // JS용 계약 배열(호실 전 계약) + 세입자 전환 칩용 기간 라벨
     $jsC = [];
     foreach ($contracts as $cc) {
-        $s = $cc['contract_date'] ?: ($cc['first_contract_date'] ?? '');
+        // 재실/월세 시작 = 입주일(잔금일) 우선, 없으면 계약일
+        $s = ($cc['balance_date'] ?? '') ?: ($cc['contract_date'] ?: ($cc['first_contract_date'] ?? ''));
         $sy = 0; $sm = 0; if (preg_match('/^(\d{4})-(\d{2})/', (string)$s, $m)) { $sy = (int)$m[1]; $sm = (int)$m[2]; }
         $occEnd = ($cc['move_out_date'] ?? '') ?: ($cc['contract_end_date'] ?? ''); // 재실 종료 = 실제 퇴거일 우선
         $ey = 0; $em = 0; if (preg_match('/^(\d{4})-(\d{2})/', (string)$occEnd, $m)) { $ey = (int)$m[1]; $em = (int)$m[2]; }
@@ -1057,16 +1243,16 @@ function nw_page_payment(PDO $pdo): void {
 ?>
 <style>
 .nw-body{max-width:940px;}
-.tenant-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:14px;}
-.tenant-bar .tb-label{font-size:13px;color:#718096;margin-right:2px;}
-.tchip{padding:6px 14px;border:1px solid #cbd5e0;border-radius:18px;background:#fff;cursor:pointer;font-size:14px;color:#4a5568;font-weight:600;text-decoration:none;display:inline-block;}
+.tenant-bar,.year-bar{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:12px 14px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,.05);}
+.tb-head{font-size:12px;font-weight:700;color:#718096;margin-bottom:9px;letter-spacing:.5px;}
+.tb-chips{display:flex;flex-wrap:wrap;gap:8px;}
+.tchip{display:inline-flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;line-height:1.2;padding:7px 14px;border:1px solid #cbd5e0;border-radius:12px;background:#fff;cursor:pointer;color:#2d3748;font-weight:700;font-size:15px;text-decoration:none;}
 .tchip:hover{background:#f7fafc;}
 .tchip.on{background:#2d3748;border-color:#2d3748;color:#fff;}
-.tchip .tc-per{font-size:11px;font-weight:400;opacity:.8;margin-left:5px;}
-.year-bar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;}
-.year-chip{padding:6px 16px;border:1px solid #cbd5e0;border-radius:18px;background:#fff;cursor:pointer;font-size:14px;color:#4a5568;font-weight:600;}
+.tchip .tc-per{margin:3px 0 0;font-size:11px;font-weight:400;opacity:.75;letter-spacing:-.2px;}
+.year-chip{padding:7px 16px;border:1px solid #cbd5e0;border-radius:12px;background:#fff;cursor:pointer;font-size:14px;color:#4a5568;font-weight:700;}
 .year-chip:hover{background:#f7fafc;}
-.year-chip.on{background:#2b6cb0;border-color:#2b6cb0;color:#fff;}
+.year-chip.on{background:#2d3748;border-color:#2d3748;color:#fff;}
 .year-chip .yc-sub{font-size:11px;font-weight:600;color:#c53030;margin-left:5px;}
 .year-chip.on .yc-sub{color:#fed7d7;}
 .year-summary{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;background:#f7fafc;border:1px solid #e2e8f0;border-radius:10px;padding:14px 18px;margin-bottom:14px;}
@@ -1098,30 +1284,18 @@ function nw_page_payment(PDO $pdo): void {
 <div class="page-head">
   <div>
     <a class="back-link" href="/nw/index.php?mode=building&id=<?= (int)$unit['building_id'] ?>">← 호실 목록</a>
-    <h1 style="margin-top:6px;"><?= nw_h($building['name']) ?> (<?= nw_h($unit['room_no']) ?>호)<?= $head ? ' — ' . nw_h($head['tenant_name']) : '' ?></h1>
-    <div class="sub">
-      <?php if ($head): ?><?= nw_h($head['tenant_phone']) ?> · 현재계약 <?= nw_h($head['contract_date']) ?> ~ <?= nw_h($head['contract_end_date']) ?><?php endif; ?>
-      <?php if (count($contracts) > 1): ?> · <b>계약 이력 <?= count($contracts) ?>건</b>(과거 세입자 포함)<?php endif; ?>
-    </div>
+    <h1 style="margin-top:6px;"><?= nw_h($building['name']) ?> (<?= nw_h($unit['room_no']) ?>호)<?= $head ? ' — ' . nw_h($head['tenant_name']) : '' ?><?php if ($headImages): ?> <button type="button" class="doc-chip" onclick="nwOpenModal('nwDocModal')">📄 계약서<?= count($headImages) > 1 ? ' ' . count($headImages) : '' ?></button><?php endif; ?></h1>
   </div>
 </div>
 
-<div class="pay-summary">
-  <div class="card"><div class="lbl">월세(현재)</div><div class="val mono"><?= nw_money($head['rent_fee'] ?? 0) ?>원</div></div>
-  <div class="card"><div class="lbl">관리비(현재)</div><div class="val mono"><?= nw_money($head['maintenance_fee'] ?? 0) ?>원</div></div>
-  <div class="card"><div class="lbl">계약 이력</div><div class="val"><?= count($contracts) ?>건</div></div>
+<div class="pay-stat">
+  <?php if ($head && $head['tenant_phone']): ?><span><i>전화</i><b><?= nw_h($head['tenant_phone']) ?></b></span><?php endif; ?>
+  <?php if ($head): ?><span><i>계약기간</i><b><?= nw_h($head['contract_date']) ?> ~ <?= nw_h($head['contract_end_date']) ?></b></span><?php endif; ?>
+  <span><i>월세</i><b class="mono"><?= nw_money($head['rent_fee'] ?? 0) ?>원</b></span>
+  <span><i>관리비</i><b class="mono"><?= nw_money($head['maintenance_fee'] ?? 0) ?>원</b></span>
+  <span><i>계약이력</i><b><?= count($contracts) ?>건</b></span>
 </div>
 
-<div class="card" style="margin-bottom:16px;">
-  <div class="pay-form">
-    <div class="form-field"><label>월세</label><div class="input-money"><input type="text" inputmode="numeric" class="money" id="p_rent_fee" value="<?= nw_money($head['rent_fee'] ?? 0) ?>"></div></div>
-    <div class="form-field"><label>관리비</label><div class="input-money"><input type="text" inputmode="numeric" class="money" id="p_maintenance_fee" value="<?= nw_money($head['maintenance_fee'] ?? 0) ?>"></div></div>
-    <div class="form-field"><label>납부일</label><input type="date" id="p_pay_date" value="<?= date('Y-m-d') ?>" onchange="nwAttrUpdate()"></div>
-    <div class="form-field"><label>귀속월</label><input type="month" id="p_bill_ym" value="<?= date('Y-m') ?>"></div>
-    <div class="form-field"><label>메모</label><input type="text" id="p_memo"></div>
-    <button class="btn btn-primary" onclick="nwAddPayment()">등록</button>
-  </div>
-</div>
 
 <div id="nwTenantBar" class="tenant-bar"></div>
 <div id="nwYearBar" class="year-bar"></div>
@@ -1286,7 +1460,7 @@ function nwRenderYears(){
     const dot = (e.exp > 0 && paid < e.exp) ? ' <span class="yc-sub">미납</span>' : '';
     return '<div class="year-chip" data-y="' + y + '" onclick="nwSelectYear(' + y + ')">' + y + '년' + dot + '</div>';
   }).join('');
-  document.getElementById('nwYearBar').innerHTML = h;
+  document.getElementById('nwYearBar').innerHTML = '<div class="tb-head">조회 기간</div><div class="tb-chips">' + h + '</div>';
   let def = (NWP.preYear && years.indexOf(NWP.preYear) >= 0) ? NWP.preYear : (years.indexOf(NWP.curY) >= 0 ? NWP.curY : years[years.length - 1]);
   if (def != null) nwSelectYear(def);
 }
@@ -1295,44 +1469,16 @@ function nwRenderTenantBar(){
   const bar = document.getElementById('nwTenantBar');
   if (!bar) return;
   if (NWP.contracts.length <= 1) { bar.style.display = 'none'; return; }
-  let h = '<span class="tb-label">세입자</span>';
+  let chips = '';
   NWP.contracts.forEach(c => {
     const on = (FOCUS && c.id === FOCUS.id) ? ' on' : '';
     const per = (c.ps || c.pe) ? '<span class="tc-per">' + c.ps + '~' + c.pe + '</span>' : '';
-    h += '<a class="tchip' + on + '" href="/nw/index.php?mode=payment&room_id=' + NWP.roomId + '&contract_id=' + c.id + '">' + esc(c.tenant || '(무기명)') + per + '</a>';
+    chips += '<a class="tchip' + on + '" href="/nw/index.php?mode=payment&room_id=' + NWP.roomId + '&contract_id=' + c.id + '">' + esc(c.tenant || '(무기명)') + per + '</a>';
   });
-  bar.innerHTML = h;
+  bar.innerHTML = '<div class="tb-head">세입자</div><div class="tb-chips">' + chips + '</div>';
 }
 nwRenderTenantBar();
 nwRenderYears();
-
-// 납부일 → 귀속 계약(세입자) 표시 + 월세/관리비 자동 채움
-function nwAttrUpdate(){
-  const date = document.getElementById('p_pay_date').value;
-  const c = attrAt(date);
-  if (c) {
-    document.getElementById('p_rent_fee').value = won(c.rent);
-    document.getElementById('p_maintenance_fee').value = won(c.mnt);
-  }
-  const bm = document.getElementById('p_bill_ym'); if (bm && date) bm.value = date.slice(0, 7); // 귀속월 기본=납부일 월
-}
-nwAttrUpdate();
-
-function nwAddPayment() {
-  const date = document.getElementById('p_pay_date').value;
-  const c = attrAt(date);
-  if (!c) { alert('납부일에 해당하는 계약을 찾을 수 없습니다.'); return; }
-  const d = {
-    contract_id: c.id,
-    rent_fee: document.getElementById('p_rent_fee').value,
-    maintenance_fee: document.getElementById('p_maintenance_fee').value,
-    pay_date: date,
-    bill_ym: document.getElementById('p_bill_ym').value,
-    memo: document.getElementById('p_memo').value,
-  };
-  if (!confirm((c.tenant || '(무기명)') + ' 계약으로 등록하시겠습니까?')) return;
-  nwApi('payment', 'add', d).then(() => location.reload());
-}
 
 // 납부 수정: 월 행 클릭 → 그 달 납부기록 편집 모달
 const nwUnmoney2 = v => Number(String(v).replace(/[^0-9]/g, '')) || 0;
@@ -1380,6 +1526,19 @@ function nwDeletePayment(id){
     <div class="modal-actions"><button class="btn btn-outline" onclick="nwCloseModal('nwEditPayModal')">닫기</button></div>
   </div>
 </div>
+
+<?php if ($headImages): ?>
+<div class="modal-overlay doc-overlay" id="nwDocModal" onclick="if(event.target===this)nwCloseModal('nwDocModal')">
+  <div class="doc-box">
+    <button type="button" class="doc-x" onclick="nwCloseModal('nwDocModal')" aria-label="닫기">✕</button>
+    <div class="doc-imgs">
+      <?php foreach ($headImages as $im): ?>
+      <img src="/nw/image.php?id=<?= (int)$im['id'] ?>" alt="계약서" loading="lazy">
+      <?php endforeach; ?>
+    </div>
+  </div>
+</div>
+<?php endif; ?>
 <?php
     nw_foot();
 }

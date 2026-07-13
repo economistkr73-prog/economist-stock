@@ -56,10 +56,40 @@ function api_nw_unit(string $action, PDO $pdo): void {
 function api_nw_contract(string $action, PDO $pdo): void {
     $nw = new Nw($pdo);
 
+    // 계약서 사진(멀티파트) → Claude Vision 판독 + 원본 이미지 DB 저장
+    if ($action === 'scanImage') {
+        if (empty($_FILES['file']['tmp_name']) || !is_uploaded_file($_FILES['file']['tmp_name'])) {
+            echo json_encode(['ok' => false, 'msg' => '이미지 파일이 없습니다.']);
+            return;
+        }
+        $nw->ensureTable(); // nw_contract_image 존재 보장(멱등)
+        $bytes = file_get_contents($_FILES['file']['tmp_name']);
+        $mime  = $_FILES['file']['type'] ?: 'image/jpeg';
+        $fname = $_FILES['file']['name'] ?? null;
+        $unitId    = (int)($_POST['room_id'] ?? 0) ?: null;
+        $contractId = (int)($_POST['contract_id'] ?? 0) ?: null;
+
+        // 원본을 먼저 저장(판독 실패해도 사진은 보관)
+        $imageId = $nw->saveContractImage($contractId, $unitId, $mime, $bytes, $fname);
+
+        // Claude Vision 판독 (env/anthropic.inc 필요)
+        $incF = $_SERVER['DOCUMENT_ROOT'] . '/env/anthropic.inc';
+        if (is_file($incF)) require_once $incF;
+        $fields = $nw->extractContractFromImage($bytes, $mime);
+        if ($fields === null) {
+            echo json_encode(['ok' => true, 'image_id' => $imageId, 'fields' => null,
+                              'msg' => 'AI 판독에 실패했습니다. 이미지는 저장되었으니 직접 입력해 주세요.']);
+            return;
+        }
+        echo json_encode(['ok' => true, 'image_id' => $imageId, 'fields' => $fields]);
+        return;
+    }
+
     if ($action === 'add') {
         $d = $_POST;
         $d['room_id'] = (int)($_POST['room_id'] ?? 0);
         $id = $nw->addContract($d);
+        if ($imgId = (int)($_POST['image_id'] ?? 0)) $nw->linkContractImage($imgId, $id);
         echo json_encode(['ok' => true, 'id' => $id]);
         return;
     }
@@ -67,6 +97,7 @@ function api_nw_contract(string $action, PDO $pdo): void {
     if ($action === 'update') {
         $id = (int)($_POST['id'] ?? 0);
         $nw->updateContract($id, $_POST);
+        if ($imgId = (int)($_POST['image_id'] ?? 0)) $nw->linkContractImage($imgId, $id);
         echo json_encode(['ok' => true]);
         return;
     }
@@ -74,6 +105,7 @@ function api_nw_contract(string $action, PDO $pdo): void {
     if ($action === 'renew') {
         $oldId = (int)($_POST['renew_from'] ?? 0);
         $newId = $nw->renewContract($oldId, $_POST);
+        if ($imgId = (int)($_POST['image_id'] ?? 0)) $nw->linkContractImage($imgId, $newId);
         echo json_encode(['ok' => true, 'id' => $newId]);
         return;
     }
