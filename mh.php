@@ -39,6 +39,7 @@ function mh_ensure_table(PDO $pdo): void {
           `wb`        TINYINT      NOT NULL DEFAULT 0,
           `url_no`    INT          NOT NULL DEFAULT 0,
           `url_dir`   VARCHAR(255) NOT NULL DEFAULT '',
+          `last_url`  VARCHAR(255) NOT NULL DEFAULT '',
           `ord_no`    INT          NOT NULL DEFAULT 0,
           `last_no`   INT          NOT NULL DEFAULT 0,
           `latest_no` INT          NOT NULL DEFAULT 0,
@@ -49,6 +50,8 @@ function mh_ensure_table(PDO $pdo): void {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     ");
     $pdo->exec("ALTER TABLE `tbl_mh` ADD COLUMN IF NOT EXISTS `latest_no` INT NOT NULL DEFAULT 0 AFTER `last_no`");
+    // 마지막으로 본 회차(본문) 경로 — url_dir 뒤의 상대 경로만 저장(도메인 바뀌어도 재조립 가능)
+    $pdo->exec("ALTER TABLE `tbl_mh` ADD COLUMN IF NOT EXISTS `last_url` VARCHAR(255) NOT NULL DEFAULT '' AFTER `url_dir`");
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS `tbl_mh_scrap` (
           `id`     INT NOT NULL AUTO_INCREMENT,
@@ -72,10 +75,19 @@ const MH_SCRAP_TABS = [
     'youtube' => ['grp' => 1, 'label' => '▶️ 유튜브', 'title' => '유튜브'],
 ];
 
-/** 작품 1건의 외부 링크 조립: https://{host}{url_no}.{tld}/{path}/{url_dir} */
+/** 작품 목록 페이지 링크 조립: https://{host}{url_no}.{tld}/{path}/{url_dir} */
 function mh_url(array $r): string {
     $t = MH_TYPES[$r['wb']] ?? MH_TYPES[0];
     return "https://{$t['host']}{$r['url_no']}.{$t['tld']}/{$t['path']}/" . rawurlencode($r['url_dir']);
+}
+
+/** 마지막 본 회차(본문) 링크. last_url(상대 경로)이 있으면 목록URL 뒤에 붙인다. 없으면 목록URL. */
+function mh_chapter_url(array $r): string {
+    $base = mh_url($r);
+    $tail = trim($r['last_url'] ?? '');
+    if ($tail === '') return $base;
+    $segs = array_map('rawurlencode', array_filter(explode('/', $tail), 'strlen'));
+    return $base . '/' . implode('/', $segs);
 }
 
 /** 독립 헤더(탭) 출력 */
@@ -101,6 +113,7 @@ if (isset($_GET['set_latest'])) {
     $url_dir = trim($_GET['url_dir'] ?? '');
     $latest  = (int)($_GET['latest_no'] ?? 0);   // 본문 최댓값 = 최신화
     $read    = (int)($_GET['read_no'] ?? 0);     // 제목 화수 = 지금 보고 있는(읽은) 화
+    $readPath = trim($_GET['read_path'] ?? '');  // 뷰어 회차 경로(url_dir 뒤 상대경로) = 본문 링크
     $wb      = (int)($_GET['wb'] ?? 0);       if (!isset(MH_TYPES[$wb])) $wb = 0;
     $url_no  = (int)($_GET['url_no'] ?? 0);
     $tit     = trim($_GET['tit'] ?? '');
@@ -123,8 +136,13 @@ if (isset($_GET['set_latest'])) {
             $st->execute([':l' => $latest, ':no' => (int)$row['no']]);
         }
         if ($read > 0) {
-            $st = $pdo->prepare("UPDATE tbl_mh SET last_no=:r, uDate=CURDATE(), kg=0 WHERE no=:no");
-            $st->execute([':r' => $read, ':no' => (int)$row['no']]);
+            if ($readPath !== '') {   // 회차 경로까지 받았으면 본문 링크도 갱신
+                $st = $pdo->prepare("UPDATE tbl_mh SET last_no=:r, last_url=:u, uDate=CURDATE(), kg=0 WHERE no=:no");
+                $st->execute([':r' => $read, ':u' => $readPath, ':no' => (int)$row['no']]);
+            } else {
+                $st = $pdo->prepare("UPDATE tbl_mh SET last_no=:r, uDate=CURDATE(), kg=0 WHERE no=:no");
+                $st->execute([':r' => $read, ':no' => (int)$row['no']]);
+            }
         }
         // 갱신 후 최종 최신화 재조회 (GREATEST 결과 반영)
         $lt = (int)$pdo->query("SELECT latest_no FROM tbl_mh WHERE no=" . (int)$row['no'])->fetchColumn();
@@ -153,6 +171,7 @@ if (isset($_GET['set_latest'])) {
     }
     $eTit = htmlspecialchars($tit, ENT_QUOTES);
     $eDir = htmlspecialchars($url_dir, ENT_QUOTES);
+    $eRPath = htmlspecialchars($readPath, ENT_QUOTES);
     ?>
 <!doctype html><html lang=ko><head><meta charset=utf-8><title>새 작품 등록</title>
 <style>
@@ -174,6 +193,7 @@ button{flex:1;border:none;border-radius:6px;padding:10px;font-weight:700;cursor:
   <label>서버번호 (url_no)</label><input id="url_no" type="number" value="<?= (int)$url_no ?>">
   <label>최신화 (latest_no)</label><input id="latest_no" type="number" value="<?= (int)$latest ?>">
   <label>읽은 회차 (last_no)</label><input id="last_no" type="number" value="<?= (int)$read ?>">
+  <input type="hidden" id="read_path" value="<?= $eRPath ?>">
   <div class="foot">
     <button class="no" onclick="window.close()">취소</button>
     <button class="ok" onclick="reg()">등록</button>
@@ -190,6 +210,7 @@ async function reg(){
     url_no: parseInt(g('url_no').value)||0,
     latest_no: parseInt(g('latest_no').value)||0,
     last_no: parseInt(g('last_no').value)||0,
+    last_url: g('read_path').value.trim(),
   };
   if(!p.tit){ alert('제목을 입력하세요'); return; }
   if(!p.url_dir){ alert('경로(url_dir)를 입력하세요'); return; }
@@ -223,16 +244,17 @@ if ($action !== '') {
                 if (!isset(MH_TYPES[$wb])) $wb = 0;
                 $maxOrd = (int)$pdo->query("SELECT COALESCE(MAX(ord_no),0) FROM tbl_mh")->fetchColumn();
                 $st = $pdo->prepare(
-                    "INSERT INTO tbl_mh (tit, wb, url_no, url_dir, ord_no, last_no, latest_no, uDate, kg)
-                     VALUES (:tit, :wb, :url_no, :url_dir, :ord, :last, :latest, CURDATE(), 0)");
+                    "INSERT INTO tbl_mh (tit, wb, url_no, url_dir, last_url, ord_no, last_no, latest_no, uDate, kg)
+                     VALUES (:tit, :wb, :url_no, :url_dir, :last_url, :ord, :last, :latest, CURDATE(), 0)");
                 $st->execute([
-                    ':tit'     => trim($in['tit'] ?? ''),
-                    ':wb'      => $wb,
-                    ':url_no'  => (int)($in['url_no'] ?? 0),
-                    ':url_dir' => trim($in['url_dir'] ?? ''),
-                    ':ord'     => $maxOrd + 1,
-                    ':last'    => (int)($in['last_no'] ?? 0),
-                    ':latest'  => (int)($in['latest_no'] ?? 0),
+                    ':tit'      => trim($in['tit'] ?? ''),
+                    ':wb'       => $wb,
+                    ':url_no'   => (int)($in['url_no'] ?? 0),
+                    ':url_dir'  => trim($in['url_dir'] ?? ''),
+                    ':last_url' => trim($in['last_url'] ?? ''),
+                    ':ord'      => $maxOrd + 1,
+                    ':last'     => (int)($in['last_no'] ?? 0),
+                    ':latest'   => (int)($in['latest_no'] ?? 0),
                 ]);
                 break;
             }
@@ -377,7 +399,7 @@ $scrapCfg = MH_SCRAP_TABS[$mode] ?? null;   // 스크랩 계열이면 설정, �
 
 // 북마클릿(연재추적기 탭에서 안내)
 $bookmarklet = <<<'BM'
-javascript:(function(){var segs=location.pathname.split('/').filter(Boolean);if(segs.length<2||!/^\d+$/.test(segs[1])){alert('작품 페이지에서 실행하세요');return;}var seg=segs[0],d=segs[1];var wb=(seg==='novel')?1:((seg==='mana'||seg==='comic')?2:((seg==='anime')?3:0));var hn=(location.hostname.match(/(\d+)/)||[])[1]||'';var tit=(document.title||'').replace(/\s*[-|:｜].*$/,'').trim();var base='https://economist.kr/mh.php?set_latest=1&url_dir='+d+'&wb='+wb+'&url_no='+hn+'&tit='+encodeURIComponent(tit);var x;if(segs.length>=3){var last=segs[segs.length-1],nums=last.match(/\d+/g)||[],cur=nums.length?parseInt(nums[nums.length-1],10):0;if(!cur){var rt=/(\d{1,4})[화회]/g,tt=document.title||'';while((x=rt.exec(tt))!==null){cur=parseInt(x[1],10);}}if(!cur){alert('현재 화수를 찾지 못했습니다');return;}window.open(base+'&read_no='+cur,'_blank');}else{var t=document.body.innerText,rb=/(\d{1,4})[화회]/g,mx=0;while((x=rb.exec(t))!==null){var v=parseInt(x[1],10);if(v>mx)mx=v;}if(!mx){alert('최신 화수를 찾지 못했습니다');return;}window.open(base+'&latest_no='+mx,'_blank');}})();
+javascript:(function(){var segs=location.pathname.split('/').filter(Boolean);if(segs.length<2||!/^\d+$/.test(segs[1])){alert('작품 페이지에서 실행하세요');return;}var seg=segs[0],d=segs[1];var wb=(seg==='novel')?1:((seg==='mana'||seg==='comic')?2:((seg==='anime')?3:0));var hn=(location.hostname.match(/(\d+)/)||[])[1]||'';var tit=(document.title||'').replace(/\s*[-|:｜].*$/,'').trim();var base='https://economist.kr/mh.php?set_latest=1&url_dir='+d+'&wb='+wb+'&url_no='+hn+'&tit='+encodeURIComponent(tit);var x;if(segs.length>=3){var last=segs[segs.length-1],nums=last.match(/\d+/g)||[],cur=nums.length?parseInt(nums[nums.length-1],10):0;if(!cur){var rt=/(\d{1,4})[화회]/g,tt=document.title||'';while((x=rt.exec(tt))!==null){cur=parseInt(x[1],10);}}if(!cur){alert('현재 화수를 찾지 못했습니다');return;}var rp=segs.slice(2).join('/');window.open(base+'&read_no='+cur+'&read_path='+encodeURIComponent(rp),'_blank');}else{var t=document.body.innerText,rb=/(\d{1,4})[화회]/g,mx=0;while((x=rb.exec(t))!==null){var v=parseInt(x[1],10);if(v>mx)mx=v;}if(!mx){alert('최신 화수를 찾지 못했습니다');return;}window.open(base+'&latest_no='+mx,'_blank');}})();
 BM;
 
 if ($mode === 'list') {
@@ -465,7 +487,9 @@ details.help code{background:#eef2f5;padding:1px 5px;border-radius:4px;font-size
 .ord button:hover{background:#dfe6ea}
 .badge{flex-shrink:0;font-size:12px;font-weight:700;color:#fff;padding:3px 8px;border-radius:20px}
 .main{flex:1;min-width:0}
-.main .tit{font-size:16px;font-weight:700;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.main .tit-row{display:flex;align-items:center;gap:6px}
+.main .tit-row .list-btn{flex-shrink:0;padding:4px 7px;font-size:15px;line-height:1}
+.main .tit{font-size:16px;font-weight:700;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;flex:1;min-width:0}
 .main .tit:hover{color:#2980b9;text-decoration:underline}
 .main .sub{font-size:12px;color:#95a5a6;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .chap{flex-shrink:0;text-align:center;cursor:pointer;min-width:58px;border-radius:8px;padding:6px 8px;background:#f4f7f9}
@@ -594,8 +618,10 @@ details.help code{background:#eef2f5;padding:1px 5px;border-radius:4px;font-size
       <ol style="margin:8px 0 8px 18px">
         <li>아래 보라색 버튼을 <b>브라우저 즐겨찾기(북마크바)로 드래그</b>해서 등록하세요.</li>
         <li><b>회차 목록 페이지</b>(예: <code>toki30.com/webtoon/807393</code>)에서 누르면 → <b>최신화</b>만 기록됩니다.</li>
-        <li><b>한 화를 보는 중</b>(예: <code>…/807393/nv-807393-73</code>)에 누르면 → 그 화(73)가 <b>읽은 회차</b>로 기록됩니다. (최신화는 안 건드림)</li>
+        <li><b>한 화를 보는 중</b>(예: <code>…/807393/nv-807393-73</code>)에 누르면 → 그 화(73)가 <b>읽은 회차</b>로 기록되고, <b>그 회차 본문 링크</b>도 함께 저장됩니다. (최신화는 안 건드림)</li>
       </ol>
+      기록 후에는 목록에서 <b>제목을 누르면 마지막으로 본 회차(본문 ▶)</b>로 바로 이동합니다. 전체 회차 목록은 오른쪽 <b>📚</b> 버튼으로 엽니다.
+      <div style="color:#e67e22;margin-top:6px">※ 북마클릿 내용이 바뀌었습니다 — <b>기존 북마크를 지우고 아래 버튼을 다시 드래그</b>해 등록하세요.</div>
       <a class="bm-link" href="<?= htmlspecialchars($bookmarklet, ENT_QUOTES) ?>" onclick="alert('클릭이 아니라, 이 버튼을 브라우저 북마크바로 드래그해서 등록하세요.');return false;">📌 화수 가져오기 (mh)</a>
       <div style="color:#95a5a6">
         ※ 작품은 경로(url_dir)로 매칭됩니다. 기록 후 뜨는 창에 <b>작품 제목·화수</b>가 표시되니 맞게 저장됐는지 바로 확인할 수 있어요.
@@ -622,18 +648,26 @@ details.help code{background:#eef2f5;padding:1px 5px;border-radius:4px;font-size
             'no' => (int)$r['no'], 'tit' => $r['tit'], 'wb' => (int)$r['wb'],
             'url_no' => (int)$r['url_no'], 'url_dir' => $r['url_dir'],
         ], JSON_UNESCAPED_UNICODE), ENT_QUOTES);
+        $hasChap  = trim($r['last_url'] ?? '') !== '';   // 저장된 본문(회차) 링크가 있는가
+        $listUrl  = mh_url($r);                          // 목록 페이지
+        $titleUrl = $hasChap ? mh_chapter_url($r) : $listUrl;  // 제목 클릭 = 본문 우선
     ?>
     <div class="card <?= $cardCls ?>" draggable="true" data-id="<?= (int)$r['no'] ?>">
       <span class="drag" title="드래그해서 순서변경">⠿</span>
       <span class="badge" style="background:<?= $t['color'] ?>"><?= htmlspecialchars($t['label']) ?></span>
       <div class="main">
-        <?php if ((int)$r['wb'] === 3): // 애니메이션 → 팝업창 ?>
-        <span class="tit" style="cursor:pointer" onclick="openPopup('<?= htmlspecialchars(mh_url($r), ENT_QUOTES) ?>')">
-          <?= htmlspecialchars($r['tit']) ?: '(제목없음)' ?> ⧉</span>
-        <?php else: // 그 외 → 새 탭 ?>
-        <a class="tit" draggable="false" href="<?= htmlspecialchars(mh_url($r)) ?>" target="_blank" rel="noopener">
-          <?= htmlspecialchars($r['tit']) ?: '(제목없음)' ?> ↗</a>
-        <?php endif; ?>
+        <div class="tit-row">
+          <?php if ($hasChap): ?>
+          <button class="icon list-btn" title="목록(전체 회차) 페이지 열기" onclick="openList('<?= htmlspecialchars($listUrl, ENT_QUOTES) ?>',<?= (int)$r['wb'] === 3 ? 'true' : 'false' ?>)">📚</button>
+          <?php endif; ?>
+          <?php if ((int)$r['wb'] === 3): // 애니메이션 → 팝업창 ?>
+          <span class="tit" style="cursor:pointer" title="<?= $hasChap ? '마지막 본 회차 열기' : '목록 열기' ?>" onclick="openPopup('<?= htmlspecialchars($titleUrl, ENT_QUOTES) ?>')">
+            <?= htmlspecialchars($r['tit']) ?: '(제목없음)' ?> <?= $hasChap ? '▶' : '⧉' ?></span>
+          <?php else: // 그 외 → 새 탭 ?>
+          <a class="tit" draggable="false" href="<?= htmlspecialchars($titleUrl) ?>" target="_blank" rel="noopener" title="<?= $hasChap ? '마지막 본 회차 열기' : '목록 열기' ?>">
+            <?= htmlspecialchars($r['tit']) ?: '(제목없음)' ?> <?= $hasChap ? '▶' : '↗' ?></a>
+          <?php endif; ?>
+        </div>
         <div class="sub"><?= htmlspecialchars($r['url_dir']) ?> · 서버<?= (int)$r['url_no'] ?></div>
       </div>
       <div class="chap" onclick="readChap(<?= (int)$r['no'] ?>,<?= (int)$r['last_no'] ?>,'<?= htmlspecialchars(addslashes($r['tit']), ENT_QUOTES) ?>',<?= $latest ?>)" title="읽은 화수 갱신">
@@ -742,6 +776,7 @@ function popupTiled(url, prefix){
     'width=' + W + ',height=' + H + ',left=' + left + ',top=' + top + ',scrollbars=yes,resizable=yes');
 }
 function openPopup(url){ popupTiled(url, 'mhread'); }   // 연재추적기 애니메이션 등 팝업 열기
+function openList(url, anime){ if(anime) openPopup(url); else window.open(url,'_blank','noopener'); }  // 📚 목록 페이지
 function openScrap(id, url){
   const w = popupTiled(url, 'mhscrap');
   if (w) { (openWins[id] = openWins[id] || []).push(w); }
