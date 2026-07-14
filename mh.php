@@ -121,7 +121,7 @@ if (isset($_GET['set_latest'])) {
     // url_dir 로 기존 작품 조회
     $row = null;
     if ($url_dir !== '') {
-        $c = $pdo->prepare("SELECT no, tit, latest_no FROM tbl_mh WHERE url_dir=:d LIMIT 1");
+        $c = $pdo->prepare("SELECT no, tit, last_no, latest_no FROM tbl_mh WHERE url_dir=:d LIMIT 1");
         $c->execute([':d' => $url_dir]);
         $row = $c->fetch(PDO::FETCH_ASSOC);
     }
@@ -130,32 +130,65 @@ if (isset($_GET['set_latest'])) {
 
     if ($row) {
         // 등록된 작품. 북마클릿이 페이지 종류를 판정해 최신화(목록) 또는 읽은화(뷰어) 중 하나만 보낸다.
-        // 최신화는 목록 페이지가 authoritative → 그대로 덮어쓴다(재실행 시 항상 정정).
+        // ★방어(구버전 북마클릿 대응): read_no가 오면 '뷰어(회차)' 컨텍스트다. 구버전 북마클릿이
+        //   latest_no를 함께 보내더라도, 지금 보고 있는 그 화(예: 20화)가 진짜 최신화(예: 85화)를
+        //   덮어쓰지 않도록 뷰어에서는 최신화 입력을 폐기한다. (뷰어는 전체 최신화를 알 수 없음)
+        if ($read > 0) $latest = 0;
+        // 최신화는 목록 페이지가 authoritative. 단, 본문 스캔 오차로 낮은 값이 들어와 기존 최신화를
+        //   깎지 않도록 GREATEST로 '올림'만 허용한다. 내림 정정은 배지 클릭(set_latest_manual)으로.
         if ($latest > 0) {
-            $st = $pdo->prepare("UPDATE tbl_mh SET latest_no = :l WHERE no=:no");
+            $st = $pdo->prepare("UPDATE tbl_mh SET latest_no = GREATEST(latest_no, :l) WHERE no=:no");
             $st->execute([':l' => $latest, ':no' => (int)$row['no']]);
         }
+        // 읽은 회차는 '앞으로만' 전진한다(이어보기 북마크처럼 최고 도달 화수 유지).
+        //   - 더 높은 화 → 위치 + 본문 딥링크 갱신, 오늘 읽음, 보관 해제
+        //   - 같은/이전 화 재열람 → 위치·딥링크 유지, '오늘 읽음'만 갱신 (되돌리기는 키패드로 수동)
+        $curRead  = (int)($row['last_no'] ?? 0);
+        $advanced = false;
         if ($read > 0) {
-            if ($readPath !== '') {   // 회차 경로까지 받았으면 본문 링크도 갱신
-                $st = $pdo->prepare("UPDATE tbl_mh SET last_no=:r, last_url=:u, uDate=CURDATE(), kg=0 WHERE no=:no");
-                $st->execute([':r' => $read, ':u' => $readPath, ':no' => (int)$row['no']]);
+            if ($read > $curRead) {
+                $advanced = true;
+                if ($readPath !== '') {
+                    $st = $pdo->prepare("UPDATE tbl_mh SET last_no=:r, last_url=:u, uDate=CURDATE(), kg=0 WHERE no=:no");
+                    $st->execute([':r' => $read, ':u' => $readPath, ':no' => (int)$row['no']]);
+                } else {
+                    $st = $pdo->prepare("UPDATE tbl_mh SET last_no=:r, uDate=CURDATE(), kg=0 WHERE no=:no");
+                    $st->execute([':r' => $read, ':no' => (int)$row['no']]);
+                }
             } else {
-                $st = $pdo->prepare("UPDATE tbl_mh SET last_no=:r, uDate=CURDATE(), kg=0 WHERE no=:no");
-                $st->execute([':r' => $read, ':no' => (int)$row['no']]);
+                $st = $pdo->prepare("UPDATE tbl_mh SET uDate=CURDATE() WHERE no=:no");
+                $st->execute([':no' => (int)$row['no']]);
             }
         }
-        // 갱신 후 최종 최신화 재조회 (GREATEST 결과 반영)
-        $lt = (int)$pdo->query("SELECT latest_no FROM tbl_mh WHERE no=" . (int)$row['no'])->fetchColumn();
+        // 갱신 후 최종 상태 재조회
+        $fin    = $pdo->query("SELECT last_no, latest_no FROM tbl_mh WHERE no=" . (int)$row['no'])->fetch(PDO::FETCH_ASSOC);
+        $curNow = (int)$fin['last_no'];
+        $lt     = (int)$fin['latest_no'];
         $eTitle = htmlspecialchars($row['tit'] ?: '(제목없음)');
-        $lines  = "<p style='font-size:18px'>✓ <b>{$eTitle}</b></p>";
+
+        // 결과 메시지(사람용 + 유저스크립트 토스트용 한 줄 요약)
         if ($read > 0) {
-            $lines .= "<p>읽은 회차 <b>{$read}화</b>로 기록</p>";
-            if ($lt > 0) $lines .= ($read >= $lt)
-                ? "<p style='color:#27ae60;font-weight:700'>최신화까지 다 읽었습니다 👍</p>"
-                : "<p style='color:#e67e22'>최신 {$lt}화 기준 " . ($lt - $read) . "화 남음</p>";
+            if ($advanced)                 $head = "읽은 회차 {$read}화로 기록";
+            elseif ($read === $curNow)     $head = "{$read}화 — 이미 기록됨";
+            else                           $head = "{$read}화 재열람 · 위치는 {$curNow}화 유지";
+            $done = ($lt > 0 && $curNow >= $lt);
+            $tail = ($lt > 0) ? ($done ? "최신화까지 다 읽음 👍" : "최신 {$lt}화 · " . ($lt - $curNow) . "화 남음") : '';
         } else {
-            $lines .= "<p>최신 <b>{$lt}화</b> 기록</p>";
+            $head = "최신 {$lt}화 기록";
+            $tail = '';
+            $done = false;
         }
+        $toastMsg = $head . ($tail !== '' ? " · {$tail}" : '');
+
+        $lines  = "<p style='font-size:18px'>✓ <b>{$eTitle}</b></p>";
+        $lines .= "<p>" . htmlspecialchars($head) . "</p>";
+        if ($tail !== '') {
+            $tc = $done ? '#27ae60;font-weight:700' : '#e67e22';
+            $lines .= "<p style='color:{$tc}'>" . htmlspecialchars($tail) . "</p>";
+        }
+        // 유저스크립트가 읽어 토스트로 띄우는 숨은 요약(팝업엔 안 보임)
+        $lines .= "<span id=\"mhmsg\" style='display:none'>" . htmlspecialchars($toastMsg) . "</span>";
+
         echo "<!doctype html><meta charset=utf-8><body style='font:16px sans-serif;padding:24px;text-align:center;line-height:1.6'>"
            . $lines
            . "<p style='color:#888;font-size:13px'>이 창은 잠시 후 닫힙니다.</p>"
@@ -595,6 +628,8 @@ details.help code{background:#eef2f5;padding:1px 5px;border-radius:4px;font-size
   <div class="bar">
     <h1>연재 목록</h1>
     <span class="stat">총 <b style="color:#2c3e50"><?= count($rows) ?></b>편 · 밀림 <b><?= $statBehind ?></b>편 · 7일↑ <b><?= $statOverdue ?></b>편</span>
+    <span class="stat" id="mhOpenCount"></span>
+    <button class="btn btn-outline btn-sm" onclick="closeAllMh()">열린창 전체 닫기</button>
     <a class="btn btn-outline btn-sm" href="?sort=<?= $sort === 'stale' ? 'ord' : 'stale' ?>">
       정렬: <?= $sort === 'stale' ? '경과일순' : '순서대로' ?></a>
     <button class="btn btn-primary" onclick="openModal()">+ 새 작품</button>
@@ -630,6 +665,25 @@ details.help code{background:#eef2f5;padding:1px 5px;border-radius:4px;font-size
     </div>
   </details>
 
+  <details class="help">
+    <summary>⚡ 화수 자동기록 유저스크립트 (팝업창에서도 동작) — 설치</summary>
+    <div class="body">
+      제목을 <b>팝업</b>으로 열면 북마크바가 없어 북마클릿을 못 씁니다. 이 <b>유저스크립트</b>를 한 번 설치하면
+      toki 계열 페이지가 열리는 순간 <b>자동으로</b> 회차(읽은 화)·최신화가 기록됩니다. <b>클릭이 필요 없습니다.</b>
+      <ol style="margin:8px 0 8px 18px">
+        <li>브라우저에 <b>Tampermonkey</b> 확장을 설치합니다. (크롬 웹스토어 → "Tampermonkey")</li>
+        <li>아래 <b>설치</b> 버튼을 누르면 Tampermonkey 설치 화면이 뜹니다 → <b>설치</b> 클릭.</li>
+        <li>크롬 최신 버전은 <code>확장 프로그램 → Tampermonkey → 세부정보 → "사용자 스크립트 허용" 토글 ON</code> 이 필요합니다.</li>
+        <li><b>economist.kr에 로그인된 상태</b>여야 기록됩니다. 기록되면 화면 우하단에 <b>초록 알림</b>이 잠깐 뜹니다.</li>
+      </ol>
+      뷰어(회차 본문)에서는 <b>읽은 회차</b>만, 목록 페이지에서는 <b>최신화</b>만 기록됩니다(북마클릿과 동일 규칙). 팝업이든 새 탭이든 모두 동작합니다.
+      <div style="margin-top:8px">
+        <a class="bm-link" href="/mh_tracker.user.js">⬇ 유저스크립트 설치</a>
+      </div>
+      <div style="color:#95a5a6;margin-top:4px">※ 설치 후 스크립트가 갱신되면 Tampermonkey가 자동 업데이트합니다(재설치 불필요).</div>
+    </div>
+  </details>
+
   <?php if (!$rows): ?>
     <div class="empty">등록된 작품이 없습니다. <b>+ 새 작품</b>으로 추가하세요.</div>
   <?php else: ?>
@@ -658,15 +712,10 @@ details.help code{background:#eef2f5;padding:1px 5px;border-radius:4px;font-size
       <div class="main">
         <div class="tit-row">
           <?php if ($hasChap): ?>
-          <button class="icon list-btn" title="목록(전체 회차) 페이지 열기" onclick="openList('<?= htmlspecialchars($listUrl, ENT_QUOTES) ?>',<?= (int)$r['wb'] === 3 ? 'true' : 'false' ?>)">📚</button>
+          <button class="icon list-btn" title="목록(전체 회차) 페이지 팝업으로 열기" onclick="mhPopup('<?= htmlspecialchars($listUrl, ENT_QUOTES) ?>')">📚</button>
           <?php endif; ?>
-          <?php if ((int)$r['wb'] === 3): // 애니메이션 → 팝업창 ?>
-          <span class="tit" style="cursor:pointer" title="<?= $hasChap ? '마지막 본 회차 열기' : '목록 열기' ?>" onclick="openPopup('<?= htmlspecialchars($titleUrl, ENT_QUOTES) ?>')">
+          <span class="tit" style="cursor:pointer" title="<?= $hasChap ? '마지막 본 회차 팝업으로 열기' : '목록 팝업으로 열기' ?>" onclick="mhPopup('<?= htmlspecialchars($titleUrl, ENT_QUOTES) ?>')">
             <?= htmlspecialchars($r['tit']) ?: '(제목없음)' ?> <?= $hasChap ? '▶' : '⧉' ?></span>
-          <?php else: // 그 외 → 새 탭 ?>
-          <a class="tit" draggable="false" href="<?= htmlspecialchars($titleUrl) ?>" target="_blank" rel="noopener" title="<?= $hasChap ? '마지막 본 회차 열기' : '목록 열기' ?>">
-            <?= htmlspecialchars($r['tit']) ?: '(제목없음)' ?> <?= $hasChap ? '▶' : '↗' ?></a>
-          <?php endif; ?>
         </div>
         <div class="sub"><?= htmlspecialchars($r['url_dir']) ?> · 서버<?= (int)$r['url_no'] ?></div>
       </div>
@@ -775,8 +824,26 @@ function popupTiled(url, prefix){
   return window.open(url, name,
     'width=' + W + ',height=' + H + ',left=' + left + ',top=' + top + ',scrollbars=yes,resizable=yes');
 }
-function openPopup(url){ popupTiled(url, 'mhread'); }   // 연재추적기 애니메이션 등 팝업 열기
-function openList(url, anime){ if(anime) openPopup(url); else window.open(url,'_blank','noopener'); }  // 📚 목록 페이지
+/* ── 연재추적기 목록: 제목/📚 클릭 시 팝업으로 열고, 전체 닫기 지원 (스크랩과 동일) ── */
+const mhWins = [];   // 이 페이지에서 연 팝업 window 핸들
+function mhPopup(url){
+  const w = popupTiled(url, 'mhread');
+  if (w) { mhWins.push(w); mhRefreshOpen(); }
+}
+function closeAllMh(){
+  let n = 0;
+  mhWins.forEach(w => { try { if (w && !w.closed) { w.close(); n++; } } catch(e){} });
+  mhWins.length = 0;
+  mhRefreshOpen();
+  if (!n) alert('닫을 열린 팝업이 없습니다. (이 페이지에서 연 창만 닫을 수 있어요)');
+}
+function mhRefreshOpen(){
+  const arr = mhWins.filter(w => w && !w.closed);
+  mhWins.length = 0; Array.prototype.push.apply(mhWins, arr);
+  const oc = document.getElementById('mhOpenCount');
+  if (oc) oc.textContent = arr.length ? ('열린 팝업 ' + arr.length + '개') : '';
+}
+setInterval(mhRefreshOpen, 1500);
 function openScrap(id, url){
   const w = popupTiled(url, 'mhscrap');
   if (w) { (openWins[id] = openWins[id] || []).push(w); }
