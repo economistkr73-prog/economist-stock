@@ -122,6 +122,13 @@ function api_nw_contract(string $action, PDO $pdo): void {
         return;
     }
 
+    // 잘못 올린 계약서 사진 삭제
+    if ($action === 'deleteImage') {
+        $nw->deleteContractImage((int)($_POST['id'] ?? 0));
+        echo json_encode(['ok' => true]);
+        return;
+    }
+
     http_response_code(400);
     echo json_encode(['ok' => false, 'msg' => "unknown action: {$action}"]);
 }
@@ -135,6 +142,9 @@ function api_nw_payment(string $action, PDO $pdo): void {
             'pay_date'        => $_POST['pay_date'] ?? '',
             'rent_fee'        => $_POST['rent_fee'] ?? '',
             'maintenance_fee' => $_POST['maintenance_fee'] ?? '',
+            'parking_fee'     => $_POST['parking_fee'] ?? '',
+            'water_fee'       => $_POST['water_fee'] ?? '',
+            'electric_fee'    => $_POST['electric_fee'] ?? '',
             'memo'            => $_POST['memo'] ?? '',
         ]);
         echo json_encode(['ok' => true, 'id' => $id]);
@@ -180,6 +190,88 @@ function api_nw_payment(string $action, PDO $pdo): void {
     if ($action === 'delete') {
         $nw->deletePayment((int)($_POST['id'] ?? 0));
         echo json_encode(['ok' => true]);
+        return;
+    }
+
+    // 공과금(수도·전기) 월별 부과액 저장 (호실+월 upsert)
+    if ($action === 'saveCharge') {
+        $nw->upsertUtilityCharge(
+            (int)($_POST['unit_id'] ?? 0),
+            (string)($_POST['bill_ym'] ?? ''),
+            (int)preg_replace('/[^0-9]/', '', (string)($_POST['water_fee'] ?? '0')),
+            (int)preg_replace('/[^0-9]/', '', (string)($_POST['electric_fee'] ?? '0'))
+        );
+        echo json_encode(['ok' => true]);
+        return;
+    }
+
+    // 청구월 요금 상수 저장
+    if ($action === 'saveConfig') {
+        $bid = (int)($_POST['building_id'] ?? 0);
+        $ym  = (string)($_POST['bill_ym'] ?? '');
+        if (!$bid || !preg_match('/^\d{4}-\d{2}$/', $ym)) { http_response_code(400); echo json_encode(['ok' => false, 'msg' => '건물/청구월 오류']); return; }
+        $g = function ($k, $def) { return is_numeric($_POST[$k] ?? null) ? (float)$_POST[$k] : $def; };
+        $nw->saveUtilityConfig($bid, $ym, [
+            'water_base' => $g('water_base', 2160),
+            'water_unit' => $g('water_unit', 930),
+            'elec_tv'    => $g('elec_tv', 2500),
+            'elec_base'  => $g('elec_base', 910),
+            'elec_unit'  => $g('elec_unit', 93.3),
+        ]);
+        echo json_encode(['ok' => true]);
+        return;
+    }
+
+    // 검침값 + 계산요금 일괄 저장
+    if ($action === 'bulkReadings') {
+        $bid  = (int)($_POST['building_id'] ?? 0);
+        $ym   = (string)($_POST['bill_ym'] ?? '');
+        $rows = json_decode($_POST['rows'] ?? '[]', true);
+        if (!$bid || !preg_match('/^\d{4}-\d{2}$/', $ym) || !is_array($rows)) { http_response_code(400); echo json_encode(['ok' => false, 'msg' => '데이터 오류']); return; }
+        $n = 0;
+        foreach ($rows as $r) {
+            $uid = (int)($r['unit_id'] ?? 0);
+            if (!$uid) continue;
+            $nw->saveUtilityReading($uid, $ym, [
+                'elec_prev'    => (int)($r['elec_prev'] ?? 0),
+                'elec_cur'     => (int)($r['elec_cur'] ?? 0),
+                'cold_prev'    => (int)($r['cold_prev'] ?? 0),
+                'cold_cur'     => (int)($r['cold_cur'] ?? 0),
+                'hot_prev'     => (int)($r['hot_prev'] ?? 0),
+                'hot_cur'      => (int)($r['hot_cur'] ?? 0),
+                'read_prev_date' => preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)($r['read_prev_date'] ?? '')) ? $r['read_prev_date'] : null,
+                'read_cur_date'  => preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)($r['read_cur_date'] ?? '')) ? $r['read_cur_date'] : null,
+                'bill_weight'  => max(1, (int)($r['bill_weight'] ?? 2)),
+                'water_fee'    => (int)($r['water_fee'] ?? 0),
+                'electric_fee' => (int)($r['electric_fee'] ?? 0),
+            ]);
+            $n++;
+        }
+        echo json_encode(['ok' => true, 'count' => $n]);
+        return;
+    }
+
+    // 공과금 월별 일괄 저장 (건물 전 호실, 청구월+주기)
+    if ($action === 'bulkCharge') {
+        $billYm = (string)($_POST['bill_ym'] ?? '');
+        $span   = max(1, min(3, (int)($_POST['span_months'] ?? 1)));
+        $rows   = json_decode($_POST['rows'] ?? '[]', true);
+        if (!preg_match('/^\d{4}-\d{2}$/', $billYm) || !is_array($rows)) {
+            http_response_code(400); echo json_encode(['ok' => false, 'msg' => '청구월/데이터가 올바르지 않습니다.']); return;
+        }
+        $n = 0;
+        foreach ($rows as $r) {
+            $uid = (int)($r['unit_id'] ?? 0);
+            if (!$uid) continue;
+            $nw->upsertUtilityCharge(
+                $uid, $billYm,
+                (int)preg_replace('/[^0-9]/', '', (string)($r['water'] ?? '0')),
+                (int)preg_replace('/[^0-9]/', '', (string)($r['electric'] ?? '0')),
+                $span
+            );
+            $n++;
+        }
+        echo json_encode(['ok' => true, 'count' => $n]);
         return;
     }
 

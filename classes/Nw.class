@@ -100,6 +100,26 @@ class Nw {
         $this->pdo->exec("ALTER TABLE nw_contract ADD COLUMN IF NOT EXISTS move_out_date DATE DEFAULT NULL AFTER contract_end_date");
         // 귀속월(YYYY-MM): 납부일과 별개로 "어느 달 것"인지 — 늦은/선납 처리
         $this->pdo->exec("ALTER TABLE nw_payment ADD COLUMN IF NOT EXISTS bill_ym VARCHAR(7) DEFAULT NULL AFTER pay_date");
+        // 주차비: 관리비처럼 매월 청구 항목. 멱등 추가.
+        $this->pdo->exec("ALTER TABLE nw_contract ADD COLUMN IF NOT EXISTS parking_fee BIGINT DEFAULT 0 AFTER maintenance_fee");
+        $this->pdo->exec("ALTER TABLE nw_payment ADD COLUMN IF NOT EXISTS parking_fee BIGINT DEFAULT 0 AFTER maintenance_fee");
+        // 공과금(수도·전기): 변동요금. 납부액은 nw_payment, 월별 부과액은 nw_utility_charge(호실+월). 멱등.
+        $this->pdo->exec("ALTER TABLE nw_payment ADD COLUMN IF NOT EXISTS water_fee BIGINT DEFAULT 0 AFTER parking_fee");
+        $this->pdo->exec("ALTER TABLE nw_payment ADD COLUMN IF NOT EXISTS electric_fee BIGINT DEFAULT 0 AFTER water_fee");
+        $this->pdo->exec("CREATE TABLE IF NOT EXISTS nw_utility_charge (id INT AUTO_INCREMENT PRIMARY KEY, unit_id INT NOT NULL, bill_ym VARCHAR(7) NOT NULL, water_fee BIGINT DEFAULT 0, electric_fee BIGINT DEFAULT 0, memo VARCHAR(200) DEFAULT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE KEY uq_room_ym (unit_id, bill_ym)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        $this->pdo->exec("ALTER TABLE nw_utility_charge ADD COLUMN IF NOT EXISTS span_months TINYINT DEFAULT 1 AFTER electric_fee");
+        // 검침 기반: 전기·냉수·온수 직전/현재 검침값(사용량 계산). 멱등.
+        $this->pdo->exec("ALTER TABLE nw_utility_charge ADD COLUMN IF NOT EXISTS elec_prev INT DEFAULT 0 AFTER span_months");
+        $this->pdo->exec("ALTER TABLE nw_utility_charge ADD COLUMN IF NOT EXISTS elec_cur INT DEFAULT 0 AFTER elec_prev");
+        $this->pdo->exec("ALTER TABLE nw_utility_charge ADD COLUMN IF NOT EXISTS cold_prev INT DEFAULT 0 AFTER elec_cur");
+        $this->pdo->exec("ALTER TABLE nw_utility_charge ADD COLUMN IF NOT EXISTS cold_cur INT DEFAULT 0 AFTER cold_prev");
+        $this->pdo->exec("ALTER TABLE nw_utility_charge ADD COLUMN IF NOT EXISTS hot_prev INT DEFAULT 0 AFTER cold_cur");
+        $this->pdo->exec("ALTER TABLE nw_utility_charge ADD COLUMN IF NOT EXISTS hot_cur INT DEFAULT 0 AFTER hot_prev");
+        $this->pdo->exec("ALTER TABLE nw_utility_charge ADD COLUMN IF NOT EXISTS read_prev_date DATE DEFAULT NULL AFTER hot_cur");
+        $this->pdo->exec("ALTER TABLE nw_utility_charge ADD COLUMN IF NOT EXISTS read_cur_date DATE DEFAULT NULL AFTER read_prev_date");
+        $this->pdo->exec("ALTER TABLE nw_utility_charge ADD COLUMN IF NOT EXISTS bill_weight TINYINT DEFAULT 2 AFTER read_cur_date");
+        // 청구월별 요금 상수(건물 단위)
+        $this->pdo->exec("CREATE TABLE IF NOT EXISTS nw_utility_config (id INT AUTO_INCREMENT PRIMARY KEY, building_id INT NOT NULL, bill_ym VARCHAR(7) NOT NULL, water_base DECIMAL(12,2) DEFAULT 2160, water_unit DECIMAL(12,2) DEFAULT 930, elec_tv DECIMAL(12,2) DEFAULT 2500, elec_base DECIMAL(12,2) DEFAULT 910, elec_unit DECIMAL(12,3) DEFAULT 93.3, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE KEY uq_bld_ym (building_id, bill_ym)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
         // 계약서 원본 이미지(사진). 계약 저장 전 스캔 단계에서 먼저 저장되므로 contract_id는 NULL 허용 후 나중에 링크.
         $this->pdo->exec("
@@ -235,6 +255,7 @@ class Nw {
             ':move_out_date'       => $d['move_out_date'] ?: null,
             ':rent_fee'            => $this->num($d['rent_fee'] ?? null),
             ':maintenance_fee'     => $this->num($d['maintenance_fee'] ?? null),
+            ':parking_fee'         => $this->num($d['parking_fee'] ?? null),
             ':rent_pay_day'        => ($d['rent_pay_day'] ?? '') !== '' ? (int)$d['rent_pay_day'] : null,
             ':agent_office'        => $d['agent_office'] ?: null,
             ':agent_phone'         => $d['agent_phone'] ?: null,
@@ -250,7 +271,7 @@ class Nw {
                  co_tenant_name, co_tenant_ssn, co_tenant_phone,
                  deposit, deposit_registered, down_payment, contract_date,
                  balance_amount, balance_date, contract_end_date, move_out_date,
-                 rent_fee, maintenance_fee, rent_pay_day,
+                 rent_fee, maintenance_fee, parking_fee, rent_pay_day,
                  agent_office, agent_phone, agent_ceo, special_terms,
                  renewal_type, first_contract_date)
             VALUES
@@ -258,7 +279,7 @@ class Nw {
                  :co_tenant_name, :co_tenant_ssn, :co_tenant_phone,
                  :deposit, :deposit_registered, :down_payment, :contract_date,
                  :balance_amount, :balance_date, :contract_end_date, :move_out_date,
-                 :rent_fee, :maintenance_fee, :rent_pay_day,
+                 :rent_fee, :maintenance_fee, :parking_fee, :rent_pay_day,
                  :agent_office, :agent_phone, :agent_ceo, :special_terms,
                  :renewal_type, :first_contract_date)
         ");
@@ -277,7 +298,7 @@ class Nw {
                 co_tenant_name=:co_tenant_name, co_tenant_ssn=:co_tenant_ssn, co_tenant_phone=:co_tenant_phone,
                 deposit=:deposit, deposit_registered=:deposit_registered, down_payment=:down_payment, contract_date=:contract_date,
                 balance_amount=:balance_amount, balance_date=:balance_date, contract_end_date=:contract_end_date, move_out_date=:move_out_date,
-                rent_fee=:rent_fee, maintenance_fee=:maintenance_fee, rent_pay_day=:rent_pay_day,
+                rent_fee=:rent_fee, maintenance_fee=:maintenance_fee, parking_fee=:parking_fee, rent_pay_day=:rent_pay_day,
                 agent_office=:agent_office, agent_phone=:agent_phone, agent_ceo=:agent_ceo, special_terms=:special_terms
             WHERE id=:id
         ");
@@ -336,7 +357,7 @@ class Nw {
     /** 건물 내 계약별·연도별 납부합계(월세+관리비): [contract_id][year] => 합계. 미납 계산용. */
     public function paymentSumsByBuilding(int $buildingId): array {
         $stmt = $this->pdo->prepare("
-            SELECT p.contract_id, LEFT(COALESCE(p.bill_ym, DATE_FORMAT(p.pay_date, '%Y-%m')), 4) AS y, SUM(p.rent_fee + p.maintenance_fee) AS amt
+            SELECT p.contract_id, LEFT(COALESCE(p.bill_ym, DATE_FORMAT(p.pay_date, '%Y-%m')), 4) AS y, SUM(p.rent_fee + p.maintenance_fee + p.parking_fee) AS amt
             FROM nw_payment p
             JOIN nw_contract c ON c.id = p.contract_id
             JOIN nw_unit u ON u.id = c.room_id
@@ -402,8 +423,8 @@ class Nw {
         $payDate = $d['pay_date'] ?: date('Y-m-d');
         $billYm = (isset($d['bill_ym']) && preg_match('/^\d{4}-\d{2}$/', (string)$d['bill_ym'])) ? $d['bill_ym'] : substr((string)$payDate, 0, 7);
         $stmt = $this->pdo->prepare("
-            INSERT INTO nw_payment (contract_id, pay_date, bill_ym, rent_fee, maintenance_fee, memo)
-            VALUES (:contract_id, :pay_date, :bill_ym, :rent_fee, :maintenance_fee, :memo)
+            INSERT INTO nw_payment (contract_id, pay_date, bill_ym, rent_fee, maintenance_fee, parking_fee, water_fee, electric_fee, memo)
+            VALUES (:contract_id, :pay_date, :bill_ym, :rent_fee, :maintenance_fee, :parking_fee, :water_fee, :electric_fee, :memo)
         ");
         $stmt->execute([
             ':contract_id'     => $d['contract_id'],
@@ -411,6 +432,9 @@ class Nw {
             ':bill_ym'         => $billYm,
             ':rent_fee'        => $this->num($d['rent_fee'] ?? null),
             ':maintenance_fee' => $this->num($d['maintenance_fee'] ?? null),
+            ':parking_fee'     => $this->num($d['parking_fee'] ?? null),
+            ':water_fee'       => $this->num($d['water_fee'] ?? null),
+            ':electric_fee'    => $this->num($d['electric_fee'] ?? null),
             ':memo'            => $d['memo'] ?: null,
         ]);
         return (int)$this->pdo->lastInsertId();
@@ -421,12 +445,15 @@ class Nw {
         $payDate = $d['pay_date'] ?: date('Y-m-d');
         $billYm = (isset($d['bill_ym']) && preg_match('/^\d{4}-\d{2}$/', (string)$d['bill_ym'])) ? $d['bill_ym'] : substr((string)$payDate, 0, 7);
         $stmt = $this->pdo->prepare("
-            UPDATE nw_payment SET pay_date=:pd, bill_ym=:by, rent_fee=:rf, maintenance_fee=:mf, memo=:memo WHERE id=:id
+            UPDATE nw_payment SET pay_date=:pd, bill_ym=:by, rent_fee=:rf, maintenance_fee=:mf, parking_fee=:pk, water_fee=:wf, electric_fee=:ef, memo=:memo WHERE id=:id
         ");
         $stmt->execute([
             ':pd' => $payDate, ':by' => $billYm,
             ':rf' => $this->num($d['rent_fee'] ?? null),
             ':mf' => $this->num($d['maintenance_fee'] ?? null),
+            ':pk' => $this->num($d['parking_fee'] ?? null),
+            ':wf' => $this->num($d['water_fee'] ?? null),
+            ':ef' => $this->num($d['electric_fee'] ?? null),
             ':memo' => $d['memo'] ?: null,
             ':id' => $id,
         ]);
@@ -439,13 +466,94 @@ class Nw {
     }
 
     // ==========================================================
+    // 공과금 부과액 (호실·월별) — 변동요금은 계약 아닌 월별 부과
+    /** 호실의 월별 공과금 부과액: [bill_ym] => ['water'=>, 'electric'=>] */
+    public function utilityChargesByRoom(int $unitId): array {
+        $stmt = $this->pdo->prepare("SELECT bill_ym, water_fee, electric_fee FROM nw_utility_charge WHERE unit_id=:u");
+        $stmt->execute([':u' => $unitId]);
+        $out = [];
+        foreach ($stmt->fetchAll() as $r) { $out[$r['bill_ym']] = ['water' => (int)$r['water_fee'], 'electric' => (int)$r['electric_fee']]; }
+        return $out;
+    }
+
+    /** 건물의 특정 청구월 공과금 부과액: [unit_id => ['water','electric','span']] */
+    public function utilityChargesForBuildingMonth(int $buildingId, string $billYm): array {
+        $stmt = $this->pdo->prepare("SELECT c.unit_id, c.water_fee, c.electric_fee, c.span_months FROM nw_utility_charge c JOIN nw_unit u ON u.id = c.unit_id WHERE u.building_id = :b AND c.bill_ym = :ym");
+        $stmt->execute([':b' => $buildingId, ':ym' => $billYm]);
+        $out = [];
+        foreach ($stmt->fetchAll() as $r) { $out[(int)$r['unit_id']] = ['water' => (int)$r['water_fee'], 'electric' => (int)$r['electric_fee'], 'span' => (int)$r['span_months']]; }
+        return $out;
+    }
+
+    /** 건물의 공과금 청구월 목록(과거 내역): 월별 합계·호실수 */
+    public function utilityChargeMonths(int $buildingId): array {
+        $stmt = $this->pdo->prepare("SELECT c.bill_ym, MAX(c.span_months) AS span, SUM(c.water_fee) AS water, SUM(c.electric_fee) AS electric, COUNT(*) AS units FROM nw_utility_charge c JOIN nw_unit u ON u.id = c.unit_id WHERE u.building_id = :b GROUP BY c.bill_ym ORDER BY c.bill_ym DESC");
+        $stmt->execute([':b' => $buildingId]);
+        return $stmt->fetchAll();
+    }
+
+    /** 청구월 요금 상수(없으면 직전월 → 기본값 상속) */
+    public function getUtilityConfig(int $buildingId, string $billYm): array {
+        $def = ['water_base' => 2160, 'water_unit' => 930, 'elec_tv' => 2500, 'elec_base' => 910, 'elec_unit' => 93.3];
+        $sel = "SELECT water_base, water_unit, elec_tv, elec_base, elec_unit FROM nw_utility_config WHERE building_id=:b AND bill_ym";
+        $stmt = $this->pdo->prepare($sel . "=:ym");
+        $stmt->execute([':b' => $buildingId, ':ym' => $billYm]);
+        $row = $stmt->fetch();
+        if (!$row) {
+            $stmt = $this->pdo->prepare($sel . "<:ym ORDER BY bill_ym DESC LIMIT 1");
+            $stmt->execute([':b' => $buildingId, ':ym' => $billYm]);
+            $row = $stmt->fetch();
+        }
+        if (!$row) return $def;
+        return ['water_base' => (float)$row['water_base'], 'water_unit' => (float)$row['water_unit'], 'elec_tv' => (float)$row['elec_tv'], 'elec_base' => (float)$row['elec_base'], 'elec_unit' => (float)$row['elec_unit']];
+    }
+
+    public function saveUtilityConfig(int $buildingId, string $billYm, array $c): void {
+        if (!preg_match('/^\d{4}-\d{2}$/', $billYm)) return;
+        $stmt = $this->pdo->prepare("INSERT INTO nw_utility_config (building_id, bill_ym, water_base, water_unit, elec_tv, elec_base, elec_unit) VALUES (:b,:ym,:wb,:wu,:et,:eb,:eu) ON DUPLICATE KEY UPDATE water_base=:wb2, water_unit=:wu2, elec_tv=:et2, elec_base=:eb2, elec_unit=:eu2");
+        $stmt->execute([':b'=>$buildingId, ':ym'=>$billYm, ':wb'=>$c['water_base'], ':wu'=>$c['water_unit'], ':et'=>$c['elec_tv'], ':eb'=>$c['elec_base'], ':eu'=>$c['elec_unit'], ':wb2'=>$c['water_base'], ':wu2'=>$c['water_unit'], ':et2'=>$c['elec_tv'], ':eb2'=>$c['elec_base'], ':eu2'=>$c['elec_unit']]);
+    }
+
+    /** 건물 청구월 검침·요금 [unit_id => row] */
+    public function utilityReadingsForBuildingMonth(int $buildingId, string $billYm): array {
+        $stmt = $this->pdo->prepare("SELECT c.unit_id, c.elec_prev, c.elec_cur, c.cold_prev, c.cold_cur, c.hot_prev, c.hot_cur, c.read_prev_date, c.read_cur_date, c.bill_weight, c.water_fee, c.electric_fee FROM nw_utility_charge c JOIN nw_unit u ON u.id=c.unit_id WHERE u.building_id=:b AND c.bill_ym=:ym");
+        $stmt->execute([':b'=>$buildingId, ':ym'=>$billYm]);
+        $out = [];
+        foreach ($stmt->fetchAll() as $r) { $out[(int)$r['unit_id']] = $r; }
+        return $out;
+    }
+
+    /** 직전 청구월(현재 이전 최신)의 현재검침 → 이번 직전검침 자동입력 [unit_id => [elec,cold,hot]] */
+    public function prevReadingsForBuilding(int $buildingId, string $billYm): array {
+        $stmt = $this->pdo->prepare("SELECT c.unit_id, c.elec_cur, c.cold_cur, c.hot_cur, c.read_cur_date, c.read_prev_date, c.bill_ym, m.maxym FROM nw_utility_charge c JOIN nw_unit u ON u.id = c.unit_id JOIN (SELECT c2.unit_id, MAX(CASE WHEN c2.elec_cur > 0 THEN c2.bill_ym END) AS realym, MAX(c2.bill_ym) AS maxym FROM nw_utility_charge c2 JOIN nw_unit u2 ON u2.id = c2.unit_id WHERE u2.building_id = :b AND c2.bill_ym < :ym GROUP BY c2.unit_id) m ON m.unit_id = c.unit_id AND m.realym = c.bill_ym WHERE u.building_id = :b2");
+        $stmt->execute([':b' => $buildingId, ':ym' => $billYm, ':b2' => $buildingId]);
+        $out = [];
+        foreach ($stmt->fetchAll() as $r) { $out[(int)$r['unit_id']] = ['elec'=>(int)$r['elec_cur'], 'cold'=>(int)$r['cold_cur'], 'hot'=>(int)$r['hot_cur'], 'cdate'=>$r['read_cur_date'], 'pdate'=>$r['read_prev_date'], 'from'=>$r['bill_ym'], 'maxym'=>$r['maxym']]; }
+        return $out;
+    }
+
+    /** 검침·요금 upsert(호실+월). 검침값 + 계산된 수도/전기 청구요금 저장. */
+    public function saveUtilityReading(int $unitId, string $billYm, array $d): void {
+        if (!preg_match('/^\d{4}-\d{2}$/', $billYm)) return;
+        $stmt = $this->pdo->prepare("INSERT INTO nw_utility_charge (unit_id, bill_ym, elec_prev, elec_cur, cold_prev, cold_cur, hot_prev, hot_cur, read_prev_date, read_cur_date, bill_weight, water_fee, electric_fee) VALUES (:u,:ym,:ep,:ec,:cp,:cc,:hp,:hc,:rpd,:rcd,:bw,:wf,:ef) ON DUPLICATE KEY UPDATE elec_prev=:ep2, elec_cur=:ec2, cold_prev=:cp2, cold_cur=:cc2, hot_prev=:hp2, hot_cur=:hc2, read_prev_date=:rpd2, read_cur_date=:rcd2, bill_weight=:bw2, water_fee=:wf2, electric_fee=:ef2");
+        $stmt->execute([':u'=>$unitId, ':ym'=>$billYm, ':ep'=>(int)$d['elec_prev'], ':ec'=>(int)$d['elec_cur'], ':cp'=>(int)$d['cold_prev'], ':cc'=>(int)$d['cold_cur'], ':hp'=>(int)$d['hot_prev'], ':hc'=>(int)$d['hot_cur'], ':rpd'=>($d['read_prev_date'] ?: null), ':rcd'=>($d['read_cur_date'] ?: null), ':bw'=>(int)($d['bill_weight'] ?? 2), ':wf'=>(int)$d['water_fee'], ':ef'=>(int)$d['electric_fee'], ':ep2'=>(int)$d['elec_prev'], ':ec2'=>(int)$d['elec_cur'], ':cp2'=>(int)$d['cold_prev'], ':cc2'=>(int)$d['cold_cur'], ':hp2'=>(int)$d['hot_prev'], ':hc2'=>(int)$d['hot_cur'], ':rpd2'=>($d['read_prev_date'] ?: null), ':rcd2'=>($d['read_cur_date'] ?: null), ':bw2'=>(int)($d['bill_weight'] ?? 2), ':wf2'=>(int)$d['water_fee'], ':ef2'=>(int)$d['electric_fee']]);
+    }
+
+    /** 월별 공과금 부과액 upsert(호실+월 UNIQUE) */
+    public function upsertUtilityCharge(int $unitId, string $billYm, int $water, int $electric, int $span = 1): void {
+        if (!preg_match('/^\d{4}-\d{2}$/', $billYm)) return;
+        $stmt = $this->pdo->prepare("INSERT INTO nw_utility_charge (unit_id, bill_ym, water_fee, electric_fee, span_months) VALUES (:u, :b, :w, :e, :s) ON DUPLICATE KEY UPDATE water_fee=:w2, electric_fee=:e2, span_months=:s2");
+        $stmt->execute([':u' => $unitId, ':b' => $billYm, ':w' => $water, ':e' => $electric, ':w2' => $water, ':e2' => $electric, ':s' => $span, ':s2' => $span]);
+    }
+
+    // ==========================================================
     // 은행 거래내역 → 납부 일괄등록 (매칭 + 벌크 인서트)
     // ==========================================================
 
     /** 건물 내 활성계약 목록(호실번호 포함) — 은행내역 매칭용 */
     public function listActiveContractsForMatch(int $buildingId): array {
         $stmt = $this->pdo->prepare("
-            SELECT c.id, c.tenant_name, c.co_tenant_name, c.rent_fee, c.maintenance_fee,
+            SELECT c.id, c.tenant_name, c.co_tenant_name, c.rent_fee, c.maintenance_fee, c.parking_fee,
                    c.contract_type, u.room_no, u.id AS unit_id
             FROM nw_contract c
             JOIN nw_unit u ON u.id = c.room_id
@@ -492,6 +600,7 @@ class Nw {
                 'label' => $c['room_no'] . '호 · ' . ($c['tenant_name'] ?: '(무기명)') . $per,
                 'rent_fee' => (int)$c['rent_fee'],
                 'maintenance_fee' => (int)$c['maintenance_fee'],
+                'parking_fee' => (int)($c['parking_fee'] ?? 0),
             ];
         }
 
@@ -518,7 +627,7 @@ class Nw {
                 'date' => $date, 'datetime' => $r['datetime'] ?? $date, 'bill_ym' => $billYm,
                 'counterparty' => $cp, 'deposit' => $dep, 'withdraw' => $wd, 'jeokyo' => $jeok,
                 'contract_id' => null, 'confidence' => 'none', 'match_reason' => '',
-                'rent_fee' => 0, 'maintenance_fee' => 0, 'dup' => false,
+                'rent_fee' => 0, 'maintenance_fee' => 0, 'parking_fee' => 0, 'water_fee' => 0, 'electric_fee' => 0, 'dup' => false,
                 'include' => false, 'skip_reason' => '',
             ];
 
@@ -546,7 +655,7 @@ class Nw {
                     if (mb_strlen($nmN) >= 5 && (mb_strpos($nmN, $cpN) === 0 || mb_strpos($cpN, $nmN) === 0)) { $nameHit = true; break; }
                 }
 
-                $rent = (int)$c['rent_fee']; $mnt = (int)$c['maintenance_fee']; $rmt = $rent + $mnt;
+                $rent = (int)$c['rent_fee']; $mnt = (int)$c['maintenance_fee']; $park = (int)($c['parking_fee'] ?? 0); $rmt = $rent + $mnt + $park;
                 $amtHit = ($rmt > 0 && $dep === $rmt) || ($rent > 0 && $dep === $rent) || ($mnt > 0 && $dep === $mnt);
 
                 // 입금일이 계약 재실기간(계약일~퇴거일/만료일, 활성은 진행중)에 포함되는지
@@ -572,8 +681,9 @@ class Nw {
 
             // 금액 분할(확정 규칙): 관리비는 계약 정액 고정, 차액은 월세로.
             //   전세(월세=0)·관리비전용 입금은 전액을 관리비로 본다.
-            if ($isMgmtOnly || $rent === 0) { $pm = $dep;            $pr = 0; }
-            else                            { $pm = min($mnt, $dep); $pr = $dep - $pm; }
+            $park = (int)($c['parking_fee'] ?? 0); $pp = min($park, $dep); $rem = $dep - $pp; // 주차비 정액 우선 차감
+            if ($isMgmtOnly || $rent === 0) { $pm = $rem;            $pr = 0; }
+            else                            { $pm = min($mnt, $rem); $pr = $rem - $pm; }
 
             // 신뢰도
             $reasons = [];
@@ -595,7 +705,7 @@ class Nw {
                 'contract_id' => $cid,
                 'confidence' => $conf,
                 'match_reason' => implode('+', $reasons),
-                'rent_fee' => $pr, 'maintenance_fee' => $pm,
+                'rent_fee' => $pr, 'maintenance_fee' => $pm, 'parking_fee' => $pp, 'water_fee' => 0, 'electric_fee' => 0,
                 'dup' => $dup,
                 'include' => !$dup && $conf !== 'low', // 확실한 것만 기본 체크
             ]);
@@ -648,7 +758,7 @@ class Nw {
             JOIN nw_payment pB ON pB.id < pA.id
             JOIN nw_contract cB ON cB.id = pB.contract_id AND cB.room_id = cA.room_id
             WHERE pA.pay_date = pB.pay_date
-              AND pA.rent_fee = pB.rent_fee AND pA.maintenance_fee = pB.maintenance_fee
+              AND pA.rent_fee = pB.rent_fee AND pA.maintenance_fee = pB.maintenance_fee AND pA.parking_fee = pB.parking_fee
               $where
         ");
         if ($buildingId) $stmt->bindValue(':b', $buildingId, PDO::PARAM_INT);
@@ -672,6 +782,9 @@ class Nw {
                     'bill_ym'         => $it['bill_ym'] ?? null,
                     'rent_fee'        => $it['rent_fee'] ?? 0,
                     'maintenance_fee' => $it['maintenance_fee'] ?? 0,
+                    'parking_fee'     => $it['parking_fee'] ?? 0,
+                    'water_fee'       => $it['water_fee'] ?? 0,
+                    'electric_fee'    => $it['electric_fee'] ?? 0,
                     'memo'            => $it['memo'] ?? null,
                 ]);
                 $inserted++;
@@ -835,6 +948,12 @@ class Nw {
         $stmt->execute([':cid' => $contractId, ':id' => $imageId]);
     }
 
+    /** 계약서 이미지 삭제(잘못 올린 사진 정리). */
+    public function deleteContractImage(int $id): void {
+        $stmt = $this->pdo->prepare("DELETE FROM nw_contract_image WHERE id=:id");
+        $stmt->execute([':id' => $id]);
+    }
+
     /** 원본 이미지 1건(바이너리 포함) — 이미지 서빙용. */
     public function getContractImage(int $id): ?array {
         $stmt = $this->pdo->prepare("SELECT id, contract_id, mime, filename, image_data FROM nw_contract_image WHERE id=:id");
@@ -860,11 +979,11 @@ class Nw {
         $sys = "너는 한국 부동산(원룸/오피스텔) 임대차 계약서 이미지에서 정보를 추출하는 도우미다. "
              . "반드시 아래 키만 가진 JSON 객체 하나만 출력한다. 설명 문장이나 코드펜스(```)는 절대 쓰지 마라. 값을 못 찾으면 빈 문자열로 둔다.\n"
              . "키: contract_type, tenant_name, tenant_ssn, tenant_phone, co_tenant_name, co_tenant_ssn, co_tenant_phone, "
-             . "deposit, down_payment, balance_amount, contract_date, balance_date, contract_end_date, rent_fee, maintenance_fee, "
+             . "deposit, down_payment, balance_amount, contract_date, balance_date, contract_end_date, rent_fee, maintenance_fee, parking_fee, "
              . "rent_pay_day, deposit_registered, agent_office, agent_phone, agent_ceo, special_terms.\n"
              . "규칙:\n"
              . "- contract_type: 월세(차임)가 있으면 'monthly', 차임 없이 보증금만이면 'jeonse', 큰 보증금과 월세가 함께면 'semi_monthly'.\n"
-             . "- 금액(deposit=보증금, down_payment=계약금, balance_amount=잔금, rent_fee=차임/월세, maintenance_fee=관리비): 숫자만(콤마·원·글자 제거). 관리비는 특약에 적힌 월 관리비 금액을 쓴다.\n"
+             . "- 금액(deposit=보증금, down_payment=계약금, balance_amount=잔금, rent_fee=차임/월세, maintenance_fee=관리비, parking_fee=월 주차비): 숫자만(콤마·원·글자 제거). 관리비·주차비는 특약에 적힌 월 금액, 없으면 0.\n"
              . "- 날짜(contract_date=계약체결일, balance_date=잔금지급일, contract_end_date=임대차 존속기간 종료일): 반드시 'YYYY-MM-DD' 형식.\n"
              . "- tenant_*: 임차인(빌린 사람) 정보. co_tenant_*: 임차인이 둘일 때만. 임대인/공동임대인/공인중개사 정보는 tenant에 넣지 마라.\n"
              . "- tenant_ssn: 주민등록번호를 '######-#######'(하이픈 포함 13자리) 형식으로. 없으면 빈 문자열.\n"
