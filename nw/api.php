@@ -110,15 +110,14 @@ function api_nw_contract(string $action, PDO $pdo): void {
         return;
     }
 
-    if ($action === 'impliedRenewal') {
-        $nw->markImpliedRenewal((int)($_POST['id'] ?? 0));
-        echo json_encode(['ok' => true]);
-        return;
-    }
-
     if ($action === 'end') {
-        $nw->endContract((int)($_POST['id'] ?? 0), $_POST['move_out_date'] ?? null);
-        echo json_encode(['ok' => true]);
+        try {
+            $nw->endContract((int)($_POST['id'] ?? 0), $_POST['move_out_date'] ?? null);
+            echo json_encode(['ok' => true]);
+        } catch (Throwable $e) {
+            http_response_code(400);
+            echo json_encode(['ok' => false, 'msg' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+        }
         return;
     }
 
@@ -164,12 +163,18 @@ function api_nw_payment(string $action, PDO $pdo): void {
         if (!$rows) { echo json_encode(['ok' => true, 'rows' => [], 'candidates' => [], 'format' => $parsed['format'], 'msg' => '거래 행을 찾지 못했습니다.']); return; }
 
         $contracts = $nw->listAllContractsByBuilding($buildingId); // 과거(공실전 세입자) 계약도 매칭 후보로
+        $charges   = $nw->utilityChargesMapForBuilding($buildingId); // 공과금 사전부과액(수도·전기 분할·대조용)
+        // 검토화면 '청구 예정액' 표시용: unitId|ym 키를 room_no|ym 키로 변환
+        $unitRoom = [];
+        foreach ($nw->listUnits($buildingId) as $u) { $unitRoom[(int)$u['id']] = (string)$u['room_no']; }
+        $chargesByRoom = [];
+        foreach ($charges as $k => $v) { [$uid, $cym] = explode('|', $k); $rn = $unitRoom[(int)$uid] ?? ''; if ($rn !== '') $chargesByRoom[$rn . '|' . $cym] = $v; }
         $dates = array_column($rows, 'date');
         $existKeys = $nw->existingPaymentKeys(
             array_column($contracts, 'id'),
             min($dates), max($dates)
         );
-        $match = $nw->matchBankRows($contracts, $rows, $existKeys, min($dates), max($dates));
+        $match = $nw->matchBankRows($contracts, $rows, $existKeys, min($dates), max($dates), $charges);
 
         echo json_encode([
             'ok' => true,
@@ -177,6 +182,7 @@ function api_nw_payment(string $action, PDO $pdo): void {
             'file'   => $_FILES['file']['name'] ?? '',
             'rows'   => $match['rows'],
             'candidates' => $match['candidates'],
+            'chargesByRoom' => $chargesByRoom,
         ], JSON_UNESCAPED_UNICODE);
         return;
     }

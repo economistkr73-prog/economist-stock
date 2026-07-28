@@ -106,6 +106,7 @@ class Nw {
         // 공과금(수도·전기): 변동요금. 납부액은 nw_payment, 월별 부과액은 nw_utility_charge(호실+월). 멱등.
         $this->pdo->exec("ALTER TABLE nw_payment ADD COLUMN IF NOT EXISTS water_fee BIGINT DEFAULT 0 AFTER parking_fee");
         $this->pdo->exec("ALTER TABLE nw_payment ADD COLUMN IF NOT EXISTS electric_fee BIGINT DEFAULT 0 AFTER water_fee");
+        $this->pdo->exec("ALTER TABLE nw_payment ADD COLUMN IF NOT EXISTS txn_at VARCHAR(25) DEFAULT NULL AFTER pay_date"); // 은행 거래일시(유니크)·중복판정용
         $this->pdo->exec("CREATE TABLE IF NOT EXISTS nw_utility_charge (id INT AUTO_INCREMENT PRIMARY KEY, unit_id INT NOT NULL, bill_ym VARCHAR(7) NOT NULL, water_fee BIGINT DEFAULT 0, electric_fee BIGINT DEFAULT 0, memo VARCHAR(200) DEFAULT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE KEY uq_room_ym (unit_id, bill_ym)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
         $this->pdo->exec("ALTER TABLE nw_utility_charge ADD COLUMN IF NOT EXISTS span_months TINYINT DEFAULT 1 AFTER electric_fee");
         // 검침 기반: 전기·냉수·온수 직전/현재 검침값(사용량 계산). 멱등.
@@ -337,8 +338,12 @@ class Nw {
     /** 계약종료: 만료 또는 중도해지. */
     public function endContract(int $id, ?string $moveOutDate = null): void {
         $mo = ($moveOutDate && preg_match('/^\d{4}-\d{2}-\d{2}$/', $moveOutDate)) ? $moveOutDate : date('Y-m-d');
-        // 실제 퇴거일이 계약 만료일보다 이르면 중도해지, 아니면(만기 도래·경과·만료일 미상) 만료로 자동 판정
         $c = $this->getContract($id);
+        if (!$c) throw new RuntimeException('계약을 찾을 수 없습니다.');
+        // ★퇴거일은 입주일(잔금일→계약일→최초계약일) 이후여야 함 — 입주 전 종료(엉뚱한 계약 오종료) 방지
+        $start = substr((string)(($c['balance_date'] ?? '') ?: ($c['contract_date'] ?? '') ?: ($c['first_contract_date'] ?? '')), 0, 10);
+        if ($start !== '' && $mo < $start) throw new RuntimeException('퇴거일(' . $mo . ')이 입주일(' . $start . ')보다 이전일 수 없습니다.');
+        // 실제 퇴거일이 계약 만료일보다 이르면 중도해지, 아니면(만기 도래·경과·만료일 미상) 만료로 자동 판정
         $end = substr((string)($c['contract_end_date'] ?? ''), 0, 10);
         $reason = ($end !== '' && $mo < $end) ? 'terminated_early' : 'expired';
         $stmt = $this->pdo->prepare("UPDATE nw_contract SET status='ended', ended_at=NOW(), ended_reason=:r, move_out_date=:mo WHERE id=:id");
@@ -423,12 +428,13 @@ class Nw {
         $payDate = $d['pay_date'] ?: date('Y-m-d');
         $billYm = (isset($d['bill_ym']) && preg_match('/^\d{4}-\d{2}$/', (string)$d['bill_ym'])) ? $d['bill_ym'] : substr((string)$payDate, 0, 7);
         $stmt = $this->pdo->prepare("
-            INSERT INTO nw_payment (contract_id, pay_date, bill_ym, rent_fee, maintenance_fee, parking_fee, water_fee, electric_fee, memo)
-            VALUES (:contract_id, :pay_date, :bill_ym, :rent_fee, :maintenance_fee, :parking_fee, :water_fee, :electric_fee, :memo)
+            INSERT INTO nw_payment (contract_id, pay_date, txn_at, bill_ym, rent_fee, maintenance_fee, parking_fee, water_fee, electric_fee, memo)
+            VALUES (:contract_id, :pay_date, :txn_at, :bill_ym, :rent_fee, :maintenance_fee, :parking_fee, :water_fee, :electric_fee, :memo)
         ");
         $stmt->execute([
             ':contract_id'     => $d['contract_id'],
             ':pay_date'        => $payDate,
+            ':txn_at'          => ($d['txn_at'] ?? null) ?: null,
             ':bill_ym'         => $billYm,
             ':rent_fee'        => $this->num($d['rent_fee'] ?? null),
             ':maintenance_fee' => $this->num($d['maintenance_fee'] ?? null),
@@ -482,6 +488,15 @@ class Nw {
         $stmt->execute([':b' => $buildingId, ':ym' => $billYm]);
         $out = [];
         foreach ($stmt->fetchAll() as $r) { $out[(int)$r['unit_id']] = ['water' => (int)$r['water_fee'], 'electric' => (int)$r['electric_fee'], 'span' => (int)$r['span_months']]; }
+        return $out;
+    }
+
+    /** 건물 전체 공과금 사전부과액 맵: ['unitId|billYm' => ['water','electric']] — 은행매칭 공과금 분할·대조용 */
+    public function utilityChargesMapForBuilding(int $buildingId): array {
+        $stmt = $this->pdo->prepare("SELECT c.unit_id, c.bill_ym, c.water_fee, c.electric_fee FROM nw_utility_charge c JOIN nw_unit u ON u.id = c.unit_id WHERE u.building_id = :b");
+        $stmt->execute([':b' => $buildingId]);
+        $out = [];
+        foreach ($stmt->fetchAll() as $r) { $out[(int)$r['unit_id'] . '|' . $r['bill_ym']] = ['water' => (int)$r['water_fee'], 'electric' => (int)$r['electric_fee']]; }
         return $out;
     }
 
@@ -569,6 +584,17 @@ class Nw {
         return strtolower(str_replace('호', '', preg_replace('/\s+/', '', $s)));
     }
 
+    /** 입금자명(메모) 정규화 — 공백(전각 포함) 제거. 중복판정용. */
+    private function normMemo(string $s): string {
+        return preg_replace('/[\s\x{3000}\x{00A0}]+/u', '', $s);
+    }
+
+    /** 공과금 배분: 적은 부과항목을 먼저 채우고 나머지를 큰 항목에 (사용자 규칙). @return [수도, 전기] */
+    private function allocUtil(int $dep, int $water, int $electric): array {
+        if ($water <= $electric) { $pw = min($dep, $water); return [$pw, $dep - $pw]; }
+        $pe = min($dep, $electric); return [$dep - $pe, $pe];
+    }
+
     /**
      * 은행 거래 행들을 건물 활성계약에 자동매칭한다(순수 로직·검토화면용).
      * @param array $contracts listActiveContractsForMatch() 결과
@@ -576,7 +602,7 @@ class Nw {
      * @param array $existKeys "contractId|YYYY-MM-DD" => true (이미 등록된 납부, 중복표시용)
      * @return array 검토용 행 배열
      */
-    public function matchBankRows(array $contracts, array $rows, array $existKeys = [], string $fromDate = '', string $toDate = ''): array {
+    public function matchBankRows(array $contracts, array $rows, array $existKeys = [], string $fromDate = '', string $toDate = '', array $charges = []): array {
         // ★원칙: 자료(엑셀)의 거래 기간에 재실이 겹치는 계약만 후보로 (해당 기간에 연관된 것만).
         if ($fromDate !== '' && $toDate !== '') {
             $contracts = array_values(array_filter($contracts, function ($c) use ($fromDate, $toDate) {
@@ -627,7 +653,7 @@ class Nw {
                 'date' => $date, 'datetime' => $r['datetime'] ?? $date, 'bill_ym' => $billYm,
                 'counterparty' => $cp, 'deposit' => $dep, 'withdraw' => $wd, 'jeokyo' => $jeok,
                 'contract_id' => null, 'confidence' => 'none', 'match_reason' => '',
-                'rent_fee' => 0, 'maintenance_fee' => 0, 'parking_fee' => 0, 'water_fee' => 0, 'electric_fee' => 0, 'dup' => false,
+                'rent_fee' => 0, 'maintenance_fee' => 0, 'parking_fee' => 0, 'water_fee' => 0, 'electric_fee' => 0, 'util_kind' => '', 'room_id' => 0, 'dup' => false,
                 'include' => false, 'skip_reason' => '',
             ];
 
@@ -666,8 +692,8 @@ class Nw {
                     if (($c['status'] ?? '') === 'active' || $oe === '' || $date <= $oe) $dateHit = true;
                 }
 
+                if (!$roomHit && !$nameHit) continue;  // ★호실 또는 이름이 있어야 후보(금액·기간만 일치=우연 매칭 → 미매칭)
                 $score = ($roomHit ? 5 : 0) + ($nameHit ? 5 : 0) + ($amtHit ? 2 : 0);
-                if ($score <= 0) continue;             // 호실·이름·금액 중 하나는 있어야 후보
                 if ($dateHit) $score += 3;             // 재실기간 포함이면 가산(같은 호실 여러 계약 중 시점 맞는 것)
                 if ($score > $bestScore) { $bestScore = $score; $best = ['c' => $c, 'room' => $roomHit, 'name' => $nameHit, 'amt' => $amtHit, 'date' => $dateHit]; $tie = false; }
                 elseif ($score === $bestScore) { $tie = true; }
@@ -678,12 +704,54 @@ class Nw {
             $c = $best['c'];
             $cid = (int)$c['id'];
             $rent = (int)$c['rent_fee']; $mnt = (int)$c['maintenance_fee'];
+            $roomId = (int)($c['room_id'] ?? $c['unit_id'] ?? 0);
 
-            // 금액 분할(확정 규칙): 관리비는 계약 정액 고정, 차액은 월세로.
-            //   전세(월세=0)·관리비전용 입금은 전액을 관리비로 본다.
-            $park = (int)($c['parking_fee'] ?? 0); $pp = min($park, $dep); $rem = $dep - $pp; // 주차비 정액 우선 차감
-            if ($isMgmtOnly || $rent === 0) { $pm = $rem;            $pr = 0; }
-            else                            { $pm = min($mnt, $rem); $pr = $rem - $pm; }
+            // ★공과금(변동요금) 판별: 입금자/적요에 전기·수도·공과금 키워드 → 월세/관리비가 아니라 수도·전기로 라우팅
+            $utilStr = $cp . ' ' . $jeok;
+            $hasElec  = (bool)preg_match('/전기/u', $utilStr);
+            $hasWater = (bool)preg_match('/수도/u', $utilStr);
+            $hasUtil  = (bool)preg_match('/공과/u', $utilStr);
+            $pw = 0; $pe = 0; $pp = 0; $pm = 0; $pr = 0; $utilHit = false; $utilAmtHit = false; $utilGuess = false; $uk = '';
+            $ch = $charges[$roomId . '|' . $billYm] ?? null;
+            if ($hasElec || $hasWater || $hasUtil) {
+                $utilHit = true;
+                if ($hasUtil || ($hasElec && $hasWater)) {              // 합산 공과금 → 적은 항목 먼저 채우고 나머지를 큰 항목에
+                    $uk = 'util';
+                    if ($ch) { $tot = (int)$ch['water'] + (int)$ch['electric']; [$pw, $pe] = $this->allocUtil($dep, (int)$ch['water'], (int)$ch['electric']); $utilAmtHit = $tot > 0 && abs($dep - $tot) <= max(2000, (int)round($tot * 0.1)); }
+                    else     { $pe = $dep; }                             // 부과액 없으면 전기로(합계는 유지)
+                } elseif ($hasElec) {
+                    $uk = 'elec'; $pe = $dep;
+                    if ($ch && (int)$ch['electric'] > 0) $utilAmtHit = abs($dep - (int)$ch['electric']) <= max(2000, (int)$ch['electric'] * 0.1);
+                } else {
+                    $uk = 'water'; $pw = $dep;
+                    if ($ch && (int)$ch['water'] > 0) $utilAmtHit = abs($dep - (int)$ch['water']) <= max(2000, (int)$ch['water'] * 0.1);
+                }
+            } else {
+                // ★키워드는 없지만 정액과 안 맞고 그 방 공과금 부과액과 근접 → 공과금(추정)으로 수도·전기 자동 배분
+                $park = (int)($c['parking_fee'] ?? 0);
+                $fixedMatch = ($dep === $rent) || ($dep === $mnt) || ($dep === $park) || ($dep === $rent + $mnt + $park) || ($dep === $rent + $mnt);
+                if (!$fixedMatch && $ch) {
+                    $uw = (int)$ch['water']; $ue = (int)$ch['electric']; $ut = $uw + $ue;
+                    // 부과 총액 이하(부분·전액 납부)면 공과금(추정): 적은 항목 먼저 채우고 나머지를 큰 항목에
+                    if ($ut > 0 && $dep <= (int)round($ut * 1.05)) {
+                        [$pw, $pe] = $this->allocUtil($dep, $uw, $ue);
+                        $utilGuess = true;
+                        $uk = ($pw > 0 && $pe > 0) ? 'util' : ($pw > 0 ? 'water' : 'elec');
+                    }
+                }
+                if ($utilGuess) {
+                    $utilHit = true; $utilAmtHit = true;                 // 금액대조로 잡은 공과금(추정)
+                } elseif ($rent > 0 && $dep === $rent) { $pr = $dep;    // ★월세 정액과 정확히 일치 → 전액 월세(월세·관리비 별도 입금 대응)
+                } elseif ($mnt > 0 && $dep === $mnt)   { $pm = $dep;    // ★관리비 정액과 정확히 일치 → 전액 관리비
+                } elseif ($park > 0 && $dep === $park) { $pp = $dep;    // ★주차비 정액과 정확히 일치 → 전액 주차비
+                } else {
+                    // 금액 분할(확정 규칙): 관리비는 계약 정액 고정, 차액은 월세로.
+                    //   전세(월세=0)·관리비전용 입금은 전액을 관리비로 본다.
+                    $pp = min($park, $dep); $rem = $dep - $pp; // 주차비 정액 우선 차감
+                    if ($isMgmtOnly || $rent === 0) { $pm = $rem;            $pr = 0; }
+                    else                            { $pm = min($mnt, $rem); $pr = $rem - $pm; }
+                }
+            }
 
             // 신뢰도
             $reasons = [];
@@ -691,24 +759,66 @@ class Nw {
             if ($best['room']) $reasons[] = '호실';
             if ($best['amt'])  $reasons[] = '금액';
             if (!empty($best['date'])) $reasons[] = '기간';
+            if ($utilHit) $reasons[] = $utilGuess ? '공과(추정)' : '공과';
+            if ($utilAmtHit) $reasons[] = '금액';
             $twoStrong = ($best['name'] && $best['room']) || (!empty($best['date']) && ($best['name'] || $best['room']));
-            $strongPlusAmt = ($best['name'] || $best['room']) && $best['amt'];
+            $strongPlusAmt = ($best['name'] || $best['room']) && ($best['amt'] || $utilAmtHit);
             if ($tie && !$twoStrong)       $conf = 'low';
             elseif ($twoStrong || $strongPlusAmt) $conf = 'high';
             elseif ($best['name'] || $best['room']) $conf = 'mid';
             else                            $conf = 'low';
 
-            $roomId = (int)($c['room_id'] ?? $c['unit_id'] ?? 0);
-            $dup = isset($existKeys[$roomId . '|' . $date]); // 같은 호실·같은 날짜면 이미등록
+            $baseKey = $roomId . '|' . $date . '|' . $dep;
+            $dtKey = (string)($r['datetime'] ?? '');
+            $dup = ($dtKey !== '' && isset($existKeys[$baseKey . '|T:' . $dtKey])) || isset($existKeys[$baseKey . '|M:' . $this->normMemo($cp)]); // 거래일시 우선, 없으면 입금자
 
             $out[] = array_merge($base, [
                 'contract_id' => $cid,
                 'confidence' => $conf,
                 'match_reason' => implode('+', $reasons),
-                'rent_fee' => $pr, 'maintenance_fee' => $pm, 'parking_fee' => $pp, 'water_fee' => 0, 'electric_fee' => 0,
+                'rent_fee' => $pr, 'maintenance_fee' => $pm, 'parking_fee' => $pp, 'water_fee' => $pw, 'electric_fee' => $pe, 'util_kind' => $uk, 'room_id' => $roomId,
                 'dup' => $dup,
                 'include' => !$dup && $conf !== 'low', // 확실한 것만 기본 체크
             ]);
+        }
+
+        // ★방별 후처리: 정액(월세·관리비·주차)을 정확히 채운 입금이 따로 있으면,
+        //   그 방의 '정액과 안 맞는 나머지 입금'은 공과금(수도·전기)으로 재분류(사용자 원칙: 관리비 납부 후 나머지는 공과금).
+        $cById = [];
+        foreach ($contracts as $cc) { $cById[(int)$cc['id']] = $cc; }
+        $roomRows = [];
+        foreach ($out as $idx => $row) {
+            if ($row['skip_reason'] !== '' || empty($row['contract_id'])) continue;
+            $rid = (int)($row['room_id'] ?? 0);
+            if ($rid > 0) $roomRows[$rid][] = $idx;
+        }
+        foreach ($roomRows as $rid => $idxs) {
+            $fixedCovered = false;                                     // 정액을 정확히 낸 입금이 있는가
+            foreach ($idxs as $idx) {
+                if ($out[$idx]['util_kind'] !== '') continue;
+                $cc = $cById[(int)$out[$idx]['contract_id']] ?? null;
+                if (!$cc) continue;
+                $fx = (int)$cc['rent_fee'] + (int)$cc['maintenance_fee'] + (int)($cc['parking_fee'] ?? 0);
+                if ($fx > 0 && (int)$out[$idx]['deposit'] === $fx) { $fixedCovered = true; break; }
+            }
+            if (!$fixedCovered) continue;
+            foreach ($idxs as $idx) {                                  // 정액 채워졌으니 나머지는 공과금(추정)
+                if ($out[$idx]['util_kind'] !== '') continue;          // 이미 공과금
+                $cc = $cById[(int)$out[$idx]['contract_id']] ?? null;
+                if (!$cc) continue;
+                $fx = (int)$cc['rent_fee'] + (int)$cc['maintenance_fee'] + (int)($cc['parking_fee'] ?? 0);
+                if ($fx > 0 && (int)$out[$idx]['deposit'] === $fx) continue; // 정액 납부는 그대로 유지
+                $ch2 = $charges[$rid . '|' . $out[$idx]['bill_ym']] ?? null;
+                if (!$ch2) continue;                                   // 공과금 부과 정보 없으면 재분류 안 함
+                $uw = (int)$ch2['water']; $ue = (int)$ch2['electric']; $ut = $uw + $ue;
+                if ($ut <= 0) continue;
+                $dep = (int)$out[$idx]['deposit'];
+                [$pw, $pe] = $this->allocUtil($dep, $uw, $ue);
+                $out[$idx]['rent_fee'] = 0; $out[$idx]['maintenance_fee'] = 0; $out[$idx]['parking_fee'] = 0;
+                $out[$idx]['water_fee'] = $pw; $out[$idx]['electric_fee'] = $pe;
+                $out[$idx]['util_kind'] = ($pw > 0 && $pe > 0) ? 'util' : ($pw > 0 ? 'water' : 'elec');
+                if (strpos((string)$out[$idx]['match_reason'], '공과') === false) $out[$idx]['match_reason'] .= '+공과(추정)';
+            }
         }
 
         return ['rows' => $out, 'candidates' => $candidates];
@@ -720,13 +830,17 @@ class Nw {
         if (!$contractIds) return [];
         $ph = implode(',', array_fill(0, count($contractIds), '?'));
         $stmt = $this->pdo->prepare("
-            SELECT c.room_id, p.pay_date FROM nw_payment p
+            SELECT c.room_id, p.pay_date, (p.rent_fee + p.maintenance_fee + p.parking_fee + p.water_fee + p.electric_fee) AS amt, p.memo, p.txn_at FROM nw_payment p
             JOIN nw_contract c ON c.id = p.contract_id
             WHERE p.contract_id IN ($ph) AND p.pay_date BETWEEN ? AND ?
         ");
         $stmt->execute(array_merge($contractIds, [$fromDate, $toDate]));
         $keys = [];
-        foreach ($stmt->fetchAll() as $row) { $keys[(int)$row['room_id'] . '|' . $row['pay_date']] = true; } // 호실+날짜 기준
+        foreach ($stmt->fetchAll() as $row) {
+            $base = (int)$row['room_id'] . '|' . $row['pay_date'] . '|' . (int)$row['amt'];
+            if (!empty($row['txn_at'])) $keys[$base . '|T:' . $row['txn_at']] = true;                       // 은행 거래일시(정확)
+            else                        $keys[$base . '|M:' . $this->normMemo((string)$row['memo'])] = true; // 구데이터: 입금자 폴백
+        }
         return $keys;
     }
 
@@ -738,15 +852,22 @@ class Nw {
     }
 
     /** 같은 호실(계약의 room)·같은 날짜에 이미 납부가 있는지 — 호실 단위 중복 방지(계약 바뀌어도) */
-    private function paymentExistsInRoom(int $contractId, string $payDate): bool {
-        $stmt = $this->pdo->prepare("
-            SELECT 1 FROM nw_payment p
+    private function paymentExistsInRoom(int $contractId, string $payDate, int $amount = -1, ?string $memo = null, string $txnAt = ''): bool {
+        // 중복 방지: 은행 거래일시(txn_at)가 있으면 그것으로 정확 비교, 구데이터(없음)는 입금자(메모) 폴백
+        $sql = "
+            SELECT p.memo, p.txn_at FROM nw_payment p
             JOIN nw_contract c ON c.id = p.contract_id
-            WHERE c.room_id = (SELECT room_id FROM nw_contract WHERE id = :cid) AND p.pay_date = :d
-            LIMIT 1
-        ");
-        $stmt->execute([':cid' => $contractId, ':d' => $payDate]);
-        return (bool)$stmt->fetchColumn();
+            WHERE c.room_id = (SELECT room_id FROM nw_contract WHERE id = :cid) AND p.pay_date = :d";
+        $params = [':cid' => $contractId, ':d' => $payDate];
+        if ($amount >= 0) { $sql .= " AND (p.rent_fee + p.maintenance_fee + p.parking_fee + p.water_fee + p.electric_fee) = :amt"; $params[':amt'] = $amount; }
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
+        $target = $this->normMemo((string)$memo);
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            if (!empty($row['txn_at']) && $txnAt !== '') { if ((string)$row['txn_at'] === $txnAt) return true; continue; } // 둘 다 거래일시 → 정확 비교
+            if ($memo === null || $this->normMemo((string)$row['memo']) === $target) return true; // 폴백
+        }
+        return false;
     }
 
     /** 같은 호실·같은 날짜·같은 금액의 중복 납부 제거(가장 오래된 id만 남김). 반환=삭제 건수. */
@@ -775,10 +896,12 @@ class Nw {
                 $cid = (int)($it['contract_id'] ?? 0);
                 $date = (string)($it['pay_date'] ?? '');
                 if (!$cid || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) { $skipped++; continue; }
-                if ($this->paymentExistsInRoom($cid, $date)) { $skipped++; continue; }
+                $amt = (int)($it['rent_fee'] ?? 0) + (int)($it['maintenance_fee'] ?? 0) + (int)($it['parking_fee'] ?? 0) + (int)($it['water_fee'] ?? 0) + (int)($it['electric_fee'] ?? 0);
+                if ($this->paymentExistsInRoom($cid, $date, $amt, (string)($it['memo'] ?? ''), (string)($it['txn_at'] ?? ''))) { $skipped++; continue; }
                 $this->addPayment([
                     'contract_id'     => $cid,
                     'pay_date'        => $date,
+                    'txn_at'          => $it['txn_at'] ?? null,
                     'bill_ym'         => $it['bill_ym'] ?? null,
                     'rent_fee'        => $it['rent_fee'] ?? 0,
                     'maintenance_fee' => $it['maintenance_fee'] ?? 0,

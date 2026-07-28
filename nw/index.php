@@ -2326,6 +2326,35 @@ table.ut-table th.wtcol,table.ut-table td.wtcol{padding-left:2px;padding-right:2
 table.ut-table input.r-wt{width:100%;box-sizing:border-box;border:none;background:transparent;text-align:center;font-weight:800;color:#2b6cb0;font-size:13px;padding:2px 0;font-variant-numeric:tabular-nums;}
 table.ut-table input.r-wt:focus{outline:none;background:#fff;border:1px solid #90cdf4;border-radius:5px;}
 table.ut-table input.r-wt[readonly]{color:#4a5568;}
+/* 📩 문자 문구 모달 */
+.sms-box{width:720px;max-width:96vw;}
+.sms-box h3 .sms-ym{font-size:12px;font-weight:600;color:#718096;margin-left:6px;}
+.sms-cfg{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px;}
+.sms-cfg > div{flex:1 1 150px;}
+.sms-cfg > div.wide{flex:1 1 100%;}
+.sms-cfg label{display:block;font-size:11px;font-weight:700;color:#718096;margin-bottom:4px;}
+.sms-cfg label span{font-weight:400;color:#a0aec0;}
+.sms-cfg input{width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid #cbd5e0;border-radius:8px;font-size:13px;}
+.sms-tpl{margin-bottom:10px;}
+.sms-tpl summary{cursor:pointer;font-size:12px;color:#4a5568;}
+.sms-tpl textarea{width:100%;box-sizing:border-box;margin-top:4px;padding:8px;border:1px solid #cbd5e0;border-radius:8px;font-size:12px;font-family:inherit;line-height:1.5;}
+.sms-tpl .tpl-lb{display:block;font-size:11px;font-weight:700;color:#718096;margin-top:8px;}
+.sms-hd .stale{background:#fbd38d;color:#7b341e;font-size:10px;font-weight:800;padding:2px 7px;border-radius:9px;white-space:nowrap;}
+.btn.sms-mini{padding:5px 12px;font-size:12px;}
+.sms-bar{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid #edf2f7;border-bottom:1px solid #edf2f7;}
+.sms-all{font-size:12px;color:#4a5568;display:flex;align-items:center;gap:5px;cursor:pointer;}
+.sms-cnt{font-size:12px;color:#718096;margin-right:auto;}
+.sms-list{max-height:46vh;overflow-y:auto;padding-top:10px;display:flex;flex-direction:column;gap:10px;}
+.sms-card{border:1px solid #e2e8f0;border-radius:10px;padding:9px 11px;background:#fff;}
+.sms-card.off{opacity:.42;}
+.sms-hd{display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:6px;}
+.sms-hd b{font-size:14px;}
+.sms-hd .tn{color:#4a5568;}
+.sms-hd .ph{color:#a0aec0;font-size:11px;}
+.sms-hd .btn{margin-left:auto;}
+.sms-txt{white-space:pre-wrap;font-size:12.5px;line-height:1.55;color:#2d3748;background:#f8fafc;border:1px solid #edf2f7;border-radius:8px;padding:8px 10px;font-family:inherit;margin:0;}
+.btn.ok{background:#38a169;border-color:#38a169;color:#fff;}
+.sms-empty{color:#a0aec0;font-size:13px;text-align:center;padding:18px;}
 </style>
 
 <div class="page-head">
@@ -2376,7 +2405,7 @@ table.ut-table input.r-wt[readonly]{color:#4a5568;}
       <div><label>전기요금</label><b id="ut-se"><?= nw_money($sumE) ?></b></div>
     </div></div>
   </div>
-  <div class="cfg-note">수도 = 절사( 기본 + (냉수+온수)사용량 × 단위당 × 1.1 ) · 전기 = 절사( (TV+기본)×개월 + 전기사용량 × 단위당 × 1.1 )</div>
+  <div class="cfg-note">수도 = 올림₁₀( 기본×개월 + (냉수+온수)사용량 × 단위당 × 1.1 ) · 전기 = 올림₁₀( (TV+기본)×개월 + 전기사용량 × 단위당 × 1.1 ) · 10원 단위 올림</div>
 </div>
 
 <div class="ut-scroll">
@@ -2403,6 +2432,7 @@ table.ut-table input.r-wt[readonly]{color:#4a5568;}
       $euse = $r ? max(0, (int)$r['elec_cur'] - (int)$r['elec_prev']) : '';
       $wuse = $r ? max(0, ((int)$r['cold_cur'] + (int)$r['hot_cur']) - ((int)$r['cold_prev'] + (int)$r['hot_prev'])) : '';
       $t = $active[$uid]['tenant_name'] ?? '';
+      $ph = $active[$uid]['tenant_phone'] ?? '';
       $rpd = ($r && $r['read_prev_date']) ? substr((string)$r['read_prev_date'], 0, 10) : (($pv && !empty($pv['cdate'])) ? substr((string)$pv['cdate'], 0, 10) : '');
       $rcd = ($r && $r['read_cur_date']) ? substr((string)$r['read_cur_date'], 0, 10) : '';
       // 미검침(이월): 이번 청구월에 값을 안 넣어 직전값을 그대로 끌어온 경우 → 검침일 직전==현재
@@ -2423,7 +2453,7 @@ table.ut-table input.r-wt[readonly]{color:#4a5568;}
       $overdue = 0;
       if ($stale && $lastActual !== '') { $rcYm = substr($lastActual, 0, 7); $overdue = ((int)substr($ym, 0, 4) * 12 + (int)substr($ym, 5, 2)) - ((int)substr($rcYm, 0, 4) * 12 + (int)substr($rcYm, 5, 2)); }
     ?>
-    <tr data-uid="<?= $uid ?>" data-wfee="<?= $wf ?>" data-efee="<?= $ef ?>"<?= $stale ? ' class="ov"' : '' ?>>
+    <tr data-uid="<?= $uid ?>" data-wfee="<?= $wf ?>" data-efee="<?= $ef ?>" data-room="<?= nw_h($u['room_no']) ?>" data-tenant="<?= nw_h($t) ?>" data-phone="<?= nw_h($ph) ?>" data-stale="<?= $stale ? 1 : 0 ?>" data-overdue="<?= (int)$overdue ?>"<?= $stale ? ' class="ov"' : '' ?>>
       <td class="rm"><b><?= nw_h($u['room_no']) ?></b>호</td>
       <td class="rm edge"><?= $t !== '' ? nw_h($t) : '<span style="color:#cbd5e0;">공실</span>' ?></td>
       <td><input type="date" class="ugd r-pd" value="<?= $rpd ?>"><?php if ($stale): ?><div class="ut-ov-n" title="최종 검침 <?= nw_h($lastActual) ?> · 이후 미입력">⚠ <?= $overdue > 0 ? $overdue . '개월 ' : '' ?>미검침</div><?php elseif (!$r && !empty($pv['from'])): ?><div style="font-size:10px;color:#a0aec0;margin-top:2px;">↖ <?= substr((string)$pv['from'], 2, 5) ?> 검침</div><?php endif; ?></td>
@@ -2449,6 +2479,7 @@ table.ut-table input.r-wt[readonly]{color:#4a5568;}
 
 <div style="margin-top:16px;display:flex;justify-content:flex-end;gap:10px;align-items:center;">
   <span id="ut-calc-note" style="color:#2f855a;font-size:13px;"></span>
+  <button class="btn btn-outline" onclick="smsOpen()">📩 문자 문구</button>
   <button id="ut-edit-btn" class="btn btn-outline" style="display:none;" onclick="utEditMode()">✏️ 수정 모드</button>
   <span id="ut-save-wrap" style="display:flex;gap:10px;">
     <button class="btn btn-outline" onclick="calcAll(true)">🧮 계산</button>
@@ -2478,6 +2509,34 @@ table.ut-table input.r-wt[readonly]{color:#4a5568;}
   <?php endif; ?>
 </div>
 
+<!-- 📩 호실별 공과금 안내 문자 문구 (복사·붙여넣기용) -->
+<div class="modal-overlay" id="smsModal" onclick="if(event.target===this)nwCloseModal('smsModal')">
+  <div class="modal-box sms-box">
+    <h3>📩 공과금 안내 문자 문구 <span class="sms-ym"><?= nw_h($ym) ?> 청구</span></h3>
+    <div class="sms-cfg">
+      <div><label>대상 월 <span>(비우면 호실 개월수로 자동)</span></label><input id="sms_mon" placeholder="자동" oninput="smsRender()"></div>
+      <div><label>입금 기한</label><input id="sms_due" oninput="smsRender()"></div>
+      <div><label>다음 검침 <span>(미검침 안내용)</span></label><input id="sms_next" oninput="smsRender()"></div>
+      <div class="wide"><label>입금계좌</label><input id="sms_acct" oninput="smsRender()"></div>
+    </div>
+    <details class="sms-tpl">
+      <summary>✏️ 문구 양식 편집 — 치환값 {월} {호실} {세입자} {수도} {전기} {합계} {기한} {계좌} {미검침개월} {다음검침}</summary>
+      <label class="tpl-lb">정상(요금 산출됨)</label>
+      <textarea id="sms_tpl" rows="8" oninput="smsRender()"></textarea>
+      <label class="tpl-lb">미검침 호실</label>
+      <textarea id="sms_tplx" rows="6" oninput="smsRender()"></textarea>
+      <button class="btn btn-outline sms-mini" style="margin-top:6px;" onclick="smsResetTpl()">기본 양식으로</button>
+    </details>
+    <div class="sms-bar">
+      <label class="sms-all"><input type="checkbox" id="sms_chkall" checked onchange="smsToggleAll(this.checked)"> 전체 선택</label>
+      <span class="sms-cnt" id="sms_cnt"></span>
+      <button class="btn btn-primary sms-mini" onclick="smsCopyAll(this)">📋 선택 전체 복사</button>
+    </div>
+    <div class="sms-list" id="sms_list"></div>
+    <div class="modal-actions"><button class="btn btn-outline" onclick="nwCloseModal('smsModal')">닫기</button></div>
+  </div>
+</div>
+
 <script>
 const NW_UBID = <?= $buildingId ?>;
 function nwGoYm(v){ if (v && /^\d{4}-\d{2}$/.test(v)) location.href = '/nw/index.php?mode=utility&building_id=' + NW_UBID + '&ym=' + v; }
@@ -2494,9 +2553,11 @@ function wtKey(e, el){
     calcAll();
   }
 }
+// 10원 단위 올림 (1,525 → 1,530). ×1.1 부동소수 오차로 1520.0000001 같은 값이 1530이 되지 않도록 소수 2자리 반올림 후 올림
+function ceil10(v){ return Math.ceil(Math.round(v * 100) / 1000) * 10; }
 function calcFees(eUse, wUse, cfg, wt){
-  const water = Math.floor((cfg.water_base + wUse * cfg.water_unit * 1.1) / 10) * 10;                              // 절사(10원)
-  const elec  = Math.floor(((cfg.elec_tv + cfg.elec_base) * (wt || 2) + eUse * cfg.elec_unit * 1.1) / 10) * 10;    // 기본료×개월수 + 사용량. 절사(10원)
+  const water = ceil10(cfg.water_base * (wt || 2) + wUse * cfg.water_unit * 1.1);                  // 기본료×개월수 + 사용량. 올림(10원)
+  const elec  = ceil10((cfg.elec_tv + cfg.elec_base) * (wt || 2) + eUse * cfg.elec_unit * 1.1);    // 기본료×개월수 + 사용량. 올림(10원)
   return { water: Math.max(0, water), elec: Math.max(0, elec) };
 }
 function calcAll(flash){
@@ -2574,6 +2635,127 @@ function utEditMode(){
   utSetLock(false);
   document.getElementById('ut-calc-note').textContent = '✏️ 수정 모드 — 계산 후 저장하세요.';
 }
+/* ── 📩 공과금 안내 문자 문구 ─────────────────────────────────
+   화면의 계산값(계산 후·저장 전 포함)을 그대로 사용. 미검침 호실은 요금 0이라 자동 제외. */
+const SMS_YM  = '<?= nw_h($ym) ?>';
+const SMS_KEY = 'nw_sms_' + NW_UBID;
+const SMS_TPL_VER = 9; // 기본 양식이 바뀌면 +1 (저장된 옛 양식을 새 기본값으로 교체)
+const SMS_TPL_DEF = '[안내] {월}월 전기/수도 요금 안내({호실}호)\n\n1.청구금액 : {합계}원 ( 수도 : {수도}원 + 전기 : {전기}원 )\n2.입금일 : {기한}까지\n3.입금계좌 : {계좌}\n\n* 입금자명(보내는분) 표시 필수\n   한꺼번에 입금 => {호실}(공과금)\n   개별 입금 => {호실}(수도) , {호실}(전기)';
+// 미검침 호실용 (검침값이 없어 요금 산출 불가)
+const SMS_TPLX_DEF = '[안내] {월}월 전기/수도 요금 안내({호실}호)\n수도 : 검침안됨\n전기 : 검침안됨\n\n* 현재까지 {미검침개월}개월 미검침되어, 공과금이 미납되고 있습니다.\n* 다음번 검침은 {다음검침}에 요청드릴 예정입니다.';
+const SMS_ACCT_DEF = '국민은행 848601-04-225860 노르웨이의 숲(이호)';
+let SMS_TXT = {};   // uid => 완성 문구
+let SMS_OFF = {};   // uid => true면 선택 해제
+
+function smsH(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+// 대상 월 라벨 = 청구월 직전 N개월 (5월 입력분·개월수 2 → "3,4")
+function smsMonLabel(wt){
+  const m = Number(SMS_YM.slice(5, 7)), n = Math.max(1, wt || 1), arr = [];
+  for (let i = n; i >= 1; i--) arr.push(((m - i - 1) % 12 + 12) % 12 + 1);
+  return arr.join(',');
+}
+// 입금 기한 기본값: 청구월 다음달 1일 (5월 입력분 → 6월1일)
+function smsDueDef(){ const m = Number(SMS_YM.slice(5, 7)); return ((m % 12) + 1) + '월1일'; }
+// 다음 검침 시기: 2개월 주기 → 청구월 다음달 말 (5월 청구 → 6월말)
+function smsNextRead(){ const m = Number(SMS_YM.slice(5, 7)); return ((m % 12) + 1) + '월말'; }
+
+function smsRows(){
+  const out = [];
+  document.querySelectorAll('tr[data-uid]').forEach(tr => {
+    const w = Number(tr.dataset.wfee) || 0, e = Number(tr.dataset.efee) || 0;
+    // 미검침 호실은 요금이 없어도 '검침안됨' 안내 대상. 그 외 요금 0(미입력)은 제외
+    const stale = tr.dataset.stale === '1' && w <= 0 && e <= 0;
+    if (!stale && w <= 0 && e <= 0) return;
+    const wt = Math.max(1, parseInt((tr.querySelector('.r-wt').value || '').replace(/[^0-9]/g, ''), 10) || 2);
+    out.push({ uid: tr.dataset.uid, room: tr.dataset.room || '', tenant: tr.dataset.tenant || '', phone: tr.dataset.phone || '',
+               w: w, e: e, wt: wt, stale: stale, overdue: Math.max(1, Number(tr.dataset.overdue) || 0) });
+  });
+  return out;
+}
+function smsText(r){
+  const val = id => (document.getElementById(id).value || '');
+  const mon = val('sms_mon').trim() || smsMonLabel(r.wt);
+  const f = n => Number(n).toLocaleString('en-US');
+  const tpl = r.stale ? (val('sms_tplx') || SMS_TPLX_DEF) : (val('sms_tpl') || SMS_TPL_DEF);
+  return tpl
+    .replace(/\{월\}/g, mon).replace(/\{호실\}/g, r.room).replace(/\{세입자\}/g, r.tenant)
+    .replace(/\{수도\}/g, f(r.w)).replace(/\{전기\}/g, f(r.e)).replace(/\{합계\}/g, f(r.w + r.e))
+    .replace(/\{기한\}/g, val('sms_due')).replace(/\{계좌\}/g, val('sms_acct'))
+    .replace(/\{미검침개월\}/g, r.overdue).replace(/\{다음검침\}/g, val('sms_next'));
+}
+function smsRender(){
+  const rows = smsRows(), box = document.getElementById('sms_list');
+  try { localStorage.setItem(SMS_KEY, JSON.stringify({ acct: document.getElementById('sms_acct').value, tpl: document.getElementById('sms_tpl').value, tplx: document.getElementById('sms_tplx').value, tv: SMS_TPL_VER })); } catch (e) {}
+  SMS_TXT = {};
+  if (!rows.length){
+    box.innerHTML = '<div class="sms-empty">요금이 계산된 호실이 없습니다.<br>(미검침 호실은 제외됩니다)</div>';
+    document.getElementById('sms_cnt').textContent = '';
+    return;
+  }
+  box.innerHTML = rows.map(r => {
+    SMS_TXT[r.uid] = smsText(r);
+    return '<div class="sms-card' + (SMS_OFF[r.uid] ? ' off' : '') + '" id="smsc-' + r.uid + '">'
+      + '<div class="sms-hd">'
+      +   '<input type="checkbox" class="sms-chk" data-uid="' + r.uid + '"' + (SMS_OFF[r.uid] ? '' : ' checked') + ' onchange="smsToggle(this)">'
+      +   '<b>' + smsH(r.room) + '호</b>'
+      +   (r.tenant ? '<span class="tn">' + smsH(r.tenant) + '</span>' : '<span class="tn" style="color:#cbd5e0;">공실</span>')
+      +   (r.phone ? '<span class="ph">' + smsH(r.phone) + '</span>' : '')
+      +   (r.stale ? '<span class="stale">⚠ ' + r.overdue + '개월 미검침</span>' : '')
+      +   '<button class="btn btn-outline sms-mini" onclick="smsCopy(SMS_TXT[\'' + r.uid + '\'], this)">📋 복사</button>'
+      + '</div>'
+      + '<pre class="sms-txt">' + smsH(SMS_TXT[r.uid]) + '</pre></div>';
+  }).join('');
+  smsCount();
+}
+function smsCount(){
+  const all = Object.keys(SMS_TXT).length, on = Object.keys(SMS_TXT).filter(u => !SMS_OFF[u]).length;
+  document.getElementById('sms_cnt').textContent = '선택 ' + on + ' / 전체 ' + all + '호실';
+  document.getElementById('sms_chkall').checked = (on === all && all > 0);
+}
+function smsToggle(el){
+  const uid = el.dataset.uid;
+  SMS_OFF[uid] = !el.checked;
+  document.getElementById('smsc-' + uid).classList.toggle('off', !el.checked);
+  smsCount();
+}
+function smsToggleAll(on){
+  document.querySelectorAll('.sms-chk').forEach(c => { c.checked = on; SMS_OFF[c.dataset.uid] = !on; document.getElementById('smsc-' + c.dataset.uid).classList.toggle('off', !on); });
+  smsCount();
+}
+function smsCopy(txt, btn){
+  const done = () => { const o = btn.textContent; btn.textContent = '✔ 복사됨'; btn.classList.add('ok'); setTimeout(() => { btn.textContent = o; btn.classList.remove('ok'); }, 1200); };
+  const fallback = () => {
+    const ta = document.createElement('textarea');
+    ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); done(); } catch (e) { alert('복사에 실패했습니다. 문구를 직접 선택해 복사하세요.'); }
+    ta.remove();
+  };
+  if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(txt).then(done, fallback);
+  else fallback();
+}
+function smsCopyAll(btn){
+  const list = Object.keys(SMS_TXT).filter(u => !SMS_OFF[u]).map(u => SMS_TXT[u]);
+  if (!list.length) { alert('선택된 호실이 없습니다.'); return; }
+  smsCopy(list.join('\n\n───────────────\n\n'), btn);
+}
+function smsResetTpl(){ document.getElementById('sms_tpl').value = SMS_TPL_DEF; document.getElementById('sms_tplx').value = SMS_TPLX_DEF; smsRender(); }
+function smsOpen(){
+  calcAll(); // 최신 계산값 반영
+  let s = {}; try { s = JSON.parse(localStorage.getItem(SMS_KEY) || '{}') || {}; } catch (e) {}
+  const ok = (s.tv === SMS_TPL_VER); // 옛 버전 저장분은 새 기본 양식으로
+  const el = id => document.getElementById(id);
+  if (!el('sms_acct').value) el('sms_acct').value = s.acct || SMS_ACCT_DEF;
+  if (!el('sms_tpl').value)  el('sms_tpl').value  = (ok && s.tpl)  ? s.tpl  : SMS_TPL_DEF;
+  if (!el('sms_tplx').value) el('sms_tplx').value = (ok && s.tplx) ? s.tplx : SMS_TPLX_DEF;
+  if (!el('sms_due').value)  el('sms_due').value  = smsDueDef();
+  if (!el('sms_next').value) el('sms_next').value = smsNextRead();
+  SMS_OFF = {};
+  smsRows().forEach(r => { if (!r.tenant) SMS_OFF[r.uid] = true; }); // 공실은 보낼 대상 없음 → 기본 해제
+  smsRender();
+  nwOpenModal('smsModal');
+}
+
 calcAll(); // 초기 표시 정렬
 if (UT_REGISTERED) { utSetLock(true); document.getElementById('ut-calc-note').textContent = '📋 등록된 내역 (읽기전용)'; }
 </script>
