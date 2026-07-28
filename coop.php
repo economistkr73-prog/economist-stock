@@ -129,7 +129,7 @@ body { display:flex; flex-direction:column; height:100vh; overflow:hidden; }
 </head>
 <body>
 <?php render_coop_nav('map'); ?>
-
+ 
 <div id="wc-stats"><!-- 통계 카드 (JS) --></div>
 
 <div id="wc-filter">

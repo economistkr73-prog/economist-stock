@@ -213,7 +213,7 @@ echo '<script>var NT_SHARE=' . ($NT_SHARE ? 'true' : 'false')
 echo <<<'BODY'
 <div class="nt-wrap">
   <div class="nt-head">
-    <h1 id="ntTitle">맛집 추이</h1>
+    <h1 id="ntTitle">네이버 맛집 추이</h1>
     <span class="sub">네이버 평점·리뷰·저장수의 회차별 변화 (직전 회차 대비)</span>
     <div class="nt-vtoggle">
       <button id="ntViewList" class="on" onclick="ntSetView('list')">표</button>
@@ -337,7 +337,7 @@ function ntUpdateHead(){
   var lbl = ntHeadLabel(region, ntSelTags);
   // 소유자 & 필터 없음 → 랜딩 느낌의 "OO 추이" 유지
   document.getElementById('ntTitle').textContent =
-    (!NT_SHARE && !region && !ntSelTags.length) ? (ntCatLabel(CAT) + ' 추이') : lbl;
+    (!NT_SHARE && !region && !ntSelTags.length) ? ('네이버 ' + ntCatLabel(CAT) + ' 추이') : lbl;
 }
 
 // 태그(칩) 목록 로드 — 현 분류·회차의 cuisine 태그를 곳수순으로. 게스트는 칩바 숨김이라 로드 안 함.
