@@ -1,0 +1,405 @@
+<?php
+/**
+ * Vod — 구글 드라이브 "영상" 루트폴더(비공개)를 서비스계정(SA)으로 재귀 탐색해
+ *        폴더 트리 + 영상 목록 + 썸네일 + 스트리밍 재생을 제공하는 클래스.
+ *
+ *   - 임의 깊이 중첩 폴더 지원(재귀). 폴더 = tbl_vod_folder, 영상 = tbl_vod 로 동기화.
+ *   - 목록/썸네일/재생 모두 SA(GDriveSA) 기반 → 구글 로그인 불필요, 어디서든 열림.
+ *   - 프록시(vod_thumb/vod_video)는 "이 fileId 가 tbl_vod 에 있는가"로 인가.
+ *
+ *   ⚠️ 이 SA 이메일을 "영상" 폴더에 '뷰어' 이상으로 공유해야 접근 가능.
+ */
+class Vod
+{
+    const DRIVE_API   = 'https://www.googleapis.com/drive/v3/files';
+    const FOLDER_MIME = 'application/vnd.google-apps.folder';
+    const MAX_DEPTH   = 20;   // 무한재귀 안전장치
+
+    // ======================================================
+    // 테이블 (영상 + 폴더트리)
+    // ======================================================
+    public static function ensureTable(PDO $pdo): void
+    {
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS tbl_vod (
+                id            INT AUTO_INCREMENT PRIMARY KEY,
+                drive_file_id VARCHAR(200) NOT NULL UNIQUE,
+                folder_id     VARCHAR(200) NOT NULL,
+                folder_name   VARCHAR(255) NOT NULL,
+                seq           INT          NULL,
+                title         VARCHAR(255) NOT NULL,
+                taken_label   VARCHAR(40)  NULL,
+                dur_label     VARCHAR(20)  NULL,
+                size          BIGINT       NULL,
+                vid_w         SMALLINT     NULL,
+                vid_h         SMALLINT     NULL,
+                created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_folder (folder_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS tbl_vod_folder (
+                folder_id     VARCHAR(200) PRIMARY KEY,
+                parent_id     VARCHAR(200) NOT NULL,
+                name          VARCHAR(255) NOT NULL,
+                depth         INT DEFAULT 0,
+                cover_file_id VARCHAR(200) NULL,
+                vid_count     INT DEFAULT 0,     -- 하위 전체(재귀) 영상 수
+                sub_count     INT DEFAULT 0,     -- 직속 하위폴더 수
+                INDEX idx_parent (parent_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
+        // 폴더별 한시적 공개 공유 (로그인 없이 그 폴더 하위만 열람)
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS tbl_vod_share (
+                id         INT AUTO_INCREMENT PRIMARY KEY,
+                folder_id  VARCHAR(200) NOT NULL,
+                token      VARCHAR(64)  NOT NULL UNIQUE,
+                expires_at DATETIME     NOT NULL,
+                revoked    TINYINT      DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_folder (folder_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
+    }
+
+    // ======================================================
+    // 동기화 — 루트부터 재귀로 폴더/영상 스캔 → upsert + 고아정리
+    // ======================================================
+    public static function sync(PDO $pdo): array
+    {
+        self::ensureTable($pdo);
+        if (!GDriveSA::enabled()) {
+            throw new RuntimeException('서비스계정(GDRIVE_SA_JSON) 미설정');
+        }
+        if (!defined('VOD_DRIVE_ROOT_ID') || VOD_DRIVE_ROOT_ID === '') {
+            throw new RuntimeException('VOD_DRIVE_ROOT_ID(영상 루트폴더) 미설정 — env/gdrive.inc 확인');
+        }
+
+        $liveV = [];   // 현존 영상 fileId
+        $liveF = [];   // 현존 폴더 id
+        self::walk($pdo, VOD_DRIVE_ROOT_ID, '(root)', 0, $liveV, $liveF);
+
+        // 고아정리 — 라이브 목록이 비면(오접근/오류) 전삭제하지 않는다(driveList 오류는 예외로 중단됨).
+        $delV = 0;
+        if ($liveV) {
+            $in = implode(',', array_fill(0, count($liveV), '?'));
+            $st = $pdo->prepare("DELETE FROM tbl_vod WHERE drive_file_id NOT IN ($in)");
+            $st->execute($liveV);
+            $delV = $st->rowCount();
+        }
+        if ($liveF) {
+            $in = implode(',', array_fill(0, count($liveF), '?'));
+            $st = $pdo->prepare("DELETE FROM tbl_vod_folder WHERE folder_id NOT IN ($in)");
+            $st->execute($liveF);
+        } elseif (!$liveV) {
+            // 폴더·영상 모두 0 → 아무것도 지우지 않음(안전)
+        } else {
+            $pdo->exec("DELETE FROM tbl_vod_folder");  // 영상만 있고 폴더 0 = 실제 비어있음
+        }
+
+        return ['folders' => count($liveF), 'videos' => count($liveV), 'deleted' => $delV];
+    }
+
+    /**
+     * 재귀 워커. $folderId 안의 영상 upsert + 하위폴더 재귀.
+     * @return array [subtreeVideoCount, coverFileId|null]  (상위 폴더의 대표썸네일·집계에 사용)
+     */
+    private static function walk(PDO $pdo, string $folderId, string $folderName, int $depth, array &$liveV, array &$liveF): array
+    {
+        if ($depth > self::MAX_DEPTH) return [0, null];
+
+        // ── 이 폴더의 영상 ──
+        $vids = self::driveList(
+            "'{$folderId}' in parents and mimeType contains 'video/'",
+            'id,name,size,videoMediaMetadata(width,height)'
+        );
+        foreach ($vids as &$vv) $vv['_seq'] = self::parseTitle($vv['name'])['seq'];
+        unset($vv);
+        usort($vids, fn($a, $b) => ($a['_seq'] ?? 99999) <=> ($b['_seq'] ?? 99999));
+
+        foreach ($vids as $v) {
+            $p  = self::parseTitle($v['name']);
+            $st = $pdo->prepare(
+                "INSERT INTO tbl_vod
+                    (drive_file_id, folder_id, folder_name, seq, title,
+                     taken_label, dur_label, size, vid_w, vid_h)
+                 VALUES (?,?,?,?,?,?,?,?,?,?)
+                 ON DUPLICATE KEY UPDATE
+                    folder_id=VALUES(folder_id), folder_name=VALUES(folder_name),
+                    seq=VALUES(seq), title=VALUES(title), taken_label=VALUES(taken_label),
+                    dur_label=VALUES(dur_label), size=VALUES(size),
+                    vid_w=VALUES(vid_w), vid_h=VALUES(vid_h)"
+            );
+            $st->execute([
+                $v['id'], $folderId, $folderName, $p['seq'], $p['title'],
+                $p['date'], $p['dur'], $v['size'] ?? null,
+                $v['videoMediaMetadata']['width'] ?? null,
+                $v['videoMediaMetadata']['height'] ?? null,
+            ]);
+            $liveV[] = $v['id'];
+        }
+
+        $count = count($vids);
+        $cover = $vids ? $vids[0]['id'] : null;   // 직속 첫 영상(seq 최소)
+
+        // ── 하위폴더 재귀 ──
+        $subs = self::driveList(
+            "'{$folderId}' in parents and mimeType='" . self::FOLDER_MIME . "'",
+            'id,name'
+        );
+        foreach ($subs as $sf) {
+            [$cCnt, $cCov] = self::walk($pdo, $sf['id'], $sf['name'], $depth + 1, $liveV, $liveF);
+
+            $st = $pdo->prepare(
+                "INSERT INTO tbl_vod_folder
+                    (folder_id, parent_id, name, depth, cover_file_id, vid_count, sub_count)
+                 VALUES (?,?,?,?,?,?,?)
+                 ON DUPLICATE KEY UPDATE
+                    parent_id=VALUES(parent_id), name=VALUES(name), depth=VALUES(depth),
+                    cover_file_id=VALUES(cover_file_id), vid_count=VALUES(vid_count),
+                    sub_count=VALUES(sub_count)"
+            );
+            // 하위폴더의 직속 하위폴더 수는 별도 조회 없이 sub 목록 재귀 중 알 수 없어 0 저장하지 않고,
+            // 여기서는 '이 sf 의 직속 하위폴더 수'를 driveList 결과로 다시 구하지 않는다 —
+            // 대신 walk 반환에 담지 않고, sub_count 는 렌더 시 listChildren 개수로 대체 가능하나,
+            // 카드 배지엔 vid_count(재귀 영상수)를 쓰므로 sub_count 는 참고용(자식 재조회 회피 위해 0 유지).
+            $st->execute([$sf['id'], $folderId, $sf['name'], $depth + 1, $cCov, $cCnt, 0]);
+            $liveF[] = $sf['id'];
+
+            $count += $cCnt;
+            if ($cover === null) $cover = $cCov;   // 직속 영상 없으면 하위 대표썸네일 승계
+        }
+
+        return [$count, $cover];
+    }
+
+    // ======================================================
+    // 파일명 파싱 — "(6mm) No.09 - 설날 2003.2.1 (15분) .mp4"
+    //   → seq=9, title="설날", date="2003.2.1", dur="15분"
+    // ======================================================
+    public static function parseTitle(string $name): array
+    {
+        $base = preg_replace('/\.(mp4|mov|m4v|avi|mkv|wmv)$/i', '', $name);
+
+        $seq = null;
+        if (preg_match('/No\.\s*0*(\d+)/i', $base, $m)) $seq = (int)$m[1];
+
+        $date = null;
+        if (preg_match('/(\d{4}\.\d{1,2}\.\d{1,2})/', $base, $m)) $date = $m[1];
+
+        $dur = null;
+        if (preg_match('/\(\s*(\d+)\s*분\s*\)/u', $base, $m)) $dur = $m[1] . '분';
+
+        $title = trim($base);
+        if (preg_match('/No\.\s*\d+\s*-\s*(.+)$/iu', $base, $m)) $title = trim($m[1]);
+        if ($date !== null) {
+            $pos = mb_strpos($title, $date);
+            if ($pos !== false) $title = trim(mb_substr($title, 0, $pos));
+        }
+        $title = trim(preg_replace('/\(\s*\d+\s*분\s*\).*/u', '', $title));
+        $title = trim(preg_replace('/^\(\s*6mm\s*\)\s*/i', '', $title));
+        $title = trim($title, " -·");
+        if ($title === '') $title = trim($base);
+
+        return ['seq' => $seq, 'title' => $title, 'date' => $date, 'dur' => $dur];
+    }
+
+    // ======================================================
+    // 네비게이션 조회
+    // ======================================================
+    /** 부모 아래 하위폴더 목록(카드용) */
+    public static function listChildren(PDO $pdo, string $parentId): array
+    {
+        self::ensureTable($pdo);
+        $st = $pdo->prepare("SELECT * FROM tbl_vod_folder WHERE parent_id = ? ORDER BY name ASC");
+        $st->execute([$parentId]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 한 폴더의 직속 영상 목록 */
+    public static function listVideosIn(PDO $pdo, string $folderId): array
+    {
+        self::ensureTable($pdo);
+        $st = $pdo->prepare(
+            "SELECT * FROM tbl_vod WHERE folder_id = ?
+              ORDER BY (seq IS NULL) ASC, seq ASC, title ASC"
+        );
+        $st->execute([$folderId]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 폴더 1건 정보(name, parent_id 등) — 없으면 null */
+    public static function folderInfo(PDO $pdo, string $folderId): ?array
+    {
+        self::ensureTable($pdo);
+        $st = $pdo->prepare("SELECT * FROM tbl_vod_folder WHERE folder_id = ? LIMIT 1");
+        $st->execute([$folderId]);
+        $r = $st->fetch(PDO::FETCH_ASSOC);
+        return $r ?: null;
+    }
+
+    /** 루트→현재 경로(빵부스러기) [[id,name], ...]. $stopAt 폴더는 제외하고 멈춤(게스트 범위 제한용). */
+    public static function breadcrumb(PDO $pdo, string $folderId, string $stopAt = ''): array
+    {
+        $chain = [];
+        $cur   = $folderId;
+        $guard = 0;
+        $root  = $stopAt !== '' ? $stopAt : (defined('VOD_DRIVE_ROOT_ID') ? VOD_DRIVE_ROOT_ID : '');
+        while ($cur !== '' && $cur !== $root && $guard++ < self::MAX_DEPTH) {
+            $info = self::folderInfo($pdo, $cur);
+            if (!$info) break;
+            array_unshift($chain, ['id' => $info['folder_id'], 'name' => $info['name']]);
+            $cur = $info['parent_id'];
+        }
+        return $chain;
+    }
+
+    /** 전체 영상 수 */
+    public static function totalVideos(PDO $pdo): int
+    {
+        self::ensureTable($pdo);
+        return (int)$pdo->query("SELECT COUNT(*) FROM tbl_vod")->fetchColumn();
+    }
+
+    /** 프록시 인가 — 이 fileId 가 동기화된 영상 목록에 있는가 */
+    public static function isKnown(PDO $pdo, string $fileId): bool
+    {
+        self::ensureTable($pdo);
+        $st = $pdo->prepare("SELECT 1 FROM tbl_vod WHERE drive_file_id = ? LIMIT 1");
+        $st->execute([$fileId]);
+        return (bool)$st->fetchColumn();
+    }
+
+    // ======================================================
+    // 폴더별 공유 (한시적 공개 링크)
+    // ======================================================
+    /** 공유 링크 생성 (기존 활성 링크는 무효화, 1개만 유지). ttl 5분~90일 클램프. */
+    public static function createShare(PDO $pdo, string $folderId, int $ttlSeconds): array
+    {
+        self::ensureTable($pdo);
+        self::revokeShares($pdo, $folderId);
+        $ttl   = max(300, min($ttlSeconds, 90 * 24 * 3600));
+        $token = bin2hex(random_bytes(16));                  // 추측 불가 32자
+        $pdo->prepare(
+            "INSERT INTO tbl_vod_share (folder_id, token, expires_at)
+             VALUES (?, ?, DATE_ADD(NOW(), INTERVAL ? SECOND))"
+        )->execute([$folderId, $token, $ttl]);
+        $st = $pdo->prepare("SELECT * FROM tbl_vod_share WHERE token = ? LIMIT 1");
+        $st->execute([$token]);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: ['token' => $token, 'expires_at' => null];
+    }
+
+    /** 토큰으로 유효한(미만료·미취소) 공유 조회 — 게스트 접근 검증 */
+    public static function getValidShare(PDO $pdo, string $token): ?array
+    {
+        if ($token === '') return null;
+        self::ensureTable($pdo);
+        $st = $pdo->prepare(
+            "SELECT * FROM tbl_vod_share
+              WHERE token = ? AND revoked = 0 AND expires_at > NOW() LIMIT 1"
+        );
+        $st->execute([$token]);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    /** 폴더의 현재 활성 공유 1건 (소유자 화면 표시용) */
+    public static function getActiveShare(PDO $pdo, string $folderId): ?array
+    {
+        self::ensureTable($pdo);
+        $st = $pdo->prepare(
+            "SELECT * FROM tbl_vod_share
+              WHERE folder_id = ? AND revoked = 0 AND expires_at > NOW()
+              ORDER BY id DESC LIMIT 1"
+        );
+        $st->execute([$folderId]);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    /** 폴더의 모든 활성 공유 즉시 차단 */
+    public static function revokeShares(PDO $pdo, string $folderId): void
+    {
+        self::ensureTable($pdo);
+        $pdo->prepare("UPDATE tbl_vod_share SET revoked = 1 WHERE folder_id = ?")
+            ->execute([$folderId]);
+    }
+
+    /** folderId 가 ancestorId 자신 또는 그 하위(자손)인가 — 부모체인 상향 탐색 */
+    public static function isDescendantOrSelf(PDO $pdo, string $folderId, string $ancestorId): bool
+    {
+        $cur = $folderId; $guard = 0;
+        while ($cur !== '' && $guard++ < self::MAX_DEPTH) {
+            if ($cur === $ancestorId) return true;
+            $info = self::folderInfo($pdo, $cur);
+            if (!$info) return false;
+            $cur = $info['parent_id'];
+        }
+        return false;
+    }
+
+    /** 영상 fileId 의 소속 폴더 id (없으면 null) */
+    public static function videoFolderId(PDO $pdo, string $fileId): ?string
+    {
+        self::ensureTable($pdo);
+        $st = $pdo->prepare("SELECT folder_id FROM tbl_vod WHERE drive_file_id = ? LIMIT 1");
+        $st->execute([$fileId]);
+        $f = $st->fetchColumn();
+        return $f === false ? null : (string)$f;
+    }
+
+    /** 게스트(공유토큰)가 이 fileId 를 볼 권한이 있는가 = 영상이 공유폴더 하위에 속함 */
+    public static function shareAuthorizes(PDO $pdo, string $token, string $fileId): bool
+    {
+        $sh = self::getValidShare($pdo, $token);
+        if (!$sh) return false;
+        $vf = self::videoFolderId($pdo, $fileId);
+        if ($vf === null) return false;
+        return self::isDescendantOrSelf($pdo, $vf, $sh['folder_id']);
+    }
+
+    /** 프록시 통합 인가: 소유자(로그인) = 알려진 영상 전체 / 게스트 = 공유폴더 하위만 */
+    public static function mediaAuthorized(PDO $pdo, bool $owner, string $fileId, string $token): bool
+    {
+        if ($owner) return self::isKnown($pdo, $fileId);
+        return $token !== '' && self::shareAuthorizes($pdo, $token, $fileId);
+    }
+
+    // ======================================================
+    // Drive files.list (SA 인증, 페이지네이션 자동)
+    // ======================================================
+    private static function driveList(string $q, string $fields): array
+    {
+        $files = [];
+        $pageToken = '';
+        do {
+            $params = [
+                'q'        => $q . ' and trashed=false',
+                'fields'   => "nextPageToken,files({$fields})",
+                'pageSize' => 100,
+                'orderBy'  => 'name',
+            ];
+            if ($pageToken !== '') $params['pageToken'] = $pageToken;
+
+            $ch = curl_init(self::DRIVE_API . '?' . http_build_query($params));
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HTTPHEADER     => GDriveSA::authHeader(),
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_CONNECTTIMEOUT => 8,
+                CURLOPT_TIMEOUT        => 30,
+            ]);
+            $json = curl_exec($ch);
+            curl_close($ch);
+
+            $data = json_decode((string)$json, true);
+            if (isset($data['error'])) {
+                throw new RuntimeException('Drive API: ' . ($data['error']['message'] ?? 'unknown'));
+            }
+            foreach ($data['files'] ?? [] as $f) $files[] = $f;
+            $pageToken = $data['nextPageToken'] ?? '';
+        } while ($pageToken !== '');
+
+        return $files;
+    }
+}
+?>
