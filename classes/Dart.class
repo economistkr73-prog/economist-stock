@@ -1,0 +1,831 @@
+<?php
+/**
+ * Dart.class — DART(금융감독원 전자공시) 오픈API 수집 + DB 전담
+ *
+ * 목적: 종목별 <b>연도별</b> EPS·BPS·DPS·배당수익률을 쌓는다.
+ *       네이버는 "오늘 값" 하나뿐이라 과거를 소급할 수 없고, KRX 오픈API 는
+ *       주식 카테고리에 이 지표들이 아예 없다. DART 만 연도별로 준다.
+ *
+ * ★ PER·PBR 은 저장하지 않는다.
+ *   둘 다 주가로 나눈 <b>파생값</b>이라 주가가 갱신되면 즉시 어긋난다.
+ *   화면에서 그때 주가로 계산한다 (시뮬레이터가 이론가·누적단가를 저장하지 않는 것과 같은 이유).
+ *
+ * ★ 종목코드로는 DART 를 부를 수 없다.
+ *   모든 API 가 8자리 corp_code 를 받으므로 corpCode.xml 매핑이 선행이다.
+ *
+ * 실측으로 확인한 것(2026-07-29, 삼성전자 2024):
+ *   - alotMatter        : 한 번에 당기·전기·전전기 3년치. se 문자열로 항목을 가른다
+ *   - fnlttSinglAcnt    : 자본총계도 3년치. fs_div=CFS(연결) / OFS(별도)
+ *   - stockTotqySttus   : 당기만. 연도별로 한 번씩 불러야 한다
+ *   - 주요 재무지표(fnlttSinglIndx) 에는 BPS 가 없다 → 자본총계 ÷ 유통주식으로 만든다
+ */
+class Dart
+{
+    /** DART 가 이 API 들로 제공하는 하한 연도 */
+    const MIN_YEAR = 2015;
+
+    /** 사업보고서 */
+    const REPRT_ANNUAL = '11011';
+
+    private PDO $pdo;
+    private string $key;
+
+    /** 호출 간 최소 간격(마이크로초). 하루 20,000회 한도라 과하게 조일 필요는 없다 */
+    private int $gapUs = 120000;
+
+    public function __construct(PDO $pdo, string $key = '')
+    {
+        $this->pdo = $pdo;
+        $this->key = $key !== '' ? $key : (defined('DART_API_KEY') ? DART_API_KEY : '');
+    }
+
+    public function hasKey(): bool
+    {
+        return $this->key !== '';
+    }
+
+    // ══ 스키마 ══════════════════════════════════════════════════════════
+    public function ensureTables(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS dart_corp_code (
+              stock_code  VARCHAR(10)  NOT NULL COMMENT '종목코드 6자리',
+              corp_code   CHAR(8)      NOT NULL COMMENT 'DART 고유번호 — 모든 API 가 이걸 받는다',
+              corp_name   VARCHAR(120) NOT NULL DEFAULT '',
+              modify_date CHAR(8)      NOT NULL DEFAULT '',
+              updated_at  DATETIME     NOT NULL,
+              PRIMARY KEY (stock_code),
+              KEY idx_dart_corp (corp_code)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        // 종목 × 사업연도 한 행. 파생값(PER·PBR)은 담지 않는다.
+        // equity_amt·shares 를 같이 남기는 이유: BPS 가 이상할 때 원자료로 되짚기 위해서다.
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS stock_fundamental (
+              stock_code VARCHAR(10)  NOT NULL,
+              bsns_year  SMALLINT     NOT NULL COMMENT '사업연도',
+              eps        INT          NULL COMMENT '주당순이익(원) — 연결 우선',
+              bps        INT          NULL COMMENT '주당순자산(원) = 자본총계 ÷ 보통주 유통주식',
+              dps        INT          NULL COMMENT '주당 현금배당금(원) — 보통주',
+              div_yield  DECIMAL(6,2) NULL COMMENT '현금배당수익률(%)',
+              net_income BIGINT       NULL COMMENT '당기순이익(원) — 연결 우선',
+              equity_amt BIGINT       NULL COMMENT '자본총계(원) — BPS 원자료',
+              shares     BIGINT       NULL COMMENT '보통주 유통주식수 — BPS 원자료',
+              par_value  INT          NULL COMMENT '주당액면가액(원) — 액면분할 보정의 기준',
+              fs_div     VARCHAR(4)   NOT NULL DEFAULT '' COMMENT 'CFS(연결) / OFS(별도)',
+              stlm_dt    DATE         NULL COMMENT '결산기준일',
+              updated_at DATETIME     NOT NULL,
+              PRIMARY KEY (stock_code, bsns_year)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        /* 재무제표 주요계정 — 스크리너의 모집단.
+         *
+         * 계정을 세로로 쌓지 않고 <b>가로(컬럼)</b>로 편 이유:
+         * 주요계정은 종류가 25개로 고정이라 늘어날 일이 없고, 스크리닝은
+         * "영업이익률 10% 이상이면서 부채비율 100% 미만" 같은 조건을 한 번에 거는 일이라
+         * 세로로 쌓으면 매번 피벗을 돌려야 한다. 종목 3,924 × 11년 = 4만여 행뿐이다.
+         *
+         * 비율(영업이익률·ROE·부채비율…)은 저장하지 않는다 — 여기 금액에서 언제든 나온다.
+         */
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS stock_financial (
+              stock_code        VARCHAR(10) NOT NULL,
+              bsns_year         SMALLINT    NOT NULL COMMENT '사업연도',
+              reprt_code        CHAR(5)     NOT NULL DEFAULT '11011' COMMENT '11011=사업보고서',
+              fs_div            VARCHAR(4)  NOT NULL DEFAULT '' COMMENT 'CFS(연결) 우선, 없으면 OFS(별도)',
+              cur_asset         BIGINT      NULL COMMENT '유동자산',
+              noncur_asset      BIGINT      NULL COMMENT '비유동자산',
+              asset_total       BIGINT      NULL COMMENT '자산총계',
+              cur_debt          BIGINT      NULL COMMENT '유동부채',
+              noncur_debt       BIGINT      NULL COMMENT '비유동부채',
+              debt_total        BIGINT      NULL COMMENT '부채총계',
+              capital_stock     BIGINT      NULL COMMENT '자본금',
+              retained_earnings BIGINT      NULL COMMENT '이익잉여금',
+              equity_total      BIGINT      NULL COMMENT '자본총계',
+              revenue           BIGINT      NULL COMMENT '매출액',
+              op_income         BIGINT      NULL COMMENT '영업이익',
+              pretax_income     BIGINT      NULL COMMENT '법인세차감전 순이익',
+              net_income        BIGINT      NULL COMMENT '당기순이익',
+              total_income      BIGINT      NULL COMMENT '총포괄손익',
+              updated_at        DATETIME    NOT NULL,
+              PRIMARY KEY (stock_code, bsns_year, reprt_code),
+              KEY idx_fin_year (bsns_year)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        // 액면가는 뒤늦게 넣었다 (액면분할 뒤섞임을 잡느라). 이미 만든 테이블에도 붙인다.
+        $has = $this->pdo->query("
+            SELECT COUNT(*) FROM information_schema.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'stock_fundamental' AND COLUMN_NAME = 'par_value'
+        ")->fetchColumn();
+        if (!$has) {
+            $this->pdo->exec("ALTER TABLE stock_fundamental ADD par_value INT NULL COMMENT '주당액면가액(원)' AFTER shares");
+        }
+
+        /* 연도별 주식수 — PER·PBR 을 그 해 기준으로 맞추려고 뒤늦게 붙였다.
+         * KRX 의 상장주식수는 '지금' 값이라 증자·분할이 있었으면 옛 연도가 어긋난다. */
+        foreach ([
+            'shares_out'    => "BIGINT NULL COMMENT '보통주 유통주식수(자기주식 제외) — 그 해 사업보고서'",
+            'shares_issued' => "BIGINT NULL COMMENT '보통주 발행주식수 — 그 해 사업보고서'",
+        ] as $col => $def) {
+            $has = $this->pdo->query("
+                SELECT COUNT(*) FROM information_schema.COLUMNS
+                 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'stock_financial' AND COLUMN_NAME = '{$col}'
+            ")->fetchColumn();
+            if (!$has) $this->pdo->exec("ALTER TABLE stock_financial ADD {$col} {$def}");
+        }
+    }
+
+    // ══ HTTP ════════════════════════════════════════════════════════════
+    /**
+     * DART 호출. 실패는 예외로 올린다 — 조용히 빈 값을 쌓는 게 제일 나쁘다.
+     *
+     * @param bool $raw true 면 JSON 파싱 없이 원문(ZIP 등)을 그대로 돌려준다
+     * @return array|string
+     */
+    private function call(string $api, array $q, bool $raw = false)
+    {
+        if ($this->key === '') throw new RuntimeException('DART 인증키가 없습니다 (env/dart.inc).');
+
+        $url = 'https://opendart.fss.or.kr/api/' . $api . '?' . http_build_query(['crtfc_key' => $this->key] + $q);
+        $ch  = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 60,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_USERAGENT      => 'Mozilla/5.0',
+        ]);
+        $body = curl_exec($ch);
+        $err  = curl_error($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        usleep($this->gapUs);
+
+        if ($body === false || $err !== '') throw new RuntimeException("DART 통신 실패({$api}): {$err}");
+        if ($code !== 200)                  throw new RuntimeException("DART HTTP {$code} ({$api})");
+        if ($raw) return (string)$body;
+
+        $j = json_decode((string)$body, true);
+        if (!is_array($j)) throw new RuntimeException("DART 응답이 JSON 이 아닙니다({$api}): " . mb_substr((string)$body, 0, 120));
+
+        // 013 = 조회된 데이터 없음. 정상 흐름이라 예외로 올리지 않고 빈 목록으로 돌려준다.
+        $st = (string)($j['status'] ?? '');
+        if ($st === '013') return ['status' => '013', 'list' => []];
+        if ($st !== '000') throw new RuntimeException("DART 오류 {$st}: " . ($j['message'] ?? '') . " ({$api})");
+
+        return $j;
+    }
+
+    /** "1,446" · "-" · "" → 숫자. 값이 없으면 null (0 과 구분해야 한다) */
+    private static function num(?string $v): ?float
+    {
+        $v = trim((string)$v);
+        if ($v === '' || $v === '-') return null;
+        $v = str_replace([',', ' '], '', $v);
+        if (!preg_match('/^-?\d+(\.\d+)?$/', $v)) return null;
+        return (float)$v;
+    }
+
+    // ══ 고유번호 매핑 ═══════════════════════════════════════════════════
+    /**
+     * corpCode.xml(ZIP) 을 받아 상장사만 적재한다.
+     *
+     * 전체 11만여 법인 중 종목코드가 있는 4천여 개만 쓴다.
+     * 상장·폐지가 생기므로 가끔 다시 돌려야 한다.
+     *
+     * @return array [total, listed, saved]
+     */
+    public function syncCorpCodes(): array
+    {
+        $zipBin = $this->call('corpCode.xml', [], true);
+        if (strlen($zipBin) < 2000) {
+            throw new RuntimeException('corpCode 응답이 너무 짧습니다: ' . mb_substr($zipBin, 0, 200));
+        }
+
+        $tmp = sys_get_temp_dir() . '/dart_corp_' . getmypid() . '.zip';
+        file_put_contents($tmp, $zipBin);
+
+        $za = new ZipArchive();
+        if ($za->open($tmp) !== true) { @unlink($tmp); throw new RuntimeException('corpCode ZIP 을 열 수 없습니다.'); }
+        $xml = $za->getFromIndex(0);
+        $za->close();
+        @unlink($tmp);
+
+        $sx = @simplexml_load_string((string)$xml);
+        if ($sx === false) throw new RuntimeException('corpCode XML 파싱 실패');
+
+        $st = $this->pdo->prepare("
+            INSERT INTO dart_corp_code (stock_code, corp_code, corp_name, modify_date, updated_at)
+            VALUES (?,?,?,?,NOW())
+            ON DUPLICATE KEY UPDATE corp_code=VALUES(corp_code), corp_name=VALUES(corp_name),
+                                    modify_date=VALUES(modify_date), updated_at=NOW()
+        ");
+
+        $total = 0; $listed = 0; $saved = 0;
+        $this->pdo->beginTransaction();
+        try {
+            foreach ($sx->list as $x) {
+                $total++;
+                $sc = trim((string)$x->stock_code);
+                if ($sc === '' || !preg_match('/^\d{6}$/', $sc)) continue;   // 비상장은 버린다
+                $listed++;
+                $st->execute([$sc, trim((string)$x->corp_code),
+                              trim((string)$x->corp_name), trim((string)$x->modify_date)]);
+                $saved++;
+            }
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+
+        return ['total' => $total, 'listed' => $listed, 'saved' => $saved];
+    }
+
+    public function corpCode(string $stockCode): ?string
+    {
+        $st = $this->pdo->prepare("SELECT corp_code FROM dart_corp_code WHERE stock_code = ?");
+        $st->execute([$stockCode]);
+        $v = $st->fetchColumn();
+        return $v === false ? null : (string)$v;
+    }
+
+    public function corpCodeCount(): int
+    {
+        return (int)$this->pdo->query("SELECT COUNT(*) FROM dart_corp_code")->fetchColumn();
+    }
+
+    // ══ 수집 ════════════════════════════════════════════════════════════
+    /**
+     * 한 종목의 연도별 지표를 모아 저장한다.
+     *
+     * 호출 수(11년 기준): 배당 4 + 자본총계 4 + 주식수 11 = 19회.
+     * 배당·자본총계는 한 번에 3년치를 주므로 3년씩 건너뛴다.
+     *
+     * @return array 연도 => 저장한 값 (역순)
+     */
+    public function collect(string $stockCode, int $fromYear, int $toYear): array
+    {
+        $corp = $this->corpCode($stockCode);
+        if ($corp === null) throw new RuntimeException("종목 {$stockCode} 의 corp_code 가 없습니다. 먼저 고유번호를 동기화하세요.");
+
+        $fromYear = max(self::MIN_YEAR, $fromYear);
+        if ($toYear < $fromYear) throw new RuntimeException('연도 범위가 잘못되었습니다.');
+
+        $acc = [];   // year => [...]
+        $put = function (int $y, string $k, $v) use (&$acc, $fromYear, $toYear) {
+            if ($v === null || $y < $fromYear || $y > $toYear) return;
+            $acc[$y][$k] = $v;
+        };
+
+        /* ── 1) 배당에 관한 사항 → eps · dps · div_yield · net_income · par_value
+         *
+         * ★ 3년씩 건너뛰며 부르지 않는다. 반드시 <b>연도별 1회, 당기 값만</b> 쓴다.
+         *
+         * 이유: 액면분할이 있으면 옛 연도가 보고서마다 다른 값으로 온다.
+         *   삼성전자 2017년 EPS = 2017년 보고서 299,868원(액면 5,000) / 2019년 보고서 5,997원(액면 100).
+         *   3년씩 건너뛰면 연도마다 출처가 달라져 분할 전·후 값이 한 표에 섞인다(실제로 그랬다).
+         * 당기만 쓰면 모든 값이 "그 해 보고서 기준"으로 통일되고, 같이 오는 액면가가
+         * 그 값이 어느 기준인지 알려 주므로 나중에 일괄 보정할 수 있다.
+         */
+        for ($y = $toYear; $y >= $fromYear; $y--) {
+            $j = $this->call('alotMatter.json',
+                ['corp_code' => $corp, 'bsns_year' => (string)$y, 'reprt_code' => self::REPRT_ANNUAL]);
+
+            foreach (($j['list'] ?? []) as $x) {
+                $se  = (string)($x['se'] ?? '');
+                $knd = trim((string)($x['stock_knd'] ?? ''));
+                $v   = self::num($x['thstrm'] ?? null);           // 당기만
+                if ($v === null) { $v = null; }
+
+                // 우선주 행이 바로 뒤에 붙어 온다 — 보통주만 골라야 값이 덮이지 않는다
+                $isCommon = ($knd === '' || $knd === '-' || mb_strpos($knd, '보통') !== false);
+
+                if ($v !== null) {
+                    if (mb_strpos($se, '액면가') !== false) {
+                        $put($y, 'par_value', (int)round($v));
+                    } elseif (mb_strpos($se, '주당순이익') !== false) {
+                        // (연결)·(별도) 둘 다 올 수 있다. 연결이 오면 덮어쓴다.
+                        if (mb_strpos($se, '연결') !== false || !isset($acc[$y]['eps'])) $put($y, 'eps', (int)round($v));
+                    } elseif (mb_strpos($se, '당기순이익') !== false) {
+                        // (백만원) 단위로 온다
+                        if (mb_strpos($se, '연결') !== false || !isset($acc[$y]['net_income'])) $put($y, 'net_income', (int)round($v * 1000000));
+                    } elseif ($isCommon && mb_strpos($se, '현금배당금') !== false && mb_strpos($se, '주당') !== false) {
+                        $put($y, 'dps', (int)round($v));
+                    } elseif ($isCommon && mb_strpos($se, '현금배당수익률') !== false) {
+                        $put($y, 'div_yield', round($v, 2));
+                    }
+                }
+                if (!empty($x['stlm_dt'])) $put($y, 'stlm_dt', substr((string)$x['stlm_dt'], 0, 10));
+            }
+        }
+
+        // ── 2) 주요계정 → 자본총계 (연결 우선)
+        //    금액이라 액면분할과 무관하다(분할해도 자본총계는 그대로) → 3년씩 받아도 안전하다
+        for ($y = $toYear; $y >= $fromYear; $y -= 3) {
+            $j = $this->call('fnlttSinglAcnt.json',
+                ['corp_code' => $corp, 'bsns_year' => (string)$y, 'reprt_code' => self::REPRT_ANNUAL]);
+
+            foreach (($j['list'] ?? []) as $x) {
+                if (mb_strpos((string)($x['account_nm'] ?? ''), '자본총계') === false) continue;
+                $div = (string)($x['fs_div'] ?? '');
+
+                foreach (['thstrm_amount' => $y, 'frmtrm_amount' => $y - 1, 'bfefrmtrm_amount' => $y - 2] as $f => $yy) {
+                    $v = self::num($x[$f] ?? null);
+                    if ($v === null) continue;
+                    // 연결이 있으면 연결로 확정, 없으면 별도로 채운다
+                    if ($div === 'CFS' || !isset($acc[$yy]['equity_amt']) || ($acc[$yy]['fs_div'] ?? '') !== 'CFS') {
+                        $put($yy, 'equity_amt', (int)round($v));
+                        $put($yy, 'fs_div', $div);
+                    }
+                }
+            }
+        }
+
+        // ── 3) 주식의 총수 현황 → 보통주 유통주식수 (연도별 1회)
+        for ($y = $toYear; $y >= $fromYear; $y--) {
+            $j = $this->call('stockTotqySttus.json',
+                ['corp_code' => $corp, 'bsns_year' => (string)$y, 'reprt_code' => self::REPRT_ANNUAL]);
+
+            foreach (($j['list'] ?? []) as $x) {
+                if (mb_strpos((string)($x['se'] ?? ''), '보통') === false) continue;
+                // 자기주식을 뺀 유통주식이 BPS 분모로 맞다. 없으면 발행주식으로 떨어진다.
+                $v = self::num($x['distb_stock_co'] ?? null) ?? self::num($x['istc_totqy'] ?? null);
+                if ($v !== null && $v > 0) $put($y, 'shares', (int)round($v));
+                break;
+            }
+        }
+
+        // ── 4) BPS 계산 후 저장
+        krsort($acc);
+        $saved = [];
+        foreach ($acc as $y => $r) {
+            $bps = (!empty($r['equity_amt']) && !empty($r['shares']))
+                 ? (int)round($r['equity_amt'] / $r['shares']) : null;
+
+            $row = [
+                'stock_code' => $stockCode,
+                'bsns_year'  => $y,
+                'eps'        => $r['eps']        ?? null,
+                'bps'        => $bps,
+                'dps'        => $r['dps']        ?? null,
+                'div_yield'  => $r['div_yield']  ?? null,
+                'net_income' => $r['net_income'] ?? null,
+                'equity_amt' => $r['equity_amt'] ?? null,
+                'shares'     => $r['shares']     ?? null,
+                'par_value'  => $r['par_value']  ?? null,
+                'fs_div'     => $r['fs_div']     ?? '',
+                'stlm_dt'    => $r['stlm_dt']    ?? null,
+            ];
+            $this->save($row);
+            $saved[$y] = $row;
+        }
+        return $saved;
+    }
+
+    private function save(array $r): void
+    {
+        $st = $this->pdo->prepare("
+            INSERT INTO stock_fundamental
+                (stock_code, bsns_year, eps, bps, dps, div_yield, net_income, equity_amt, shares, par_value, fs_div, stlm_dt, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NOW())
+            ON DUPLICATE KEY UPDATE
+                eps=VALUES(eps), bps=VALUES(bps), dps=VALUES(dps), div_yield=VALUES(div_yield),
+                net_income=VALUES(net_income), equity_amt=VALUES(equity_amt), shares=VALUES(shares),
+                par_value=VALUES(par_value), fs_div=VALUES(fs_div), stlm_dt=VALUES(stlm_dt), updated_at=NOW()
+        ");
+        $st->execute([
+            $r['stock_code'], $r['bsns_year'], $r['eps'], $r['bps'], $r['dps'], $r['div_yield'],
+            $r['net_income'], $r['equity_amt'], $r['shares'], $r['par_value'], $r['fs_div'], $r['stlm_dt'],
+        ]);
+    }
+
+    // ══ 조회 ════════════════════════════════════════════════════════════
+    /** 한 종목의 연도별 지표 (최근 연도 먼저) */
+    public function rows(string $stockCode): array
+    {
+        $st = $this->pdo->prepare("
+            SELECT * FROM stock_fundamental WHERE stock_code = ? ORDER BY bsns_year DESC
+        ");
+        $st->execute([$stockCode]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 수집된 종목 목록 (연도 수·최근 연도) */
+    public function collected(): array
+    {
+        return $this->pdo->query("
+            SELECT f.stock_code, c.corp_name, COUNT(*) AS years,
+                   MIN(f.bsns_year) AS y_from, MAX(f.bsns_year) AS y_to, MAX(f.updated_at) AS updated_at
+            FROM stock_fundamental f
+            LEFT JOIN dart_corp_code c ON c.stock_code = f.stock_code
+            GROUP BY f.stock_code, c.corp_name
+            ORDER BY f.stock_code
+        ")->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    // ══ 재무제표 주요계정 (전종목 스크리너용) ═══════════════════════════
+    /**
+     * DART 계정명 → 우리 컬럼.
+     *
+     * 금융업은 '영업이익(손실)' 처럼 이름이 조금 다르게 온다. 공백을 지우고 맞춘다.
+     * 여기 없는 계정(예수부채·이자수익 등 금융업 전용)은 버린다 — 스크리닝에 공통으로 못 쓴다.
+     */
+    private static function accountMap(): array
+    {
+        return [
+            '유동자산'          => 'cur_asset',
+            '비유동자산'        => 'noncur_asset',
+            '자산총계'          => 'asset_total',
+            '유동부채'          => 'cur_debt',
+            '비유동부채'        => 'noncur_debt',
+            '부채총계'          => 'debt_total',
+            '자본금'            => 'capital_stock',
+            '이익잉여금'        => 'retained_earnings',
+            '이익잉여금(결손금)' => 'retained_earnings',
+            '자본총계'          => 'equity_total',
+            '매출액'            => 'revenue',
+            '영업이익'          => 'op_income',
+            '영업이익(손실)'    => 'op_income',
+            '법인세차감전순이익' => 'pretax_income',
+            '당기순이익'        => 'net_income',
+            '당기순이익(손실)'  => 'net_income',
+            '총포괄손익'        => 'total_income',
+        ];
+    }
+
+    /** DART 가 한 번에 받아 주는 회사 수 (초과하면 status=021) */
+    const MULTI_MAX = 100;
+
+    /**
+     * 전종목 재무제표를 한 해치 받아 저장한다.
+     *
+     * ★ 100개씩 묶어 부른다 — 한 종목씩 부르면 전종목 11년이 172,656회로 하루 한도(20,000)를 넘는다.
+     *   묶어 부르면 11년 전체가 440회로 끝난다.
+     *
+     * 연결(CFS)이 있으면 연결을 쓰고, 없으면 별도(OFS)로 떨어진다.
+     * 당기 금액만 쓴다 — 전기·전전기도 오지만, 회계기준 변경으로 재작성되는 일이 있어
+     * "그 해 보고서의 당기"로 통일하는 편이 연도 간 기준이 흔들리지 않는다.
+     *
+     * @return array [companies, saved]
+     */
+    public function collectFinancials(int $year, string $reprt = self::REPRT_ANNUAL, ?callable $progress = null): array
+    {
+        $map = $this->pdo->query("SELECT corp_code, stock_code FROM dart_corp_code")->fetchAll(PDO::FETCH_KEY_PAIR);
+        if (!$map) throw new RuntimeException('고유번호 매핑이 비어 있습니다. 먼저 동기화하세요.');
+
+        $cols   = self::accountMap();
+        $chunks = array_chunk(array_keys($map), self::MULTI_MAX);
+        $rows   = [];   // stock_code => [col => amount, fs_div]
+
+        foreach ($chunks as $i => $chunk) {
+            $j = $this->call('fnlttMultiAcnt.json', [
+                'corp_code'  => implode(',', $chunk),
+                'bsns_year'  => (string)$year,
+                'reprt_code' => $reprt,
+            ]);
+
+            foreach (($j['list'] ?? []) as $x) {
+                $sc = $map[$x['corp_code'] ?? ''] ?? null;
+                if ($sc === null) continue;
+
+                $key = str_replace(' ', '', (string)($x['account_nm'] ?? ''));
+                $col = $cols[$key] ?? null;
+                if ($col === null) continue;
+
+                $div = (string)($x['fs_div'] ?? '');
+                $amt = self::num($x['thstrm_amount'] ?? null);
+                if ($amt === null) continue;
+
+                // 연결이 한 번이라도 오면 그 종목은 연결로 확정하고, 별도 값은 무시한다
+                $cur = $rows[$sc]['fs_div'] ?? '';
+                if ($cur === 'CFS' && $div !== 'CFS') continue;
+                if ($div === 'CFS' && $cur !== 'CFS') $rows[$sc] = ['fs_div' => 'CFS'];
+
+                $rows[$sc]['fs_div'] = $rows[$sc]['fs_div'] ?? $div;
+                $rows[$sc][$col]     = (int)round($amt);
+            }
+
+            if ($progress) $progress($i + 1, count($chunks), count($rows));
+        }
+
+        $saved = $this->saveFinancials($rows, $year, $reprt);
+        return ['companies' => count($rows), 'saved' => $saved];
+    }
+
+    private function saveFinancials(array $rows, int $year, string $reprt): int
+    {
+        $cols = array_values(array_unique(array_values(self::accountMap())));
+        $set  = implode(',', $cols);
+        $ph   = implode(',', array_fill(0, count($cols), '?'));
+        $upd  = implode(',', array_map(fn($c) => "{$c}=VALUES({$c})", $cols));
+
+        $st = $this->pdo->prepare("
+            INSERT INTO stock_financial (stock_code, bsns_year, reprt_code, fs_div, {$set}, updated_at)
+            VALUES (?,?,?,?,{$ph},NOW())
+            ON DUPLICATE KEY UPDATE fs_div=VALUES(fs_div), {$upd}, updated_at=NOW()
+        ");
+
+        $n = 0;
+        $this->pdo->beginTransaction();
+        try {
+            foreach ($rows as $sc => $r) {
+                $args = [$sc, $year, $reprt, $r['fs_div'] ?? ''];
+                foreach ($cols as $c) $args[] = $r[$c] ?? null;
+                $st->execute($args);
+                $n++;
+            }
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+        return $n;
+    }
+
+    /**
+     * 연도별 주식수를 채운다 (stock_financial.shares_out / shares_issued).
+     *
+     * 왜 필요한가: KRX 의 상장주식수는 <b>지금</b> 값이라, 그 사이 증자·액면분할이 있었으면
+     * 옛 연도 PER·PBR 이 어긋난다. DART 는 그 해 사업보고서의 주식수를 준다.
+     *
+     * ★ 이 API 는 다중회사 버전이 없어 <b>종목별·연도별 1회</b> 호출이다.
+     *   전종목 11년이면 3만 회가 넘어 하루 한도(20,000)를 넘긴다 — 그래서 최근 몇 년만 받는다.
+     *
+     * ★ 이미 채워진 행은 건너뛴다 — 중간에 끊겨도 다시 돌리면 이어받는다.
+     *
+     * @param int  $limit    이번 실행에서 처리할 최대 종목 수 (0 이면 제한 없음)
+     * @param bool $krxOnly  KRX 최근 거래일에 있는 종목만 (폐지 종목에 호출을 쓰지 않는다)
+     * @return array [done, filled, empty, remain]
+     */
+    public function collectShares(int $year, int $limit = 0, bool $krxOnly = true, ?callable $progress = null): array
+    {
+        $krxJoin = $krxOnly
+            ? "JOIN krx_daily k ON k.stock_code = f.stock_code
+                             AND k.bas_dd = (SELECT MAX(bas_dd) FROM krx_daily)"
+            : '';
+
+        $sql = "SELECT f.stock_code, c.corp_code
+                  FROM stock_financial f
+                  JOIN dart_corp_code c ON c.stock_code = f.stock_code
+                  {$krxJoin}
+                 WHERE f.bsns_year = ? AND f.reprt_code = ? AND f.shares_out IS NULL
+                 ORDER BY f.stock_code";
+        $st = $this->pdo->prepare($sql);
+        $st->execute([$year, self::REPRT_ANNUAL]);
+        $todo = $st->fetchAll(PDO::FETCH_ASSOC);
+
+        $remain = count($todo);
+        if ($limit > 0) $todo = array_slice($todo, 0, $limit);
+
+        $up = $this->pdo->prepare("
+            UPDATE stock_financial SET shares_out = ?, shares_issued = ?, updated_at = NOW()
+             WHERE stock_code = ? AND bsns_year = ? AND reprt_code = ?
+        ");
+
+        $done = $filled = $blank = 0;
+        foreach ($todo as $t) {
+            $done++;
+            try {
+                $j = $this->call('stockTotqySttus.json', [
+                    'corp_code' => $t['corp_code'], 'bsns_year' => (string)$year,
+                    'reprt_code' => self::REPRT_ANNUAL,
+                ]);
+            } catch (Throwable $e) {
+                // 한도 초과(020)면 더 돌아도 소용없다 — 여기서 멈춘다
+                if (mb_strpos($e->getMessage(), '020') !== false) break;
+                continue;
+            }
+
+            $out = $iss = null;
+            foreach (($j['list'] ?? []) as $x) {
+                if (mb_strpos((string)($x['se'] ?? ''), '보통') === false) continue;
+                $out = self::num($x['distb_stock_co'] ?? null);
+                $iss = self::num($x['istc_totqy'] ?? null) ?? self::num($x['now_to_isu_stock_totqy'] ?? null);
+                break;
+            }
+
+            if ($out !== null && $out > 0) {
+                $up->execute([(int)$out, $iss === null ? null : (int)$iss,
+                              $t['stock_code'], $year, self::REPRT_ANNUAL]);
+                $filled++;
+            } else {
+                // 값이 안 오는 회사도 있다(서식 차이). 0 으로 표시해 다음 실행에서 다시 안 부른다.
+                $up->execute([0, null, $t['stock_code'], $year, self::REPRT_ANNUAL]);
+                $blank++;
+            }
+
+            if ($progress && $done % 100 === 0) $progress($done, count($todo), $filled);
+        }
+
+        return ['done' => $done, 'filled' => $filled, 'empty' => $blank, 'remain' => $remain - $done];
+    }
+
+    /** 연도별 주식수 채움 현황 */
+    public function sharesStatus(): array
+    {
+        return $this->pdo->query("
+            SELECT bsns_year,
+                   COUNT(*) AS total,
+                   SUM(shares_out IS NOT NULL) AS done,
+                   SUM(shares_out > 0)         AS ok
+              FROM stock_financial
+             WHERE reprt_code = '11011'
+             GROUP BY bsns_year ORDER BY bsns_year DESC
+        ")->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    // ══ 스크리너 조회 ═══════════════════════════════════════════════════
+    /** 재무제표가 있는 연도 목록 (최근 먼저) */
+    public function financialYears(string $reprt = self::REPRT_ANNUAL): array
+    {
+        $st = $this->pdo->prepare("
+            SELECT bsns_year, COUNT(*) AS n FROM stock_financial
+             WHERE reprt_code = ? GROUP BY bsns_year ORDER BY bsns_year DESC
+        ");
+        $st->execute([$reprt]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * 한 해 전종목 + 전년 값(성장률용).
+     *
+     * 비율 계산은 하지 않고 금액만 돌려준다 — 거르고 정렬하는 쪽에서 ratio() 로 만든다.
+     * 한 해가 3천 행 남짓이라 통째로 읽어 PHP 에서 다루는 편이 조건을 붙이기 쉽다.
+     */
+    public function screenRows(int $year, string $reprt = self::REPRT_ANNUAL, bool $listedOnly = true): array
+    {
+        /* dart_corp_code 는 DART 기준이라 <b>상장폐지된 종목도 코드를 달고 남아 있다</b>
+         * (SK브로드밴드·오스템임플란트·동원F&B …). 그대로 두면 지금 살 수 없는 종목이
+         * 스크리너에 섞인다. <b>거래소 원본</b>(krx_daily)에 있는 종목만 남겨 걸러 낸다.
+         *
+         * 네이버 목록(all_stock_info)을 쓰지 않는 이유: 누락이 있다.
+         * 실측(2026-07-29) — DL(000210)·경방(000050)은 정상 상장인데 그쪽엔 없었고 KRX엔 있었다.
+         *
+         * krx_daily 의 상장주식수(list_shrs)로 EPS·BPS 를 만든다 —
+         * DART 의 주당 값은 종목별 호출이라 전종목이면 하루 한도를 넘는다.
+         */
+        $last = $this->pdo->query("SELECT MAX(bas_dd) FROM krx_daily")->fetchColumn();
+        $join = ($listedOnly && $last) ? 'INNER JOIN' : 'LEFT JOIN';
+
+        $st = $this->pdo->prepare("
+            SELECT f.stock_code, f.fs_div,
+                   COALESCE(NULLIF(k.stock_name,''), c.corp_name) AS corp_name,
+                   k.market, k.close_prc, k.mktcap, k.list_shrs, k.stock_code AS listed,
+                   f.shares_out, f.shares_issued,
+                   f.revenue, f.op_income, f.net_income,
+                   f.asset_total, f.debt_total, f.equity_total,
+                   f.cur_asset, f.cur_debt,
+                   p.revenue    AS prev_revenue,
+                   p.op_income  AS prev_op_income,
+                   p.net_income AS prev_net_income
+              FROM stock_financial f
+              {$join}   krx_daily      k ON k.stock_code = f.stock_code AND k.bas_dd = ?
+              LEFT JOIN dart_corp_code c ON c.stock_code = f.stock_code
+              LEFT JOIN stock_financial p ON p.stock_code = f.stock_code
+                                         AND p.reprt_code = f.reprt_code
+                                         AND p.bsns_year  = f.bsns_year - 1
+             WHERE f.bsns_year = ? AND f.reprt_code = ?
+        ");
+        $st->execute([$last ?: '1000-01-01', $year, $reprt]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 한 종목의 연도별 재무 (최근 먼저) */
+    public function financialSeries(string $stockCode, string $reprt = self::REPRT_ANNUAL): array
+    {
+        $st = $this->pdo->prepare("
+            SELECT * FROM stock_financial WHERE stock_code = ? AND reprt_code = ?
+             ORDER BY bsns_year DESC
+        ");
+        $st->execute([$stockCode, $reprt]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    public function corpName(string $stockCode): string
+    {
+        $st = $this->pdo->prepare("SELECT corp_name FROM dart_corp_code WHERE stock_code = ?");
+        $st->execute([$stockCode]);
+        return (string)($st->fetchColumn() ?: '');
+    }
+
+    /**
+     * 금액 한 줄에서 비율을 만든다. 저장하지 않는 이유는 금액이 갱신되면 같이 따라와야 하기 때문.
+     *
+     * 분모가 0·음수면 null 이다 — 자본잠식(자본총계 ≤ 0)에 부채비율을 매기면 숫자가 거짓말을 한다.
+     */
+    public static function ratio(array $r): array
+    {
+        $rev = (float)($r['revenue']      ?? 0);
+        $op  = (float)($r['op_income']    ?? 0);
+        $ni  = (float)($r['net_income']   ?? 0);
+        $eq  = (float)($r['equity_total'] ?? 0);
+        $as  = (float)($r['asset_total']  ?? 0);
+        $dt  = (float)($r['debt_total']   ?? 0);
+        $ca  = (float)($r['cur_asset']    ?? 0);
+        $cd  = (float)($r['cur_debt']     ?? 0);
+        $pr  = (float)($r['prev_revenue'] ?? 0);
+        $po  = (float)($r['prev_op_income'] ?? 0);
+
+        /* EPS·BPS 는 <b>순이익·자본총계 ÷ 주식수</b>로 만든다.
+         *
+         * ★★ 분모는 <b>주가와 같은 시점</b>이어야 한다. 이걸 틀리면 값이 통째로 어긋난다.
+         *
+         * 주가는 KRX 최근 종가(=액면분할이 반영된 지금 가격)다. 그러니 분모도 지금 주식수여야 한다.
+         * "그 해 주식수가 더 정확하다"고 생각해 shares_out 을 먼저 썼다가 실측에서 틀린 게 드러났다 —
+         *   대한제분 2023: 그 해 1,645,197주 → 지금 16,900,000주 (2024년 10:1 액면분할)
+         *   지금 주가(분할 후) ÷ 분할 전 주식수 기준 EPS = PER 0.23  ← 10배 찌그러짐
+         *
+         * 그래서 기본은 KRX 현재 상장주식수(list_shrs)다.
+         * 다만 자기주식이 빠진 <b>유통</b>주식수가 EPS 로는 더 맞으므로,
+         * <b>분할·대규모 증자가 없었던 종목에 한해</b> shares_out 을 쓴다.
+         * 판정은 그 해 발행주식수와 지금 상장주식수가 5% 안쪽이면 "주식 수 체계가 그대로"로 본다.
+         */
+        $now = (float)($r['list_shrs']     ?? 0);
+        $out = (float)($r['shares_out']    ?? 0);
+        $iss = (float)($r['shares_issued'] ?? 0);
+
+        $sh = $now;
+        if ($out > 0 && $iss > 0 && $now > 0 && abs($now / $iss - 1) <= 0.05) {
+            $sh = $out;      // 주식 수 체계가 그대로 → 자기주식 제외분이 더 정확하다
+        }
+        if ($sh <= 0) $sh = $out;    // KRX 에 없는 종목(미거래)이라도 값은 내준다
+
+        $px = (float)($r['close_prc'] ?? 0);
+        $eps = ($sh > 0) ? $ni / $sh : null;
+        $bps = ($sh > 0) ? $eq / $sh : null;
+
+        return [
+            'op_margin'  => $rev > 0 ? $op / $rev      : null,   // 영업이익률
+            'net_margin' => $rev > 0 ? $ni / $rev      : null,   // 순이익률
+            'roe'        => $eq > 0  ? $ni / $eq       : null,   // 자기자본이익률
+            'roa'        => $as > 0  ? $ni / $as       : null,
+            'debt_ratio' => $eq > 0  ? $dt / $eq       : null,   // 부채비율
+            'cur_ratio'  => $cd > 0  ? $ca / $cd       : null,   // 유동비율
+            'rev_growth' => $pr > 0  ? $rev / $pr - 1  : null,   // 매출 성장률
+            'op_growth'  => $po > 0  ? $op / $po - 1   : null,   // 영업이익 성장률 (전년 적자면 계산 불가)
+
+            'eps'        => $eps === null ? null : round($eps),
+            'bps'        => $bps === null ? null : round($bps),
+            // 적자·자본잠식이면 PER·PBR 은 뜻이 없다 — 계산하지 않고 비워 둔다
+            'per'        => ($px > 0 && $eps !== null && $eps > 0) ? round($px / $eps, 2) : null,
+            'pbr'        => ($px > 0 && $bps !== null && $bps > 0) ? round($px / $bps, 2) : null,
+        ];
+    }
+
+    /**
+     * 액면분할 보정 — 저장된 원본에 `adj_*` 를 얹어 돌려준다.
+     *
+     * 저장은 언제나 "그 해 보고서 원본"이다. 옛 연도는 분할 전 기준이라
+     * 그대로 이으면 시계열이 끊긴다 (삼성전자 2016 EPS 157,967원 → 2018년 6,461원).
+     *
+     *   계수 = 그 해 액면가 ÷ 가장 최근 액면가        (삼성전자 2016: 5,000 ÷ 100 = 50)
+     *   주당 값(eps·dps·bps)은 계수로 나누고, 주식수는 계수를 곱한다.
+     *
+     * 배당수익률은 비율이라 손대지 않는다. 자본총계·순이익도 금액이라 그대로다.
+     * 원본을 고치지 않는 이유: 나중에 또 분할하면 기준이 바뀌므로, 볼 때마다 계산하는 게 안전하다.
+     *
+     * @param array $rows rows() 결과 (연도 내림차순)
+     */
+    public static function adjust(array $rows): array
+    {
+        // 가장 최근 연도의 액면가가 기준
+        $base = null;
+        foreach ($rows as $r) {
+            if (!empty($r['par_value'])) { $base = (float)$r['par_value']; break; }
+        }
+
+        foreach ($rows as &$r) {
+            $par = !empty($r['par_value']) ? (float)$r['par_value'] : null;
+            $f   = ($base && $par) ? $par / $base : 1.0;
+
+            $r['adj_factor'] = $f;
+            $r['adj_eps']    = ($r['eps']    === null) ? null : (int)round($r['eps'] / $f);
+            $r['adj_dps']    = ($r['dps']    === null) ? null : (int)round($r['dps'] / $f);
+            $r['adj_bps']    = ($r['bps']    === null) ? null : (int)round($r['bps'] / $f);
+            $r['adj_shares'] = ($r['shares'] === null) ? null : (int)round($r['shares'] * $f);
+        }
+        unset($r);
+
+        return $rows;
+    }
+
+    /**
+     * PER·PBR 은 저장하지 않고 여기서 만든다.
+     * 그 해 지표에 <b>지금 주가</b>를 씌우는 것이므로, 어느 주가를 넣을지는 부르는 쪽이 정한다.
+     */
+    public static function ratios(array $row, ?float $price): array
+    {
+        // 분할 보정값이 있으면 그걸 쓴다 — 주가(수정주가)와 기준이 맞아야 한다
+        $eps = (float)($row['adj_eps'] ?? $row['eps'] ?? 0);
+        $bps = (float)($row['adj_bps'] ?? $row['bps'] ?? 0);
+        return [
+            'per' => ($price !== null && $eps > 0) ? round($price / $eps, 2) : null,
+            'pbr' => ($price !== null && $bps > 0) ? round($price / $bps, 2) : null,
+        ];
+    }
+}
+?>

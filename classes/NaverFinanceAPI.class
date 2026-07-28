@@ -560,6 +560,66 @@ class NaverFinanceAPI {
         return ['success' => $out];
     }
     /**
+     * 기간 지정 일봉 OHLC 수집 — api.finance.naver.com/siseJson.naver
+     *
+     * getDailyOhlc() 는 "최근 N일"이라 백테스트용 장기 구간에는 모자란다.
+     * 이쪽은 시작·종료일을 그대로 넘겨 10년치도 한 번에 받는다 (2,600행 ≈ 160KB).
+     *
+     * @param string $start YYYYMMDD
+     * @param string $end   YYYYMMDD
+     * @return array ['success'=>[ ['t'=>'YYYY-MM-DD','o','h','l','c','v'], ... ]] | ['error'=>msg]
+     */
+    public function getDailyOhlcRange(string $stockCode, string $start, string $end): array {
+        $code  = preg_replace('/[^0-9A-Za-z]/', '', $stockCode);
+        $start = preg_replace('/[^0-9]/', '', $start);
+        $end   = preg_replace('/[^0-9]/', '', $end);
+        if ($code === '')                                   return ['error' => '종목코드 누락'];
+        if (strlen($start) !== 8 || strlen($end) !== 8)      return ['error' => '기간 형식 오류 (YYYYMMDD)'];
+        if ($start > $end)                                   return ['error' => '시작일이 종료일보다 뒤입니다.'];
+
+        $url = "https://api.finance.naver.com/siseJson.naver?symbol={$code}"
+             . "&requestType=1&startTime={$start}&endTime={$end}&timeframe=day";
+
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 30);            // 10년치는 응답이 크다
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_USERAGENT, $this->pcUserAgent);
+        curl_setopt($ch, CURLOPT_REFERER, "https://finance.naver.com/item/main.naver?code={$code}");
+        $raw  = curl_exec($ch);
+        $http = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err  = curl_error($ch);
+        curl_close($ch);
+
+        if ($raw === false) return ['error' => "cURL 에러: {$err}"];
+        if ($http !== 200)  return ['error' => "HTTP 에러: {$http}"];
+
+        // 헤더행만 작은따옴표를 쓰는 비표준 JSON → 따옴표를 맞춰 준 뒤 디코드
+        $rows = json_decode(str_replace("'", '"', trim($raw)), true);
+        if (!is_array($rows)) return ['error' => '네이버 응답 파싱 실패 (형식 변경 가능성)'];
+
+        $out = [];
+        foreach ($rows as $i => $r) {
+            if ($i === 0) continue;                 // [날짜,시가,고가,저가,종가,거래량,외국인소진율]
+            if (!is_array($r) || !isset($r[0], $r[4])) continue;
+            $d = (string) $r[0];
+            if (strlen($d) !== 8) continue;
+            $out[] = [
+                't' => substr($d, 0, 4) . '-' . substr($d, 4, 2) . '-' . substr($d, 6, 2),
+                'o' => (float) $r[1],
+                'h' => (float) $r[2],
+                'l' => (float) $r[3],
+                'c' => (float) $r[4],
+                'v' => (int)   ($r[5] ?? 0),
+            ];
+        }
+        if (!$out) return ['error' => '해당 기간에 시세가 없습니다. 종목코드와 기간을 확인하세요.'];
+
+        usort($out, fn($a, $b) => strcmp($a['t'], $b['t']));
+        return ['success' => $out];
+    }
+    /**
      * 당일 1분봉 OHLC 수집 — 네이버 모바일차트 API (정상 OHLC + 분당 거래량 제공)
      *   api.stock.naver.com/chart/domestic/item/{code}/minute?count=400
      * 반환: ['success'=>[ ['t'=>'YYYY-MM-DD HH:MM','o','h','l','c','v'], ... ]] | ['error'=>msg]

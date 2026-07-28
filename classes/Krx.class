@@ -1,0 +1,223 @@
+<?php
+/**
+ * Krx.class — 한국거래소 오픈API 수집 + DB 전담
+ *
+ * 쓰는 곳은 두 가지다.
+ *   ① <b>거래 가능 종목 판정</b> — 거래소 원본이라 상장폐지·거래정지가 정확히 빠진다.
+ *      네이버 목록(all_stock_info)은 누락이 있다 — 실측(2026-07-29)에서
+ *      DL(000210)·경방(000050)이 네이버엔 있는데 우리 DB엔 없었고, KRX엔 정확히 있었다.
+ *   ② <b>상장주식수</b>(LIST_SHRS) — 전종목 EPS·BPS 를 만드는 마지막 조각.
+ *      DART 는 주당 값을 종목별 호출로만 주는데 전종목이면 하루 한도를 넘는다.
+ *      순이익·자본총계(이미 있음) ÷ 상장주식수로 계산하면 한 번에 끝난다.
+ *
+ * ★ 실시간 시세용이 아니다. 실측 결과:
+ *   - 데이터가 T+1 이 아니다 (7/29 시점 최신이 7/27)
+ *   - 최근 며칠치만 준다 (7/17 은 이미 0건) → 과거 시세는 계속 네이버 일봉이 담당한다
+ */
+class Krx
+{
+    const BASE = 'https://data-dbg.krx.co.kr/svc/apis/';
+
+    /** 시장별 엔드포인트. 이용신청이 승인된 것만 부를 수 있다. */
+    const MARKETS = [
+        'sto/stk_bydd_trd' => 'KOSPI',
+        'sto/ksq_bydd_trd' => 'KOSDAQ',
+    ];
+
+    private PDO $pdo;
+    private string $key;
+
+    public function __construct(PDO $pdo, string $key = '')
+    {
+        $this->pdo = $pdo;
+        $this->key = $key !== '' ? $key : (defined('KRX_API_KEY') ? KRX_API_KEY : '');
+    }
+
+    public function hasKey(): bool
+    {
+        return $this->key !== '';
+    }
+
+    // ══ 스키마 ══════════════════════════════════════════════════════════
+    public function ensureTables(): void
+    {
+        // 하루 2,765행. 며칠치만 받아 오므로 커질 일이 없다.
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS krx_daily (
+              stock_code VARCHAR(10) NOT NULL,
+              bas_dd     DATE        NOT NULL COMMENT '기준일',
+              market     VARCHAR(10) NOT NULL DEFAULT '' COMMENT 'KOSPI / KOSDAQ',
+              stock_name VARCHAR(80) NOT NULL DEFAULT '',
+              close_prc  BIGINT      NULL COMMENT '종가',
+              open_prc   BIGINT      NULL,
+              high_prc   BIGINT      NULL,
+              low_prc    BIGINT      NULL,
+              fluc_rt    DECIMAL(8,2) NULL COMMENT '등락률(%)',
+              acc_vol    BIGINT      NULL COMMENT '거래량',
+              acc_val    BIGINT      NULL COMMENT '거래대금',
+              mktcap     BIGINT      NULL COMMENT '시가총액(원)',
+              list_shrs  BIGINT      NULL COMMENT '상장주식수 — EPS·BPS 계산의 분모',
+              updated_at DATETIME    NOT NULL,
+              PRIMARY KEY (stock_code, bas_dd),
+              KEY idx_krx_dd (bas_dd)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+    }
+
+    // ══ HTTP ════════════════════════════════════════════════════════════
+    /**
+     * 실패는 예외로 올린다. 특히 401 은 "이용신청 안 됨"이라 조용히 넘기면 원인을 못 찾는다.
+     */
+    private function call(string $path, array $q): array
+    {
+        if ($this->key === '') throw new RuntimeException('KRX 인증키가 없습니다 (env/krx.inc).');
+
+        $ch = curl_init(self::BASE . $path . '?' . http_build_query($q));
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 60,
+            CURLOPT_FOLLOWLOCATION => true,      // http→https 302 를 따라가야 한다
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_HTTPHEADER     => ['AUTH_KEY: ' . $this->key, 'Accept: application/json'],
+            CURLOPT_USERAGENT      => 'Mozilla/5.0',
+        ]);
+        $body = curl_exec($ch);
+        $err  = curl_error($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($body === false || $err !== '') throw new RuntimeException("KRX 통신 실패({$path}): {$err}");
+
+        $j = json_decode((string)$body, true);
+        if (!is_array($j)) throw new RuntimeException("KRX 응답이 JSON 이 아닙니다({$path}): " . mb_substr((string)$body, 0, 120));
+
+        if (isset($j['respCode']) && (string)$j['respCode'] !== '000') {
+            $msg = (string)($j['respMsg'] ?? '');
+            if ((string)$j['respCode'] === '401') {
+                $msg .= ' — openapi.krx.co.kr 에서 이 API 의 이용신청이 승인됐는지 확인하세요.';
+            }
+            throw new RuntimeException("KRX 오류 {$j['respCode']}: {$msg}");
+        }
+        if ($code !== 200) throw new RuntimeException("KRX HTTP {$code} ({$path})");
+
+        return $j['OutBlock_1'] ?? [];
+    }
+
+    /** "1,234" · "" · "-" → 숫자. 값이 없으면 null */
+    private static function num($v): ?float
+    {
+        $v = trim((string)$v);
+        if ($v === '' || $v === '-') return null;
+        $v = str_replace([',', ' '], '', $v);
+        if (!preg_match('/^-?\d+(\.\d+)?$/', $v)) return null;
+        return (float)$v;
+    }
+
+    // ══ 수집 ════════════════════════════════════════════════════════════
+    /**
+     * 하루치 전종목(코스피+코스닥)을 받아 저장한다.
+     *
+     * @return array [date, rows] — 휴장일이면 rows = 0
+     */
+    public function collect(string $ymd): array
+    {
+        $rows = [];
+        foreach (self::MARKETS as $path => $mk) {
+            foreach ($this->call($path, ['basDd' => $ymd]) as $x) {
+                $code = trim((string)($x['ISU_CD'] ?? ''));
+                // 표준코드(KR7005930003)로 오는 경우를 대비해 단축코드로 맞춘다
+                if (strlen($code) === 12) $code = substr($code, 3, 6);
+                if (!preg_match('/^\w{6}$/', $code)) continue;
+
+                $rows[] = [
+                    $code,
+                    substr($ymd, 0, 4) . '-' . substr($ymd, 4, 2) . '-' . substr($ymd, 6, 2),
+                    (string)($x['MKT_NM'] ?? $mk),
+                    mb_substr((string)($x['ISU_NM'] ?? ''), 0, 80),
+                    self::num($x['TDD_CLSPRC'] ?? null),
+                    self::num($x['TDD_OPNPRC'] ?? null),
+                    self::num($x['TDD_HGPRC']  ?? null),
+                    self::num($x['TDD_LWPRC']  ?? null),
+                    self::num($x['FLUC_RT']    ?? null),
+                    self::num($x['ACC_TRDVOL'] ?? null),
+                    self::num($x['ACC_TRDVAL'] ?? null),
+                    self::num($x['MKTCAP']     ?? null),
+                    self::num($x['LIST_SHRS']  ?? null),
+                ];
+            }
+        }
+
+        if ($rows) $this->save($rows);
+        return ['date' => $ymd, 'rows' => count($rows)];
+    }
+
+    /**
+     * 가장 최근 거래일을 찾아 받아 온다.
+     *
+     * 오늘 것은 없다(T+1 도 아니다) — 실측상 하루 이상 늦으므로 며칠 거슬러 올라가며 찾는다.
+     *
+     * @param int $back 몇 일까지 거슬러 볼지
+     */
+    public function collectLatest(int $back = 10): array
+    {
+        for ($i = 0; $i <= $back; $i++) {
+            $ymd = date('Ymd', strtotime("-{$i} day"));
+            $r   = $this->collect($ymd);
+            if ($r['rows'] > 0) return $r;
+        }
+        return ['date' => '', 'rows' => 0];
+    }
+
+    private function save(array $rows): void
+    {
+        $st = $this->pdo->prepare("
+            INSERT INTO krx_daily
+                (stock_code, bas_dd, market, stock_name, close_prc, open_prc, high_prc, low_prc,
+                 fluc_rt, acc_vol, acc_val, mktcap, list_shrs, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
+            ON DUPLICATE KEY UPDATE
+                market=VALUES(market), stock_name=VALUES(stock_name),
+                close_prc=VALUES(close_prc), open_prc=VALUES(open_prc),
+                high_prc=VALUES(high_prc), low_prc=VALUES(low_prc), fluc_rt=VALUES(fluc_rt),
+                acc_vol=VALUES(acc_vol), acc_val=VALUES(acc_val),
+                mktcap=VALUES(mktcap), list_shrs=VALUES(list_shrs), updated_at=NOW()
+        ");
+
+        $this->pdo->beginTransaction();
+        try {
+            foreach ($rows as $r) $st->execute($r);
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+    }
+
+    // ══ 조회 ════════════════════════════════════════════════════════════
+    /** 저장된 가장 최근 기준일 (없으면 '') */
+    public function lastDate(): string
+    {
+        $v = $this->pdo->query("SELECT MAX(bas_dd) FROM krx_daily")->fetchColumn();
+        return $v === false || $v === null ? '' : (string)$v;
+    }
+
+    /** 그 날 거래된 종목 수 */
+    public function countAt(string $date): int
+    {
+        $st = $this->pdo->prepare("SELECT COUNT(*) FROM krx_daily WHERE bas_dd = ?");
+        $st->execute([$date]);
+        return (int)$st->fetchColumn();
+    }
+
+    /** 한 종목의 최근 시세 (없으면 null) */
+    public function quote(string $stockCode): ?array
+    {
+        $st = $this->pdo->prepare("
+            SELECT * FROM krx_daily WHERE stock_code = ? ORDER BY bas_dd DESC LIMIT 1
+        ");
+        $st->execute([$stockCode]);
+        $r = $st->fetch(PDO::FETCH_ASSOC);
+        return $r ?: null;
+    }
+}
+?>

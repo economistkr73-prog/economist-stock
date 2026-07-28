@@ -1,0 +1,1336 @@
+<?php
+/**
+ * classes/Pf.class — 주식 포트폴리오(분할매수) DB 전담 클래스
+ *
+ * PDO 쿼리만 담당한다. 계산 로직은 stock/lib/calc.php (순수 함수)에 있다.
+ * 테이블 접두어는 pf_ (economist73 공유 스키마 충돌 방지).
+ *
+ * 용어: "포트폴리오" = 종목을 담는 단위. 증권사 계좌와 1:1 로 쓸 수도 있고
+ *       (broker/acct_no 컬럼), 한 계좌를 전략별로 쪼개서 여러 개를 둘 수도 있다.
+ */
+class Pf
+{
+    private PDO $pdo;
+
+    public function __construct(PDO $pdo)
+    {
+        $this->pdo = $pdo;
+    }
+
+    // ══ 스키마 ══════════════════════════════════════════════════════════
+    public function ensureTables(): void
+    {
+        $this->migrate();
+
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS pf_stock (
+              code        VARCHAR(10)  NOT NULL,
+              name        VARCHAR(60)  NOT NULL DEFAULT '',
+              market      VARCHAR(10)  NOT NULL DEFAULT 'KOSPI',
+              last_price  DECIMAL(14,2) DEFAULT NULL,
+              high_price  DECIMAL(14,2) DEFAULT NULL,
+              priced_at   DATETIME     DEFAULT NULL,
+              PRIMARY KEY (code)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS pf_portfolio (
+              id            INT AUTO_INCREMENT PRIMARY KEY,
+              name          VARCHAR(60)  NOT NULL DEFAULT '',
+              broker        VARCHAR(40)  NOT NULL DEFAULT '',
+              acct_no       VARCHAR(40)  NOT NULL DEFAULT '',
+              buy_fee_rate  DECIMAL(8,6) NOT NULL DEFAULT 0.003400,
+              sell_fee_rate DECIMAL(8,6) NOT NULL DEFAULT 0.001500,
+              principal_seed BIGINT      NOT NULL DEFAULT 0,   -- 이관 시드. 실제 원금은 pf_principal_flow 합계
+              cash          BIGINT       NOT NULL DEFAULT 0,   -- 미사용 (여유자금 개념 제거)
+              memo          VARCHAR(200) NOT NULL DEFAULT '',
+              note          VARCHAR(200) NOT NULL DEFAULT '',   -- 상세메모(여러 줄)
+              sort_no       INT          NOT NULL DEFAULT 0,
+              is_active     TINYINT(1)   NOT NULL DEFAULT 1
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        // 원금 입출금 이력 — 원금은 이 표의 합계로 파생된다 (컬럼으로 들고 있지 않는다)
+        //   증액은 amount +, 인출은 amount − 로 넣는다.
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS pf_principal_flow (
+              id           INT AUTO_INCREMENT PRIMARY KEY,
+              portfolio_id INT          NOT NULL,
+              flow_at      DATE         NOT NULL,
+              amount       BIGINT       NOT NULL DEFAULT 0,
+              reason       VARCHAR(80)  NOT NULL DEFAULT '',
+              created_at   DATETIME     NOT NULL,
+              KEY idx_pf_pflow (portfolio_id, flow_at, id),
+              CONSTRAINT fk_pf_pflow FOREIGN KEY (portfolio_id)
+                REFERENCES pf_portfolio(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        // 포트폴리오 메모 이력 — 짧은 한 줄 기록을 시간순으로 쌓는다 (수정 없이 신규/삭제만)
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS pf_portfolio_memo (
+              id           INT AUTO_INCREMENT PRIMARY KEY,
+              portfolio_id INT         NOT NULL,
+              content      VARCHAR(60) NOT NULL DEFAULT '',
+              created_at   DATETIME    NOT NULL,
+              KEY idx_pf_pmemo (portfolio_id, created_at),
+              CONSTRAINT fk_pf_pmemo FOREIGN KEY (portfolio_id)
+                REFERENCES pf_portfolio(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        // 증권사 마스터. 수수료 요율은 증권사에 딸리고, 포트폴리오는 증권사를 참조한다.
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS pf_broker (
+              id            INT AUTO_INCREMENT PRIMARY KEY,
+              name          VARCHAR(40)  NOT NULL DEFAULT '',
+              buy_fee_rate  DECIMAL(8,6) NOT NULL DEFAULT 0.003400,
+              sell_fee_rate DECIMAL(8,6) NOT NULL DEFAULT 0.001500,
+              memo          VARCHAR(200) NOT NULL DEFAULT '',
+              sort_no       INT          NOT NULL DEFAULT 0,
+              UNIQUE KEY uk_pf_broker (name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        // 증권사별 위탁수수료 구간. 비어 있으면 pf_broker 의 단일 요율을 쓴다.
+        //   키움 = 단일 구간(0.015%) / 삼성 = 거래금액 구간별 요율 + 정액
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS pf_broker_fee (
+              id        INT AUTO_INCREMENT PRIMARY KEY,
+              broker_id INT           NOT NULL,
+              min_amt   BIGINT        NOT NULL DEFAULT 0,
+              fee_rate  DECIMAL(10,8) NOT NULL DEFAULT 0,
+              fee_fixed INT           NOT NULL DEFAULT 0,
+              KEY idx_pf_bfee (broker_id),
+              CONSTRAINT fk_pf_bfee FOREIGN KEY (broker_id)
+                REFERENCES pf_broker(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        // 시장별 증권거래세(+농어촌특별세). 매도할 때만 붙는다.
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS pf_market (
+              code     VARCHAR(10)  NOT NULL,
+              name     VARCHAR(30)  NOT NULL DEFAULT '',
+              tax_rate DECIMAL(8,6) NOT NULL DEFAULT 0,
+              memo     VARCHAR(120) NOT NULL DEFAULT '',
+              sort_no  INT          NOT NULL DEFAULT 0,
+              PRIMARY KEY (code)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS pf_rule_set (
+              id         INT AUTO_INCREMENT PRIMARY KEY,
+              name       VARCHAR(60)  NOT NULL DEFAULT '',
+              volatility DECIMAL(5,2) DEFAULT NULL,
+              memo       TEXT,
+              sort_no    INT NOT NULL DEFAULT 0
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS pf_rule_step (
+              rule_set_id INT         NOT NULL,
+              step_no     TINYINT     NOT NULL,
+              weight      DECIMAL(7,4) NOT NULL DEFAULT 0,
+              drop_rate   DECIMAL(7,4) NOT NULL DEFAULT 0,
+              target_rate DECIMAL(7,4) NOT NULL DEFAULT 0,
+              PRIMARY KEY (rule_set_id, step_no),
+              CONSTRAINT fk_pf_step_set FOREIGN KEY (rule_set_id)
+                REFERENCES pf_rule_set(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS pf_position (
+              id           INT AUTO_INCREMENT PRIMARY KEY,
+              portfolio_id INT         NOT NULL,
+              stock_code   VARCHAR(10) NOT NULL,
+              rule_set_id  INT         NOT NULL,
+              limit_amt    BIGINT      NOT NULL DEFAULT 0,
+              started_at   DATE        DEFAULT NULL,
+              status       ENUM('watch','open','closed') NOT NULL DEFAULT 'watch',
+              sort_no      INT         NOT NULL DEFAULT 0,
+              memo         VARCHAR(200) NOT NULL DEFAULT '',
+              UNIQUE KEY uk_pf_pos (portfolio_id, stock_code),
+              KEY idx_pf_pos_pf (portfolio_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS pf_trade (
+              id          INT AUTO_INCREMENT PRIMARY KEY,
+              position_id INT         NOT NULL,
+              step_no     TINYINT     NOT NULL DEFAULT 0,
+              side        ENUM('buy','sell') NOT NULL DEFAULT 'buy',
+              traded_at   DATE        NOT NULL,
+              price       DECIMAL(14,2) NOT NULL DEFAULT 0,
+              qty         INT         NOT NULL DEFAULT 0,
+              memo        VARCHAR(200) NOT NULL DEFAULT '',
+              KEY idx_pf_trade_pos (position_id, step_no),
+              CONSTRAINT fk_pf_trade_pos FOREIGN KEY (position_id)
+                REFERENCES pf_position(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        // 시뮬레이터에 올린 일자별 종가. [["2015-07-24",306000], ...] 형태로 통째 보관한다.
+        // 시세는 파생이 아니라 원본이라 정규화해서 행으로 쪼갤 이유가 없다 (수천 행 × 여러 종목).
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS pf_sim_data (
+              id          INT AUTO_INCREMENT PRIMARY KEY,
+              stock_code  VARCHAR(10) NOT NULL DEFAULT '',   -- 종목이 곧 키. 같은 종목은 덮어쓴다
+              stock_name  VARCHAR(60) NOT NULL DEFAULT '',
+              from_date   DATE        DEFAULT NULL,
+              to_date     DATE        DEFAULT NULL,
+              bar_count   INT         NOT NULL DEFAULT 0,
+              has_ohlc    TINYINT(1)  NOT NULL DEFAULT 0,   -- 고가·저가가 있으면 장중 체결을 흉내낼 수 있다
+              rows_json   MEDIUMTEXT,
+              -- 마지막으로 돌린 조건만 저장한다. 수익률 같은 결과는 저장하지 않고 매번 다시 계산한다
+              -- (룰셋을 고치면 목록 수치가 자동으로 따라오게 하려면 이래야 한다)
+              rule_set_id INT         NOT NULL DEFAULT 0,
+              broker_id   INT         NOT NULL DEFAULT 0,
+              market      VARCHAR(10) NOT NULL DEFAULT '',
+              limit_amt   BIGINT      NOT NULL DEFAULT 0,
+              opt_from    DATE        DEFAULT NULL,
+              opt_to      DATE        DEFAULT NULL,
+              reenter     TINYINT(1)  NOT NULL DEFAULT 1,
+              wait_days   INT         NOT NULL DEFAULT 10,   -- 청산 후 쉬는 거래일 (PF_SIM_WAIT_DEFAULT 와 맞출 것)
+              intraday    TINYINT(1)  NOT NULL DEFAULT 1,
+              -- 목록에 뿌릴 요약만 캐시한다. cache_key 는 시세버전+조건+룰셋/수수료/세율 지문이라
+              -- 무엇 하나라도 바뀌면 키가 달라져 저절로 무효가 된다 (결과를 '저장'하는 게 아니다).
+              data_ver    INT         NOT NULL DEFAULT 0,
+              cache_key   VARCHAR(40) NOT NULL DEFAULT '',
+              cache_json  VARCHAR(255) NOT NULL DEFAULT '',
+              cached_at   DATETIME    DEFAULT NULL,
+              created_at  DATETIME    NOT NULL,
+              UNIQUE KEY uk_pf_sim_code (stock_code)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        $this->seedPrincipalFlow();
+    }
+
+    /**
+     * 옛 principal 컬럼값을 입출금 이력의 첫 줄('최초 원금')로 옮긴다.
+     * 이력이 이미 한 줄이라도 있으면 건드리지 않으므로 반복 실행해도 안전하다.
+     */
+    private function seedPrincipalFlow(): void
+    {
+        $this->pdo->exec("
+            INSERT INTO pf_principal_flow (portfolio_id, flow_at, amount, reason, created_at)
+            SELECT f.id, CURDATE(), f.principal_seed, '최초 원금', NOW()
+            FROM pf_portfolio f
+            WHERE f.principal_seed <> 0
+              AND NOT EXISTS (SELECT 1 FROM pf_principal_flow w WHERE w.portfolio_id = f.id)
+        ");
+    }
+
+    /**
+     * 스키마 이관.
+     *  - 초기 버전의 "계좌(account)" 개념을 "포트폴리오(portfolio)"로 개명
+     *  - 증권사 계좌번호(acct_no)·메모 컬럼 추가
+     * 반복 실행해도 안전하다.
+     */
+    private function migrate(): void
+    {
+        if ($this->tableExists('pf_account') && !$this->tableExists('pf_portfolio')) {
+            $this->pdo->exec("RENAME TABLE pf_account TO pf_portfolio");
+        }
+
+        if ($this->tableExists('pf_position') && $this->columnExists('pf_position', 'account_id')) {
+            $this->pdo->exec("ALTER TABLE pf_position CHANGE account_id portfolio_id INT NOT NULL");
+        }
+
+        if ($this->tableExists('pf_portfolio')) {
+            if (!$this->columnExists('pf_portfolio', 'acct_no')) {
+                $this->pdo->exec("ALTER TABLE pf_portfolio ADD acct_no VARCHAR(40) NOT NULL DEFAULT '' AFTER broker");
+            }
+            if (!$this->columnExists('pf_portfolio', 'memo')) {
+                $this->pdo->exec("ALTER TABLE pf_portfolio ADD memo VARCHAR(200) NOT NULL DEFAULT '' AFTER cash");
+            }
+            // 한 줄 메모(memo) 옆에 붙는 여러 줄 상세메모
+            if (!$this->columnExists('pf_portfolio', 'note')) {
+                $this->pdo->exec("ALTER TABLE pf_portfolio ADD note VARCHAR(200) NOT NULL DEFAULT '' AFTER memo");
+            }
+            // 증권사별 위탁수수료. 기본값은 기존 상수와 같은 결과가 나오도록 잡았다
+            // (매수 0.34% / 매도 0.15% + 시장세율 0.15% = 0.30%)
+            if (!$this->columnExists('pf_portfolio', 'buy_fee_rate')) {
+                $this->pdo->exec("ALTER TABLE pf_portfolio ADD buy_fee_rate DECIMAL(8,6) NOT NULL DEFAULT 0.003400 AFTER acct_no");
+            }
+            if (!$this->columnExists('pf_portfolio', 'sell_fee_rate')) {
+                $this->pdo->exec("ALTER TABLE pf_portfolio ADD sell_fee_rate DECIMAL(8,6) NOT NULL DEFAULT 0.001500 AFTER buy_fee_rate");
+            }
+            // 수수료를 증권사 마스터로 옮기면서 포트폴리오는 증권사를 참조하게 바뀌었다
+            if (!$this->columnExists('pf_portfolio', 'broker_id')) {
+                $this->pdo->exec("ALTER TABLE pf_portfolio ADD broker_id INT NOT NULL DEFAULT 0 AFTER broker");
+            }
+            // 원금은 입출금 이력(pf_principal_flow) 합계로 파생시킨다.
+            // 옛 컬럼은 이관 시드로만 남기고 이름을 바꿔 실수로 읽지 않게 한다.
+            if ($this->columnExists('pf_portfolio', 'principal')
+                && !$this->columnExists('pf_portfolio', 'principal_seed')) {
+                $this->pdo->exec("ALTER TABLE pf_portfolio CHANGE principal principal_seed BIGINT NOT NULL DEFAULT 0");
+            }
+        }
+
+        /*
+         * 시뮬레이터는 종목을 키로 삼는다 (같은 종목 재업로드 = 시세 갱신).
+         * 별도 이름 컬럼은 종목명과 중복이라 없애고, 대신 마지막 실행조건을 들고 있는다.
+         * 결과(수익률 등)는 절대 저장하지 않는다 — 룰셋을 고치면 목록 수치가 따라와야 하므로.
+         */
+        if ($this->tableExists('pf_sim_data')) {
+            foreach ([
+                'stock_code'  => "VARCHAR(10) NOT NULL DEFAULT ''",
+                'stock_name'  => "VARCHAR(60) NOT NULL DEFAULT ''",
+                'rule_set_id' => 'INT NOT NULL DEFAULT 0',
+                'broker_id'   => 'INT NOT NULL DEFAULT 0',
+                'market'      => "VARCHAR(10) NOT NULL DEFAULT ''",
+                'limit_amt'   => 'BIGINT NOT NULL DEFAULT 0',
+                'opt_from'    => 'DATE DEFAULT NULL',
+                'opt_to'      => 'DATE DEFAULT NULL',
+                'reenter'     => 'TINYINT(1) NOT NULL DEFAULT 1',
+                'wait_days'   => 'INT NOT NULL DEFAULT 10',
+                'has_ohlc'    => 'TINYINT(1) NOT NULL DEFAULT 0',
+                'intraday'    => 'TINYINT(1) NOT NULL DEFAULT 1',
+                'data_ver'    => 'INT NOT NULL DEFAULT 0',
+                'cache_key'   => "VARCHAR(40) NOT NULL DEFAULT ''",
+                'cache_json'  => "VARCHAR(255) NOT NULL DEFAULT ''",
+                'cached_at'   => 'DATETIME DEFAULT NULL',
+            ] as $col => $def) {
+                if (!$this->columnExists('pf_sim_data', $col)) {
+                    $this->pdo->exec("ALTER TABLE pf_sim_data ADD {$col} {$def}");
+                }
+            }
+
+            // 대기(거래일) 기본값 0 → 10. 이미 저장된 행의 값은 건드리지 않고 컬럼 기본값만 바꾼다
+            // (새로 등록하는 종목이 wait_days 없이 INSERT 되므로 컬럼 기본값이 곧 화면 기본값이다).
+            $def = $this->pdo->query("
+                SELECT COLUMN_DEFAULT FROM information_schema.COLUMNS
+                 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'pf_sim_data' AND COLUMN_NAME = 'wait_days'
+            ")->fetchColumn();
+            if ($def !== false && (int)$def === 0) {
+                $this->pdo->exec('ALTER TABLE pf_sim_data ALTER COLUMN wait_days SET DEFAULT 10');
+            }
+
+            // 옛 이름 컬럼 → 종목명으로 옮기고 제거
+            if ($this->columnExists('pf_sim_data', 'name')) {
+                $this->pdo->exec("UPDATE pf_sim_data SET stock_name = name WHERE stock_name = '' AND name <> ''");
+                $this->pdo->exec('ALTER TABLE pf_sim_data DROP COLUMN name');
+            }
+
+            // 종목코드 유일화. 코드가 없던 행은 지우지 않고 임시 코드를 붙여 살려 둔다.
+            if (!$this->indexExists('pf_sim_data', 'uk_pf_sim_code')) {
+                $this->pdo->exec("UPDATE pf_sim_data SET stock_code = CONCAT('X', LPAD(id, 5, '0')) WHERE stock_code = ''");
+                $this->pdo->exec("DELETE t1 FROM pf_sim_data t1
+                                   JOIN pf_sim_data t2 ON t1.stock_code = t2.stock_code AND t1.id < t2.id");
+                if ($this->indexExists('pf_sim_data', 'idx_pf_sim_code')) {
+                    $this->pdo->exec('ALTER TABLE pf_sim_data DROP INDEX idx_pf_sim_code');
+                }
+                $this->pdo->exec('ALTER TABLE pf_sim_data ADD UNIQUE KEY uk_pf_sim_code (stock_code)');
+            }
+        }
+
+        // 룰셋 드래그 정렬용 순서 컬럼 (기존 행은 id 순서로 초기화)
+        if ($this->tableExists('pf_rule_set') && !$this->columnExists('pf_rule_set', 'sort_no')) {
+            $this->pdo->exec("ALTER TABLE pf_rule_set ADD sort_no INT NOT NULL DEFAULT 0");
+            $this->pdo->exec("UPDATE pf_rule_set SET sort_no = id");
+        }
+
+        $this->migrateBrokers();
+    }
+
+    /**
+     * 포트폴리오에 붙어 있던 증권사명·수수료를 pf_broker 로 승격한다.
+     * broker_id 가 0 인 포트폴리오만 손대므로 반복 실행해도 안전하다.
+     */
+    private function migrateBrokers(): void
+    {
+        if (!$this->tableExists('pf_portfolio') || !$this->tableExists('pf_broker')) return;
+        if (!$this->columnExists('pf_portfolio', 'broker_id')) return;
+
+        $st = $this->pdo->query("
+            SELECT id, broker, buy_fee_rate, sell_fee_rate
+            FROM pf_portfolio WHERE broker_id = 0
+        ");
+        $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+        if (!$rows) return;
+
+        foreach ($rows as $r) {
+            $name = trim((string)$r['broker']);
+            if ($name === '') $name = '미지정';
+
+            $find = $this->pdo->prepare("SELECT id FROM pf_broker WHERE name = ?");
+            $find->execute([$name]);
+            $bid = (int)$find->fetchColumn();
+
+            if (!$bid) {
+                $ins = $this->pdo->prepare(
+                    "INSERT INTO pf_broker (name, buy_fee_rate, sell_fee_rate, memo) VALUES (?,?,?,?)"
+                );
+                $ins->execute([$name, (float)$r['buy_fee_rate'], (float)$r['sell_fee_rate'], '기존 포트폴리오에서 이관']);
+                $bid = (int)$this->pdo->lastInsertId();
+            }
+
+            $upd = $this->pdo->prepare("UPDATE pf_portfolio SET broker_id = ? WHERE id = ?");
+            $upd->execute([$bid, (int)$r['id']]);
+
+            // 포트폴리오에 붙어 있던 구간표도 증권사로 옮긴다 (한 번만)
+            if ($this->tableExists('pf_fee_tier')) {
+                $old = $this->pdo->prepare("SELECT * FROM pf_fee_tier WHERE portfolio_id = ? ORDER BY min_amt");
+                $old->execute([(int)$r['id']]);
+                $tiers = $old->fetchAll(PDO::FETCH_ASSOC);
+
+                if ($tiers) {
+                    $has = $this->pdo->prepare("SELECT COUNT(*) FROM pf_broker_fee WHERE broker_id = ?");
+                    $has->execute([$bid]);
+                    if ((int)$has->fetchColumn() === 0) {
+                        $ins = $this->pdo->prepare(
+                            "INSERT INTO pf_broker_fee (broker_id, min_amt, fee_rate, fee_fixed) VALUES (?,?,?,?)"
+                        );
+                        foreach ($tiers as $t) {
+                            $ins->execute([$bid, (int)$t['min_amt'], (float)$t['fee_rate'], (int)$t['fee_fixed']]);
+                        }
+                    }
+                    $del = $this->pdo->prepare("DELETE FROM pf_fee_tier WHERE portfolio_id = ?");
+                    $del->execute([(int)$r['id']]);
+                }
+            }
+        }
+    }
+
+    private function tableExists(string $table): bool
+    {
+        $st = $this->pdo->prepare(
+            "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?"
+        );
+        $st->execute([$table]);
+        return (int)$st->fetchColumn() > 0;
+    }
+
+    private function columnExists(string $table, string $column): bool
+    {
+        $st = $this->pdo->prepare(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?"
+        );
+        $st->execute([$table, $column]);
+        return (int)$st->fetchColumn() > 0;
+    }
+
+    private function indexExists(string $table, string $index): bool
+    {
+        $st = $this->pdo->prepare(
+            "SELECT COUNT(*) FROM information_schema.STATISTICS
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?"
+        );
+        $st->execute([$table, $index]);
+        return (int)$st->fetchColumn() > 0;
+    }
+
+    // ══ 포트폴리오 ══════════════════════════════════════════════════════
+    public function portfolios(bool $activeOnly = false): array
+    {
+        $sql = "
+            SELECT f.*,
+                   (SELECT COALESCE(SUM(w.amount),0) FROM pf_principal_flow w WHERE w.portfolio_id = f.id) AS principal,
+                   b.name AS broker_name, b.buy_fee_rate, b.sell_fee_rate,
+                   (SELECT COUNT(*) FROM pf_broker_fee t WHERE t.broker_id = f.broker_id) AS tier_count
+            FROM pf_portfolio f
+            LEFT JOIN pf_broker b ON b.id = f.broker_id
+        ";
+        if ($activeOnly) $sql .= " WHERE f.is_active = 1";
+        $sql .= " ORDER BY f.sort_no, f.id";
+        return $this->pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    public function portfolioGet(int $id): ?array
+    {
+        $st = $this->pdo->prepare("
+            SELECT f.*, (SELECT COALESCE(SUM(w.amount),0) FROM pf_principal_flow w WHERE w.portfolio_id = f.id) AS principal
+            FROM pf_portfolio f WHERE f.id = ?
+        ");
+        $st->execute([$id]);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    /**
+     * 포트폴리오 저장. 수수료는 여기서 다루지 않는다 — 증권사(pf_broker)에 딸려 있고
+     * broker_id 로 연결만 한다. broker 컬럼은 표시용 캐시.
+     * 원금도 여기서 다루지 않는다 — pf_principal_flow 합계로 파생된다.
+     */
+    public function portfolioSave(array $d): int
+    {
+        $cur = !empty($d['id']) ? $this->portfolioGet((int)$d['id']) : null;
+        $bid = array_key_exists('broker_id', $d) ? (int)$d['broker_id'] : (int)($cur['broker_id'] ?? 0);
+
+        $bname = '';
+        if ($bid) {
+            $b = $this->brokerGet($bid);
+            $bname = $b['name'] ?? '';
+        }
+
+        if (!empty($d['id'])) {
+            $st = $this->pdo->prepare("
+                UPDATE pf_portfolio
+                SET name=?, broker_id=?, broker=?, acct_no=?,
+                    memo=?, note=?, sort_no=?, is_active=?
+                WHERE id=?
+            ");
+            $st->execute([
+                $d['name'], $bid, $bname, $d['acct_no'] ?? '',
+                $d['memo'] ?? '', $d['note'] ?? '',
+                (int)($d['sort_no'] ?? 0), (int)($d['is_active'] ?? 1), (int)$d['id'],
+            ]);
+            return (int)$d['id'];
+        }
+
+        $st = $this->pdo->prepare("
+            INSERT INTO pf_portfolio
+              (name, broker_id, broker, acct_no, memo, note, sort_no, is_active)
+            VALUES (?,?,?,?,?,?,?,?)
+        ");
+        $st->execute([
+            $d['name'], $bid, $bname, $d['acct_no'] ?? '',
+            $d['memo'] ?? '', $d['note'] ?? '',
+            (int)($d['sort_no'] ?? 0), (int)($d['is_active'] ?? 1),
+        ]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    // ══ 증권사 + 수수료 구간 ════════════════════════════════════════════
+    public function brokers(): array
+    {
+        return $this->pdo->query("
+            SELECT b.*,
+                   (SELECT COUNT(*) FROM pf_broker_fee t WHERE t.broker_id = b.id) AS tier_count,
+                   (SELECT COUNT(*) FROM pf_portfolio f WHERE f.broker_id = b.id)  AS folio_count
+            FROM pf_broker b ORDER BY b.sort_no, b.name
+        ")->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    public function brokerGet(int $id): ?array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM pf_broker WHERE id = ?");
+        $st->execute([$id]);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    public function brokerSave(array $d): int
+    {
+        if (!empty($d['id'])) {
+            $st = $this->pdo->prepare(
+                "UPDATE pf_broker SET name=?, buy_fee_rate=?, sell_fee_rate=?, memo=?, sort_no=? WHERE id=?"
+            );
+            $st->execute([
+                trim($d['name']), (float)($d['buy_fee_rate'] ?? 0), (float)($d['sell_fee_rate'] ?? 0),
+                $d['memo'] ?? '', (int)($d['sort_no'] ?? 0), (int)$d['id'],
+            ]);
+            // 포트폴리오에 남아 있는 표시용 증권사명도 맞춰 준다
+            $sync = $this->pdo->prepare("UPDATE pf_portfolio SET broker = ? WHERE broker_id = ?");
+            $sync->execute([trim($d['name']), (int)$d['id']]);
+            return (int)$d['id'];
+        }
+
+        $st = $this->pdo->prepare(
+            "INSERT INTO pf_broker (name, buy_fee_rate, sell_fee_rate, memo, sort_no) VALUES (?,?,?,?,?)"
+        );
+        $st->execute([
+            trim($d['name']),
+            (float)($d['buy_fee_rate']  ?? 0.0034),
+            (float)($d['sell_fee_rate'] ?? 0.0015),
+            $d['memo'] ?? '', (int)($d['sort_no'] ?? 0),
+        ]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public function brokerDelete(int $id): void
+    {
+        $st = $this->pdo->prepare("DELETE FROM pf_broker WHERE id = ?");
+        $st->execute([$id]);
+    }
+
+    public function brokerFolioCount(int $id): int
+    {
+        $st = $this->pdo->prepare("SELECT COUNT(*) FROM pf_portfolio WHERE broker_id = ?");
+        $st->execute([$id]);
+        return (int)$st->fetchColumn();
+    }
+
+    /** 한 증권사의 수수료 구간 (min_amt 오름차순) */
+    public function brokerFees(int $brokerId): array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM pf_broker_fee WHERE broker_id = ? ORDER BY min_amt");
+        $st->execute([$brokerId]);
+
+        $out = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $out[] = [
+                'min_amt'   => (float)$r['min_amt'],
+                'fee_rate'  => (float)$r['fee_rate'],
+                'fee_fixed' => (float)$r['fee_fixed'],
+            ];
+        }
+        return $out;
+    }
+
+    /** 여러 증권사의 구간을 한 번에 (대시보드 N+1 방지) */
+    public function brokerFeesMap(array $brokerIds = []): array
+    {
+        $sql    = "SELECT * FROM pf_broker_fee";
+        $params = [];
+        $ids    = array_values(array_filter(array_unique(array_map('intval', $brokerIds))));
+        if ($ids) {
+            $sql   .= " WHERE broker_id IN (" . implode(',', array_fill(0, count($ids), '?')) . ")";
+            $params = $ids;
+        }
+        $sql .= " ORDER BY broker_id, min_amt";
+
+        $st = $this->pdo->prepare($sql);
+        $st->execute($params);
+
+        $out = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $out[(int)$r['broker_id']][] = [
+                'min_amt'   => (float)$r['min_amt'],
+                'fee_rate'  => (float)$r['fee_rate'],
+                'fee_fixed' => (float)$r['fee_fixed'],
+            ];
+        }
+        return $out;
+    }
+
+    /** 구간 전체 교체 (빈 배열이면 단일 요율로 돌아간다) */
+    public function brokerFeesReplace(int $brokerId, array $tiers): void
+    {
+        $this->pdo->beginTransaction();
+        try {
+            $del = $this->pdo->prepare("DELETE FROM pf_broker_fee WHERE broker_id = ?");
+            $del->execute([$brokerId]);
+
+            $ins = $this->pdo->prepare(
+                "INSERT INTO pf_broker_fee (broker_id, min_amt, fee_rate, fee_fixed) VALUES (?,?,?,?)"
+            );
+            foreach ($tiers as $t) {
+                $ins->execute([
+                    $brokerId,
+                    (int)  ($t['min_amt']   ?? 0),
+                    (float)($t['fee_rate']  ?? 0),
+                    (int)  ($t['fee_fixed'] ?? 0),
+                ]);
+            }
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+    }
+
+    // ══ 시장별 세율 ═════════════════════════════════════════════════════
+    public function markets(): array
+    {
+        return $this->pdo->query("SELECT * FROM pf_market ORDER BY sort_no, code")->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** code => tax_rate */
+    public function marketRates(): array
+    {
+        $out = [];
+        foreach ($this->markets() as $m) $out[$m['code']] = (float)$m['tax_rate'];
+        return $out;
+    }
+
+    public function marketSave(array $d): void
+    {
+        $st = $this->pdo->prepare("
+            INSERT INTO pf_market (code, name, tax_rate, memo, sort_no)
+            VALUES (:code, :name, :tax, :memo, :sort)
+            ON DUPLICATE KEY UPDATE name=VALUES(name), tax_rate=VALUES(tax_rate),
+                                    memo=VALUES(memo), sort_no=VALUES(sort_no)
+        ");
+        $st->execute([
+            ':code' => strtoupper(trim($d['code'])),
+            ':name' => $d['name'] ?? '',
+            ':tax'  => (float)($d['tax_rate'] ?? 0),
+            ':memo' => $d['memo'] ?? '',
+            ':sort' => (int)($d['sort_no'] ?? 0),
+        ]);
+    }
+
+    public function marketDelete(string $code): void
+    {
+        $st = $this->pdo->prepare("DELETE FROM pf_market WHERE code = ?");
+        $st->execute([$code]);
+    }
+
+    /** 등록된 종목이 쓰는 시장 코드 목록 (세율 미등록 확인용) */
+    public function marketsInUse(): array
+    {
+        return $this->pdo->query("
+            SELECT s.market, COUNT(*) AS cnt
+            FROM pf_position p JOIN pf_stock s ON s.code = p.stock_code
+            GROUP BY s.market ORDER BY s.market
+        ")->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * 시장별 증권거래세 기본값 (2026년 기준).
+     * 세율은 해마다 바뀌므로 설정 화면에서 확인·수정할 수 있게 해 두었다.
+     */
+    public function marketDefaults(): array
+    {
+        return [
+            ['KOSPI',  '코스피',    0.0020, '증권거래세 0.05% + 농어촌특별세 0.15% = 0.20%', 1],
+            ['KOSDAQ', '코스닥',    0.0020, '증권거래세 0.20%',                              2],
+            ['KONEX',  '코넥스',    0.0010, '증권거래세 0.10%',                              3],
+            ['KOTC',   'K-OTC',     0.0020, '증권거래세 0.20%',                              4],
+            ['OTC',    '비상장·장외', 0.0035, '증권거래세 0.35%',                            5],
+            ['ETF',    '국내 ETF',  0.0000, '국내 주식형 ETF는 증권거래세 면제',             6],
+        ];
+    }
+
+    /** 시장 세율이 비어 있을 때만 기본값을 넣는다. @return int 생성 건수 */
+    public function seedMarkets(): int
+    {
+        if ((int)$this->pdo->query("SELECT COUNT(*) FROM pf_market")->fetchColumn() > 0) return 0;
+        return $this->resetMarkets();
+    }
+
+    /** 기본값으로 덮어쓴다 (직접 추가한 시장은 남는다). @return int 반영 건수 */
+    public function resetMarkets(): int
+    {
+        foreach ($this->marketDefaults() as [$code, $name, $tax, $memo, $sort]) {
+            $this->marketSave(['code' => $code, 'name' => $name, 'tax_rate' => $tax, 'memo' => $memo, 'sort_no' => $sort]);
+        }
+        return count($this->marketDefaults());
+    }
+
+    /** 순서만 저장 (드래그 정렬) */
+    public function portfolioSort(int $id, int $sortNo): void
+    {
+        $st = $this->pdo->prepare("UPDATE pf_portfolio SET sort_no = ? WHERE id = ?");
+        $st->execute([$sortNo, $id]);
+    }
+
+    public function portfolioDelete(int $id): void
+    {
+        $st = $this->pdo->prepare("DELETE FROM pf_portfolio WHERE id = ?");
+        $st->execute([$id]);
+    }
+
+    public function portfolioPositionCount(int $id): int
+    {
+        $st = $this->pdo->prepare("SELECT COUNT(*) FROM pf_position WHERE portfolio_id = ?");
+        $st->execute([$id]);
+        return (int)$st->fetchColumn();
+    }
+
+    /** 포트폴리오 메모 이력 (최근 순). 수정은 없고 신규/삭제만 한다. */
+    public function portfolioMemos(int $id): array
+    {
+        $st = $this->pdo->prepare("
+            SELECT * FROM pf_portfolio_memo
+            WHERE portfolio_id = ?
+            ORDER BY created_at DESC, id DESC
+        ");
+        $st->execute([$id]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    public function portfolioMemoAdd(int $id, string $content): int
+    {
+        $st = $this->pdo->prepare(
+            "INSERT INTO pf_portfolio_memo (portfolio_id, content, created_at) VALUES (?,?,NOW())"
+        );
+        $st->execute([$id, $content]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public function portfolioMemoDelete(int $memoId): void
+    {
+        $st = $this->pdo->prepare("DELETE FROM pf_portfolio_memo WHERE id = ?");
+        $st->execute([$memoId]);
+    }
+
+    /** 원금 입출금 이력 (최근 순). 원금 자체는 이 표의 합계다. */
+    public function principalFlows(int $id): array
+    {
+        $st = $this->pdo->prepare("
+            SELECT * FROM pf_principal_flow
+            WHERE portfolio_id = ?
+            ORDER BY flow_at DESC, id DESC
+        ");
+        $st->execute([$id]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 증액은 양수, 인출은 음수로 넣는다. */
+    public function principalFlowAdd(int $id, string $date, int $amount, string $reason): int
+    {
+        $st = $this->pdo->prepare("
+            INSERT INTO pf_principal_flow (portfolio_id, flow_at, amount, reason, created_at)
+            VALUES (?,?,?,?,NOW())
+        ");
+        $st->execute([$id, $date, $amount, $reason]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public function principalFlowDelete(int $flowId): void
+    {
+        $st = $this->pdo->prepare("DELETE FROM pf_principal_flow WHERE id = ?");
+        $st->execute([$flowId]);
+    }
+
+    public function principalSum(int $id): int
+    {
+        $st = $this->pdo->prepare(
+            "SELECT COALESCE(SUM(amount),0) FROM pf_principal_flow WHERE portfolio_id = ?"
+        );
+        $st->execute([$id]);
+        return (int)$st->fetchColumn();
+    }
+
+    // ══ 시뮬레이터 시세 데이터 ══════════════════════════════════════════
+    /** 목록 (본문 제외 — 수천 행짜리 JSON 을 목록에서 들고 올 이유가 없다) */
+    public function simDataList(): array
+    {
+        return $this->pdo->query("
+            SELECT id, stock_code, stock_name, from_date, to_date, bar_count, has_ohlc, created_at,
+                   rule_set_id, broker_id, market, limit_amt, opt_from, opt_to, reenter, wait_days, intraday,
+                   data_ver, cache_key, cache_json, cached_at
+            FROM pf_sim_data ORDER BY stock_name, stock_code
+        ")->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 본문까지 — rows 는 [['d'=>'YYYY-MM-DD','c'=>float], ...] 로 풀어서 준다. */
+    public function simDataGet(int $id): ?array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM pf_sim_data WHERE id = ?");
+        $st->execute([$id]);
+        $r = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$r) return null;
+
+        // 저장 형태: [일자,종가] / [일자,종가,시가,고가,저가] / [일자,종가,시가,고가,저가,거래량]
+        $rows = [];
+        foreach ((array)json_decode((string)$r['rows_json'], true) as $x) {
+            if (!is_array($x) || count($x) < 2) continue;
+            $row = ['d' => (string)$x[0], 'c' => (float)$x[1]];
+            if (count($x) >= 5) {
+                $row['o'] = (float)$x[2];
+                $row['h'] = (float)$x[3];
+                $row['l'] = (float)$x[4];
+            }
+            if (count($x) >= 6) $row['v'] = (int)$x[5];
+            $rows[] = $row;
+        }
+        $r['rows'] = $rows;
+        return $r;
+    }
+
+    /**
+     * 시세 등록/갱신. 종목코드가 키라서 같은 종목을 다시 올리면 시세만 갈아끼운다.
+     * 조건(룰셋·한도 등)은 건드리지 않는다 — 시세를 갱신해도 보던 설정은 그대로여야 한다.
+     *
+     * @param array $rows [['d'=>,'c'=>], ...] 오름차순
+     */
+    public function simDataUpsert(string $code, string $stockName, array $rows): int
+    {
+        $packed = [];
+        $ohlc   = 1;
+        foreach ($rows as $r) {
+            if (isset($r['h'], $r['l'])) {
+                $one = [$r['d'], $r['c'] + 0, ($r['o'] ?? $r['c']) + 0, $r['h'] + 0, $r['l'] + 0];
+                if (isset($r['v'])) $one[] = (int)$r['v'];
+                $packed[] = $one;
+            } else {
+                $packed[] = [$r['d'], $r['c'] + 0];
+                $ohlc = 0;   // 한 행이라도 종가뿐이면 장중 모드를 쓸 수 없다
+            }
+        }
+
+        $args = [
+            $stockName,
+            $rows ? $rows[0]['d'] : null,
+            $rows ? $rows[count($rows) - 1]['d'] : null,
+            count($rows),
+            $rows ? $ohlc : 0,
+            json_encode($packed, JSON_UNESCAPED_UNICODE),
+        ];
+
+        $cur = $this->simDataFindByCode($code);
+        if ($cur) {
+            $st = $this->pdo->prepare("
+                UPDATE pf_sim_data
+                SET stock_name=?, from_date=?, to_date=?, bar_count=?, has_ohlc=?, rows_json=?,
+                    data_ver=data_ver+1
+                WHERE id=?
+            ");
+            $args[] = (int)$cur['id'];
+            $st->execute($args);
+            return (int)$cur['id'];
+        }
+
+        $st = $this->pdo->prepare("
+            INSERT INTO pf_sim_data (stock_code, stock_name, from_date, to_date, bar_count, has_ohlc, rows_json, created_at)
+            VALUES (?,?,?,?,?,?,?,NOW())
+        ");
+        array_unshift($args, $code);
+        $st->execute($args);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    /** 종목코드로 1건 (본문 제외) */
+    public function simDataFindByCode(string $code): ?array
+    {
+        if ($code === '') return null;
+        $st = $this->pdo->prepare("
+            SELECT id, stock_code, stock_name, from_date, to_date, bar_count, has_ohlc
+            FROM pf_sim_data WHERE stock_code = ? LIMIT 1
+        ");
+        $st->execute([$code]);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    /**
+     * 마지막으로 돌린 조건을 기억해 둔다. 결과(수익률 등)는 저장하지 않는다.
+     * 다음에 이 데이터를 열면 같은 조건으로 다시 계산해서 보여 준다.
+     */
+    public function simDataSaveOptions(int $id, array $o): void
+    {
+        $st = $this->pdo->prepare("
+            UPDATE pf_sim_data
+            SET rule_set_id=?, broker_id=?, market=?, limit_amt=?, opt_from=?, opt_to=?, reenter=?, wait_days=?, intraday=?
+            WHERE id=?
+        ");
+        $st->execute([
+            (int)($o['rs'] ?? 0), (int)($o['b'] ?? 0), (string)($o['mk'] ?? ''),
+            (int)($o['limit'] ?? 0),
+            ($o['from'] ?? '') !== '' ? $o['from'] : null,
+            ($o['to']   ?? '') !== '' ? $o['to']   : null,
+            !empty($o['re']) ? 1 : 0, (int)($o['wait'] ?? 0), !empty($o['intraday']) ? 1 : 0, $id,
+        ]);
+    }
+
+    /** 목록용 요약 캐시. 키가 안 맞으면 읽는 쪽에서 무시하므로 덮어쓰기만 하면 된다. */
+    public function simDataCacheSave(int $id, string $key, array $summary): void
+    {
+        $st = $this->pdo->prepare(
+            "UPDATE pf_sim_data SET cache_key=?, cache_json=?, cached_at=NOW() WHERE id=?"
+        );
+        $st->execute([$key, mb_substr(json_encode($summary), 0, 255), $id]);
+    }
+
+    /** 증권사 수수료(구간/정률) + 시장 세율 → 계산 파라미터 */
+    public function simCostParams(int $brokerId, string $market): array
+    {
+        $b = $brokerId ? $this->brokerGet($brokerId) : null;
+        return pf_cost_params([
+            'buy_fee_rate'  => $b['buy_fee_rate']  ?? 0.0034,
+            'sell_fee_rate' => $b['sell_fee_rate'] ?? 0.0015,
+            'tax_rate'      => $this->marketRates()[$market] ?? 0.0020,
+        ], $brokerId ? $this->brokerFees($brokerId) : []);
+    }
+
+    public function simDataDelete(int $id): void
+    {
+        $st = $this->pdo->prepare("DELETE FROM pf_sim_data WHERE id = ?");
+        $st->execute([$id]);
+    }
+
+    /** 종목코드로 등록된 포지션 1건 (시뮬레이터 → 종목 상세 링크용) */
+    public function positionFindByCode(string $code): ?array
+    {
+        if ($code === '') return null;
+        $st = $this->pdo->prepare("
+            SELECT p.id, p.portfolio_id, p.rule_set_id, p.limit_amt, p.status,
+                   s.name AS stock_name, f.name AS portfolio_name, r.name AS rule_name
+            FROM pf_position  p
+            JOIN pf_stock     s ON s.code = p.stock_code
+            JOIN pf_portfolio f ON f.id   = p.portfolio_id
+            JOIN pf_rule_set  r ON r.id   = p.rule_set_id
+            WHERE p.stock_code = ?
+            ORDER BY p.id LIMIT 1
+        ");
+        $st->execute([$code]);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    // ══ 룰셋 ════════════════════════════════════════════════════════════
+    public function ruleSets(): array
+    {
+        return $this->pdo->query("
+            SELECT r.*,
+                   (SELECT COUNT(*) FROM pf_rule_step s WHERE s.rule_set_id = r.id) AS step_count,
+                   (SELECT COUNT(*) FROM pf_position p WHERE p.rule_set_id = r.id)  AS pos_count
+            FROM pf_rule_set r ORDER BY r.sort_no, r.id
+        ")->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 순서만 저장 (드래그 정렬) */
+    public function ruleSetSort(int $id, int $sortNo): void
+    {
+        $st = $this->pdo->prepare("UPDATE pf_rule_set SET sort_no = ? WHERE id = ?");
+        $st->execute([$sortNo, $id]);
+    }
+
+    /** 룰셋 1건 + steps (step_no 키 배열) */
+    public function ruleSetGet(int $id): ?array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM pf_rule_set WHERE id = ?");
+        $st->execute([$id]);
+        $rs = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$rs) return null;
+
+        $rs['steps'] = $this->ruleSteps($id);
+        return $rs;
+    }
+
+    public function ruleSteps(int $ruleSetId): array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM pf_rule_step WHERE rule_set_id = ? ORDER BY step_no");
+        $st->execute([$ruleSetId]);
+
+        $out = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $out[(int)$r['step_no']] = [
+                'step_no'     => (int)$r['step_no'],
+                'weight'      => (float)$r['weight'],
+                'drop_rate'   => (float)$r['drop_rate'],
+                'target_rate' => (float)$r['target_rate'],
+            ];
+        }
+        return $out;
+    }
+
+    /** 여러 룰셋의 steps 를 한 번에 (대시보드 N+1 방지) */
+    public function ruleStepsMap(array $ruleSetIds): array
+    {
+        $ids = array_values(array_unique(array_map('intval', $ruleSetIds)));
+        if (!$ids) return [];
+
+        $ph = implode(',', array_fill(0, count($ids), '?'));
+        $st = $this->pdo->prepare("SELECT * FROM pf_rule_step WHERE rule_set_id IN ($ph) ORDER BY rule_set_id, step_no");
+        $st->execute($ids);
+
+        $out = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $out[(int)$r['rule_set_id']][(int)$r['step_no']] = [
+                'step_no'     => (int)$r['step_no'],
+                'weight'      => (float)$r['weight'],
+                'drop_rate'   => (float)$r['drop_rate'],
+                'target_rate' => (float)$r['target_rate'],
+            ];
+        }
+        return $out;
+    }
+
+    public function ruleSetSave(array $d): int
+    {
+        $vol = (($d['volatility'] ?? '') === '' || $d['volatility'] === null) ? null : (float)$d['volatility'];
+
+        if (!empty($d['id'])) {
+            $st = $this->pdo->prepare("UPDATE pf_rule_set SET name=?, volatility=?, memo=? WHERE id=?");
+            $st->execute([$d['name'], $vol, $d['memo'] ?? '', (int)$d['id']]);
+            return (int)$d['id'];
+        }
+
+        $st = $this->pdo->prepare("INSERT INTO pf_rule_set (name, volatility, memo) VALUES (?,?,?)");
+        $st->execute([$d['name'], $vol, $d['memo'] ?? '']);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public function ruleSetDelete(int $id): void
+    {
+        $st = $this->pdo->prepare("DELETE FROM pf_rule_set WHERE id = ?");
+        $st->execute([$id]);
+    }
+
+    /** 차수 전체 교체 (인라인 편집 저장) */
+    public function ruleStepsReplace(int $ruleSetId, array $steps): void
+    {
+        $this->pdo->beginTransaction();
+        try {
+            $del = $this->pdo->prepare("DELETE FROM pf_rule_step WHERE rule_set_id = ?");
+            $del->execute([$ruleSetId]);
+
+            $ins = $this->pdo->prepare(
+                "INSERT INTO pf_rule_step (rule_set_id, step_no, weight, drop_rate, target_rate) VALUES (?,?,?,?,?)"
+            );
+            foreach ($steps as $s) {
+                $ins->execute([
+                    $ruleSetId, (int)$s['step_no'],
+                    (float)$s['weight'], (float)$s['drop_rate'], (float)$s['target_rate'],
+                ]);
+            }
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+    }
+
+    // ══ 종목 ════════════════════════════════════════════════════════════
+    public function stockGet(string $code): ?array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM pf_stock WHERE code = ?");
+        $st->execute([$code]);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    public function stockUpsert(array $d): void
+    {
+        $st = $this->pdo->prepare("
+            INSERT INTO pf_stock (code, name, market, last_price, high_price, priced_at)
+            VALUES (:code, :name, :market, :last_price, :high_price, :priced_at)
+            ON DUPLICATE KEY UPDATE
+              name       = VALUES(name),
+              market     = VALUES(market),
+              last_price = IFNULL(VALUES(last_price), last_price),
+              high_price = IFNULL(VALUES(high_price), high_price),
+              priced_at  = IFNULL(VALUES(priced_at), priced_at)
+        ");
+        $st->execute([
+            ':code'       => $d['code'],
+            ':name'       => $d['name'] ?? '',
+            ':market'     => $d['market'] ?? 'KOSPI',
+            ':last_price' => ($d['last_price'] ?? '') === '' ? null : (float)$d['last_price'],
+            ':high_price' => ($d['high_price'] ?? '') === '' ? null : (float)$d['high_price'],
+            ':priced_at'  => (($d['last_price'] ?? '') === '') ? null : date('Y-m-d H:i:s'),
+        ]);
+    }
+
+    /** all_stock_info 에서 종목 검색 (종목 등록 자동완성용) */
+    public function stockSearch(string $q, int $limit = 20): array
+    {
+        $limit = max(1, min(50, $limit));
+        $st = $this->pdo->prepare("
+            SELECT stock_code AS code, stock_name AS name, stock_price AS last_price
+            FROM all_stock_info
+            WHERE stock_code = :exact OR stock_name LIKE :like
+            ORDER BY (stock_code = :exact2) DESC, stock_cap DESC
+            LIMIT {$limit}
+        ");
+        $st->execute([':exact' => $q, ':exact2' => $q, ':like' => '%' . $q . '%']);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * all_stock_info → pf_stock 시세 동기화.
+     * high_price 는 "관측 최고가"로 누적 갱신한다 (수동 입력값이 더 크면 유지).
+     * @return int 갱신된 종목 수
+     */
+    public function syncPrices(array $codes = []): int
+    {
+        $sql = "
+            UPDATE pf_stock p
+            JOIN all_stock_info s ON s.stock_code = p.code
+            SET p.last_price = s.stock_price,
+                p.name       = IF(p.name = '', s.stock_name, p.name),
+                p.high_price = GREATEST(IFNULL(p.high_price, 0), IFNULL(s.stock_price, 0)),
+                p.priced_at  = NOW()
+            WHERE s.stock_price > 0
+        ";
+        $params = [];
+        if ($codes) {
+            $ph     = implode(',', array_fill(0, count($codes), '?'));
+            $sql   .= " AND p.code IN ($ph)";
+            $params = array_values($codes);
+        }
+
+        $st = $this->pdo->prepare($sql);
+        $st->execute($params);
+        return $st->rowCount();
+    }
+
+    // ══ 포지션 ══════════════════════════════════════════════════════════
+    public function positions(?int $portfolioId = null, ?string $status = null): array
+    {
+        $sql = "
+            SELECT p.*,
+                   s.name AS stock_name, s.market, s.last_price, s.high_price, s.priced_at,
+                   f.name AS portfolio_name, f.acct_no, f.broker_id,
+                   b.name AS broker, b.buy_fee_rate, b.sell_fee_rate,
+                   m.tax_rate, m.name AS market_name,
+                   r.name AS rule_name, r.volatility
+            FROM pf_position  p
+            JOIN pf_stock     s ON s.code = p.stock_code
+            JOIN pf_portfolio f ON f.id   = p.portfolio_id
+            JOIN pf_rule_set  r ON r.id   = p.rule_set_id
+            LEFT JOIN pf_broker b ON b.id   = f.broker_id
+            LEFT JOIN pf_market m ON m.code = s.market
+            WHERE 1=1
+        ";
+        $params = [];
+        if ($portfolioId !== null) { $sql .= " AND p.portfolio_id = ?"; $params[] = $portfolioId; }
+        if ($status !== null)      { $sql .= " AND p.status = ?";       $params[] = $status; }
+        $sql .= " ORDER BY f.sort_no, f.id, p.sort_no, p.id";
+
+        $st = $this->pdo->prepare($sql);
+        $st->execute($params);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    public function positionGet(int $id): ?array
+    {
+        $st = $this->pdo->prepare("
+            SELECT p.*,
+                   s.name AS stock_name, s.market, s.last_price, s.high_price, s.priced_at,
+                   f.name AS portfolio_name, f.acct_no, f.broker_id,
+                   (SELECT COALESCE(SUM(w.amount),0) FROM pf_principal_flow w WHERE w.portfolio_id = f.id) AS principal,
+                   b.name AS broker, b.buy_fee_rate, b.sell_fee_rate,
+                   m.tax_rate, m.name AS market_name,
+                   r.name AS rule_name, r.volatility
+            FROM pf_position  p
+            JOIN pf_stock     s ON s.code = p.stock_code
+            JOIN pf_portfolio f ON f.id   = p.portfolio_id
+            JOIN pf_rule_set  r ON r.id   = p.rule_set_id
+            LEFT JOIN pf_broker b ON b.id   = f.broker_id
+            LEFT JOIN pf_market m ON m.code = s.market
+            WHERE p.id = ?
+        ");
+        $st->execute([$id]);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    public function positionSave(array $d): int
+    {
+        if (!empty($d['id'])) {
+            $st = $this->pdo->prepare("
+                UPDATE pf_position
+                SET portfolio_id=?, stock_code=?, rule_set_id=?, limit_amt=?, started_at=?, status=?, sort_no=?, memo=?
+                WHERE id=?
+            ");
+            $st->execute([
+                (int)$d['portfolio_id'], $d['stock_code'], (int)$d['rule_set_id'], (int)$d['limit_amt'],
+                ($d['started_at'] ?? '') ?: null, $d['status'] ?? 'watch',
+                (int)($d['sort_no'] ?? 0), $d['memo'] ?? '', (int)$d['id'],
+            ]);
+            return (int)$d['id'];
+        }
+
+        $st = $this->pdo->prepare("
+            INSERT INTO pf_position (portfolio_id, stock_code, rule_set_id, limit_amt, started_at, status, sort_no, memo)
+            VALUES (?,?,?,?,?,?,?,?)
+        ");
+        $st->execute([
+            (int)$d['portfolio_id'], $d['stock_code'], (int)$d['rule_set_id'], (int)$d['limit_amt'],
+            ($d['started_at'] ?? '') ?: null, $d['status'] ?? 'watch',
+            (int)($d['sort_no'] ?? 0), $d['memo'] ?? '',
+        ]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public function positionDelete(int $id): void
+    {
+        $st = $this->pdo->prepare("DELETE FROM pf_position WHERE id = ?");
+        $st->execute([$id]);
+    }
+
+    // ══ 매매 ════════════════════════════════════════════════════════════
+    public function trades(int $positionId): array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM pf_trade WHERE position_id = ? ORDER BY traded_at, id");
+        $st->execute([$positionId]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 여러 포지션의 매매 내역을 한 번에 (대시보드 N+1 방지) */
+    public function tradesMap(array $positionIds): array
+    {
+        $ids = array_values(array_unique(array_map('intval', $positionIds)));
+        if (!$ids) return [];
+
+        $ph = implode(',', array_fill(0, count($ids), '?'));
+        $st = $this->pdo->prepare("SELECT * FROM pf_trade WHERE position_id IN ($ph) ORDER BY position_id, traded_at, id");
+        $st->execute($ids);
+
+        $out = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $out[(int)$r['position_id']][] = $r;
+        }
+        return $out;
+    }
+
+    public function tradeGet(int $id): ?array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM pf_trade WHERE id = ?");
+        $st->execute([$id]);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    public function tradeSave(array $d): int
+    {
+        if (!empty($d['id'])) {
+            $st = $this->pdo->prepare(
+                "UPDATE pf_trade SET step_no=?, side=?, traded_at=?, price=?, qty=?, memo=? WHERE id=?"
+            );
+            $st->execute([
+                (int)$d['step_no'], $d['side'] ?? 'buy', $d['traded_at'],
+                (float)$d['price'], (int)$d['qty'], $d['memo'] ?? '', (int)$d['id'],
+            ]);
+            return (int)$d['id'];
+        }
+
+        $st = $this->pdo->prepare(
+            "INSERT INTO pf_trade (position_id, step_no, side, traded_at, price, qty, memo) VALUES (?,?,?,?,?,?,?)"
+        );
+        $st->execute([
+            (int)$d['position_id'], (int)$d['step_no'], $d['side'] ?? 'buy', $d['traded_at'],
+            (float)$d['price'], (int)$d['qty'], $d['memo'] ?? '',
+        ]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public function tradeDelete(int $id): void
+    {
+        $st = $this->pdo->prepare("DELETE FROM pf_trade WHERE id = ?");
+        $st->execute([$id]);
+    }
+
+    // ══ 시드 ════════════════════════════════════════════════════════════
+    /** 룰셋이 하나도 없을 때만 기본 룰셋 2종을 넣는다. @return int 생성된 룰셋 수 */
+    public function seedRuleSets(): int
+    {
+        if ((int)$this->pdo->query("SELECT COUNT(*) FROM pf_rule_set")->fetchColumn() > 0) return 0;
+
+        // 별첨1 손익분기율 표에서 역산한 룰셋 (재현 결과가 원본 계산열과 최대 0.02%p 오차)
+        $basic = [
+            [1, 0.0150,  0.000, 0.15],
+            [2, 0.0255, -0.100, 0.20],
+            [3, 0.0255, -0.110, 0.25],
+            [4, 0.0640, -0.240, 0.30],
+            [5, 0.1845, -0.275, 0.35],
+            [6, 0.2775, -0.320, 0.40],
+            [7, 0.4160, -0.360, 0.50],
+        ];
+        // 별첨3(하이비스)·별첨4(한국가구)에서 역산한 룰셋. 전 차수 이론가 오차 0 확인됨.
+        $vol5 = [
+            [1, 0.0150,  0.00, 0.15],
+            [2, 0.0255, -0.07, 0.20],
+            [3, 0.0255, -0.08, 0.25],
+            [4, 0.0640, -0.21, 0.30],
+            [5, 0.1845, -0.25, 0.35],
+            [6, 0.2770, -0.29, 0.40],
+            [7, 0.4160, -0.33, 0.50],
+        ];
+
+        $n = 0;
+        foreach ([['기본 8% / 7단계', 8.0, $basic], ['변동율 5% / 7단계', 5.0, $vol5]] as [$name, $vol, $steps]) {
+            $id = $this->ruleSetSave(['name' => $name, 'volatility' => $vol, 'memo' => '초기 시드 (엑셀 별첨 역산)']);
+            $this->ruleStepsReplace($id, array_map(
+                fn($s) => ['step_no' => $s[0], 'weight' => $s[1], 'drop_rate' => $s[2], 'target_rate' => $s[3]],
+                $steps
+            ));
+            $n++;
+        }
+        return $n;
+    }
+
+    /** 포트폴리오가 하나도 없을 때만 기본 1건 생성. @return int 생성된 id (0 = 이미 있음) */
+    public function seedPortfolio(): int
+    {
+        if ((int)$this->pdo->query("SELECT COUNT(*) FROM pf_portfolio")->fetchColumn() > 0) return 0;
+        return $this->portfolioSave(['name' => '기본 포트폴리오']);
+    }
+}
+?>

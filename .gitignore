@@ -31,3 +31,6 @@ img/
 cache/
 # 로컬 백업 폴더 (env_bak/.vscode_bak 등 - 자격증명 사본, git 노출 금지)
 *_bak/
+
+# 백업 파일 변형 (*.bak_parking 등)
+*.bak_*
