@@ -1,0 +1,132 @@
+<?php
+/**
+ * StockAmtGov.class — 공공데이터포털(금융위원회 주식시세정보)로 <b>종목별</b> 거래대금 수집
+ *
+ * 왜 이 경로인가
+ *   KRX 오픈API(KrxAmt)는 <b>일자별 전종목</b>이라 24종목을 채우려 해도 985일치를 훑어야 했다.
+ *   금융위 API 는 <b>종목 + 기간</b>으로 물을 수 있어 종목당 1~2회면 4년치가 끝난다.
+ *   원천이 KRX 라 값도 공식값과 같다(집계 기준이 다른 포털 데이터와 다른 점).
+ *
+ * 저장은 KrxAmt 와 같은 `krx_amt` 테이블을 쓴다 — 소비하는 쪽(API·엔진)이 하나만 알면 되게.
+ *
+ * 키: env/datago.inc 의 DATA_GO_KEY (공공데이터포털 마이페이지 > 일반 인증키 Decoding)
+ */
+class StockAmtGov
+{
+    const URL = 'https://apis.data.go.kr/1160100/service/GetStockSecuritiesInfoService/getStockPriceInfo';
+
+    private PDO $pdo;
+    private string $key;
+
+    public function __construct(PDO $pdo, string $key = '')
+    {
+        $this->pdo = $pdo;
+        $this->key = $key !== '' ? $key : (defined('DATA_GO_KEY') ? DATA_GO_KEY : '');
+    }
+
+    public function hasKey(): bool { return $this->key !== ''; }
+
+    /** krx_amt 는 KrxAmt 와 공유한다 (여기서도 없으면 만든다) */
+    public function ensureTable(): void
+    {
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS krx_amt (
+                code CHAR(6)  NOT NULL,
+                d    DATE     NOT NULL,
+                amt  BIGINT   NOT NULL COMMENT '거래대금(원)',
+                vol  BIGINT   NOT NULL COMMENT '거래량(주)',
+                PRIMARY KEY (code, d),
+                KEY idx_d (d)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
+    }
+
+    /**
+     * 한 종목의 기간 시세를 받는다 → [ ['d'=>'YYYY-MM-DD','amt'=>int,'vol'=>int], ... ]
+     * @param string $code   6자리 단축코드
+     * @param string $from   YYYYMMDD
+     * @param string $to     YYYYMMDD
+     * @param int    $rows   한 번에 받을 행 수 (API 최대 넉넉히)
+     */
+    public function fetch(string $code, string $from, string $to, int $rows = 1200): array
+    {
+        $code = preg_replace('/[^0-9A-Za-z]/', '', $code);
+        $q = http_build_query([
+            'serviceKey' => $this->key,
+            'resultType' => 'json',
+            'numOfRows'  => $rows,
+            'pageNo'     => 1,
+            'beginBasDt' => preg_replace('/[^0-9]/', '', $from),
+            'endBasDt'   => preg_replace('/[^0-9]/', '', $to),
+            'likeSrtnCd' => $code,
+        ]);
+        $ch = curl_init(self::URL . '?' . $q);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 60,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_FOLLOWLOCATION => true,
+        ]);
+        $body = curl_exec($ch);
+        $http = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err  = (string)curl_error($ch);
+        curl_close($ch);
+
+        if ($body === false || $err !== '') throw new RuntimeException("통신 실패({$code}): {$err}");
+        if ($http !== 200)                  throw new RuntimeException("HTTP {$http} ({$code})");
+
+        $j = json_decode((string)$body, true);
+        if (!is_array($j)) {
+            // 인증 실패 등은 XML 로 온다 — 메시지를 그대로 보여 준다
+            throw new RuntimeException('JSON 아님(' . $code . '): ' . mb_substr(strip_tags((string)$body), 0, 160));
+        }
+        $head = $j['response']['header'] ?? [];
+        $rc = (string)($head['resultCode'] ?? '');
+        if ($rc !== '' && $rc !== '00') {
+            throw new RuntimeException("API 오류 {$rc}: " . (string)($head['resultMsg'] ?? ''));
+        }
+        $items = $j['response']['body']['items']['item'] ?? [];
+        if (isset($items['basDt'])) $items = [$items];       // 1건이면 객체로 온다
+
+        $out = [];
+        foreach ($items as $x) {
+            // ★ likeSrtnCd 는 '부분일치'다 — 005380 으로 물으면 00538005 같은 것도 섞일 수 있다
+            if (preg_replace('/[^0-9A-Za-z]/', '', (string)($x['srtnCd'] ?? '')) !== $code) continue;
+            $bd = preg_replace('/[^0-9]/', '', (string)($x['basDt'] ?? ''));
+            if (strlen($bd) !== 8) continue;
+            $vol = (float)($x['trqu'] ?? 0);
+            $amt = (float)($x['trPrc'] ?? 0);
+            if ($vol <= 0 || $amt <= 0) continue;            // 거래 없는 날은 남기지 않는다
+            $out[] = [
+                'd'   => substr($bd, 0, 4) . '-' . substr($bd, 4, 2) . '-' . substr($bd, 6, 2),
+                'amt' => (int)$amt,
+                'vol' => (int)$vol,
+            ];
+        }
+        return $out;
+    }
+
+    /** 받은 것을 저장 (UPSERT — 몇 번을 돌려도 안전) */
+    public function save(string $code, array $rows): int
+    {
+        if (!$rows) return 0;
+        $code = preg_replace('/[^0-9A-Za-z]/', '', $code);
+        $st = $this->pdo->prepare(
+            "INSERT INTO krx_amt (code, d, amt, vol) VALUES (?,?,?,?)
+             ON DUPLICATE KEY UPDATE amt=VALUES(amt), vol=VALUES(vol)"
+        );
+        $this->pdo->beginTransaction();
+        try {
+            foreach ($rows as $r) $st->execute([$code, $r['d'], $r['amt'], $r['vol']]);
+            $this->pdo->commit();
+        } catch (Throwable $e) { $this->pdo->rollBack(); throw $e; }
+        return count($rows);
+    }
+
+    /** 한 종목을 기간째로 받아 저장 */
+    public function collect(string $code, string $from, string $to): int
+    {
+        return $this->save($code, $this->fetch($code, $from, $to));
+    }
+}
+?>

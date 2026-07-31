@@ -1,0 +1,843 @@
+<?php
+/**
+ * KrxAmt.class — KRX 일별 <b>실제 거래대금</b> 수집·보관
+ *
+ * 왜 만들었나
+ *   네이버 일봉에는 거래대금이 없다. 그래서 지표 엔진이 「종가×거래량」으로 근사해 왔는데,
+ *   실측(2026-07-31 · KRX 실제값 7,949표본) 결과 VWAP 대비 <b>중앙 오차 0.99%</b>였다.
+ *   보통은 문제없지만 「전고 거래대금 돌파」처럼 <b>아슬아슬한 대소 비교</b>에서는 판정이 갈린다
+ *   (두 날 비교 뒤집힘률 0.79%). 그래서 실제 거래대금을 따로 받아 둔다.
+ *
+ * 설계
+ *   ★ KRX API 는 <b>일자별 전종목</b>이다 — 종목을 좁혀도 호출 수는 안 줄어든다.
+ *     비용은 「날짜 수」로만 정해진다(1일 = 시장 2회 ≈ 2초).
+ *     그래서 <b>받는 건 전종목, 저장은 대상 종목만</b>이 기본이다(all=1 이면 전종목 저장).
+ *   ★ 커서를 따로 두지 않는다 — 저장된 min(d)/max(d) 가 곧 진행 상황이라 몇 번을 다시 돌려도 안전하다.
+ *   ★ 휴장일은 응답이 비어 오므로 그냥 건너뛴다(빈 날짜를 기록하지 않는다).
+ */
+class KrxAmt
+{
+    const BASE = 'https://data-dbg.krx.co.kr/svc/apis/';
+    const MARKETS = ['sto/stk_bydd_trd' => 'KOSPI', 'sto/ksq_bydd_trd' => 'KOSDAQ'];
+
+    private PDO $pdo;
+    private string $key;
+
+    public function __construct(PDO $pdo, string $key = '')
+    {
+        $this->pdo = $pdo;
+        $this->key = $key !== '' ? $key : (defined('KRX_API_KEY') ? KRX_API_KEY : '');
+    }
+
+    public function hasKey(): bool { return $this->key !== ''; }
+
+    /**
+     * ★ 2026-07-31 — <b>전종목 일별 원장</b>으로 확장했다.
+     *
+     * 처음엔 차트에 붙일 거래대금만 담는 선별 테이블(24종목)이었다. 「거래대금 60일 최고」
+     * 스크리너를 만들면서 <b>전종목·장기</b>가 필요해졌는데, 그러면 지금 이 테이블이
+     * 새 원장의 부분집합이 된다 — 새 테이블을 만들면 24종목이 두 곳에 중복 저장된다.
+     * 그래서 <b>여기를 넓혔다</b>(`주식시세가져오기.md` 의 중복 금지 원칙).
+     *
+     * 담는 것은 KRX 일자별 응답이 <b>이미 같이 주는</b> 값들뿐이다 — 추가 호출 0회.
+     *   ★ `list_shrs` 가 핵심이다. KRX 는 <b>수정주가가 아니라 원본</b>이라
+     *     액면분할이 있으면 거래량이 하루아침에 10배로 뛰어 「60일 최고」 오탐이 된다.
+     *     상장주식수 변동을 같이 보면 그 날을 가려낼 수 있다.
+     *   ⊗ <b>종목명은 담지 않는다</b> — 80바이트 × 수백만 행이면 본문보다 이름이 커진다.
+     *     이름은 `krx_daily`·`all_stock_info` 에서 조인해 붙인다.
+     *
+     * 자료형은 실측 용량(확장 전 행당 138바이트)을 보고 좁혔다 — 주가는 INT 로 충분하고
+     * (21억), 거래대금·시총·상장주식수만 BIGINT 가 필요하다.
+     */
+    public function ensureTable(): void
+    {
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS krx_amt (
+                code      CHAR(6)      NOT NULL,
+                d         DATE         NOT NULL,
+                amt       BIGINT       NOT NULL COMMENT '거래대금(원) — KRX 실제값',
+                vol       BIGINT       NOT NULL COMMENT '거래량(주)',
+                o         INT UNSIGNED NULL COMMENT '시가',
+                h         INT UNSIGNED NULL COMMENT '고가',
+                l         INT UNSIGNED NULL COMMENT '저가',
+                c         INT UNSIGNED NULL COMMENT '종가',
+                mktcap    BIGINT       NULL COMMENT '시가총액(원)',
+                list_shrs BIGINT       NULL COMMENT '상장주식수 — 액면분할·증자 감지용',
+                mkt       CHAR(1)      NOT NULL DEFAULT '' COMMENT 'K=코스피 Q=코스닥',
+                src       CHAR(1)      NOT NULL DEFAULT 'k' COMMENT 'k=KRX확정 n=네이버잠정(당일)',
+                PRIMARY KEY (code, d),
+                KEY idx_d (d)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
+
+        // 이미 있던 테이블(4컬럼)을 넓힌다. MariaDB 의 IF NOT EXISTS 라 몇 번을 돌려도 안전하다.
+        foreach ([
+            "o         INT UNSIGNED NULL COMMENT '시가'",
+            "h         INT UNSIGNED NULL COMMENT '고가'",
+            "l         INT UNSIGNED NULL COMMENT '저가'",
+            "c         INT UNSIGNED NULL COMMENT '종가'",
+            "mktcap    BIGINT       NULL COMMENT '시가총액(원)'",
+            "list_shrs BIGINT       NULL COMMENT '상장주식수 — 액면분할·증자 감지용'",
+            "mkt       CHAR(1)      NOT NULL DEFAULT '' COMMENT 'K=코스피 Q=코스닥'",
+            "src       CHAR(1)      NOT NULL DEFAULT 'k' COMMENT 'k=KRX확정 n=네이버잠정(당일)'",
+        ] as $col) {
+            try { $this->pdo->exec("ALTER TABLE krx_amt ADD COLUMN IF NOT EXISTS {$col}"); }
+            catch (Throwable $e) { /* 이미 있으면 넘어간다 */ }
+        }
+    }
+
+    /** 그 날에 이미 몇 종목이 들어 있나 — 백필 이어받기 판정용 */
+    public function dayCount(string $d): int
+    {
+        $st = $this->pdo->prepare("SELECT COUNT(*) FROM krx_amt WHERE d=?");
+        $st->execute([$d]);
+        return (int)$st->fetchColumn();
+    }
+
+    /** 차트를 그리는 대상 종목 — 포트폴리오 보유 ∪ 관심종목 ∪ 시뮬레이터 자료 */
+    public function targets(): array
+    {
+        $out = [];
+        foreach ([
+            "SELECT DISTINCT stock_code c FROM pf_position",
+            "SELECT DISTINCT stock_code c FROM pf_watchlist",
+            "SELECT DISTINCT stock_code c FROM pf_sim_data",
+        ] as $sql) {
+            try {
+                foreach ($this->pdo->query($sql)->fetchAll(PDO::FETCH_COLUMN) as $c) {
+                    $c = preg_replace('/[^0-9A-Za-z]/', '', (string)$c);
+                    if ($c !== '') $out[$c] = 1;
+                }
+            } catch (Throwable $e) { /* 테이블이 없으면 그 소스만 건너뛴다 */ }
+        }
+        return array_keys($out);
+    }
+
+    private function call(string $path, array $q): array
+    {
+        $ch = curl_init(self::BASE . $path . '?' . http_build_query($q));
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 30,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_FOLLOWLOCATION => true,          // http→https 302 를 따라가야 한다
+            CURLOPT_HTTPHEADER     => ['AUTH_KEY: ' . $this->key],
+        ]);
+        $body = curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err  = (string)curl_error($ch);
+        curl_close($ch);
+
+        if ($body === false || $err !== '') throw new RuntimeException("KRX 통신 실패({$path}): {$err}");
+        if ($code !== 200)                  throw new RuntimeException("KRX HTTP {$code} ({$path})");
+        $j = json_decode((string)$body, true);
+        if (!is_array($j)) throw new RuntimeException("KRX 응답이 JSON 이 아님({$path})");
+        foreach (['OutBlock_1', 'output', 'block1', 'OutBlock'] as $k) {
+            if (isset($j[$k]) && is_array($j[$k])) return $j[$k];
+        }
+        return [];   // 휴장일 등
+    }
+
+    private static function num($v): float
+    {
+        return (float)str_replace(',', '', (string)$v);
+    }
+
+    /** 값이 없거나(`""` · `"-"`) 숫자가 아니면 <b>null</b> — 0 으로 채우면 "값이 0" 과 구별이 안 된다 */
+    private static function numN($v): ?float
+    {
+        $v = trim((string)$v);
+        if ($v === '' || $v === '-') return null;
+        $v = str_replace([',', ' '], '', $v);
+        if (!preg_match('/^-?\d+(\.\d+)?$/', $v)) return null;
+        return (float)$v;
+    }
+
+    private static function intN($v): ?int
+    {
+        $n = self::numN($v);
+        return $n === null ? null : (int)$n;
+    }
+
+    /**
+     * 하루치 수집 → 저장 행 수 반환.
+     * @param string     $ymd   YYYYMMDD
+     * @param array|null $codes 저장할 종목(null 이면 전종목 저장)
+     */
+    public function collectDay(string $ymd, ?array $codes = null): int
+    {
+        $ymd = preg_replace('/[^0-9]/', '', $ymd);
+        if (strlen($ymd) !== 8) throw new InvalidArgumentException('YYYYMMDD 형식이어야 합니다.');
+        $d = substr($ymd, 0, 4) . '-' . substr($ymd, 4, 2) . '-' . substr($ymd, 6, 2);
+        $want = $codes === null ? null : array_flip($codes);
+
+        $rows = [];
+        foreach (self::MARKETS as $path => $mkName) {
+            $mk = $mkName === 'KOSPI' ? 'K' : 'Q';
+            foreach ($this->call($path, ['basDd' => $ymd]) as $x) {
+                $code = trim((string)($x['ISU_CD'] ?? ''));
+                if (strlen($code) === 12) $code = substr($code, 3, 6);   // 표준코드 → 단축코드
+                if ($code === '' || ($want !== null && !isset($want[$code]))) continue;
+
+                // ★ 거래가 없는 날(거래정지·단일가 없음)도 <b>남긴다</b>.
+                //   레포의 확립된 규칙 「저장은 하되 지표에서 제외」(pf_bar_valid)를 따른다 —
+                //   원장에서 날짜가 통째로 사라지면 나중에 "쉰 날"과 "안 받은 날"을 구별할 수 없다.
+                //   창 계산·최고치 판정 쪽에서 `amt > 0` 으로 거른다.
+                $close = self::numN($x['TDD_CLSPRC'] ?? null);
+                if ($close === null || $close <= 0) continue;            // 종가조차 없으면 원장에 못 넣는다
+
+                $rows[] = [
+                    $code, $d,
+                    (int)self::num($x['ACC_TRDVAL'] ?? 0),
+                    (int)self::num($x['ACC_TRDVOL'] ?? 0),
+                    self::intN($x['TDD_OPNPRC'] ?? null),
+                    self::intN($x['TDD_HGPRC']  ?? null),
+                    self::intN($x['TDD_LWPRC']  ?? null),
+                    (int)$close,
+                    self::intN($x['MKTCAP']     ?? null),
+                    self::intN($x['LIST_SHRS']  ?? null),
+                    $mk,
+                ];
+            }
+        }
+        if (!$rows) return 0;
+
+        return $this->save($rows);
+    }
+
+    /**
+     * UPSERT — 같은 날을 다시 받아도 덮어쓰기만 된다(멱등).
+     *
+     * ★ 전종목이면 하루 2,765행이라 <b>한 행씩 execute 하면 백필이 몇 배 느려진다.</b>
+     *   500행씩 묶어 한 문장으로 보낸다.
+     * ★ `src='k'` 로 못박는다 — 당일 네이버 잠정값(n)이 들어와 있어도 KRX 확정값이 이긴다.
+     */
+    private function save(array $rows): int
+    {
+        $cols = "(code, d, amt, vol, o, h, l, c, mktcap, list_shrs, mkt, src)";
+        $upd  = "amt=VALUES(amt), vol=VALUES(vol), o=VALUES(o), h=VALUES(h), l=VALUES(l),
+                 c=VALUES(c), mktcap=VALUES(mktcap), list_shrs=VALUES(list_shrs),
+                 mkt=VALUES(mkt), src='k'";
+        $n = 0;
+        $this->pdo->beginTransaction();
+        try {
+            foreach (array_chunk($rows, 500) as $chunk) {
+                $ph  = implode(',', array_fill(0, count($chunk), "(?,?,?,?,?,?,?,?,?,?,?,'k')"));
+                $arg = [];
+                foreach ($chunk as $r) foreach ($r as $v) $arg[] = $v;
+                $st = $this->pdo->prepare("INSERT INTO krx_amt {$cols} VALUES {$ph}
+                                           ON DUPLICATE KEY UPDATE {$upd}");
+                $st->execute($arg);
+                $n += count($chunk);
+            }
+            $this->pdo->commit();
+        } catch (Throwable $e) { $this->pdo->rollBack(); throw $e; }
+        return $n;
+    }
+
+    /**
+     * ★ krx_daily 에서 옮겨 담기 — <b>API 를 부르지 않는다</b>.
+     *
+     * 매일 13:05 `dart_krx` 크론이 이미 KRX 전종목을 받아 `krx_daily` 에 넣는다
+     * (거래대금 `acc_val` 까지 들어 있다). 그런데 krx_daily 는 최근 10일만 두고 지운다(prune).
+     * 그래서 <b>지워지기 전에 여기로 옮겨</b> 장기 이력을 만든다 — 같은 값을 두 번 받을 이유가 없다.
+     *
+     * @param array|null $codes 옮길 종목(null 이면 krx_daily 에 있는 전종목)
+     * @return int 저장 행 수
+     */
+    public function syncFromKrxDaily(?array $codes = null): int
+    {
+        $sql = "SELECT stock_code, bas_dd, acc_val, acc_vol,
+                       open_prc, high_prc, low_prc, close_prc, mktcap, list_shrs, market
+                  FROM krx_daily
+                 WHERE close_prc > 0";
+        $arg = [];
+        if ($codes !== null) {
+            if (!$codes) return 0;
+            $sql .= ' AND stock_code IN (' . implode(',', array_fill(0, count($codes), '?')) . ')';
+            $arg = $codes;
+        }
+        try {
+            $st = $this->pdo->prepare($sql);
+            $st->execute($arg);
+            $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Throwable $e) { return 0; }   // krx_daily 가 없으면 조용히 0
+        if (!$rows) return 0;
+
+        $out = [];
+        foreach ($rows as $r) {
+            $out[] = [
+                $r['stock_code'], $r['bas_dd'],
+                (int)$r['acc_val'], (int)$r['acc_vol'],
+                self::intN($r['open_prc']), self::intN($r['high_prc']),
+                self::intN($r['low_prc']),  self::intN($r['close_prc']),
+                self::intN($r['mktcap']),   self::intN($r['list_shrs']),
+                // 시장명은 'KOSPI'/'KOSDAQ' 또는 한글로 온다 — 둘 다 코스닥만 골라내면 된다
+                (stripos((string)$r['market'], 'DAQ') !== false
+                    || strpos((string)$r['market'], '코스닥') !== false) ? 'Q' : 'K',
+            ];
+        }
+        return $this->save($out);
+    }
+
+    // ══ 당일 잠정치 (T+0) ═══════════════════════════════════════════════
+    /**
+     * ★ 장 마감 뒤, 네이버 스냅샷(all_stock_info)으로 <b>오늘 행</b>을 잠정 적재한다.
+     *
+     * KRX 확정값은 T+1(다음날 오후 1시)에야 온다. 「당일 마감 후에 보고 싶다」는 요건은
+     * 이 잠정치(src='n')로 채우고, 다음날 13:05 `dart_krx` 크론의 이관이 확정값(src='k')으로
+     * 덮어쓴다 — `stock_daily_range`(당일 1줄 + 다음날 보정)와 같은 패턴.
+     *
+     * ★ 휴장일 차단이 공짜다 — uDate 가 오늘인 행만 쓰므로 휴장일엔 저절로 0건이다.
+     * ★ KRX 확정값(src='k')이 이미 있으면 <b>절대 덮지 않는다</b>(IF 가드).
+     * ★ 단위: stock_vol_cap(거래대금)·stock_cap(시총)은 <b>억원</b>이라 ×1e8 로 원 단위로 맞춘다.
+     * ★ o/h/l/list_shrs 는 네이버 스냅샷에 없다 — NULL 로 두면 다음날 확정값이 채운다.
+     */
+    public function provisionalFromSnapshot(): int
+    {
+        $today = date('Y-m-d');
+        try {
+            $src = $this->pdo->query("
+                SELECT stock_code, stock_price, stock_vol, stock_vol_cap, stock_cap
+                  FROM all_stock_info
+                 WHERE DATE(uDate) = CURDATE()
+                   AND stock_price > 0 AND stock_vol > 0 AND stock_vol_cap > 0
+            ")->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Throwable $e) { return 0; }
+        if (!$src) return 0;
+
+        $n = 0;
+        $this->pdo->beginTransaction();
+        try {
+            foreach (array_chunk($src, 500) as $chunk) {
+                $ph = []; $arg = [];
+                foreach ($chunk as $r) {
+                    $ph[]  = "(?,?,?,?,?,?,'n')";
+                    $arg[] = preg_replace('/[^0-9A-Za-z]/', '', (string)$r['stock_code']);
+                    $arg[] = $today;
+                    $arg[] = (int)round((float)$r['stock_vol_cap'] * 1e8);   // 억원 → 원
+                    $arg[] = (int)$r['stock_vol'];
+                    $arg[] = (int)$r['stock_price'];
+                    $arg[] = (int)round((float)$r['stock_cap'] * 1e8);       // 억원 → 원
+                }
+                $st = $this->pdo->prepare("
+                    INSERT INTO krx_amt (code, d, amt, vol, c, mktcap, src)
+                    VALUES " . implode(',', $ph) . "
+                    ON DUPLICATE KEY UPDATE
+                        amt    = IF(src='k', amt,    VALUES(amt)),
+                        vol    = IF(src='k', vol,    VALUES(vol)),
+                        c      = IF(src='k', c,      VALUES(c)),
+                        mktcap = IF(src='k', mktcap, VALUES(mktcap)),
+                        src    = IF(src='k', 'k', 'n')");
+                $st->execute($arg);
+                $n += count($chunk);
+            }
+            $this->pdo->commit();
+        } catch (Throwable $e) { $this->pdo->rollBack(); throw $e; }
+        return $n;
+    }
+
+    /**
+     * 잠정치(src='n')가 KRX 확정값과 얼마나 어긋났었나 — <b>덮어쓰기 직전</b>에 부른다.
+     * 덮고 나면 잠정값이 사라져 다시는 잴 수 없으므로, 이 한 줄 로그가 T+0 경로의 상시 검증이다.
+     * @return array|null [비교 건수, 거래대금 절대오차 중앙(%), 1% 초과 건수] — 잴 것이 없으면 null
+     */
+    public function provisionalGap(): ?array
+    {
+        try {
+            $rows = $this->pdo->query("
+                SELECT a.amt nav, k.acc_val krx
+                  FROM krx_amt a
+                  JOIN krx_daily k ON k.stock_code = a.code AND k.bas_dd = a.d
+                 WHERE a.src = 'n' AND a.amt > 0 AND k.acc_val > 0
+            ")->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Throwable $e) { return null; }
+        if (!$rows) return null;
+
+        $diff = [];
+        foreach ($rows as $r) $diff[] = abs($r['nav'] / $r['krx'] - 1);
+        sort($diff);
+        $med  = $diff[(int)floor((count($diff) - 1) / 2)];
+        $over = count(array_filter($diff, static fn($v) => $v > 0.01));
+        return [count($diff), round($med * 100, 3), $over];
+    }
+
+    // ══ 거래대금 신고가 신호 ═════════════════════════════════════════════
+    /** 신호가 있는 최근 거래일들 (전종목 적재가 된 날만 — 옛 24종목 구간 제외) */
+    public function recentDates(int $n = 40): array
+    {
+        $st = $this->pdo->prepare("
+            SELECT d FROM krx_amt WHERE amt > 0
+             GROUP BY d HAVING COUNT(*) >= 500
+             ORDER BY d DESC LIMIT " . (int)$n);
+        $st->execute();
+        return $st->fetchAll(PDO::FETCH_COLUMN);
+    }
+
+    /** 신고가 판정 창 (거래일) — 차트 지표 「최고_거래대금선」의 변수_봉수와 같은 값으로 맞춘다(2026-07-31) */
+    public const SURGE_WIN = 120;
+
+    /**
+     * ★ 그 날짜의 「거래대금 120거래일 신고가」 목록.
+     *
+     * 판정(2026-07-31 백테스트 2회 — 60일판·120일판 · stock/index.php 검증 탭에 실측 근거):
+     *   신호  = 그 날 amt 가 그 종목 직전 SURGE_WIN−1 거래일(amt>0 인 날만) 최고를 넘음
+     *   제외  = 이력 SURGE_WIN 행 미만 (신규상장이 자동으로 "최고"가 되는 것 방지)
+     *   같이 계산 = mul(직전최고 대비 배수) · avg_mul(직전 20일 평균 대비) · chg(등락률)
+     *
+     * 창을 달력 250일로 끊어 읽는다(≈170거래일) — 전 이력을 훑으면 14초, 이만큼이면 몇 초.
+     */
+    public function surgeForDate(?string $d = null): array
+    {
+        $d = $d !== null && $d !== '' ? $d : ($this->recentDates(1)[0] ?? '');
+        if ($d === '') return ['date' => '', 'rows' => []];
+        $from = date('Y-m-d', strtotime($d . ' -250 day'));
+        $w    = self::SURGE_WIN;
+
+        $st = $this->pdo->prepare("
+            WITH b AS (
+              SELECT code, d, amt, vol, c, mktcap, list_shrs, mkt, src
+                FROM krx_amt
+               WHERE amt > 0 AND c > 0 AND d >= ? AND d <= ?
+            ),
+            w AS (
+              SELECT code, d, amt, vol, c, mktcap, list_shrs, src,
+                     MAX(NULLIF(mkt, '')) OVER (PARTITION BY code) AS mkt,
+                     MAX(amt)  OVER winp AS pmax,
+                     AVG(amt)  OVER win19 AS pavg20,
+                     COUNT(*)  OVER winc AS nwin,
+                     LAG(c, 1) OVER winf  AS cp
+                FROM b
+              WINDOW winp  AS (PARTITION BY code ORDER BY d ROWS BETWEEN " . ($w - 1) . " PRECEDING AND 1 PRECEDING),
+                     win19 AS (PARTITION BY code ORDER BY d ROWS BETWEEN 19 PRECEDING AND 1 PRECEDING),
+                     winc  AS (PARTITION BY code ORDER BY d ROWS BETWEEN " . ($w - 1) . " PRECEDING AND CURRENT ROW),
+                     winf  AS (PARTITION BY code ORDER BY d)
+            )
+            SELECT code, mkt, src, c, cp, amt, vol, mktcap, list_shrs,
+                   amt / pmax   AS mul,
+                   CASE WHEN pavg20 > 0 THEN amt / pavg20 END AS avg_mul,
+                   CASE WHEN cp > 0     THEN c / cp - 1    END AS chg
+              FROM w
+             WHERE d = ? AND nwin >= {$w} AND pmax IS NOT NULL AND amt > pmax
+             ORDER BY amt DESC");
+        $st->execute([$from, $d, $d]);
+        return ['date' => $d, 'rows' => $st->fetchAll(PDO::FETCH_ASSOC)];
+    }
+
+    // ══ 신호 캐시 ═══════════════════════════════════════════════════════
+    /**
+     * ★ 왜 캐시인가 — 120일 창 윈도우 연산이 <b>화면에서 8~9초</b>였다(실측 2026-07-31).
+     * 신호는 하루에 한 번(크론이 데이터를 넣을 때)만 바뀌므로 그때 계산해 둔다
+     * (`stock_price_range` 와 같은 「원본 + 집계 캐시」 패턴).
+     *
+     * ★ `krx_surge_day`(날짜 마커)가 따로 있는 이유 — <b>「신호 0개인 날」과 「아직 계산 안 한 날」을
+     *   구별</b>해야 한다. 행이 없다는 것만으로는 둘을 가를 수 없다.
+     */
+    public function ensureSurgeCache(): void
+    {
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS krx_surge (
+                d         DATE         NOT NULL,
+                code      CHAR(6)      NOT NULL,
+                mkt       CHAR(1)      NOT NULL DEFAULT '',
+                src       CHAR(1)      NOT NULL DEFAULT 'k',
+                c         INT UNSIGNED NULL,
+                cp        INT UNSIGNED NULL COMMENT '전일 종가',
+                amt       BIGINT       NOT NULL,
+                vol       BIGINT       NOT NULL,
+                mktcap    BIGINT       NULL,
+                list_shrs BIGINT       NULL,
+                mul       DECIMAL(12,4) NULL COMMENT '직전 창 최고 대비',
+                avg_mul   DECIMAL(12,4) NULL COMMENT '직전 20일 평균 대비',
+                chg       DECIMAL(10,6) NULL COMMENT '등락률',
+                PRIMARY KEY (d, code)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS krx_surge_day (
+                d           DATE NOT NULL PRIMARY KEY,
+                n           INT  NOT NULL COMMENT '신호 수(0 포함)',
+                win         INT  NOT NULL COMMENT '계산에 쓴 창 길이',
+                computed_at DATETIME NOT NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
+    }
+
+    /**
+     * 캐시 우선 조회 — 없으면 그 자리에서 계산해 채운다(첫 조회자만 몇 초를 낸다).
+     * 창 길이가 바뀌면(win 불일치) 그 날을 다시 계산한다 — 60→120 전환 잔재 방어.
+     */
+    public function surgeCached(?string $d = null): array
+    {
+        $d = $d !== null && $d !== '' ? $d : ($this->recentDates(1)[0] ?? '');
+        if ($d === '') return ['date' => '', 'rows' => []];
+        $this->ensureSurgeCache();
+
+        $st = $this->pdo->prepare("SELECT n, win FROM krx_surge_day WHERE d = ?");
+        $st->execute([$d]);
+        $day = $st->fetch(PDO::FETCH_ASSOC);
+
+        if ($day && (int)$day['win'] === self::SURGE_WIN) {
+            if ((int)$day['n'] === 0) return ['date' => $d, 'rows' => []];
+            $st = $this->pdo->prepare("
+                SELECT code, mkt, src, c, cp, amt, vol, mktcap, list_shrs, mul, avg_mul, chg
+                  FROM krx_surge WHERE d = ? ORDER BY amt DESC");
+            $st->execute([$d]);
+            return ['date' => $d, 'rows' => $st->fetchAll(PDO::FETCH_ASSOC)];
+        }
+        return $this->rebuildSurge($d);
+    }
+
+    /** 그 날짜의 신호를 계산해 캐시에 넣는다 (있던 것은 교체) */
+    public function rebuildSurge(string $d): array
+    {
+        $this->ensureSurgeCache();
+        $res = $this->surgeForDate($d);
+        if ($res['date'] === '') return $res;
+
+        $this->pdo->beginTransaction();
+        try {
+            $del = $this->pdo->prepare("DELETE FROM krx_surge WHERE d = ?");
+            $del->execute([$d]);
+            if ($res['rows']) {
+                $ins = $this->pdo->prepare("
+                    INSERT INTO krx_surge (d, code, mkt, src, c, cp, amt, vol, mktcap, list_shrs, mul, avg_mul, chg)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)");
+                foreach ($res['rows'] as $r) {
+                    $ins->execute([$d, $r['code'], (string)$r['mkt'], (string)$r['src'],
+                        $r['c'], $r['cp'], $r['amt'], $r['vol'], $r['mktcap'], $r['list_shrs'],
+                        $r['mul'], $r['avg_mul'], $r['chg']]);
+                }
+            }
+            $up = $this->pdo->prepare("
+                INSERT INTO krx_surge_day (d, n, win, computed_at) VALUES (?,?,?,NOW())
+                ON DUPLICATE KEY UPDATE n=VALUES(n), win=VALUES(win), computed_at=NOW()");
+            $up->execute([$d, count($res['rows']), self::SURGE_WIN]);
+            $this->pdo->commit();
+        } catch (Throwable $e) { $this->pdo->rollBack(); throw $e; }
+        return $res;
+    }
+
+    /**
+     * ★ 과거 전체를 한 방에 예열한다 — 날짜별로 부르면 40일 × 수초인데,
+     * 전 구간을 <b>윈도우 한 패스</b>로 훑으면 15초로 끝난다(백테스트와 같은 쿼리 구조).
+     * 지난 날짜를 드롭다운으로 옮겨 다닐 때 매번 몇 초씩 기다리지 않게 하는 용도.
+     * 날짜 마커는 전종목 적재가 된 날(500종목↑)만 찍는다 — recentDates 와 같은 기준.
+     * @return array [신호 행수, 마커 날짜수]
+     */
+    public function warmSurgeAll(string $from): array
+    {
+        $this->ensureSurgeCache();
+        $w    = self::SURGE_WIN;
+        $back = date('Y-m-d', strtotime($from . ' -250 day'));
+
+        $rows = $this->pdo->prepare("
+            WITH b AS (
+              SELECT code, d, amt, vol, c, mktcap, list_shrs, mkt, src
+                FROM krx_amt
+               WHERE amt > 0 AND c > 0 AND d >= ?
+            ),
+            w AS (
+              SELECT code, d, amt, vol, c, mktcap, list_shrs, src,
+                     MAX(NULLIF(mkt, '')) OVER (PARTITION BY code) AS mkt,
+                     MAX(amt)  OVER winp AS pmax,
+                     AVG(amt)  OVER win19 AS pavg20,
+                     COUNT(*)  OVER winc AS nwin,
+                     LAG(c, 1) OVER winf  AS cp
+                FROM b
+              WINDOW winp  AS (PARTITION BY code ORDER BY d ROWS BETWEEN " . ($w - 1) . " PRECEDING AND 1 PRECEDING),
+                     win19 AS (PARTITION BY code ORDER BY d ROWS BETWEEN 19 PRECEDING AND 1 PRECEDING),
+                     winc  AS (PARTITION BY code ORDER BY d ROWS BETWEEN " . ($w - 1) . " PRECEDING AND CURRENT ROW),
+                     winf  AS (PARTITION BY code ORDER BY d)
+            )
+            SELECT d, code, mkt, src, c, cp, amt, vol, mktcap, list_shrs,
+                   amt / pmax AS mul,
+                   CASE WHEN pavg20 > 0 THEN amt / pavg20 END AS avg_mul,
+                   CASE WHEN cp > 0     THEN c / cp - 1    END AS chg
+              FROM w
+             WHERE d >= ? AND nwin >= {$w} AND pmax IS NOT NULL AND amt > pmax");
+        $rows->execute([$back, $from]);
+        $sig = $rows->fetchAll(PDO::FETCH_ASSOC);
+
+        // 마커 대상 = 전종목 적재가 된 거래일 전부 (신호 0개인 날도 「계산됨」으로 찍는다)
+        $days = $this->pdo->prepare("
+            SELECT d, 0 FROM krx_amt WHERE amt > 0 AND d >= ?
+             GROUP BY d HAVING COUNT(*) >= 500");
+        $days->execute([$from]);
+        $mark = $days->fetchAll(PDO::FETCH_KEY_PAIR);
+        foreach ($sig as $r) if (isset($mark[$r['d']])) $mark[$r['d']]++;
+
+        $this->pdo->beginTransaction();
+        try {
+            $this->pdo->prepare("DELETE FROM krx_surge WHERE d >= ?")->execute([$from]);
+            $this->pdo->prepare("DELETE FROM krx_surge_day WHERE d >= ?")->execute([$from]);
+
+            foreach (array_chunk($sig, 500) as $chunk) {
+                $ph = implode(',', array_fill(0, count($chunk), '(?,?,?,?,?,?,?,?,?,?,?,?,?)'));
+                $arg = [];
+                foreach ($chunk as $r) {
+                    array_push($arg, $r['d'], $r['code'], (string)$r['mkt'], (string)$r['src'],
+                        $r['c'], $r['cp'], $r['amt'], $r['vol'], $r['mktcap'], $r['list_shrs'],
+                        $r['mul'], $r['avg_mul'], $r['chg']);
+                }
+                $this->pdo->prepare("INSERT INTO krx_surge
+                    (d, code, mkt, src, c, cp, amt, vol, mktcap, list_shrs, mul, avg_mul, chg)
+                    VALUES {$ph}")->execute($arg);
+            }
+            $up = $this->pdo->prepare("
+                INSERT INTO krx_surge_day (d, n, win, computed_at) VALUES (?,?,?,NOW())");
+            foreach ($mark as $d => $n) $up->execute([$d, $n, $w]);
+            $this->pdo->commit();
+        } catch (Throwable $e) { $this->pdo->rollBack(); throw $e; }
+        return [count($sig), count($mark)];
+    }
+
+    /**
+     * 그 날짜 이후의 캐시를 지운다 — 원장이 바뀌면(잠정→확정 덮어쓰기 등) 그 날과
+     * 그 날을 창에 포함하는 이후 날짜의 판정이 달라질 수 있다. 다시 볼 때 저절로 재계산된다.
+     */
+    public function invalidateSurge(string $fromDate): void
+    {
+        $this->ensureSurgeCache();
+        try {
+            $this->pdo->prepare("DELETE FROM krx_surge WHERE d >= ?")->execute([$fromDate]);
+            $this->pdo->prepare("DELETE FROM krx_surge_day WHERE d >= ?")->execute([$fromDate]);
+        } catch (Throwable $e) { /* 캐시는 없어도 동작한다 */ }
+    }
+
+    // ══ 박스 상태 (지지·저항 경로) ══════════════════════════════════════
+    /**
+     * ★ 신호일 박스(고가 H=저항 · 저가 L=지지)가 <b>지금까지</b> 어떻게 됐나 — 종가 기준.
+     *
+     * 경로 연구(2026-07-31 · 6,058건 · 기간분할 통과)의 판정 규칙을 화면용으로 옮긴 것:
+     *   돌파   = 종가 > H 가 먼저  →  매집형이면 실측 +2.26%·승률 57.9% (돌파 뒤 H 아래로 오면 가짜돌파)
+     *   붕괴   = 종가 < L 이 먼저  →  계단(직전 2개 신호의 H·L)이 73.8% 받아준다 · 관통은 3.1%뿐
+     *   계단지지 = 붕괴 후 계단 레벨(±2%)에 저가가 닿고 종가가 버팀 → 매집형이면 +1.41%·55.1%
+     *
+     * @param array $sigs [['code'=>, 'd'=>], …] — 신호들
+     * @return array "code|d" => ['st'=>클래스, 'txt'=>, 'tip'=>, 'h'=>, 'l'=>]
+     */
+    public function boxStatusMany(array $sigs): array
+    {
+        if (!$sigs) return [];
+        $pairs = []; $codes = []; $minD = null;
+        foreach ($sigs as $s) {
+            $pairs[] = [$s['code'], $s['d']];
+            $codes[$s['code']] = 1;
+            if ($minD === null || $s['d'] < $minD) $minD = $s['d'];
+        }
+        $codes = array_keys($codes);
+        $inC   = implode(',', array_fill(0, count($codes), '?'));
+
+        // ① 신호일 H·L (잠정치 src='n' 은 OHLC 가 없어 '집계중'으로 나온다)
+        $ph = implode(',', array_fill(0, count($pairs), '(?,?)'));
+        $arg = [];
+        foreach ($pairs as $p) { $arg[] = $p[0]; $arg[] = $p[1]; }
+        $st = $this->pdo->prepare("SELECT code, d, h, l FROM krx_amt WHERE (code, d) IN ($ph)");
+        $st->execute($arg);
+        $HL = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $HL[$r['code'] . '|' . $r['d']] = [(float)$r['h'], (float)$r['l']];
+        }
+
+        // ② 신호일 이후 봉 (거래일만)
+        $st = $this->pdo->prepare("
+            SELECT code, d, l, c FROM krx_amt
+             WHERE code IN ($inC) AND d > ? AND amt > 0 AND c > 0 ORDER BY code, d");
+        $st->execute(array_merge($codes, [$minD]));
+        $bars = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) $bars[$r['code']][] = $r;
+
+        // ③ 계단 — 그 종목의 이전 신호들 (직전 2개의 H·L 을 쓴다)
+        $st = $this->pdo->prepare("
+            SELECT s.code, s.d, a.h, a.l
+              FROM krx_surge s JOIN krx_amt a ON a.code = s.code AND a.d = s.d
+             WHERE s.code IN ($inC) AND a.h > 0 ORDER BY s.code, s.d");
+        $st->execute($codes);
+        $hist = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) $hist[$r['code']][] = $r;
+
+        $Z = 0.02;   // 레벨 허용오차 — 경로 연구와 동일
+        $out = [];
+        foreach ($sigs as $s) {
+            $key = $s['code'] . '|' . $s['d'];
+            [$H, $L] = $HL[$key] ?? [0.0, 0.0];
+            if ($H <= 0 || $L <= 0) {
+                $out[$key] = ['st' => 'bx-na', 'txt' => '집계중', 'tip' => '신호일 고가·저가는 다음날 KRX 확정값에서 옵니다', 'h' => 0, 'l' => 0];
+                continue;
+            }
+
+            /* 계단 레벨 = ★<b>현재 L 아래 레벨을 주는 최근 박스 2개</b>의 H·L (내림차순 최대 4).
+             * 「직전 2개 신호」로 하면 바로 위에 겹친 박스가 자리만 차지해 진짜 아래층을 시야에서
+             * 잘라낸다 — 삼성물산 6/19 박스에서 실제로 그랬다(3월 계단 264,500을 잃어 관통 오판).
+             * 정의 변경은 재측정(4라운드)으로 검증: 계단지지 74.9%·관통 2.5%·규칙2 양기간 ＋ 유지. */
+            $lv = []; $prev = [];
+            foreach ($hist[$s['code']] ?? [] as $hrow) if ($hrow['d'] < $s['d']) $prev[] = $hrow;
+            /* floors = L 아래에 레벨을 주는 과거 박스 수(무제한) — 위치 연구(2026-08-01)의 축.
+             * 계단지지 매수 규칙은 floors≥3 일 때만 유효(+2.40%·58.5%·양기간 ＋), 1~2 는 실측
+             * 음수(−2.47%·45%·양기간 −)라 관망. 매매용 계단($lv)은 여전히 최근 박스 2개만. */
+            $nBox = 0; $floors = 0;
+            for ($p = count($prev) - 1; $p >= 0; $p--) {
+                $cand = [];
+                foreach (['h', 'l'] as $f) {
+                    $v = (float)$prev[$p][$f];
+                    if ($v > 0 && $v < $L * (1 - $Z)) $cand[] = $v;
+                }
+                if (!$cand) continue;
+                $floors++;
+                if ($nBox < 2) { $nBox++; foreach ($cand as $v) $lv[] = $v; }
+            }
+            rsort($lv); $lv = array_slice($lv, 0, 4);
+            $tipHL = 'H(저항) ' . number_format($H) . ' · L(지지) ' . number_format($L)
+                   . ($lv ? ' · 계단 ' . implode('/', array_map(fn($v) => number_format($v), $lv)) : ' · 계단 없음(첫 폭발)');
+
+            // 신호일 이후 봉만 골라 종가 기준 상태기계
+            $bs = [];
+            foreach ($bars[$s['code']] ?? [] as $b) if ($b['d'] > $s['d']) $bs[] = $b;
+            if (!$bs) { $out[$key] = ['st' => 'bx-new', 'txt' => '新박스', 'tip' => $tipHL, 'h' => $H, 'l' => $L]; continue; }
+
+            $phase = ''; $pi = -1;
+            foreach ($bs as $i => $b) {
+                $c = (float)$b['c'];
+                if ($c > $H) { $phase = 'A'; $pi = $i; break; }
+                if ($c < $L) { $phase = 'C'; $pi = $i; break; }
+            }
+            $lastC = (float)end($bs)['c'];
+
+            if ($phase === 'A') {
+                /* ★삼성물산 사례(2026-07-31)로 고침 — 돌파 후 <b>두 달 지나</b> 반락한 것을
+                 * "가짜돌파"라 부르면 +40% 간 성공 사례가 실패처럼 읽힌다.
+                 * 경로 연구의 가짜돌파(A2)는 「+5일 내 재진입」이다 — 그 정의만 그 이름을 쓴다. */
+                $ago = count($bs) - $pi;   // 돌파 후 경과 거래일
+                if ($lastC > $H) {
+                    $out[$key] = ['st' => 'bx-brk', 'txt' => '돌파✓ ' . $ago . '일',
+                        'tip' => $tipHL . ' — 종가가 저항 위 (매집형 돌파 매수 실측 +2.26%·승률 57.9%)', 'h' => $H, 'l' => $L];
+                } elseif ($ago <= 5) {
+                    $out[$key] = ['st' => 'bx-fake', 'txt' => '가짜돌파',
+                        'tip' => $tipHL . ' — 돌파 직후(5일 내) 박스 안으로 되돌아옴', 'h' => $H, 'l' => $L];
+                } else {
+                    $out[$key] = ['st' => 'bx-fake', 'txt' => '돌파후반락',
+                        'tip' => $tipHL . " — 돌파하고 {$ago}거래일 지나 저항 아래로 반락 (돌파 자체는 성립했던 박스)", 'h' => $H, 'l' => $L];
+                }
+            } elseif ($phase === 'C') {
+                /* ★계단을 <b>차례로</b> 시험한다 — 한 계단을 지켰다가도 나중에 깨면 다음 계단으로 내려간다.
+                 * (전엔 첫 지지에서 판정을 멈춰, 그 계단마저 깨진 뒤에도 「계단지지」로 남아 있었다 —
+                 *  삼성물산이 정확히 그랬다: 7/16 1단(386,000) 지지 → 이탈 → 지금 2단(340,000) 시험 중) */
+                if (!$lv) {
+                    $out[$key] = ['st' => 'bx-dn', 'txt' => '붕괴↓',
+                        'tip' => $tipHL . ' — 받아줄 계단이 없음(첫 폭발)', 'h' => $H, 'l' => $L];
+                } else {
+                    $idx = 0; $touched = false; $pierced = false; $n = count($lv);
+                    for ($u = $pi; $u < count($bs); $u++) {
+                        $c = (float)$bs[$u]['c']; $lo = (float)$bs[$u]['l'];
+                        while ($idx < $n && $c < $lv[$idx] * (1 - $Z)) { $idx++; $touched = false; }
+                        if ($idx >= $n) { $pierced = true; break; }
+                        if ($lo > 0 && $lo <= $lv[$idx] * (1 + $Z)) $touched = true;
+                    }
+                    if ($pierced) {
+                        $out[$key] = ['st' => 'bx-dn', 'txt' => '관통↓',
+                            'tip' => $tipHL . ' — 계단까지 전부 뚫림(실측 3.1%의 드문 케이스)', 'h' => $H, 'l' => $L];
+                    } elseif (!$touched) {
+                        $out[$key] = ['st' => 'bx-dn', 'txt' => '붕괴·표류',
+                            'tip' => $tipHL . sprintf(' — 지지 아래·%d단 계단(%s) 위에서 표류', $idx + 1, number_format($lv[$idx])), 'h' => $H, 'l' => $L];
+                    } elseif ($lastC > $lv[$idx] * (1 + $Z)) {
+                        /* ⚠ = 위치 연구(2026-08-01): 아래층 박스 3개 미만의 계단지지는 실측 음수 — 매수규칙 미충족 */
+                        $flNote = $floors >= 3
+                            ? sprintf(' · 아래층 박스 %d개 — 매수규칙 충족(매집형×아래층 3개↑ 실측 +2.40%%·승률 58.5%%)', $floors)
+                            : sprintf(' · ⚠아래층 박스 %d개(3개 미만) — 실측 음수(−2.5%%·승률 45%%)라 관망', $floors);
+                        $out[$key] = ['st' => 'bx-lad', 'txt' => '계단지지 ' . ($idx + 1) . '단' . ($floors >= 3 ? '' : '⚠'),
+                            'tip' => $tipHL . sprintf(' — %d단(%s)이 받아 반등 중', $idx + 1, number_format($lv[$idx])) . $flNote,
+                            'h' => $H, 'l' => $L];
+                    } else {
+                        $out[$key] = ['st' => 'bx-lad', 'txt' => ($idx + 1) . '단 시험중',
+                            'tip' => $tipHL . sprintf(' — 지금 %d단 계단(%s) 바로 위 — 지키면 반등 후보, 깨면 %s',
+                                $idx + 1, number_format($lv[$idx]),
+                                $idx + 1 < $n ? ($idx + 2) . '단(' . number_format($lv[$idx + 1]) . ')' : '계단 없음')
+                                . ($floors < 3 ? sprintf(' · ⚠아래층 박스 %d개 — 지지 확인돼도 매수규칙(3개↑) 미충족', $floors) : ''),
+                            'h' => $H, 'l' => $L];
+                    }
+                }
+            } else {
+                /* ⚠ = 박스 기간 연구(2026-08-01·검증 탭 ⑦): 매집형 박스가 체류 10일을 넘기면
+                 * 돌파율이 60%→37%로 꺾이고(유통기한), 늦은 돌파는 사도 음수(−6.68%·n=6). */
+                $toH = $lastC > 0 ? ($H / $lastC - 1) * 100 : 0;
+                $days = count($bs);   // 신호 후 경과 거래일 (전부 박스 안)
+                $stale = $days > 10;
+                $out[$key] = ['st' => 'bx-in',
+                    'txt' => sprintf('박스안 H%+.1f%%', $toH) . ($stale ? ' ' . $days . '일⚠' : ''),
+                    'tip' => $tipHL . sprintf(' — 현재가에서 저항까지 %+.1f%% · 지지까지 %+.1f%%',
+                        $toH, $lastC > 0 ? ($L / $lastC - 1) * 100 : 0)
+                        . ($stale ? sprintf(' · ⚠신호 후 %d거래일째 박스 체류 — 10일 넘으면 돌파율이 60%%→37%%로 꺾인다(유통기한·검증 탭 ⑦). 늦은 돌파는 추격 주의', $days) : ''),
+                    'h' => $H, 'l' => $L];
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * 매집형 박스 추적 — 최근 신호 중 매집형(20평비≤5 ∧ 등락 0~10%)만.
+     * 경로 연구의 승자 규칙(돌파 매수·계단지지 매수)을 매일 화면에서 보기 위한 목록.
+     */
+    public function accBoxes(string $upto, int $calDays = 45, float $minAmt = 1e10, int $cap = 40): array
+    {
+        $from = date('Y-m-d', strtotime($upto . " -{$calDays} day"));
+        $st = $this->pdo->prepare("
+            SELECT code, d, amt, c, avg_mul, chg
+              FROM krx_surge
+             WHERE d BETWEEN ? AND ? AND amt >= ?
+               AND avg_mul IS NOT NULL AND avg_mul <= 5
+               AND chg IS NOT NULL AND chg >= 0 AND chg < 0.10
+             ORDER BY d DESC LIMIT " . (int)$cap);
+        $st->execute([$from, $upto, $minAmt]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 종목명 — all_stock_info 우선, 없으면(상장폐지 등) krx_daily 최근 이름 */
+    public function names(array $codes): array
+    {
+        if (!$codes) return [];
+        $in  = implode(',', array_fill(0, count($codes), '?'));
+        $out = [];
+        try {
+            $st = $this->pdo->prepare("SELECT stock_code, stock_name FROM all_stock_info WHERE stock_code IN ($in)");
+            $st->execute(array_values($codes));
+            $out = $st->fetchAll(PDO::FETCH_KEY_PAIR);
+        } catch (Throwable $e) { /* 아래 폴백 */ }
+        $miss = array_values(array_diff($codes, array_keys($out)));
+        if ($miss) {
+            try {
+                $in2 = implode(',', array_fill(0, count($miss), '?'));
+                $st = $this->pdo->prepare("
+                    SELECT stock_code, stock_name FROM krx_daily
+                     WHERE stock_code IN ($in2) AND stock_name <> ''");
+                $st->execute($miss);
+                foreach ($st->fetchAll(PDO::FETCH_KEY_PAIR) as $k => $v) $out[$k] = $v;
+            } catch (Throwable $e) { /* 이름 없이 코드로 표시 */ }
+        }
+        return $out;
+    }
+
+    /** 적재 현황 — [행수, 종목수, 최초일, 최종일] */
+    public function stat(): array
+    {
+        $r = $this->pdo->query(
+            "SELECT COUNT(*) n, COUNT(DISTINCT code) c, MIN(d) mn, MAX(d) mx FROM krx_amt"
+        )->fetch(PDO::FETCH_ASSOC);
+        return [(int)$r['n'], (int)$r['c'], (string)$r['mn'], (string)$r['mx']];
+    }
+
+    /** 종목의 거래대금 시계열 → [ 'YYYY-MM-DD' => amt ] */
+    public function series(string $code, string $from = '', string $to = ''): array
+    {
+        $sql = "SELECT d, amt FROM krx_amt WHERE code=?";
+        $arg = [preg_replace('/[^0-9A-Za-z]/', '', $code)];
+        if ($from !== '') { $sql .= " AND d>=?"; $arg[] = $from; }
+        if ($to   !== '') { $sql .= " AND d<=?"; $arg[] = $to; }
+        $st = $this->pdo->prepare($sql . " ORDER BY d");
+        $st->execute($arg);
+        $out = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) $out[$r['d']] = (int)$r['amt'];
+        return $out;
+    }
+}
+?>
