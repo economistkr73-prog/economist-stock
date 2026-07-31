@@ -14,9 +14,9 @@
  * 남은 pending 이 0 이 될 때까지 반복 호출하면 전체 좌표화 완료.
  */
 
-require_once "./env/cnt.inc";
-if (file_exists("./env/maps.inc"))  require_once "./env/maps.inc";
-if (file_exists("./env/kakao.inc")) require_once "./env/kakao.inc";
+require_once $_SERVER['DOCUMENT_ROOT'] . "/env/cnt.inc";
+if (file_exists($_SERVER['DOCUMENT_ROOT'] . "/env/maps.inc"))  require_once $_SERVER['DOCUMENT_ROOT'] . "/env/maps.inc";
+if (file_exists($_SERVER['DOCUMENT_ROOT'] . "/env/kakao.inc")) require_once $_SERVER['DOCUMENT_ROOT'] . "/env/kakao.inc";
 
 header('Content-Type: text/html; charset=utf-8');
 

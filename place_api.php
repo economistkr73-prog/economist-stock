@@ -900,7 +900,7 @@ function seed_demo(Place $place): array
 
 // ==========================================================
 // 개발용: 좌표 없이 주소만 있는 더미 (geocode_status=pending)
-// → cron_place_geocode.php 로 좌표화 테스트. 적재 직후엔 지도에 안 뜸(ok 아님)
+// → cron_job.php?task=place_geo 로 좌표화 테스트. 적재 직후엔 지도에 안 뜸(ok 아님)
 // ==========================================================
 function seed_pending(Place $place): array
 {
@@ -924,7 +924,7 @@ function seed_pending(Place $place): array
         $r = $place->ingest($it);
         if ($r['place_id'] > 0) $cnt++;
     }
-    return ['ok' => true, 'msg' => "pending 더미 적재 완료 (좌표X) — cron_place_geocode.php 로 좌표화하세요",
+    return ['ok' => true, 'msg' => "pending 더미 적재 완료 (좌표X) — cron_job.php?task=place_geo 로 좌표화하세요",
             'places' => $cnt];
 }
 

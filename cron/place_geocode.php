@@ -15,9 +15,9 @@
  * 남은 pending 이 0 이 나올 때까지 반복 호출하면 전체 좌표화 완료.
  */
 
-require_once "./env/cnt.inc";
-if (file_exists("./env/maps.inc"))  require_once "./env/maps.inc";  // 네이버 지오코딩 키
-if (file_exists("./env/kakao.inc")) require_once "./env/kakao.inc"; // 카카오 키워드 검색 키
+require_once $_SERVER['DOCUMENT_ROOT'] . "/env/cnt.inc";
+if (file_exists($_SERVER['DOCUMENT_ROOT'] . "/env/maps.inc"))  require_once $_SERVER['DOCUMENT_ROOT'] . "/env/maps.inc";  // 네이버 지오코딩 키
+if (file_exists($_SERVER['DOCUMENT_ROOT'] . "/env/kakao.inc")) require_once $_SERVER['DOCUMENT_ROOT'] . "/env/kakao.inc"; // 카카오 키워드 검색 키
 
 header('Content-Type: text/html; charset=utf-8');
 

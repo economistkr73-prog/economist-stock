@@ -58,7 +58,7 @@ require_login();                   // 미로그인 시 /lg.php 리다이렉트
 | `analysis_model.php` | 분석 모델 정의 |
 | `daily_news.php` | 일간 뉴스 수집 및 표시 |
 | `stock_thema_news.php` | 종목 테마 뉴스 |
-| `cron_keyword_collector.php` | 키워드 자동 수집 (크론 전용) |
+| `cron_job.php` | **모든 크론의 유일한 진입점** (레지스트리+디스패처). 구현은 `cron/` — 아래 「크론」 절 |
 | `rss_feed.php` | RSS 피드 출력 |
 | `lg.php` / `gi.php` | 로그인 / 회원가입 |
 | `classes/data_upload.php` | 데이터 수동 입력 UI |
@@ -72,6 +72,25 @@ require_login();                   // 미로그인 시 /lg.php 리다이렉트
 ## `etf_stock.php` 다중 창 패턴
 
 행 클릭 시 `openCommonFrames(rowId, stockCode, params, targets, curPhp)`를 호출해 여러 named window를 열어 종목 상세를 표시한다. `urlMap`에서 target 이름(`etf_t1`, `etf_d1`, `etf_d2`, `etf_d5`)과 `mode`를 매핑한다.
+
+## 크론(배치)
+
+**`CRON.md` 를 먼저 읽는다.** 전체표·잡별 상세(역할·소스·쓰는 테이블·실측 소요·이어받기)·외부 API 한도·테이블 역인덱스·신규 크론 체크리스트가 들어 있다.
+
+구조 — **크론 파일을 루트에 새로 만들지 않는다.**
+
+| 위치 | 역할 |
+|------|------|
+| `cron_job.php` | 유일한 진입점. `TASKS` 레지스트리가 "어떤 파일을 어떤 인자로 부를지" 결정 |
+| `cron/*.php` | 실제 구현. env 는 `$_SERVER['DOCUMENT_ROOT']` 기준으로 읽는다 |
+| `cron/_boot.php` | CLI 실행 시 `DOCUMENT_ROOT` 세팅 (각 파일 맨 위에서 require) |
+| `env/cronbg.inc` | 30초 타임아웃 우회(자기호출 bg) + 로그 + 시간예산 공용 헬퍼 |
+
+- 크론 사이트(cron-job.org)에 등록되는 URL은 **`cron_job.php?task=<이름>&k=…` 하나뿐**이다.
+  모드·옵션을 바꿀 때 **크론 사이트를 건드리지 않고 `TASKS` 만 고친다.**
+- 목록 `?task=list&k=…` · 실행 전 확인 `&explain=1` · bg 로그 `&log=1`
+- 핵심 제약: 응답 타임아웃 **30초**, SAPI 가 **apache2handler**(`fastcgi_finish_request` 없음)
+  → 30초 넘는 잡은 **`env/cronbg.inc` 의 자기호출 bg** 만 통한다 (옛 `Connection: close` 패턴은 무효).
 
 ## 환경 설정 파일
 

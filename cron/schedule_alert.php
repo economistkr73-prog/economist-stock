@@ -10,8 +10,8 @@ if (!isset($_GET['ssk']) || $_GET['ssk'] !== $secret_key) {
     die("접근 권한이 없습니다.");
 }
 
-require_once "env/cnt.inc";
-require_once "env/kakao.inc";
+require_once $_SERVER['DOCUMENT_ROOT'] . "/env/cnt.inc";
+require_once $_SERVER['DOCUMENT_ROOT'] . "/env/kakao.inc";
 
 error_reporting(E_ALL & ~E_NOTICE);
 ini_set("display_errors", 0);

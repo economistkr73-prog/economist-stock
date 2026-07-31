@@ -1,27 +1,51 @@
 <?php
 // cron_keyword_collector.php
 // 호출 예시:
-//   mode=stock_etf_news  → 시세 갱신 + 종목 키워드 수집 (기존 동작)
-//   mode=news            → 네이버 금융 섹션 뉴스 키워드 수집
+//   mode=stock_etf_news  → 시세 갱신 + 종목 키워드 수집 (기존 동작 · 평일 9회 · 약 14초)
+//   mode=news            → 네이버 금융 섹션 뉴스 키워드 수집 (매일 10회 · 약 5초)
+//   mode=etf_update      → ETF 편입종목 갱신 (★ 30초를 넘는다 → bg=1 필수)
 //   mode 없음            → stock_etf_news 와 동일 (하위 호환)
+//
+// bg / 로그 (자세한 배경은 env/cronbg.inc 주석)
+//   ?ssk=…&mode=etf_update&bg=1    ← 크론용. 즉시 성공 응답 후 뒤에서 완주
+//   ?ssk=…&mode=etf_update&log=1   ← 지난 bg 실행이 무엇을 했는지
+//   ?ssk=…&mode=etf_update&sec=900 ← 이번 실행 시간 예산(초). 기본 3600
+//   bg 를 빼면 화면으로 그대로 본다(연결이 끊기면 종료 — 좀비 방지).
+//
+//   ※ mode=news·stock_etf_news 는 30초 안에 끝나므로 bg 가 필요 없다. 다만
+//     stock_etf_news 는 실측 14초라 여유가 크지 않다 — 네이버가 느려지면 &bg=1 을 붙인다.
 
 $secret_key = "mysn1973!";
 
 if (!isset($_GET['ssk']) || $_GET['ssk'] !== $secret_key) {
+    http_response_code(403);
     die("접근 권한이 없습니다.");
 }
 
-require_once "env/cnt.inc";
-require_once "env/e.fnc";
-if (file_exists("env/kakao.inc")) require_once "env/kakao.inc"; // 카카오 알림(선택)
+require_once $_SERVER['DOCUMENT_ROOT'] . "/env/cnt.inc";
+require_once $_SERVER['DOCUMENT_ROOT'] . "/env/e.fnc";
+// env/ 는 .gitignore 대상이라 git 으로 따라오지 않는다 — 배포 누락을 알아볼 수 있게 가드
+if (!is_file($_SERVER['DOCUMENT_ROOT'] . "/env/cronbg.inc")) { http_response_code(500); die("env/cronbg.inc 없음 — env/ 는 git 제외라 수동 배포가 필요합니다.\n"); }
+require_once $_SERVER['DOCUMENT_ROOT'] . "/env/cronbg.inc";
+if (file_exists($_SERVER['DOCUMENT_ROOT'] . "/env/kakao.inc")) require_once $_SERVER['DOCUMENT_ROOT'] . "/env/kakao.inc"; // 카카오/Pushover 알림(선택)
 
 error_reporting(E_ALL & ~E_NOTICE);
 ini_set("display_errors", 1);
 ini_set("allow_url_fopen", 1);
 set_time_limit(0);
-ignore_user_abort(true);
 
 $mode = $_GET['mode'] ?? 'stock_etf_news';
+
+// 모드별로 로그를 분리한다 — 하루 10회 도는 news 가 etf_update 로그를 덮어쓰면 안 된다
+define('KWC_LOG', sys_get_temp_dir() . '/keyword_collector_' . preg_replace('/[^a-z_]/', '', $mode) . '.log');
+
+if (!empty($_GET['log'])) cron_bg_show_log(KWC_LOG, (int)($_GET['n'] ?? 60));
+
+/* 시간 예산 기본 3600초(1시간).
+ * etf_update 는 ETF 1개당 sleep(2) 라 대상 수에 비례해 길어진다. 지금까지는 무제한으로
+ * 돌려 완주했으므로 <b>현행 동작을 바꾸지 않는 선</b>에서 폭주만 막는 값으로 뒀다.
+ * 로그의 "총 N초" 를 보고 실제 소요를 알면 &sec= 로 줄인다. */
+cron_bg_begin(KWC_LOG, max(0, (int)($_GET['sec'] ?? 3600)));
 
 /**
  * ETF 업데이트 결과를 카카오톡(나에게)으로 전송
@@ -56,16 +80,10 @@ function kakao_etf_notify(int $updatedCount, array $newEtfList): void
     Notify::send($msg, "https://economist.kr/etf_stock.php");
 }
 
-// 즉시 200 OK 전송 후 연결 종료 (cron-job.org 타임아웃 회피)
-ignore_user_abort(true);
-set_time_limit(0);
-ob_start();
-echo "OK";
-$size = ob_get_length();
-header("Content-Length: $size");
-header("Connection: close");
-ob_end_flush();
-flush();
+/* ★ 여기 있던 「Content-Length + Connection: close」 블록을 없앴다 (2026-07-30).
+ *   이 서버는 SAPI 가 apache2handler 라 그 패턴이 <b>듣지 않는다</b> — 응답을 끝까지
+ *   기다리므로 etf_update 는 매일 "Failed (timeout)" 이었다. 이제 위쪽 cron_bg_begin()
+ *   이 &bg=1 일 때 자기 자신에게 비동기 요청을 던진다. 자세한 내용은 env/cronbg.inc. */
 
 // ============================================================
 // mode=stock_etf_news  시세 + 종목 키워드 수집 (기존 기능)
@@ -292,13 +310,17 @@ if ($mode === 'stock_etf_news' || $mode === '') {
             }
         }
 
-        $sql = "SELECT i.etf_code
+        /* ★ 정렬을 "오래 안 받은 것부터" 로 바꿨다 (한 번도 안 받음 → 가장 낡음 → 코드순).
+         *   etf_code ASC 로 두면 시간예산에 걸려 중간에 끊길 때 <b>뒷쪽 코드가 영원히 안 받아진다</b>
+         *   — ETF 1개당 sleep(2) 라 대상이 많으면 매일 같은 자리에서 끊기기 때문이다.
+         *   낡은 것부터 받으면 끊겨도 다음 실행이 그 뒤를 이어받아 전체가 돌아간다. */
+        $sql = "SELECT i.etf_code, MAX(h.uDate) AS last_u
                 FROM all_etf_info i
                 LEFT JOIN all_etf_holdings_info h ON i.etf_code = h.etf_code
                 WHERE i.skip_update = 0
                 GROUP BY i.etf_code
                 HAVING MAX(h.uDate) IS NULL OR MAX(h.uDate) < CURDATE()
-                ORDER BY i.etf_code ASC";
+                ORDER BY (MAX(h.uDate) IS NULL) DESC, MAX(h.uDate) ASC, i.etf_code ASC";
 
         $etfs = $pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC);
 
@@ -306,14 +328,31 @@ if ($mode === 'stock_etf_news' || $mode === '') {
             echo "[완료] 오늘 업데이트할 ETF가 없습니다.\n";
             kakao_etf_notify(0, $newEtfList);
         } else {
-            $updatedCount = 0;
-            foreach ($etfs as $etf) {
+            $total = count($etfs);
+            $updatedCount = 0; $budgetHit = false;
+            cron_bg_log("갱신 대상 ETF {$total}개 (ETF당 sleep 2초 — 최소 " . ($total * 2) . "초)");
+
+            foreach ($etfs as $i => $etf) {
                 $etfRepo->updateEtfHoldings($etf['etf_code']);
                 $updatedCount++;
+
+                // 예산을 넘겼으면 남은 것은 다음 실행에 넘긴다 (낡은 것부터 받으므로 밀리지 않는다)
+                if (cron_bg_over()) { $budgetHit = true; break; }
+
+                if ($updatedCount % 25 === 0) cron_bg_log(sprintf('  … %d/%d', $updatedCount, $total));
                 sleep(2);
             }
+
             data_upTime('auto_etf_naver_update', 'update', $pdo);
-            echo "[성공] ETF {$updatedCount}개 편입종목 업데이트 완료.\n";
+
+            if ($budgetHit) {
+                $left = $total - $updatedCount;
+                cron_bg_log("시간 예산 도달 — {$updatedCount}/{$total} 처리, 남은 {$left}개는 다음 실행에서");
+                echo "[부분성공] ETF {$updatedCount}/{$total}개 업데이트 (예산 도달 — 남은 {$left}개는 다음 실행).\n";
+            } else {
+                cron_bg_log("완료 — ETF {$updatedCount}개 편입종목 갱신");
+                echo "[성공] ETF {$updatedCount}개 편입종목 업데이트 완료.\n";
+            }
             kakao_etf_notify($updatedCount, $newEtfList);
         }
 

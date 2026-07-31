@@ -41,7 +41,10 @@
  *                     place(여행지도 마커)는 건드리지 않음. bg 없이 호출(리포트 확인).
  */
 
-require_once "./env/cnt.inc";
+require_once $_SERVER['DOCUMENT_ROOT'] . "/env/cnt.inc";
+// env/ 는 .gitignore 대상이라 git 으로 따라오지 않는다 — 배포 누락을 알아볼 수 있게 가드
+if (!is_file($_SERVER['DOCUMENT_ROOT'] . "/env/cronbg.inc")) { http_response_code(500); exit("env/cronbg.inc 없음 — env/ 는 git 제외라 수동 배포가 필요합니다.\n"); }
+require_once $_SERVER['DOCUMENT_ROOT'] . "/env/cronbg.inc";
 
 header('Content-Type: text/html; charset=utf-8');
 
@@ -62,22 +65,23 @@ $delaySec = max(0, min(10, (int)($_GET['delay'] ?? 3)));
 $dry      = !empty($_GET['dry']);
 $START    = microtime(true);
 
-// 외부 HTTP 크론(cron-job.org 등)은 응답 타임아웃(보통 30초)이 있다.
-// bg=1 → 즉시 200 OK 로 연결을 끊어 크론은 성공 처리하고, 수집은 백그라운드에서
-// 이어서 수행한다(cron_keyword_collector.php 와 동일 패턴). max_sec 시간예산이
-// 종료를 보장하므로 좀비 워커는 생기지 않는다. (수동 디버깅은 bg 없이 호출 → 리포트 수신)
-if (!empty($_GET['bg'])) {
-    ignore_user_abort(true);
-    ob_start();
-    echo "OK";
-    header("Content-Length: " . ob_get_length());
-    header("Connection: close");
-    ob_end_flush();
-    flush();
-    if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
-} else {
-    ignore_user_abort(false);                     // 수동 호출: 끊기면 종료(좀비 방지)
-}
+/* 외부 HTTP 크론(cron-job.org)은 응답을 30초까지만 기다린다.
+ * bg=1 → 자기 자신에게 비동기 요청을 던지고 즉시 성공 응답, 수집은 뒤에서 이어 돈다.
+ *
+ * ★ 여기 있던 「Content-Length + Connection: close + fastcgi_finish_request」 패턴을
+ *   버렸다(2026-07-30). 이 서버는 SAPI 가 apache2handler 라 그 패턴이 <b>듣지 않는다</b> —
+ *   응답을 끝까지 기다리므로 stay·camping 회차가 매일 "Failed (timeout)" 이었다.
+ *   (ignore_user_abort 덕에 수집은 돌았지만 실패가 상시라 감시가 죽어 있었다.)
+ *   자세한 배경과 짝으로 필요한 3종 세트는 env/cronbg.inc 주석 참조.
+ *
+ * 뒤에서 도는 쪽은 화면이 없으므로 출력이 로그로 간다 → 같은 URL 에 &log=1 로 읽는다.
+ * 종료는 이 파일의 max_sec 시간예산이 보장한다(cron_bg_begin 에 준 값은 폭주 대비 상한).
+ * 수동 디버깅은 bg 를 빼고 호출하면 리포트를 화면으로 그대로 받는다. */
+define('NPC_LOG', sys_get_temp_dir() . '/naver_collect_' . $category . '.log');
+
+if (!empty($_GET['log'])) cron_bg_show_log(NPC_LOG, (int)($_GET['n'] ?? 80));
+
+cron_bg_begin(NPC_LOG, $maxSec + 60);
 
 $col = new NaverPlaceCollector($pdo);
 $col->ensureTables();

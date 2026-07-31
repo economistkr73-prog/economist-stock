@@ -18,7 +18,7 @@
  *   ?key=econ-place-tag&after=12345     id 이후부터(이어받기) / &limit=2000
  * INSERT IGNORE 라 여러 번 돌려도 중복/수동태그를 건드리지 않는다.
  */
-require_once "./env/cnt.inc";
+require_once $_SERVER['DOCUMENT_ROOT'] . "/env/cnt.inc";
 header('Content-Type: text/plain; charset=utf-8');
 
 $TOKEN = 'econ-place-tag';

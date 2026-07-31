@@ -13,7 +13,7 @@
  * 매너: 요청 간 sleep, 직렬 처리, 신원 밝힌 UA, 원본 HTML 캐시.
  */
 
-require_once "./env/cnt.inc";
+require_once $_SERVER['DOCUMENT_ROOT'] . "/env/cnt.inc";
 
 header('Content-Type: text/html; charset=utf-8');
 
@@ -36,8 +36,8 @@ $cacheDir = sys_get_temp_dir() . '/ardent_cache';
 $crawler  = new ArdentNews($cacheDir);
 
 // ── AI 파이프라인(dry_ai / run_ai) 공통: 키·지오코딩·중복판정 ──────────────
-if (file_exists("./env/anthropic.inc")) require_once "./env/anthropic.inc";
-if (file_exists("./env/kakao.inc"))     require_once "./env/kakao.inc";
+if (file_exists($_SERVER['DOCUMENT_ROOT'] . "/env/anthropic.inc")) require_once $_SERVER['DOCUMENT_ROOT'] . "/env/anthropic.inc";
+if (file_exists($_SERVER['DOCUMENT_ROOT'] . "/env/kakao.inc"))     require_once $_SERVER['DOCUMENT_ROOT'] . "/env/kakao.inc";
 $AI_KEY = getenv('ANTHROPIC_API_KEY') ?: (defined('ANTHROPIC_API_KEY') ? ANTHROPIC_API_KEY : '');
 $CATKO  = ['restaurant'=>'맛집','stay'=>'스테이','camping'=>'캠핑','travel'=>'여행지','event'=>'행사','etc'=>'기타','cafe'=>'카페'];
 

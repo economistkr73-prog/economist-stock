@@ -699,7 +699,7 @@ function ntLoadPeriods(){
     if (!ps.length){
       sel.innerHTML = '';
       document.getElementById('ntCount').textContent = '';
-      document.getElementById('ntBody').innerHTML = '<div class="nt-empty">아직 수집된 회차가 없습니다. '+ntEsc(ntCatLabel(CAT))+' 수집(cron_naver_collect.php?cat='+CAT+') 후 표시됩니다.</div>';
+      document.getElementById('ntBody').innerHTML = '<div class="nt-empty">아직 수집된 회차가 없습니다. '+ntEsc(ntCatLabel(CAT))+' 수집(cron_job.php?task=naver_'+CAT+') 후 표시됩니다.</div>';
       return;
     }
     sel.innerHTML = ps.map(function(p){ return '<option value="'+p+'">'+p+'</option>'; }).join('');

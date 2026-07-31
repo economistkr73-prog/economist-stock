@@ -13,8 +13,8 @@
  * 전체(1990~2050, 약 22,300일) 적재 완료될 때까지 "완료" 표시가 나올 때까지 반복 실행.
  */
 
-require_once "./env/cnt.inc";
-require_once "./env/kakao.inc"; // HOLIDAY_API_KEY (data.go.kr 인증키, 음양력 API도 동일 키 사용)
+require_once $_SERVER['DOCUMENT_ROOT'] . "/env/cnt.inc";
+require_once $_SERVER['DOCUMENT_ROOT'] . "/env/kakao.inc"; // HOLIDAY_API_KEY (data.go.kr 인증키, 음양력 API도 동일 키 사용)
 
 header('Content-Type: text/html; charset=utf-8');
 

@@ -10,7 +10,7 @@
 - 종목 테마 뉴스 (`stock_thema_news.php`)
 - 분석 모델 / 증권 뉴스 리포트 (`analysis_model.php`)
 - RSS 피드 제공 (`rss_feed.php`)
-- 키워드 자동 수집 크론 (`cron_keyword_collector.php`)
+- 크론 일체 — 진입점 `cron_job.php`, 구현 `cron/`, 전체 명세 `CRON.md`
 
 ## 환경 설정
 

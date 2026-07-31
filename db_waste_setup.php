@@ -40,5 +40,5 @@ foreach ($errors as $e) echo "<li style='color:#c00'>" . htmlspecialchars($e) . 
 echo "</ul>";
 echo "<p>현재 waste_companies 행 수: <b>{$rowCnt}</b></p>";
 echo "<p>다음 단계: <code>/mig_waste_import.php?key=econ-waste-import</code> 로 데이터 적재 → "
-   . "<code>/cron_waste_geocode.php?key=econ-waste-geo</code> 로 좌표화.</p>";
+   . "<code>/cron_job.php?task=waste_geo&amp;k=econ-cron-j7k2</code> 로 좌표화.</p>";
 ?>
