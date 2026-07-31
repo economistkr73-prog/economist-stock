@@ -52,12 +52,23 @@ php market/report.php         # 오늘 리포트 생성
 /market/report.php?key=econ-mkt-7x3k        # 화면에 리포트 출력 + 파일 저장
 ```
 
-## 크론 (cafe24 자체크론 없음 → cron-job.org 등 외부 URL 크론)
+## 크론 (cafe24 자체크론 없음 → cron-job.org 외부 URL 크론)
+
+실제 등록값 (2026-07-30 확인) — **`report=1` 로 수집·리포트를 한 줄에 묶어 항목이 1개다.**
 
 ```
-06:00  https://economist.kr/market/crawl.php?key=econ-mkt-7x3k
-07:00  https://economist.kr/market/report.php?key=econ-mkt-7x3k
+10 8 * * 1-6   (월~토 08:10)
+https://economist.kr/market/crawl.php?key=econ-mkt-7x3k&report=1&notify=1&bg=1
 ```
+
+- `report=1` → 같은 요청에서 `report.php` 를 이어 실행(`rebrief=true`). `notify=1` → Pushover 발송.
+- **일요일 제외**(`1-6`) → 월요일 브리핑의 기준일은 금요일 거래일이 된다
+  (기준일 = 투자자 매매동향 최신일).
+- `bg=1` 은 이 서버(apache2handler)에서 **실제로는 무효**다. 전체가 15.6초라 크론 타임아웃(30초)
+  안에 끝나 문제되지 않는다. 소스가 늘어 30초를 넘기면 `cron/dart_collect.php` 의
+  자기호출 bg 패턴으로 바꿔야 한다 — 자세한 내용은 루트 `CRON.md` §2.2.
+
+크론 전반(등록 15개·타임아웃 규약·외부 API 한도)은 루트 **`CRON.md`** 를 본다.
 
 ## Claude 브리핑 키
 

@@ -17,7 +17,7 @@ if (!$cli) {
 }
 
 // ── bg=1: 즉시 200 응답 후 연결 종료, 나머지는 백그라운드에서 끝까지 실행 ──
-//    (cron-job.org 20초 타임아웃 회피 — cron_keyword_collector.php 패턴)
+//    (cron-job.org 30초 타임아웃 회피 — 이 서버에선 무효인 옛 패턴. CRON.md §2.2 참조)
 if (!$cli && isset($_GET['bg'])) {
     ignore_user_abort(true);
     @set_time_limit(0);

@@ -26,6 +26,7 @@ function mkt_generate_report(string $date, array $opt = []): ?array {
     $brief = ($opt['rebrief'] ?? false) ? null : mkt_load_brief($date);
     $briefCached = $brief !== null;
     if (!$brief) { $brief = mkt_gen_brief($snap, $anom); if ($opt['save'] ?? true) mkt_save_brief($date, $brief); }
+    $brief = mkt_brief_normalize($brief);   // 원소가 객체여도 렌더는 항상 문자열만 받게
     $html  = mkt_render($snap, $prev, $anom, $brief);
     // 완전한 HTML 일 때만 캐시(렌더 중단 시 잘린 결과 저장 방지)
     if (($opt['save'] ?? true) && str_contains($html, '</html>')) mkt_save_html($date, $html);
@@ -152,6 +153,11 @@ function mkt_api_key(): string {
 
 function mkt_brief_input(array $d, array $anom): string {
     $L = [];
+    // ★시간 순서 선언 — 이걸 안 주면 Claude가 "뉴욕 반등에도 코스피 하락" 식으로 인과를 뒤집는다.
+    //   실제 순서: 국내 전일 15:30 마감 → (간밤) 뉴욕 오늘 새벽 마감 → 오늘 아침 이 브리핑 작성.
+    $L[] = "[시간 순서] 이 브리핑은 오늘 아침 작성한다. 아래 '국내' 수치는 전일({$d['date']}) 15:30에 마감한 결과이고, "
+        . "'해외' 지수와 뉴욕 뉴스는 그 이후 간밤(오늘 새벽)에 마감한 결과다. "
+        . "즉 국내 마감이 먼저이고 뉴욕 마감이 나중이므로, 간밤 뉴욕 흐름은 전일 국내 장에 영향을 줄 수 없었고 오늘 국내 장의 재료다.";
     foreach (($d['indicesKr'] ?? []) as $i)
         if (($i['quality'] ?? '') === 'ok') $L[] = "국내 {$i['name']} {$i['close']} (" . mkt_signpct($i['day']['pct']) . ")";
     $inv = $d['investors']['kospi'] ?? null;
@@ -180,6 +186,26 @@ function mkt_brief_input(array $d, array $anom): string {
     return implode("\n", $L);
 }
 
+/**
+ * Claude가 change/watch 원소를 {item,desc} 객체로 반환하는 날이 있다(스키마 미고정 시 재량).
+ * strict_types 하에서 h(?string)에 배열이 들어가면 TypeError → 렌더 중단이므로 항상 문자열로 정규화한다.
+ */
+function mkt_brief_normalize(array $b): array {
+    foreach (['change', 'watch'] as $k) {
+        $b[$k] = array_values(array_map(function ($x) {
+            if (is_array($x)) {
+                $item = trim((string) ($x['item'] ?? ''));
+                $desc = trim((string) ($x['desc'] ?? ''));
+                if ($item !== '' && $desc !== '') return "{$item} — {$desc}";
+                return $desc !== '' ? $desc : ($item !== '' ? $item : json_encode($x, JSON_UNESCAPED_UNICODE));
+            }
+            return (string) $x;
+        }, (array) ($b[$k] ?? [])));
+    }
+    if (!is_string($b['head'] ?? '')) $b['head'] = json_encode($b['head'] ?? '', JSON_UNESCAPED_UNICODE);
+    return $b;
+}
+
 function mkt_gen_brief(array $d, array $anom): array {
     $fallback = [
         'head'   => '자동 브리핑(이상치 요약)',
@@ -190,9 +216,13 @@ function mkt_gen_brief(array $d, array $anom): array {
     if (!$key) return $fallback;
 
     $sys = "너는 개인 투자자용 데스크다. 주어진 스냅샷·이상치·주요 뉴스 헤드라인을 근거로 한국어 데일리 브리핑을 쓴다. "
-        . "반드시 JSON만 출력(코드펜스·앞뒤 설명 금지): {\"head\":\"\",\"change\":[],\"watch\":[]}. "
+        . "반드시 JSON만 출력(코드펜스·앞뒤 설명 금지): {\"head\":\"문장\",\"change\":[\"문장\",\"문장\",\"문장\"],\"watch\":[\"문장\",\"문장\",\"문장\"]}. "
+        . "change·watch 원소는 객체({item,desc} 등)가 아니라 순수 문자열. "
         . "head 1문장. change 정확히 3개, watch 정확히 3개. 각 항목은 한 문장(공백포함 50자 이내)·핵심 수치 1~2개만, 장황 금지. "
         . "당일 등락은 전일 종가 대비 위주. 채권 금리 상승=가격 하락으로 해석. 뉴스는 수치 해석의 맥락으로만 활용(헤드라인 나열 금지). "
+        . "[시간 순서 엄수] 국내 증시가 먼저 마감했고 뉴욕은 그 뒤 간밤에 마감했다. "
+        . "'뉴욕 상승에도 코스피 하락'처럼 뉴욕 결과가 국내 마감보다 먼저 있었던 듯한 역인과 서술 금지. "
+        . "간밤 뉴욕은 '코스피 하락 마감 후 뉴욕은 반등' 식으로 순서대로 쓰거나 오늘 국내 장의 관전 재료로 서술. "
         . "미수집은 누락(하락 아님)이라고 watch에 명시. 과장·투자권유 금지.";
     $payload = [
         'model' => MKT_MODEL, 'max_tokens' => 1500, 'system' => $sys,
