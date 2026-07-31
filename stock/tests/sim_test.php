@@ -272,6 +272,19 @@ $base   = pf_sim_run(t_series([10000, 9000, 8100]), $R3, ['limit_amt' => 1000000
 t_eq('종가만 있으면 장중 옵션 무시', $base['trades'][1]['price'], $noOhlc['trades'][1]['price']);
 t_eq('  매수 횟수도 동일',           $base['buy_count'],           $noOhlc['buy_count']);
 
+// ══ 사이클 전부 (닫힘 + 미청산) ════════════════════════════════════════
+/*
+ * ★ 미청산 사이클은 `cycles` 가 아니라 `open_cycle` 에 따로 담긴다 —
+ *   합치지 않으면 「물린 사이클 0개」 라는 거짓 결론이 나온다(실제로 그렇게 속았다).
+ */
+t_head('★ pf_sim_all_cycles — open_cycle 을 빠뜨리지 않는다');
+t_eq('닫힘 2 + 미청산 1 = 3', 3, count(pf_sim_all_cycles([
+    'cycles' => [['no' => 1], ['no' => 2]], 'open_cycle' => ['no' => 3, 'open' => true]])));
+t_eq('미청산 없으면 닫힘만', 2, count(pf_sim_all_cycles(['cycles' => [['no' => 1], ['no' => 2]], 'open_cycle' => null])));
+t_eq('빈 결과도 안전', 0, count(pf_sim_all_cycles(pf_sim_empty())));
+$acAll = pf_sim_all_cycles(['cycles' => [['no' => 1]], 'open_cycle' => ['no' => 2, 'open' => true]]);
+t_eq('미청산이 맨 뒤에 온다', true, !empty(end($acAll)['open']));
+
 // ══════════════════════════════════════════════════════════════════════
 echo "\n" . str_repeat('═', 74) . "\n";
 printf(" 결과: %d PASS / %d FAIL  (총 %d)\n",

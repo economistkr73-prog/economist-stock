@@ -24,8 +24,56 @@ class Dart
     /** DART 가 이 API 들로 제공하는 하한 연도 */
     const MIN_YEAR = 2015;
 
-    /** 사업보고서 */
-    const REPRT_ANNUAL = '11011';
+    /** 분기보고서는 2016년부터 있다 (2015년은 013 — 조회된 데이터 없음) */
+    const MIN_QUARTER_YEAR = 2016;
+
+    /* 보고서 종류.
+     *
+     * ★ 손익 계정은 <b>모두 누적(YTD)</b> 으로 저장한다 — 아래 네 코드가 하나의 축이 된다.
+     *     11013 = 1~3월   11012 = 1~6월   11014 = 1~9월   11011 = 1~12월
+     *   당분기(3개월)는 누적의 차이로 언제든 만들 수 있으므로 저장하지 않는다
+     *   (비율·이론가를 저장하지 않는 것과 같은 이유 — 원본 하나만 남긴다).
+     *
+     * 실측(2026-07-29, 표본 500종목 2024년):
+     *   thstrm_amount     = 그 분기 3개월      thstrm_add_amount = 누적
+     *   thstrm_add 제공률 100%(1,413/1,413) · Q1+Q2+Q3 = 누적3Q 일치 444/466(95.3%)
+     *   재무상태표(sj_div=BS)에는 add 가 아예 없다 — 분기말 <b>시점</b>값이라 누적이라는 게 없다.
+     *   ⇒ 저장 규칙은 한 줄이면 된다: <b>add 가 있으면 add, 없으면 thstrm</b>.
+     *     (연간 보고서도 add 가 없으므로 같은 규칙에 그대로 들어맞는다)
+     */
+    const REPRT_ANNUAL = '11011';   // 사업보고서   (누적 12개월)
+    const REPRT_Q1     = '11013';   // 1분기보고서  (누적  3개월)
+    const REPRT_H1     = '11012';   // 반기보고서   (누적  6개월)
+    const REPRT_Q3     = '11014';   // 3분기보고서  (누적  9개월)
+
+    /** 보고서 코드 → [이름, 누적 개월수] */
+    const REPRT_INFO = [
+        '11013' => ['1분기', 3],
+        '11012' => ['반기',  6],
+        '11014' => ['3분기', 9],
+        '11011' => ['연간',  12],
+    ];
+
+    /** 분기보고서 세 종류 (누적 개월 순) */
+    const REPRT_QUARTERS = ['11013', '11012', '11014'];
+
+    /* 네이버 시세를 며칠까지 믿을지.
+     * 네이버 크론은 장중 5~10회 돌아 사실상 실시간이므로 정상이면 항상 0일이다.
+     * 거래정지 종목만 갱신이 멈추는데, 그건 KRX 종가와 값이 같아 폴백해도 결과가 바뀌지 않는다
+     * (실측 2026-07-29 — 묵은 111종목 전부 KRX 와 일치).
+     * 이 값이 하는 일은 <b>네이버 수집이 통째로 멈췄을 때</b> 조용히 옛 주가를 쓰지 않게 막는 것이다. */
+    const NAV_MAX_AGE = 3;
+
+    public static function reprtName(string $rc): string
+    {
+        return self::REPRT_INFO[$rc][0] ?? $rc;
+    }
+
+    /** 그 보고서가 담는 누적 개월수 (분기 대비 연환산에 쓴다) */
+    public static function reprtMonths(string $rc): int
+    {
+        return self::REPRT_INFO[$rc][1] ?? 12;
+    }
 
     private PDO $pdo;
     private string $key;
@@ -136,6 +184,9 @@ class Dart
             ")->fetchColumn();
             if (!$has) $this->pdo->exec("ALTER TABLE stock_financial ADD {$col} {$def}");
         }
+
+        // 6개월 고가·저가 — 채우는 쪽은 NaverFinanceAPI 지만, 읽는 쪽이 여기라 같이 보장한다
+        NaverFinanceAPI::ensureRangeTable($this->pdo);
     }
 
     // ══ HTTP ════════════════════════════════════════════════════════════
@@ -470,6 +521,9 @@ class Dart
      * 당기 금액만 쓴다 — 전기·전전기도 오지만, 회계기준 변경으로 재작성되는 일이 있어
      * "그 해 보고서의 당기"로 통일하는 편이 연도 간 기준이 흔들리지 않는다.
      *
+     * ★ 분기보고서도 같은 함수로 받는다. 손익은 <b>누적(YTD)</b> 으로 저장한다 —
+     *   REPRT_INFO 주석 참조. 규칙은 `thstrm_add_amount ?? thstrm_amount` 한 줄이다.
+     *
      * @return array [companies, saved]
      */
     public function collectFinancials(int $year, string $reprt = self::REPRT_ANNUAL, ?callable $progress = null): array
@@ -497,7 +551,14 @@ class Dart
                 if ($col === null) continue;
 
                 $div = (string)($x['fs_div'] ?? '');
-                $amt = self::num($x['thstrm_amount'] ?? null);
+
+                /* 누적으로 통일한다.
+                 *   손익(sj_div=IS/CIS) 분기보고서 → thstrm_add_amount 가 누적, thstrm_amount 는 그 3개월
+                 *   재무상태표(sj_div=BS)          → add 가 아예 없다. thstrm 이 분기말 시점값이다
+                 *   사업보고서(연간)               → add 가 없다. thstrm 이 12개월 누적이다
+                 * 세 경우 모두 "add 가 있으면 add" 한 줄로 맞는다. */
+                $amt = self::num($x['thstrm_add_amount'] ?? null);
+                if ($amt === null) $amt = self::num($x['thstrm_amount'] ?? null);
                 if ($amt === null) continue;
 
                 // 연결이 한 번이라도 오면 그 종목은 연결로 확정하고, 별도 값은 무시한다
@@ -651,6 +712,30 @@ class Dart
     }
 
     /**
+     * 스크리너가 고를 수 있는 기준 목록 — (사업연도 × 보고서) 를 최근 것부터.
+     *
+     * 분기를 고르면 그 분기 기준 <b>최근 4분기(TTM)</b> 로 본다. 기준을 종목마다 따로 잡지 않고
+     * 전 종목에 같은 기준을 씌우는 이유: 스크리너는 종목끼리 견주는 화면이라
+     * 어떤 종목은 3분기, 어떤 종목은 반기 기준이면 줄을 세우는 의미가 없어진다.
+     */
+    public function reportBases(): array
+    {
+        // updated_at 도 같이 낸다 — 매일 도는 갱신(cron_dart_collect.php job=fresh)이
+        // 실제로 돌고 있는지는 이 시각으로만 알 수 있다.
+        $rows = $this->pdo->query("
+            SELECT bsns_year, reprt_code, COUNT(*) AS n, MAX(updated_at) AS updated_at
+              FROM stock_financial GROUP BY bsns_year, reprt_code
+        ")->fetchAll(PDO::FETCH_ASSOC);
+
+        // 사업연도 내림차순 → 같은 해면 누적 개월수 내림차순 (연간 → 3분기 → 반기 → 1분기)
+        usort($rows, function ($a, $b) {
+            return [(int)$b['bsns_year'], self::reprtMonths($b['reprt_code'])]
+               <=> [(int)$a['bsns_year'], self::reprtMonths($a['reprt_code'])];
+        });
+        return $rows;
+    }
+
+    /**
      * 한 해 전종목 + 전년 값(성장률용).
      *
      * 비율 계산은 하지 않고 금액만 돌려준다 — 거르고 정렬하는 쪽에서 ratio() 로 만든다.
@@ -691,7 +776,221 @@ class Dart
              WHERE f.bsns_year = ? AND f.reprt_code = ?
         ");
         $st->execute([$last ?: '1000-01-01', $year, $reprt]);
-        return $st->fetchAll(PDO::FETCH_ASSOC);
+        return $this->withNav($st->fetchAll(PDO::FETCH_ASSOC));
+    }
+
+    /**
+     * 한 분기 기준 <b>최근 4분기(TTM)</b> 전종목. screenRows() 와 같은 모양으로 돌려준다.
+     *
+     * 저장은 누적(YTD)이므로 12개월치는 뺄셈 한 번이면 나온다:
+     *
+     *     TTM = 전년 연간(12M) + 당해 누적(nM) − 전년 동기 누적(nM)
+     *
+     *   삼성전자 2024 3분기 기준 매출
+     *     = 2023 연간 258.9조 + 2024 누적3Q 225.1조 − 2023 누적3Q 199.7조
+     *
+     * 성장률 비교 대상(prev_*)은 <b>한 해 전 같은 분기의 TTM</b> 이다:
+     *     전기 TTM = 전전년 연간 + 전년 누적 − 전전년 동기 누적
+     *
+     * 재무상태표(자산·부채·자본)는 흐름이 아니라 <b>시점</b>값이라 더하고 뺄 게 없다 —
+     * 그 분기말 값을 그대로 쓴다. ROE 분모가 분기말 자본이 되는 것도 이 때문이다.
+     *
+     * 주식수(shares_out·shares_issued)는 분기보고서로 받지 않으므로 <b>전년 사업보고서</b> 것을 쓴다.
+     *
+     * 전년 자료가 없는 종목(신규상장 등)은 TTM 을 만들 수 없어 빠진다 — INNER JOIN 이 그 역할이다.
+     */
+    public function screenRowsTtm(int $year, string $reprt, bool $listedOnly = true): array
+    {
+        if (!in_array($reprt, self::REPRT_QUARTERS, true)) {
+            throw new InvalidArgumentException('TTM 은 분기보고서 기준에서만 만듭니다.');
+        }
+
+        $last = $this->pdo->query("SELECT MAX(bas_dd) FROM krx_daily")->fetchColumn();
+        $join = ($listedOnly && $last) ? 'INNER JOIN' : 'LEFT JOIN';
+
+        // 흐름 항목 = 전년연간 + 당해누적 − 전년동기누적
+        $ttm  = fn(string $c) => "(pa.{$c} + f.{$c} - pq.{$c})";
+        // 한 해 전 같은 분기의 TTM
+        $ttmP = fn(string $c) => "(pa2.{$c} + pq.{$c} - pq2.{$c})";
+
+        $st = $this->pdo->prepare("
+            SELECT f.stock_code, f.fs_div,
+                   COALESCE(NULLIF(k.stock_name,''), c.corp_name) AS corp_name,
+                   k.market, k.close_prc, k.mktcap, k.list_shrs, k.stock_code AS listed,
+                   pa.shares_out, pa.shares_issued,
+                   " . $ttm('revenue')    . " AS revenue,
+                   " . $ttm('op_income')  . " AS op_income,
+                   " . $ttm('net_income') . " AS net_income,
+                   f.asset_total, f.debt_total, f.equity_total,
+                   f.cur_asset, f.cur_debt,
+                   " . $ttmP('revenue')    . " AS prev_revenue,
+                   " . $ttmP('op_income')  . " AS prev_op_income,
+                   " . $ttmP('net_income') . " AS prev_net_income
+              FROM stock_financial f
+              JOIN stock_financial pa  ON pa.stock_code  = f.stock_code
+                                      AND pa.bsns_year   = f.bsns_year - 1 AND pa.reprt_code  = ?
+              JOIN stock_financial pq  ON pq.stock_code  = f.stock_code
+                                      AND pq.bsns_year   = f.bsns_year - 1 AND pq.reprt_code  = f.reprt_code
+              LEFT JOIN stock_financial pa2 ON pa2.stock_code = f.stock_code
+                                      AND pa2.bsns_year  = f.bsns_year - 2 AND pa2.reprt_code = ?
+              LEFT JOIN stock_financial pq2 ON pq2.stock_code = f.stock_code
+                                      AND pq2.bsns_year  = f.bsns_year - 2 AND pq2.reprt_code = f.reprt_code
+              {$join}   krx_daily      k ON k.stock_code = f.stock_code AND k.bas_dd = ?
+              LEFT JOIN dart_corp_code c ON c.stock_code = f.stock_code
+             WHERE f.bsns_year = ? AND f.reprt_code = ?
+        ");
+        $st->execute([self::REPRT_ANNUAL, self::REPRT_ANNUAL, $last ?: '1000-01-01', $year, $reprt]);
+        return $this->withNav($st->fetchAll(PDO::FETCH_ASSOC));
+    }
+
+    /**
+     * 네이버 시세를 코드 → [주가, 며칠 묵음] 으로 한 번에 읽어 둔다.
+     *
+     * ★ SQL 조인으로 붙이면 안 된다. `all_stock_info.stock_code` 는 <b>char(6) utf8mb3</b> 인데
+     *   `stock_financial.stock_code` 는 <b>varchar(10) utf8mb4</b> 라 콜레이션이 달라서
+     *   MySQL 이 인덱스를 못 쓰고 매 행마다 전체를 훑는다(EXPLAIN: type=ALL · BNL join).
+     *   실측(2026-07-29) — 이 조인 하나로 재무분석이 <b>11ms → 1,073ms</b> 가 됐다.
+     *   한 번에 읽어 PHP 에서 맞추면 2,487행에 5ms 다. 공용 테이블 스키마를 건드리지 않아도 된다.
+     *
+     * @return array code => ['stock_price'=>…, 'age'=>…]
+     */
+    private function navPrices(): array
+    {
+        return $this->pdo->query("
+            SELECT stock_code, stock_price, DATEDIFF(CURDATE(), DATE(uDate)) AS age
+              FROM all_stock_info
+        ")->fetchAll(PDO::FETCH_UNIQUE | PDO::FETCH_ASSOC);
+    }
+
+    /* 6개월 고가·저가 (stock_price_range). navPrices() 와 같은 이유로 <b>PHP 에서 합친다</b> —
+     * LEFT JOIN 을 걸었다가 콜레이션이 달라 인덱스를 못 타고 스크리너가 2.3초로 늘어난 적이 있다. */
+    private function priceRanges(int $months = 6): array
+    {
+        $st = $this->pdo->prepare("
+            SELECT stock_code, hi, hi_date, lo, lo_date, bars
+              FROM stock_price_range WHERE months = ?
+        ");
+        $st->execute([$months]);
+        return $st->fetchAll(PDO::FETCH_UNIQUE | PDO::FETCH_ASSOC);
+    }
+
+    /** 조회 결과에 네이버 주가를 얹는다 (ratio() 가 nav_price·nav_age 를 본다) */
+    private function withNav(array $rows): array
+    {
+        if (!$rows) return $rows;
+        $nav = $this->navPrices();
+        $rng = $this->priceRanges();
+        foreach ($rows as &$r) {
+            $n = $nav[$r['stock_code']] ?? null;
+            $r['nav_price'] = $n['stock_price'] ?? null;
+            $r['nav_age']   = $n['age'] ?? null;
+
+            $g = $rng[$r['stock_code']] ?? null;
+            $r['hi_6m']   = $g['hi'] ?? null;
+            $r['hi_date'] = $g['hi_date'] ?? null;
+            $r['lo_6m']   = $g['lo'] ?? null;
+            $r['lo_date'] = $g['lo_date'] ?? null;
+            $r['bars_6m'] = $g['bars'] ?? null;
+        }
+        unset($r);
+        return $rows;
+    }
+
+    /** 한 종목의 모든 보고서 (연간·분기) — 최근 것부터 */
+    public function reportSeries(string $stockCode): array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM stock_financial WHERE stock_code = ?");
+        $st->execute([$stockCode]);
+        $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+
+        usort($rows, function ($a, $b) {
+            return [(int)$b['bsns_year'], self::reprtMonths($b['reprt_code'])]
+               <=> [(int)$a['bsns_year'], self::reprtMonths($a['reprt_code'])];
+        });
+        return $rows;
+    }
+
+    /**
+     * 누적(YTD) 행들 → <b>분기별 3개월</b> 손익. 저장하지 않고 볼 때 만든다.
+     *
+     *   1Q = 누적1Q            3Q = 누적3Q − 누적반기
+     *   2Q = 누적반기 − 누적1Q  4Q = 연간   − 누적3Q
+     *
+     * 4분기는 보고서가 따로 없다 — 사업보고서에서 3분기 누적을 뺀 것이 4분기다.
+     * 앞 분기가 없으면(미제출·상장 전) null 로 둔다. 0 으로 채우면 "적자"로 읽힌다.
+     *
+     * 재무상태표 항목은 그 분기말 시점값이라 뺄셈하지 않고 그대로 싣는다.
+     *
+     * @param  array $rows reportSeries() 결과
+     * @return array 최근 분기 먼저. [bsns_year, quarter(1~4), label, revenue, op_income, net_income, …]
+     */
+    public static function quarterly(array $rows): array
+    {
+        // (연도, 보고서) → 행
+        $by = [];
+        foreach ($rows as $r) $by[(int)$r['bsns_year']][$r['reprt_code']] = $r;
+
+        $flow = ['revenue', 'op_income', 'pretax_income', 'net_income', 'total_income'];
+        $snap = ['asset_total', 'debt_total', 'equity_total', 'cur_asset', 'cur_debt'];
+
+        // 분기 → [이번 누적 코드, 빼야 할 직전 누적 코드]
+        $step = [
+            1 => [self::REPRT_Q1,     null],
+            2 => [self::REPRT_H1,     self::REPRT_Q1],
+            3 => [self::REPRT_Q3,     self::REPRT_H1],
+            4 => [self::REPRT_ANNUAL, self::REPRT_Q3],
+        ];
+
+        $out = [];
+        foreach ($by as $y => $codes) {
+            foreach ($step as $q => [$cur, $prev]) {
+                $c = $codes[$cur] ?? null;
+                if ($c === null) continue;
+                $p = ($prev === null) ? null : ($codes[$prev] ?? null);
+
+                // 직전 누적이 필요한데 없으면 그 분기는 만들 수 없다
+                if ($prev !== null && $p === null) continue;
+
+                $row = ['bsns_year' => $y, 'quarter' => $q,
+                        'label' => substr((string)$y, 2) . ' ' . $q . 'Q',
+                        'reprt_code' => $cur, 'fs_div' => $c['fs_div'] ?? ''];
+
+                foreach ($flow as $col) {
+                    $a = ($c[$col] === null) ? null : (float)$c[$col];
+                    $b = ($p === null) ? 0.0 : (($p[$col] === null) ? null : (float)$p[$col]);
+                    $row[$col] = ($a === null || $b === null) ? null : (int)round($a - $b);
+                }
+                foreach ($snap as $col) $row[$col] = ($c[$col] === null) ? null : (int)$c[$col];
+
+                $out[] = $row;
+            }
+        }
+
+        usort($out, fn($a, $b) => [$b['bsns_year'], $b['quarter']] <=> [$a['bsns_year'], $a['quarter']]);
+        return $out;
+    }
+
+    /**
+     * 스팩(기업인수목적회사)인가 — 이름으로 가린다.
+     *
+     * 스팩은 껍데기 회사라 매출이 거의 없고 이자수익만 있어 PER·ROE 가 엉뚱하게 잡힌다.
+     * 스크리너 모집단 2,482종목 중 40개가 여기 해당한다(실측).
+     * 업종코드가 DB 에 없어 이름으로 가릴 수밖에 없는데, 상호에 반드시 둘 중 하나가 들어간다.
+     */
+    public static function isSpac(?string $name): bool
+    {
+        return $name !== null && preg_match('/스팩|기업인수목적/u', $name) === 1;
+    }
+
+    /** 지금 상장주식수 (KRX 최근 거래일). 없으면 0 — EPS·BPS 의 분모다 */
+    public function listedShares(string $stockCode): float
+    {
+        $st = $this->pdo->prepare("
+            SELECT list_shrs FROM krx_daily
+             WHERE stock_code = ? AND bas_dd = (SELECT MAX(bas_dd) FROM krx_daily)
+        ");
+        $st->execute([$stockCode]);
+        return (float)$st->fetchColumn();
     }
 
     /** 한 종목의 연도별 재무 (최근 먼저) */
@@ -713,9 +1012,75 @@ class Dart
     }
 
     /**
+     * 종목 검색 — 스크리너 <b>조건에 안 걸리는</b> 종목의 재무를 바로 열려고 쓴다.
+     *
+     * ★ 모집단이 all_stock_info(네이버)가 아니라 <b>dart_corp_code</b> 인 것이 핵심이다.
+     *   Pf::stockSearch() 는 네이버 목록을 보는데 거기엔 누락이 있어(DL 000210·경방 000050 등 9종목)
+     *   "검색에 안 잡히는 종목을 찾겠다"는 이 자리에서 하필 그게 걸리면 앞뒤가 안 맞는다.
+     *   여기서 찾을 수 있는 종목 = 상세 화면이 실제로 보여 줄 수 있는 종목이라야 한다.
+     *
+     * 거래 여부와 재무 보유 연도수를 같이 낸다 — dart_corp_code 는 DART 기준이라
+     * <b>상장폐지 종목도 코드를 달고 남아 있어서</b>(SK브로드밴드·오스템임플란트) 목록에 뜬다.
+     * 왜 떴는지 보이지 않으면 "아직 거래되는 줄" 오해한다.
+     * 우선주(005385 등)는 DART 에 corp_code 가 없어 애초에 여기 안 나온다 — 본주로 봐야 한다.
+     */
+    public function searchCorp(string $q, int $limit = 20): array
+    {
+        $q = trim($q);
+        if ($q === '') return [];
+        $limit = max(1, min(50, $limit));
+
+        /* 재무 연도수는 상관 서브쿼리로 센다 — PK(stock_code, bsns_year, reprt_code) 앞자리를 그대로 타므로
+         * 9만 행짜리 GROUP BY 파생테이블을 만들어 조인하는 것보다 훨씬 싸다.
+         * ★ 세 테이블 모두 utf8mb4 VARCHAR(10) 이라 조인이 인덱스를 탄다.
+         *   all_stock_info(utf8mb3)를 여기 끌어들이면 콜레이션이 어긋나 BNL 로 떨어진다(실측 15배). */
+        /* ★★ 이름을 <b>두 군데</b>서 찾는다 — DART 는 법인 정식명이라 부르는 이름과 다른 회사가 많다.
+         *   실측: "현대차" 로 치면 corp_name 이 <b>현대자동차</b>라 005380 이 안 걸리고 현대차증권만 나왔다.
+         *   krx_daily.stock_name 은 거래소 종목명(= 우리가 부르는 이름)이라 이쪽이 걸린다.
+         *   krx_daily 는 어차피 거래여부 때문에 조인하고 있으므로 조건 하나 더 붙는 값이 공짜다
+         *   (corp_name 에 인덱스가 없어 어차피 3,924행 스캔이다 — 실측 2ms). */
+        $st = $this->pdo->prepare("
+            SELECT c.stock_code AS code,
+                   c.corp_name  AS name,
+                   k.stock_name AS kname,
+                   k.close_prc  AS last_price,
+                   k.mktcap,
+                   (k.stock_code IS NOT NULL) AS traded,
+                   (SELECT COUNT(*) FROM stock_financial f
+                     WHERE f.stock_code = c.stock_code AND f.reprt_code = :rc) AS years
+              FROM dart_corp_code c
+              LEFT JOIN krx_daily k
+                     ON k.stock_code = c.stock_code
+                    AND k.bas_dd = (SELECT MAX(bas_dd) FROM krx_daily)
+             WHERE c.stock_code = :exact
+                OR c.corp_name  LIKE :like
+                OR k.stock_name LIKE :like2
+             ORDER BY (c.stock_code = :exact2) DESC,      -- 코드를 정확히 쳤으면 그게 1순위
+                      (k.stock_code IS NOT NULL) DESC,    -- 지금 거래되는 종목 먼저
+                      k.mktcap DESC                       -- 그다음은 큰 회사부터
+             LIMIT {$limit}
+        ");
+        // 같은 값을 :exact2·:like2 로 따로 두는 건 Pf::stockSearch() 와 같은 이유다
+        // (에뮬레이션 설정에 따라 같은 이름을 두 번 바인딩하지 못하는 경우가 있다)
+        $st->execute([
+            ':rc'    => self::REPRT_ANNUAL,
+            ':exact' => $q, ':exact2' => $q,
+            ':like'  => '%' . $q . '%', ':like2' => '%' . $q . '%',
+        ]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
      * 금액 한 줄에서 비율을 만든다. 저장하지 않는 이유는 금액이 갱신되면 같이 따라와야 하기 때문.
      *
      * 분모가 0·음수면 null 이다 — 자본잠식(자본총계 ≤ 0)에 부채비율을 매기면 숫자가 거짓말을 한다.
+     *
+     * ── 시세 두 테이블의 역할 분담 ────────────────────────────────────
+     *   all_stock_info (네이버)  <b>주가</b>            — 장중 5~10회 갱신, 사실상 실시간
+     *   krx_daily      (거래소)  <b>상장주식수</b>       — 네이버엔 이 컬럼이 아예 없다
+     *                            <b>거래종목 판정</b>     — 네이버 목록은 누락이 있다
+     *                            close_prc 는 폴백 전용
+     * 중복이 아니라 분업이다. 주가는 네이버만, 주식수·종목판정은 KRX 만 제대로 준다.
      */
     public static function ratio(array $r): array
     {
@@ -754,11 +1119,59 @@ class Dart
         }
         if ($sh <= 0) $sh = $out;    // KRX 에 없는 종목(미거래)이라도 값은 내준다
 
-        $px = (float)($r['close_prc'] ?? 0);
+        /* 주가는 <b>네이버(all_stock_info)</b> 가 단일 소스다. 장중 5~10회 갱신되어 사실상 실시간이고,
+         * KRX 는 T+1 이라 하루 묵는다(실측 2026-07-29: 네이버 204,500 vs KRX 220,000 — 7% 차이).
+         *
+         * krx_daily.close_prc 는 <b>폴백 전용</b>이다:
+         *   ① 네이버 목록에 없는 종목 (실측 4개)
+         *   ② 네이버 갱신이 며칠째 멈춘 경우 — 조용히 옛 주가로 PER 을 내는 것이 제일 나쁘다
+         * 거래정지 종목은 네이버가 갱신을 멈추지만 KRX 종가와 값이 같으므로(실측 111/111 일치) 폴백해도 손해가 없다.
+         */
+        $px  = 0.0;
+        $nav = (float)($r['nav_price'] ?? 0);
+        $age = $r['nav_age'] ?? null;                 // 네이버 값이 며칠 묵었나 (NULL = 네이버에 없음)
+        if ($nav > 0 && ($age === null || (int)$age <= self::NAV_MAX_AGE)) $px = $nav;
+
+        $src = 'naver';
+        if ($px <= 0) { $px = (float)($r['close_prc'] ?? 0); $src = 'krx'; }
+
         $eps = ($sh > 0) ? $ni / $sh : null;
         $bps = ($sh > 0) ? $eq / $sh : null;
 
+        /* 시가총액도 그 주가로 다시 만든다.
+         * 저장된 krx_daily.mktcap 을 그대로 쓰면 시총은 어제, PER 은 오늘 기준이 되어
+         * 한 화면에서 두 조건이 서로 다른 날을 보게 된다 — 이 레포가 이미 한 번 크게 당한 그 함정이다.
+         * 분모는 EPS 용 유통주식수가 아니라 <b>상장주식수</b>여야 한다(시총의 정의). */
+        $mkt = ($px > 0 && $now > 0) ? $px * $now : (float)($r['mktcap'] ?? 0);
+
+        /* ── 6개월 고점대비 낙폭 · 저점대비 상승률
+         *
+         * 재무만 보면 "좋은 회사"는 찾아도 "지금 싼가"는 못 본다. 그 축을 여기서 붙인다.
+         * 고가·저가는 크론이 채워 둔 stock_price_range(네이버 일봉 장중 고/저)이고,
+         * 현재가는 위에서 고른 $px(네이버 실시간)다 — <b>비율은 저장하지 않고 볼 때 만든다</b>.
+         *
+         * ★ 지금 주가가 저장된 고가를 넘겼으면(신고가) 고가를 지금 값으로 올려 잡는다.
+         *   표는 어제까지의 일봉이라, 오늘 장중에 뚫은 신고가는 아직 안 들어 있다.
+         *   그대로 두면 낙폭이 <b>양수</b>로 나와 "고점 대비 +3% 하락" 같은 말이 된다.
+         *   저가도 같은 이유로 아래로 잡는다. 그래서 낙폭은 항상 ≤0, 상승률은 항상 ≥0 이다.
+         */
+        $hi = (float)($r['hi_6m'] ?? 0);
+        $lo = (float)($r['lo_6m'] ?? 0);
+        if ($px > 0 && $hi > 0) $hi = max($hi, $px);
+        if ($px > 0 && $lo > 0) $lo = min($lo, $px);
+
+        /* ★ 6개월 내내 값이 한 가격이면 <b>장기 거래정지</b>다 — 그 구간엔 고점도 저점도 없다.
+         *   정지일은 종가를 고·저로 쓰므로(수집 쪽 규칙) 121일 전부 같은 값이 되어 hi = lo 가 된다.
+         *   그대로 두면 낙폭 0%·상승률 0% 로 나와 「신고가이면서 동시에 신저가」라는 말이 되고,
+         *   더 나쁘게는 "저점대비 20% 이내" 조건에 정지 종목이 전부 딸려 온다.
+         *   모르는 값은 통과시키지 않는다 — 아래에서 null 이 되도록 0 으로 지운다. */
+        $flat = ($hi > 0 && $lo > 0 && $hi <= $lo * 1.0001);
+        if ($flat) $hi = $lo = 0.0;
+
         return [
+            'price'      => $px,
+            'price_src'  => $src,
+            'mktcap'     => $mkt,
             'op_margin'  => $rev > 0 ? $op / $rev      : null,   // 영업이익률
             'net_margin' => $rev > 0 ? $ni / $rev      : null,   // 순이익률
             'roe'        => $eq > 0  ? $ni / $eq       : null,   // 자기자본이익률
@@ -768,11 +1181,33 @@ class Dart
             'rev_growth' => $pr > 0  ? $rev / $pr - 1  : null,   // 매출 성장률
             'op_growth'  => $po > 0  ? $op / $po - 1   : null,   // 영업이익 성장률 (전년 적자면 계산 불가)
 
+            /* 순이익 ÷ 영업이익 — <b>일회성 이익 탐지기</b>.
+             *
+             * 장사로 번 돈(영업이익)보다 최종 순이익이 훨씬 크면 그 차액은 대개
+             * 자산매각·염가매수차익·평가이익처럼 <b>다시 오지 않는 돈</b>이다.
+             * 그런 해에는 PER 이 뚝 떨어져 싸 보이지만 이듬해 원위치한다.
+             *
+             * 실측(4개 기준연도 백테스트) — PER≤5 만 걸어 고른 종목의 5년 뒤 영업이익 중앙값이
+             * −32% · −32% · −39% · −39% 로 <b>네 번 모두</b> 무작위(전체 +34~+44%)에 크게 졌다.
+             * 목록을 까 보면 영업적자인데 순이익만 흑자인 회사가 상위를 차지하고 있었다.
+             *
+             * 영업이익이 0 이하면 배수 자체가 뜻이 없으므로 null 이다.
+             */
+            'ni_op'      => ($op > 0) ? round($ni / $op, 2) : null,
+
             'eps'        => $eps === null ? null : round($eps),
             'bps'        => $bps === null ? null : round($bps),
             // 적자·자본잠식이면 PER·PBR 은 뜻이 없다 — 계산하지 않고 비워 둔다
             'per'        => ($px > 0 && $eps !== null && $eps > 0) ? round($px / $eps, 2) : null,
             'pbr'        => ($px > 0 && $bps !== null && $bps > 0) ? round($px / $bps, 2) : null,
+
+            // 최근 6개월 — 낙폭은 음수(0 이면 신고가), 상승률은 양수(0 이면 신저가)
+            'hi_6m'      => $hi > 0 ? $hi : null,
+            'lo_6m'      => $lo > 0 ? $lo : null,
+            'hi_date'    => $r['hi_date'] ?? null,
+            'lo_date'    => $r['lo_date'] ?? null,
+            'dd_hi'      => ($px > 0 && $hi > 0) ? $px / $hi - 1 : null,   // 고점대비 낙폭
+            'rb_lo'      => ($px > 0 && $lo > 0) ? $px / $lo - 1 : null,   // 저점대비 상승률
         ];
     }
 

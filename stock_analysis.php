@@ -79,7 +79,7 @@ echo <<<'PAGE'
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>상승종목 분석 대시보드</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css"/>
-<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<script src="/style/dailychart.js?v=26"></script>
 <style>
   :root{
     --bg:#0e1320; --panel:#141b2b; --panel-2:#1b2335; --line:#26304a;
@@ -137,20 +137,7 @@ echo <<<'PAGE'
   .etfb.et2{background:#23449c;color:#dbe7ff;border:1px solid #3b82f6;}
   .etfb.et3{background:#2563eb;color:#fff;border:1px solid #4f8cff;}
   .etfb.et4{background:#e11d2a;color:#fff;border:1px solid #ff5a5a;box-shadow:0 0 8px rgba(225,29,42,.5);}
-  #grid{flex:1;display:grid;grid-template-columns:15% 11% 11% 63%;min-height:0;}
-  /* 전일 신호 패널 */
-  .ps-head{position:sticky;top:0;z-index:1;background:var(--panel);padding:6px 11px;
-    font-size:12px;font-weight:700;color:var(--accent);border-bottom:1px solid var(--line);}
-  .ps-head .ps-date{color:var(--ink-mute);font-weight:600;font-size:11px;margin-left:3px;}
-  .ps-row{padding:8px 11px;border-bottom:1px solid rgba(38,48,74,.5);cursor:pointer;transition:background .1s;}
-  .ps-row:hover{background:var(--panel-2);}
-  .ps-row.on{background:#1d2741;}
-  .ps-row.has-core{box-shadow:inset 3px 0 0 0 #e8493f;}
-  .ps-row.has-intra{box-shadow:inset 3px 0 0 0 #d9a441;}
-  .ps-nm{font-size:13px;font-weight:700;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-  .ps-meta{display:flex;align-items:center;gap:6px;margin-top:4px;}
-  .ps-meta .sg{margin-left:0;padding:1px 7px;font-size:11px;}
-  .ps-cur{margin-left:auto;font-size:12px;font-weight:700;}
+  #grid{flex:1;display:grid;grid-template-columns:17% 13% 70%;min-height:0;}
   .col{min-width:0;min-height:0;display:flex;flex-direction:column;border-right:1px solid var(--line);}
   .col:last-child{border-right:none;}
   .col-head{flex:0 0 auto;padding:9px 12px;border-bottom:1px solid var(--line);
@@ -179,19 +166,6 @@ echo <<<'PAGE'
   .row .turn{text-align:right;font-size:14px;color:var(--ink-mute);min-width:46px;}
   .row-head span:last-child,.row .turn{padding-right:2px;}
   .rank{display:inline-block;width:30px;color:var(--ink-mute);font-size:14px;text-align:right;margin-right:4px;}
-  /* 신호 칩 */
-  .sg{display:inline-flex;align-items:center;gap:3px;margin-left:8px;padding:2px 9px;border-radius:999px;
-      font-size:12px;font-weight:800;line-height:1.55;vertical-align:middle;letter-spacing:-.01em;white-space:nowrap;}
-  .sg .pct{font-family:var(--mono);font-weight:800;}
-  .sg .stk{font-size:10.5px;opacity:.85;font-weight:700;margin-left:1px;}
-  .sg-today.sg-core{background:linear-gradient(135deg,#ff5b4d,#c5241a);color:#fff;box-shadow:0 2px 9px rgba(232,73,63,.45);}
-  .sg-today.sg-intra{background:linear-gradient(135deg,#f3bd3c,#c98a00);color:#241900;box-shadow:0 2px 9px rgba(217,164,65,.4);}
-  .sg-old{background:transparent;border:1px solid var(--line);color:var(--ink-mute);}
-  .sg-old .pct{color:var(--ink-dim);}
-  /* 신호 행 차별화: 좌측 액센트 바 + 종목명 강조 */
-  .row.has-core{box-shadow:inset 3px 0 0 0 #e8493f;}
-  .row.has-intra{box-shadow:inset 3px 0 0 0 #d9a441;}
-  .row.has-core .nm b,.row.has-intra .nm b{color:#fff;}
   .list-msg{padding:18px 12px;color:var(--ink-mute);font-size:13px;line-height:1.6;}
   .col-head .pager{margin-left:auto;display:flex;gap:6px;align-self:center;}
   .col-head .pager button{background:var(--panel-2);color:var(--ink);border:1px solid var(--line);
@@ -217,15 +191,7 @@ echo <<<'PAGE'
   .chart-bar .px{font-size:11px;color:var(--ink-dim);}
   .chart-host{flex:1;min-height:0;position:relative;}
   /* 일봉 상승셋업 흰색 칩(배수+승률) */
-  .chip-layer{position:absolute;inset:0;pointer-events:none;overflow:hidden;z-index:3;}
-  .dchip{position:absolute;background:#fff;border-radius:7px;
-    padding:2px 7px;font-size:10px;font-weight:800;line-height:1.2;text-align:center;
-    box-shadow:0 1px 5px rgba(0,0,0,.45);white-space:nowrap;}
-  .dchip .r{display:block;color:#c0241a;}
-  .dchip .w{display:block;color:#111;font-variant-numeric:tabular-nums;}
-  .dchip .w.real{color:#0a7d32;}                 /* 실측 칼리브레이션 적중률 — 초록 */
-  .dchip .w.est{color:#666;font-style:italic;}   /* 표본부족 정적추정 — 회색 이탤릭 */
-  .dchip.gold{box-shadow:0 1px 6px rgba(184,134,11,.6);} .dchip.gold .r{color:#b8860b;}
+  /* 일봉 신호 칩(.dc-chip)·전고점선 스타일은 style/dailychart.js 가 주입한다 */
   #selBar{display:flex;align-items:baseline;gap:12px;padding:8px 14px;background:var(--panel-2);border-bottom:1px solid var(--line);}
   #selBar .snm{font-size:16px;font-weight:800;letter-spacing:-.02em;}
   #selBar .scode{font-size:11px;color:var(--ink-mute);}
@@ -272,13 +238,6 @@ echo <<<'PAGE'
       <div class="col-body" id="stockList"><div class="list-msg">불러오는 중…</div></div>
     </section>
     <section class="col">
-      <div class="col-head">
-        <span class="seg" id="psSeg"><button id="segPrev" type="button" class="on">전일신호</button><button id="segToday" type="button">오늘신호</button></span>
-        <span class="sub" id="psSub"></span></div>
-      <div class="col-body" id="psList"><div class="list-msg">불러오는 중…</div></div>
-    </section>
-
-    <section class="col">
       <div class="col-head"><h2>뉴스</h2><span class="sub" id="newsSub"></span></div>
       <div class="col-body" id="newsList">
         <div class="news-empty">왼쪽에서 종목을 선택하면<br/>관련 뉴스를 불러옵니다.</div>
@@ -293,7 +252,7 @@ echo <<<'PAGE'
       </div>
       <div class="charts">
         <div class="chart-block">
-          <div class="chart-bar"><span class="lbl">일봉</span><button type="button" id="toggleHighLine" class="cline-chip on" title="신호일 전고점(돌파레벨) 수평선 표시/숨김">전고점선</button><button type="button" id="toggleTodayHigh" class="cline-chip on" title="당일 기준 전고점(직전 60일 최고가=현 돌파레벨) 수평선">당일전고</button><button type="button" id="toggleCurPrice" class="cline-chip" title="현재가격선 표시/숨김">현재가</button><span class="seg dseg"><button type="button" id="dayb160" class="on">160</button><button type="button" id="dayb240">240</button></span><span class="px">OHLC + 거래량 &nbsp; 흰칩 ▲N.Nx=신고가+대량거래·아래숫자=승률 · 금색=거래량5배+</span></div>
+          <div class="chart-bar"><span class="lbl" id="dailyLbl">일봉</span><button type="button" id="toggleHighLine" class="cline-chip on" title="신호일 전고점(돌파레벨) 수평선 표시/숨김">전고점선</button><button type="button" id="toggleTodayHigh" class="cline-chip on" title="당일 기준 전고점(직전 60일 최고가=현 돌파레벨) 수평선">당일전고</button><button type="button" id="toggleCurPrice" class="cline-chip" title="현재가격선 표시/숨김">현재가</button><span id="dPBar"></span><span id="dIBar"></span><span id="dIndLeg" class="dc-leg-dark"></span><span class="px">OHLC + 거래량 &nbsp; 흰칩 ▲N.Nx=신고가+대량거래·아래숫자=승률 · 금색=거래량5배+</span></div>
           <div class="chart-host" id="dailyChart"></div>
         </div>
         <div class="chart-block bottom">
@@ -307,7 +266,6 @@ echo <<<'PAGE'
 
 <script>
 const API = 'stock_analysis_api.php';
-const LWC = LightweightCharts;
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const UP = css('--up'), DOWN = css('--down');
 const $ = id => document.getElementById(id);
@@ -319,169 +277,42 @@ function fmtVal(eok){ // 거래대금: 입력은 '억' 단위
 }
 function fmtPrice(p){return Math.round(Number(p)||0).toLocaleString();}
 function fmtRate(r){r=Number(r)||0; return (r>=0?'+':'')+r.toFixed(2)+'%';}
-// 일봉: 시간값이 문자열('YYYY-MM-DD')·비즈니스데이({year,month,day})·타임스탬프 중 무엇이든 → 한글 날짜(시간 없음)
-function fmtKDate(t){
-  if(typeof t==='string'){ const p=t.split('-'); return `${+p[0]}년 ${+p[1]}월 ${+p[2]}일`; }
-  if(t && typeof t==='object' && 'year' in t) return `${t.year}년 ${t.month}월 ${t.day}일`;
-  const d=new Date((Number(t)||0)*1000);
-  return `${d.getUTCFullYear()}년 ${d.getUTCMonth()+1}월 ${d.getUTCDate()}일`;
-}
-function fmtKDateShort(t){ // 축 눈금용 (M/D)
-  if(typeof t==='string'){ const p=t.split('-'); return `${+p[1]}/${+p[2]}`; }
-  if(t && typeof t==='object' && 'year' in t) return `${t.month}/${t.day}`;
-  const d=new Date((Number(t)||0)*1000);
-  return `${d.getUTCMonth()+1}/${d.getUTCDate()}`;
-}
-// 분봉: UTC로 취급(벽시계=KST)된 타임스탬프 → HH:MM
-function fmtHM(t){
-  const d=new Date((Number(t)||0)*1000);
-  return String(d.getUTCHours()).padStart(2,'0')+':'+String(d.getUTCMinutes()).padStart(2,'0');
-}
+// 날짜·시각 축 포맷(한글 날짜·HH:MM)은 style/dailychart.js 모듈이 맡는다
 
-/* ---- 차트 인스턴스 (1회 생성 후 재사용) ---- */
-const chartOpts = {
-  layout:{background:{color:'transparent'},textColor:css('--ink-dim'),fontFamily:'Pretendard'},
-  grid:{vertLines:{color:'rgba(38,48,74,.4)'},horzLines:{color:'rgba(38,48,74,.4)'}},
-  rightPriceScale:{borderColor:css('--line')},
-  timeScale:{borderColor:css('--line'),timeVisible:true,secondsVisible:false},
-  crosshair:{mode:LWC.CrosshairMode.Normal},
-};
-const candleOpts={upColor:UP,downColor:DOWN,borderUpColor:UP,borderDownColor:DOWN,wickUpColor:UP,wickDownColor:DOWN};
-function makeChart(hostId,kind){
-  const host=$(hostId);
-  const opt={...chartOpts,width:host.clientWidth,height:host.clientHeight};
-  if(kind==='daily'){               // 일봉: 날짜만(시간 없음)
-    opt.localization={timeFormatter:fmtKDate};
-    opt.timeScale={borderColor:css('--line'),timeVisible:false,secondsVisible:false,tickMarkFormatter:fmtKDateShort};
-  }else{                            // 분봉: HH:MM
-    opt.localization={timeFormatter:fmtHM};
-    opt.timeScale={borderColor:css('--line'),timeVisible:true,secondsVisible:false,tickMarkFormatter:fmtHM};
-  }
-  const chart=LWC.createChart(host,opt);
-  const candle=chart.addCandlestickSeries(candleOpts);
-  const vol=chart.addHistogramSeries({priceFormat:{type:'volume'},priceScaleId:'vol'});
-  chart.priceScale('vol').applyOptions({scaleMargins:{top:0.8,bottom:0}});
-  return {chart,candle,vol,host};
-}
-const daily=makeChart('dailyChart','daily');
-const minute=makeChart('minuteChart','minute');
-// 현재가격선(캔들 내장 priceLine): 기본 숨김, 켜지면 실선
-daily.candle.applyOptions({priceLineVisible:false, priceLineStyle:LWC.LineStyle.Solid, priceLineColor:'#d9a441', priceLineWidth:1});
-function paint(c,data){
-  c.candle.setData(data.map(d=>({time:d.time,open:d.open,high:d.high,low:d.low,close:d.close})));
-  c.vol.setData(data.map(d=>({time:d.time,value:d.vol,color:(d.close>=d.open?UP:DOWN)+'66'})));
-  if(data.length) c.chart.timeScale().fitContent();
-}
-// 상승 셋업: '종가 60일 신고가 돌파 + 거래량 60일평균 2배+' → 흰색 칩(배수+승률)
-// 승률 = 상승확률 엔진의 누적 실측 적중률(rise_pattern_stats)을 cell_key로 조회. 표본 부족 시 정적추정 폴백.
-let CALIB={};                 // {'core:2-3':{n,rate,lo,hi}, ...} — action=calib 로 1회 로드
-const CALIB_MIN_N=8;          // 실측 채택 최소 표본(그 미만은 정적추정 사용)
-function volTier(r){ return r>=5?'5+' : r>=3?'3-5' : r>=2?'2-3' : r>=1?'1-2' : '0-1'; }  // 엔진 volTier와 동일
-function brkWinStatic(r){ return r>=5?90 : r>=3?82 : 78; }   // 폴백: 거래량 등급별 대략 승률(3일내 +3%)
-// 클라이언트 흰칩은 '종가 신고가 돌파'(=core) 신호 → cell_key 'core:{tier}'
-function winInfo(ratio){
-  const c=CALIB['core:'+volTier(ratio)];
-  if(c && c.n>=CALIB_MIN_N) return {pct:Math.round(c.rate), real:true, n:c.n, lo:c.lo, hi:c.hi};
-  return {pct:brkWinStatic(ratio), real:false};
-}
-async function loadCalib(){
-  try{ const m=await fetch(API+'?action=calib').then(r=>r.json());
-       if(m && typeof m==='object') { CALIB=m; renderDailyChips(); } }catch(e){}
-}
-function computeDailySignals(data){
-  const out=[]; const n=data.length;
-  for(let i=60;i<n;i++){
-    let ph=-Infinity, vs=0;
-    for(let k=i-60;k<i;k++){ if(data[k].high>ph)ph=data[k].high; vs+=data[k].vol; }
-    if(!(data[i].close>ph)) continue;
-    const ratio = vs>0 ? data[i].vol/(vs/60) : 0;
-    if(ratio<2) continue;
-    out.push({time:data[i].time, low:data[i].low, close:data[i].close, ph, ratio});  // ph=전고점(돌파레벨). 승률은 렌더시 winInfo로 산출
-  }
-  return out;
-}
-let DAILY_SIGNALS=[];
-const dailyChipLayer=document.createElement('div'); dailyChipLayer.className='chip-layer';
-$('dailyChart').appendChild(dailyChipLayer);
-function renderDailyChips(){
-  dailyChipLayer.innerHTML='';
-  const ts=daily.chart.timeScale();
-  for(const s of DAILY_SIGNALS){
-    const x=ts.timeToCoordinate(s.time); if(x==null) continue;
-    const y=daily.candle.priceToCoordinate(s.low); if(y==null) continue;
-    const w=winInfo(s.ratio);
-    const c=document.createElement('div');
-    c.className='dchip'+(s.ratio>=5?' gold':'');
-    c.style.left=x+'px'; c.style.top=(y+8)+'px';
-    c.title = w.real
-      ? `실측 적중률 ${w.pct}% · 3일내 +3% 터치 (표본 ${w.n}건, 95%CI ${w.lo}~${w.hi}%)`
-      : `추정 승률 ${w.pct}% · 실측 표본 부족(정적추정)`;
-    c.innerHTML=`<span class="r">▲ ${s.ratio.toFixed(1)}x</span><span class="w ${w.real?'real':'est'}">${w.pct}%</span>`;
-    dailyChipLayer.appendChild(c);
-  }
-}
-daily.chart.timeScale().subscribeVisibleLogicalRangeChange(renderDailyChips);
-// 신호일 전고점 수평선: 신호의 돌파 기준선(직전 60일 전고점 ph)을 그림 — 신호 트리거 레벨
-let DAILY_PRICELINES=[];
-let SHOW_HIGH_LINES=true;   // 기본 ON. 일봉 헤더 '전고점선' 칩으로 토글
-function drawSignalPriceLines(){
-  for(const pl of DAILY_PRICELINES) daily.candle.removePriceLine(pl);
-  DAILY_PRICELINES=[];
-  if(!SHOW_HIGH_LINES) return;
-  for(const s of DAILY_SIGNALS){
-    if(s.ph==null) continue;
-    const gold=s.ratio>=5;
-    DAILY_PRICELINES.push(daily.candle.createPriceLine({
-      price:s.ph,                        // 전고점(돌파레벨)
-      color:gold?'#b8860b':'rgba(255,255,255,.45)',
-      lineWidth:1, lineStyle:LWC.LineStyle.Dashed,
-      axisLabelVisible:false,            // 가격 라벨·제목 없이 선만 표시
-    }));
-  }
-}
+/* ---- 차트 (공용 모듈 style/dailychart.js — 신호칩·전고점선·당일전고·현재가선 포함) ----
+ * 신호 조건('종가 60봉 신고가 돌파 + 거래량 2배+')과 승률 칩은 모듈 단일본이다. */
+let daily=null, minute=null;   // DailyChart 핸들 (load 후 생성)
+const dcReady = DailyChart.load().then(()=>{
+  daily = DailyChart.create('dailyChart', {theme:'dark', signals:{}, curPrice:'#d9a441',
+                                           key:'updash', legend:'dIndLeg'});
+  minute = DailyChart.create('minuteChart', {theme:'dark', kind:'minute'});
+  // 기간 바 [일봉|주봉 ┃ 기간 4개] = 공용 컴포넌트 (일봉 160/240/480/전체 ↔ 주봉 24/48/96주/전체)
+  DailyChart.periodBar('dPBar', daily, {
+    theme: 'dark',
+    defaultIndex: 0,   // 160일 (기존 기본값 유지)
+    onChange: info => { $('dailyLbl').textContent = info.tf==='week' ? '주봉' : '일봉'; }
+  });
+  DailyChart.indicatorBar('dIBar', daily, { theme: 'dark', key: 'updash' });   // 사용자 지표 + 차트틀
+});
 // 일봉 '전고점선' 칩 토글 (기본 ON)
 $('toggleHighLine').onclick=function(){
-  SHOW_HIGH_LINES=!SHOW_HIGH_LINES;
-  this.classList.toggle('on', SHOW_HIGH_LINES);
-  drawSignalPriceLines();
+  const on=!this.classList.contains('on');
+  this.classList.toggle('on', on);
+  if(daily) daily.setSignalLines(on);
 };
-// 당일 기준 전고점선: 직전 60영업일(최신봉 제외) 최고가 = 현재 돌파 기준레벨. 단일 수평선
-let TODAY_HIGH_LINE=null;
-let SHOW_TODAY_HIGH=true;    // 기본 ON. '당일전고' 칩으로 토글
-function todayPriorHigh(){
-  const n=DAILY_FULL.length;
-  if(n<2) return null;
-  const end=n-1;                       // 최신봉(당일) 제외
-  let ph=-Infinity;
-  for(let k=Math.max(0,end-60);k<end;k++){ if(DAILY_FULL[k].high>ph)ph=DAILY_FULL[k].high; }
-  return ph>-Infinity?ph:null;
-}
-function drawTodayHighLine(){
-  if(TODAY_HIGH_LINE){ daily.candle.removePriceLine(TODAY_HIGH_LINE); TODAY_HIGH_LINE=null; }
-  if(!SHOW_TODAY_HIGH) return;
-  const ph=todayPriorHigh(); if(ph==null) return;
-  TODAY_HIGH_LINE=daily.candle.createPriceLine({
-    price:ph,                          // 직전 60일 전고점(현 돌파레벨)
-    color:'#22d3ee',                   // 시안 — 신호별 전고선(흰/금)과 구분
-    lineWidth:1, lineStyle:LWC.LineStyle.Solid,
-    axisLabelVisible:false,            // 우측 축 라벨·제목 없이 선만 표시
-  });
-}
 // '당일전고' 칩 토글 (기본 ON)
 $('toggleTodayHigh').onclick=function(){
-  SHOW_TODAY_HIGH=!SHOW_TODAY_HIGH;
-  this.classList.toggle('on', SHOW_TODAY_HIGH);
-  drawTodayHighLine();
+  const on=!this.classList.contains('on');
+  this.classList.toggle('on', on);
+  if(daily) daily.setTodayHigh(on);
 };
 // 일봉 '현재가' 칩 토글 (기본 OFF, 실선)
 $('toggleCurPrice').onclick=function(){
   const on=!this.classList.contains('on');
   this.classList.toggle('on', on);
-  daily.candle.applyOptions({priceLineVisible:on});
+  if(daily) daily.setCurPrice(on);
 };
-function resizeAll(){ for(const c of [daily,minute]) c.chart.resize(c.host.clientWidth,c.host.clientHeight); renderDailyChips(); }
-new ResizeObserver(resizeAll).observe($('dailyChart'));
-window.addEventListener('resize',resizeAll);
+// 기간 바(일봉/주봉·기간)는 위 periodBar 가 dcReady 이후 #dPBar 에 그린다
 
 /* ---- 목록(top30, 커서 페이징) ---- */
 const listEl=$('stockList');
@@ -491,13 +322,6 @@ let nextCursor=null;   // 다음 페이지 커서 {val, code} = 현재 페이지
 let loadingList=false;
 let LIST_SORT='rate';  // 'rate'=상승률상위 / 'cap'=시총상위
 
-/* ---- rise_analysis 신호 뱃지 (최근 3거래일) ---- */
-let SIGNALS={};
-async function loadSignals(){
-  try{ const r=await fetch(API+'?action=signals').then(x=>x.json());
-       SIGNALS=(r && typeof r==='object' && !Array.isArray(r)) ? r : {}; }
-  catch(e){ SIGNALS={}; }
-}
 // ETF 편입 뱃지: 이 종목을 상위 편입(top_rank)한 ETF 수 → 티어 색상 (etf_stock.php get_etf_badge_html 로직 차용)
 function etfBadge(n){
   n=Number(n)||0;
@@ -506,86 +330,6 @@ function etfBadge(n){
   const icon = n>=100?'💎' : '';
   return `<span class="etfb ${cls}" title="상위 편입 ETF ${n}개">${icon}${n}</span>`;
 }
-function sigBadge(code){
-  const g=SIGNALS[code]; if(!g) return '';
-  const emo=g.type==='core'?'🔥':'⚡';
-  const pred=(g.pred!=null)?Math.round(g.pred*100)+'%':'';
-  const cls='sg '+(g.today?'sg-today':'sg-old')+' '+(g.type==='core'?'sg-core':'sg-intra');
-  const kind=g.type==='core'?'핵심신호':'장중신호';
-  const tip=`${kind} · ${(g.dates||[]).join(', ')} · 예측 ${pred||'-'}`;
-  const pctH=pred?`<span class="pct">${pred}</span>`:'';
-  const stkH=(g.count>=2)?`<span class="stk">×${g.count}</span>`:'';
-  return `<span class="${cls}" title="${tip}">${emo}${pctH}${stkH}</span>`;
-}
-
-/* ---- 신호 패널: 전일(최근 3분석일)/오늘 토글 ---- */
-let PS_SCOPE='prev';   // 'prev'=전일신호(최근 3일) / 'today'=오늘 장종료후 분석 신호
-async function loadPrevSignals(){
-  const el=$('psList');
-  const today=PS_SCOPE==='today';
-  el.innerHTML='<div class="list-msg">불러오는 중…</div>';
-  let res={};
-  try{ res=await fetch(API+'?action=prevsignals&scope='+PS_SCOPE).then(r=>r.json()); }catch(e){ res={}; }
-  const dates=(res&&res.dates)||[];
-  const groups=(res&&res.groups)||{};
-  const labels=today?['오늘']:['전일','전전일','3일전'];
-  el.innerHTML=''; $('psSub').textContent=today?(dates.length?'장종료 후 분석':''):(dates.length?'최근 3일':'');
-  let any=false;
-  dates.forEach((d,gi)=>{
-    const arr=groups[d]||[];
-    if(!arr.length) return;
-    any=true;
-    const hd=document.createElement('div');
-    hd.className='ps-head';
-    hd.innerHTML=`${labels[gi]||''}<span class="ps-date">${d.slice(5).replace('-','/')}</span>`;
-    el.appendChild(hd);
-    arr.forEach(p=>{
-      const core=p.type==='core';
-      const emo=core?'🔥':'⚡';
-      const pred=(p.pred!=null)?Math.round(p.pred*100)+'%':'';
-      const up=Number(p.rate)>=0;
-      const stk=(p.count>=2)?`<span class="stk">×${p.count}</span>`:'';
-      // 당일(실시간) 등락률 — 신호일 대비 오늘 성과 (라벨 없이 우측 정렬)
-      const hasCur=(p.cur!=null);
-      const curUp=hasCur&&Number(p.cur)>=0;
-      const curH=hasCur
-        ? `<span class="ps-cur mono ${curUp?'up':'down'}" title="당일(현재) 등락률">${fmtRate(p.cur)}</span>`
-        : `<span class="ps-cur mono" style="color:#888" title="당일 시세 없음">–</span>`;
-      // 회전율(거래대금/시총) — 주식·ETF 모두 폴백 조회
-      const turnH=(p.turnover!=null)
-        ? `<span class="mono" style="font-size:11px;color:var(--ink-mute)" title="회전율(거래대금/시총)">회 ${Number(p.turnover).toFixed(1)}%</span>`
-        : '';
-      const r=document.createElement('div');
-      r.className='ps-row has-'+(core?'core':'intra');
-      r.innerHTML=`<div class="ps-nm">${p.name}</div>
-        <div class="ps-meta"><span class="sg sg-today ${core?'sg-core':'sg-intra'}">${emo}<span class="pct">${pred}</span>${stk}</span>
-          <span class="mono ${up?'up':'down'}" style="font-size:11px;opacity:.7" title="신호일 등락률">신 ${fmtRate(p.rate)}</span>
-          <span style="margin-left:auto;display:inline-flex;align-items:center;gap:6px">${turnH}${curH}</span></div>`;
-      r.onclick=()=>{
-        document.querySelectorAll('#psList .ps-row.on').forEach(x=>x.classList.remove('on'));
-        r.classList.add('on');
-        selectStock({code:p.code,name:p.name,
-          price:(p.curPrice!=null?p.curPrice:p.close),
-          rate:(p.cur!=null?p.cur:p.rate),tradeEok:0}, r);
-      };
-      el.appendChild(r);
-    });
-  });
-  if(!any) el.innerHTML=today
-    ? '<div class="list-msg">오늘 분석한 신호 없음<br/>(장종료 후 분석 전이거나 신호 미발생)</div>'
-    : '<div class="list-msg">최근 신호 없음<br/>(분석 이력 부족)</div>';
-}
-/* 전일 ↔ 오늘 신호 토글 */
-function setPsScope(scope){
-  if(PS_SCOPE===scope) return;
-  PS_SCOPE=scope;
-  $('segPrev').classList.toggle('on', scope==='prev');
-  $('segToday').classList.toggle('on', scope==='today');
-  loadPrevSignals();
-}
-$('segPrev').onclick=()=>setPsScope('prev');
-$('segToday').onclick=()=>setPsScope('today');
-
 async function loadPage(cursor, startRank){
   if(loadingList) return;
   loadingList=true; $('btnFirst').disabled=true; $('btnNext').disabled=true;
@@ -620,14 +364,13 @@ function renderList(){
   listEl.innerHTML='';
   STOCKS.forEach((s,i)=>{
     const up=Number(s.rate)>=0;
-    const g=SIGNALS[s.code];
     const row=document.createElement('div');
-    row.className='row'+(g?(' has-'+(g.type==='core'?'core':'intra')):''); row.dataset.code=s.code;
+    row.className='row'; row.dataset.code=s.code;
     const metric=LIST_SORT==='cap'?s.cap:s.tradeEok;
     const cap=Number(s.cap)||0, trade=Number(s.tradeEok)||0;
     const turn=cap>0 ? (trade/cap*100) : 0;       // 회전율(%) = 거래대금/시총
     const etfTag=s.kind==='etf'?'<span class="ktag">ETF</span>':'';
-    row.innerHTML=`<div class="nm"><b><span class="rank">${pageStart+i+1}</span>${s.name}${etfTag}${etfBadge(s.etfTop)}${sigBadge(s.code)}</b>
+    row.innerHTML=`<div class="nm"><b><span class="rank">${pageStart+i+1}</span>${s.name}${etfTag}${etfBadge(s.etfTop)}</b>
         <span class="mono" style="padding-left:34px">${s.code}</span></div>
       <div class="rate mono ${up?'up':'down'}">${fmtRate(s.rate)}</div>
       <div class="val mono">${fmtVal(metric)}</div>
@@ -656,22 +399,6 @@ $('segCap').onclick=()=>setListSort('cap');
 
 /* ---- 종목 선택 → 뉴스/일봉/분봉 동시 fetch (Promise.all) ---- */
 let CUR_STOCK=null;            // 현재 선택 종목
-let DAILY_DAYS=160;           // 화면 표시 기간(영업일): 160 / 240
-let DAILY_FULL=[];            // 항상 240영업일 원본 — 신호(흰칩·종가선) 계산 기준
-// 화면만 다시 그림(재조회·신호재계산 없음). 신호는 240 기준이라 화면 밖 종가선도 그려짐
-function repaintDaily(){
-  const view = DAILY_DAYS===160 ? DAILY_FULL.slice(-160) : DAILY_FULL;
-  paint(daily, view);
-  drawSignalPriceLines();                       // DAILY_SIGNALS(240 기준) → 화면 밖 신호 종가선도 표시
-  drawTodayHighLine();                           // 당일 기준 전고점 단일 수평선
-  setTimeout(renderDailyChips,0);               // 흰칩은 화면 안 신호만(좌표 null이면 skip)
-}
-// 일봉 데이터 적용: 240 원본 보관 + 신호 240 기준 계산 후 화면 그림
-function applyDaily(d){
-  DAILY_FULL=(Array.isArray(d)?d:[]).map(x=>({time:x.t,open:x.o,high:x.h,low:x.l,close:x.c,vol:x.v}));
-  DAILY_SIGNALS=computeDailySignals(DAILY_FULL);   // 항상 240 기준
-  repaintDaily();
-}
 async function selectStock(s,row){
   document.querySelectorAll('.row.on').forEach(r=>r.classList.remove('on'));
   if(row) row.classList.add('on');
@@ -686,26 +413,16 @@ async function selectStock(s,row){
 
   const [news,d,m]=await Promise.all([
     fetch(`${API}?action=news&code=${s.code}`).then(r=>r.json()).catch(()=>[]),
-    fetch(`${API}?action=daily&code=${s.code}&days=240`).then(r=>r.json()).catch(()=>[]),  // 신호 계산 위해 항상 240
-    fetch(`${API}?action=minute&code=${s.code}`).then(r=>r.json()).catch(()=>[]),
+    DailyChart.fetchDaily(s.code,1000).catch(()=>[]),  // 1000영업일(≈4년) 한 번 — 표시는 bindPeriod 슬라이스
+    DailyChart.fetchMinute(s.code).catch(()=>[]),
   ]);
 
-  applyDaily(d);
-  paint(minute,(Array.isArray(m)?m:[]).map(x=>({
-    time:Math.floor(Date.parse(x.t.replace(' ','T')+'Z')/1000),   // KST 벽시계를 UTC로 취급 → 09:00 그대로 표시
-    open:x.o,high:x.h,low:x.l,close:x.c,vol:x.v})));
+  await dcReady;
+  daily.setData(d);     // 신호칩·전고점선·당일전고는 모듈이 그린다 (240 전체 기준)
+  minute.setData(m);
   renderNews(Array.isArray(news)?news:[]);
 }
-// 기간 토글: 재조회 없이 240 원본을 슬라이스해 화면만 갱신
-function setDailyDays(n){
-  if(DAILY_DAYS===n) return;
-  DAILY_DAYS=n;
-  $('dayb160').classList.toggle('on', n===160);
-  $('dayb240').classList.toggle('on', n===240);
-  repaintDaily();
-}
-$('dayb160').onclick=()=>setDailyDays(160);
-$('dayb240').onclick=()=>setDailyDays(240);
+// 기간 토글은 bindPeriod 가 관리 — 재조회 없이 1000일 원본을 슬라이스만 한다
 function renderNews(list){
   const el=$('newsList'); el.innerHTML='';
   if(!list.length){ el.innerHTML='<div class="news-empty">관련 뉴스가 없습니다.</div>'; return; }
@@ -761,7 +478,7 @@ async function openStock(s){
     try{ const r=await fetch(`${API}?action=search&keyword=${encodeURIComponent(s.code||s.name)}`).then(x=>x.json());
          if(Array.isArray(r)&&r.length) full=r.find(x=>x.code===s.code)||r[0]; }catch(e){}
   }
-  document.querySelectorAll('.row.on,.ps-row.on').forEach(x=>x.classList.remove('on'));
+  document.querySelectorAll('.row.on').forEach(x=>x.classList.remove('on'));
   selectStock(full,null);
   try{ await fetch(`${API}?action=saverecent&code=${encodeURIComponent(full.code)}&name=${encodeURIComponent(full.name)}`); }catch(e){}
   loadRecent();
@@ -789,13 +506,12 @@ async function loadMeta(){
        if(m&&m.updated) $('qtime').innerHTML=`<b>${m.updated}</b> 기준 (KRX 장중)`; }catch(e){}
 }
 let liveBusy=false;
-async function refreshLive(){   // 화면 새로고침: DB 최신값으로 리스트·신호·시각 다시 그림(시세 수집 아님)
+async function refreshLive(){   // 화면 새로고침: DB 최신값으로 리스트·시각 다시 그림(시세 수집 아님)
   if(liveBusy) return; liveBusy=true;
   const badge=$('liveBadge');
   badge.classList.add('loading'); badge.textContent='새로고침…';
-  await Promise.all([loadSignals(), loadMeta()]);
+  await loadMeta();
   nextCursor=null; await loadPage(null,0);   // 첫 페이지부터 다시
-  await loadPrevSignals();
   badge.classList.remove('loading'); badge.textContent='LIVE'; liveBusy=false;
 }
 $('liveBadge').onclick=refreshLive;
@@ -804,11 +520,9 @@ $('liveBadge').onclick=refreshLive;
 function tick(){ $('clock').textContent=new Date().toLocaleString('ko-KR',{hour12:false}); }
 tick(); setInterval(tick,1000);
 
-loadSignals().then(()=>loadPage(null,0));
-loadPrevSignals();
+loadPage(null,0);
 loadRecent();
 loadMeta();
-loadCalib();   // 흰칩 승률용 실측 칼리브레이션(rise_pattern_stats) 로드
 </script>
 </body>
 </html>

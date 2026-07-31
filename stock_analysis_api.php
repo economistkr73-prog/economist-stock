@@ -23,6 +23,7 @@ $action = $_GET['action'] ?? $_POST['action'] ?? '';
 try {
     switch ($module) {
         case 'stock': api_stock($action, $pdo); break;
+        case 'ind':   api_ind($action, $pdo);   break;   // 사용자 지표 (style/dailychart.js 소비)
         default:
             http_response_code(400);
             echo json_encode(['error' => "unknown module: {$module}"], JSON_UNESCAPED_UNICODE);
@@ -128,8 +129,9 @@ function api_stock(string $action, PDO $pdo): void
             if ($code === '') { echo json_encode([]); return; }
 
             $want = (int)($_GET['days'] ?? 160);
-            $want = $want >= 240 ? 240 : 160;        // 허용: 160 / 240 영업일
-            $cal  = $want >= 240 ? 380 : 250;        // 영업일 확보용 달력일수(주말·휴일 버퍼 포함)
+            // 허용: 160/240/480/1000 영업일. 1000(≈4년)은 주봉(dailychart.js setTf) 뷰용
+            if (!in_array($want, [160, 240, 480, 1000], true)) $want = $want >= 240 ? 240 : 160;
+            $cal = (int)ceil($want * 1.55) + 10;     // 영업일 확보용 달력일수(주말·휴일 버퍼 포함)
 
             $api = new NaverFinanceAPI();
             $res = $api->getDailyOhlc($code, $cal);
@@ -138,7 +140,24 @@ function api_stock(string $action, PDO $pdo): void
             // 최근 N영업일만 (오름차순 유지)
             $rows = $res['success'];
             if (count($rows) > $want) $rows = array_slice($rows, -$want);
-            echo json_encode(array_values($rows), JSON_UNESCAPED_UNICODE);
+            $rows = array_values($rows);
+
+            /* 실제 거래대금(KRX) 병합 — 있는 날만 'a' 로 실어 보낸다.
+             * 네이버 일봉엔 거래대금이 없어 지표 엔진이 「종가×거래량」으로 근사하는데,
+             * 그 오차(중앙 0.99%)가 「전고 거래대금 돌파」 판정을 뒤집을 수 있다(실측 0.79%).
+             * 값이 없는 날은 키를 넣지 않는다 — 엔진이 근사로 폴백하고, 화면은 그 사실을 안다. */
+            try {
+                $ka = new KrxAmt($pdo);
+                $ser = $ka->series($code, $rows[0]['t'] ?? '', $rows[count($rows) - 1]['t'] ?? '');
+                if ($ser) {
+                    foreach ($rows as &$r) {
+                        if (isset($ser[$r['t']])) $r['a'] = $ser[$r['t']];
+                    }
+                    unset($r);
+                }
+            } catch (Throwable $e) { /* 테이블 미생성 등 — 근사로 계속 */ }
+
+            echo json_encode($rows, JSON_UNESCAPED_UNICODE);
             return;
         }
 
@@ -152,104 +171,6 @@ function api_stock(string $action, PDO $pdo): void
             if (isset($res['error']) || !isset($res['success'])) { echo json_encode([]); return; }
 
             echo json_encode(array_values($res['success']), JSON_UNESCAPED_UNICODE);
-            return;
-        }
-
-        // ── 최근 3거래일 rise_analysis 신호 (대시보드 뱃지용) ──
-        //   반환: { "005930": {type,pred,latest,today,count,dates:[...]}, ... }
-        case 'signals': {
-            try {
-                $rows = $pdo->query(
-                    "SELECT stock_code, signal_date, signal_type, is_signal, pred_hit3
-                     FROM rise_pick
-                     WHERE signal_date >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)
-                     ORDER BY signal_date DESC")->fetchAll(PDO::FETCH_ASSOC);
-            } catch (Throwable $e) { echo json_encode(new stdClass()); return; }
-
-            $today = date('Y-m-d');
-            $map = [];
-            foreach ($rows as $r) {
-                $c = $r['stock_code'];
-                if (!isset($map[$c])) {   // 첫 등장 = 최신(정렬 desc)
-                    $map[$c] = [
-                        'type'   => $r['signal_type'],
-                        'pred'   => $r['pred_hit3'] !== null ? (float)$r['pred_hit3'] : null,
-                        'signal' => (int)$r['is_signal'],
-                        'latest' => $r['signal_date'],
-                        'today'  => 0, 'count' => 0, 'dates' => [],
-                    ];
-                }
-                $map[$c]['count']++;
-                $map[$c]['dates'][] = $r['signal_date'];
-                if ($r['signal_date'] === $today) $map[$c]['today'] = 1;
-            }
-            echo json_encode($map ?: new stdClass(), JSON_UNESCAPED_UNICODE);
-            return;
-        }
-
-        // ── 전일/오늘 신호: 신호일을 날짜별 그룹으로 ──
-        //   scope=today → 오늘(CURDATE) 신호만 / 그 외 → 오늘 이전 최근 3분석일
-        //   종목은 가장 최근 신호일 그룹에만 1회 표시, count=조회기간중 신호난 일수
-        //   반환: { dates:[d1,d2,d3], groups:{ d1:[{...,count}], d2:[...], d3:[...] } }
-        case 'prevsignals': {
-            $scope = (($_GET['scope'] ?? '') === 'today') ? 'today' : 'prev';
-            $dateCond = $scope === 'today' ? 'signal_date = CURDATE()' : 'signal_date < CURDATE()';
-            try {
-                $dates = $pdo->query(
-                    "SELECT DISTINCT signal_date FROM rise_pick WHERE {$dateCond}
-                     ORDER BY signal_date DESC LIMIT 3")->fetchAll(PDO::FETCH_COLUMN);
-                if (!$dates) { echo json_encode(['dates' => [], 'groups' => new stdClass()]); return; }
-
-                $in = implode(',', array_fill(0, count($dates), '?'));
-                // 시세 출처 폴백: 주식=all_stock_info, ETF=all_etf_price (rise_pick에 ETF 섞여있음)
-                $st = $pdo->prepare(
-                    "SELECT rp.stock_code, rp.stock_name, rp.signal_date, rp.signal_type, rp.pred_hit3,
-                            rp.today_rate, rp.close_price, rp.is_signal,
-                            COALESCE(asi.stock_rate,  aep.etf_rate)  AS cur_rate,
-                            COALESCE(asi.stock_price, aep.etf_price) AS cur_price,
-                            CASE
-                              WHEN asi.stock_cap  > 0 THEN asi.stock_vol_cap / asi.stock_cap  * 100
-                              WHEN aep.market_cap > 0 THEN aep.trading_value / aep.market_cap * 100
-                              ELSE NULL
-                            END AS turnover
-                     FROM rise_pick rp
-                     LEFT JOIN all_stock_info asi ON asi.stock_code = rp.stock_code
-                     LEFT JOIN all_etf_price  aep ON aep.etf_code   = rp.stock_code
-                     WHERE rp.signal_date IN ({$in})");
-                $st->execute($dates);
-
-                $byCode = [];
-                foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
-                    $c = $r['stock_code'];
-                    if (!isset($byCode[$c])) $byCode[$c] = ['count' => 0, 'recent' => '', 'row' => null];
-                    $byCode[$c]['count']++;
-                    if ($r['signal_date'] > $byCode[$c]['recent']) { $byCode[$c]['recent'] = $r['signal_date']; $byCode[$c]['row'] = $r; }
-                }
-
-                $groups = [];
-                foreach ($dates as $d) $groups[$d] = [];
-                foreach ($byCode as $c => $info) {
-                    $r = $info['row'];
-                    $groups[$info['recent']][] = [
-                        'code' => $c, 'name' => $r['stock_name'], 'type' => $r['signal_type'],
-                        'pred' => $r['pred_hit3'] !== null ? (float)$r['pred_hit3'] : null,
-                        'rate' => (float)$r['today_rate'], 'close' => (int)$r['close_price'],
-                        'cur'  => $r['cur_rate']  !== null ? (float)$r['cur_rate']  : null,   // 당일(실시간) 등락률
-                        'curPrice' => $r['cur_price'] !== null ? (float)$r['cur_price'] : null,
-                        'turnover' => $r['turnover'] !== null ? (float)$r['turnover'] : null, // 회전율(거래대금/시총)
-                        'signal' => (int)$r['is_signal'], 'count' => $info['count'],
-                    ];
-                }
-                foreach ($groups as &$g) {
-                    usort($g, function ($a, $b) {
-                        if ($a['signal'] !== $b['signal']) return $b['signal'] - $a['signal'];
-                        if ($a['type'] !== $b['type']) return ($a['type'] === 'core' ? 0 : 1) - ($b['type'] === 'core' ? 0 : 1);
-                        return ($b['pred'] ?? 0) <=> ($a['pred'] ?? 0);
-                    });
-                }
-                unset($g);
-                echo json_encode(['dates' => $dates, 'groups' => $groups], JSON_UNESCAPED_UNICODE);
-            } catch (Throwable $e) { echo json_encode(['dates' => [], 'groups' => new stdClass()]); }
             return;
         }
 
@@ -317,25 +238,61 @@ function api_stock(string $action, PDO $pdo): void
             return;
         }
 
-        // ── 칼리브레이션: 상승확률 엔진 누적 실측 적중률(rise_pattern_stats) ──
-        //   cell_key(예 'core:2-3')별 {n:표본, rate:3일내+3%적중%, lo/hi:95%CI}.
-        //   일봉 흰칩 승률을 정적추정 대신 실측값으로 표시하기 위한 소스. 테이블 없으면 {}.
-        case 'calib': {
-            $out = [];
-            try {
-                $rows = $pdo->query(
-                    "SELECT cell_key, n_samples, hit3_rate, ci_low, ci_high FROM rise_pattern_stats"
-                )->fetchAll(PDO::FETCH_ASSOC);
-                foreach ($rows as $r) {
-                    $out[$r['cell_key']] = [
-                        'n'    => (int) $r['n_samples'],
-                        'rate' => round((float) $r['hit3_rate'] * 100, 1),
-                        'lo'   => round((float) $r['ci_low']    * 100, 1),
-                        'hi'   => round((float) $r['ci_high']   * 100, 1),
-                    ];
-                }
-            } catch (Throwable $e) { $out = []; }   // 테이블 미존재 → 빈 맵(프론트 정적폴백)
-            echo json_encode($out, JSON_UNESCAPED_UNICODE);
+        default:
+            http_response_code(400);
+            echo json_encode(['error' => "unknown action: {$action}"], JSON_UNESCAPED_UNICODE);
+    }
+}
+
+// ==========================================================
+// ind 모듈 — 사용자 지표 CRUD (계산·표시는 style/dailychart.js 가 담당)
+//   action=list             → [{id,name,draw,expr,vars,color,note}, ...]
+//   action=save (POST)      → {ok:1,id}   (id 있으면 수정)
+//   action=del  (POST id)   → {ok:1}
+// ==========================================================
+function api_ind(string $action, PDO $pdo): void
+{
+    $ci = new ChartIndicator($pdo);
+    switch ($action) {
+
+        case 'list':
+            echo json_encode($ci->list(), JSON_UNESCAPED_UNICODE);
+            return;
+
+        case 'save': {
+            $id = $ci->save($_POST);
+            echo json_encode(['ok' => 1, 'id' => $id]);
+            return;
+        }
+
+        case 'del': {
+            $id = (int)($_POST['id'] ?? 0);
+            if ($id <= 0) { http_response_code(400); echo json_encode(['error' => 'id 누락']); return; }
+            $ci->delete($id);
+            echo json_encode(['ok' => 1]);
+            return;
+        }
+
+        // ── 저장된 차트 (기간·시간축 + 축별 지표 세트) + 화면별 마지막 적용 차트 ──
+        case 'preset': {          // 목록 + 화면별 선택 상태를 한 번에
+            echo json_encode(['presets' => $ci->presets(), 'prefs' => $ci->prefs()], JSON_UNESCAPED_UNICODE);
+            return;
+        }
+        case 'preset_save': {     // id 있으면 그 차트의 해당 축 세트만 갱신 (view 는 매번 갱신)
+            $id = $ci->presetSave($_POST);
+            echo json_encode(['ok' => 1, 'id' => $id]);
+            return;
+        }
+        case 'preset_del': {
+            $id = (int)($_POST['id'] ?? 0);
+            if ($id <= 0) { http_response_code(400); echo json_encode(['error' => 'id 누락']); return; }
+            $ci->presetDelete($id);
+            echo json_encode(['ok' => 1]);
+            return;
+        }
+        case 'pref_save': {       // 이 화면에서 마지막으로 쓴 틀 기억
+            $ci->prefSave((string)($_POST['chart_key'] ?? ''), (int)($_POST['preset_id'] ?? 0));
+            echo json_encode(['ok' => 1]);
             return;
         }
 

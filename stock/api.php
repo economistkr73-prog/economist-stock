@@ -28,6 +28,8 @@ try {
         case 'sim':      api_sim($action, $pdo, $pf);      break;
         case 'dart':     api_dart($action, $pdo, $pf);     break;
         case 'krx':      api_krx($action, $pdo, $pf);      break;
+        case 'watch':    api_watch($action, $pdo, $pf);    break;
+        case 'preset':   api_preset($action, $pdo, $pf);   break;
         default:         pf_api_fail('알 수 없는 module 입니다.');
     }
 } catch (Throwable $e) {
@@ -165,6 +167,20 @@ function api_portfolio(string $action, PDO $pdo, Pf $pf): void
 }
 
 // ══ 룰셋 ════════════════════════════════════════════════════════════════
+/**
+ * 같은 이름이 이미 있으면 뒤에 2, 3 … 을 붙여 비켜 준다.
+ * 목록에서 이름이 겹치면 어느 것을 고르는지 알 수 없으므로 저장 단계에서 갈라 둔다.
+ */
+function pf_unique_name(string $want, array $sets): string
+{
+    $used = array_map(fn($s) => (string)$s['name'], $sets);
+    if (!in_array($want, $used, true)) return $want;
+
+    $n = 2;
+    while (in_array($want . ' ' . $n, $used, true)) $n++;
+    return $want . ' ' . $n;
+}
+
 function api_ruleset(string $action, PDO $pdo, Pf $pf): void
 {
     $back = '/stock/index.php?mode=ruleset';
@@ -178,33 +194,113 @@ function api_ruleset(string $action, PDO $pdo, Pf $pf): void
             ]);
             pf_api_done($back . '&rid=' . $id, 'ok', '새 룰셋을 만들었습니다.');
 
+        /* ── 이름·메모 + 차수를 <b>한 번에</b> 저장한다.
+         *
+         * 전에는 「이름/메모 저장」(save)과 「차수 저장」(steps)이 <b>각각 다른 폼</b>에 있었다.
+         * 폼이 갈리면 브라우저는 누른 버튼이 속한 폼의 값만 보내므로, 차수 표를 고친 뒤
+         * 「이름/메모 저장」 을 누르면 <b>차수 수정이 조용히 사라졌다</b> —
+         * 저장 뒤 화면이 DB 값으로 다시 그려져 경고조차 없었다. 나눠 둘 실익이 없어 버튼을 하나로 합쳤다.
+         *
+         * ★ 차수를 지우는 사고를 막는 장치: 차수 표가 실려 온 요청인지 <b>`has_steps`</b> 로 가른다.
+         *   - has_steps 있고 차수 0개  → 사용자가 행을 다 지웠다 → 오류로 되돌린다
+         *   - has_steps 없음           → 이름·메모만 보낸 요청 → 차수는 손대지 않는다
+         *   (둘 다 `step_no` 가 비어 있어서 POST 만으로는 구별할 수 없다)
+         */
         case 'save':
-            $id = (int)($_POST['id'] ?? 0);
-            $pf->ruleSetSave([
+            $id    = (int)($_POST['id'] ?? 0);
+            $steps = null;
+
+            /* ★ 차수를 <b>먼저 검사</b>한다 — 이름을 저장한 뒤 차수에서 막으면
+             *   "오류라는데 이름은 바뀌어 있다"는 반쪽 저장이 된다(실측으로 그랬다). */
+            if (isset($_POST['has_steps'])) {
+                $steps = [];
+                foreach (($_POST['step_no'] ?? []) as $i => $n) {
+                    $steps[] = [
+                        'step_no'     => $i + 1,   // 화면 순서대로 1..N 재부여
+                        'weight'      => (float)pf_arr('weight', $i, 0)      / 100,
+                        'drop_rate'   => (float)pf_arr('drop_rate', $i, 0)   / 100,
+                        'target_rate' => (float)pf_arr('target_rate', $i, 0) / 100,
+                    ];
+                }
+                if (!$steps) {
+                    pf_api_done($back . '&rid=' . $id, 'err',
+                        '차수가 하나도 없습니다 — 아무것도 저장하지 않았습니다.');
+                }
+            }
+
+            /* ★ 변동율 입력칸은 화면에서 걷어냈다. 그런데 ruleSetSave 는 늘 그 열을 쓰므로
+             *   값을 안 보내면 기존 값이 <b>조용히 지워진다</b> — 기능을 뺀 것이 데이터를 지울
+             *   이유는 아니므로, 폼에 없으면 DB 의 현재 값을 그대로 다시 넣는다. */
+            $vol = array_key_exists('volatility', $_POST)
+                ? $_POST['volatility']
+                : (($id && ($cur = $pf->ruleSetGet($id))) ? $cur['volatility'] : null);
+
+            $id = $pf->ruleSetSave([
                 'id'         => $id,
                 'name'       => trim($_POST['name'] ?? ''),
-                'volatility' => $_POST['volatility'] ?? null,
+                'volatility' => $vol,
                 'memo'       => trim($_POST['memo'] ?? ''),
             ]);
-            pf_api_done($back . '&rid=' . $id, 'ok', '룰셋 정보를 저장했습니다.');
 
-        case 'steps':
-            $rid    = (int)($_POST['rule_set_id'] ?? 0);
-            $stepNo = $_POST['step_no'] ?? [];
-            $steps  = [];
-
-            foreach ($stepNo as $i => $n) {
-                $steps[] = [
-                    'step_no'     => $i + 1,   // 화면 순서대로 1..N 재부여
-                    'weight'      => (float)pf_arr('weight', $i, 0)      / 100,
-                    'drop_rate'   => (float)pf_arr('drop_rate', $i, 0)   / 100,
-                    'target_rate' => (float)pf_arr('target_rate', $i, 0) / 100,
-                ];
+            if ($steps === null) {
+                pf_api_done($back . '&rid=' . $id, 'ok', '룰셋 정보를 저장했습니다.');
             }
-            if (!$steps) pf_api_done($back . '&rid=' . $rid, 'err', '차수가 하나도 없습니다.');
+            $pf->ruleStepsReplace($id, $steps);
+            pf_api_done($back . '&rid=' . $id, 'ok', '저장했습니다 (차수 ' . count($steps) . '개).');
 
-            $pf->ruleStepsReplace($rid, $steps);
-            pf_api_done($back . '&rid=' . $rid, 'ok', count($steps) . '개 차수를 저장했습니다.');
+        /* ── 자동 생성 결과를 <b>새 룰셋</b>으로 저장한다.
+         *
+         * 화면(mode=ruleset&gen=1)의 미리보기는 GET 이라 DB 를 안 건드린다. 저장만 여기로 온다.
+         * ★ 언제나 <b>새로</b> 만든다 — 쓰는 룰셋을 덮어쓸 길을 아예 두지 않는다.
+         * ★ 미리보기와 <b>같은 함수</b>(pf_gen_input/pf_gen_opt/pf_rule_gen)로 다시 계산한다.
+         *   폼에서 계산된 차수를 받아 오면 화면과 저장이 갈릴 수 있다. */
+        case 'gen':
+            $in = pf_gen_input($_REQUEST);
+            $g  = pf_rule_gen(pf_gen_opt($in));
+            if (empty($g['ok'])) pf_api_done($back . '&gen=1', 'err', $g['error']);
+
+            $name = trim($_POST['name'] ?? '');
+            if ($name === '') $name = '자동 ' . (int)$in['n'] . '단계';
+            $name = pf_unique_name($name, $pf->ruleSets());
+
+            /* 변동율은 「상정하는 20거래일 변동성」이다 — 자동 생성은 그 값을 모르므로 비워 둔다.
+             * (거짓 숫자를 넣으면 실측 대조가 엉뚱한 판정을 낸다) */
+            $new = $pf->ruleSetSave([
+                'name'       => $name,
+                'volatility' => null,
+                // 곡률은 소수 둘째 자리까지 남긴다 — 1.15 와 1.20 이 결과를 가르는 값이라 잘리면 재현이 안 된다
+                'memo'       => sprintf('자동 생성 · %d단계 · 목표 %+.1f%%→%+.1f%% · 손익분기 %.1f%% · 곡률 %.2f',
+                                        (int)$in['n'], $in['ef'], $in['el'], $in['be'], $in['k']),
+            ]);
+
+            $rows = [];
+            foreach ($g['steps'] as $n => $s) {
+                $rows[] = ['step_no' => $n, 'weight' => $s['weight'],
+                           'drop_rate' => $s['drop_rate'], 'target_rate' => $s['target_rate']];
+            }
+            $pf->ruleStepsReplace($new, $rows);
+            pf_api_done($back . '&rid=' . $new, 'ok',
+                '「' . $name . '」 를 만들었습니다 (' . count($rows) . '차수). 원본 룰셋은 그대로입니다.');
+
+        /* ── 저장된 룰셋을 통째로 복제한다.
+         *
+         * 룰셋을 이리저리 바꿔 보려면 전에는 새 룰셋을 만들어 차수를 하나씩 다시 입력해야 했다.
+         * ★ 「화면에서 고친 뒤 다른 이름으로 저장」 도 만들어 봤다가 <b>걷어냈다</b> —
+         *   복제로 같은 일이 되는데, 그쪽은 <b>쓰는 룰셋에 묶인 폼</b>에서 값을 고치게 해서
+         *   실수로 「차수 저장」 을 누르면 포지션이 딸린 원본이 바뀐다. 복제가 먼저인 편이 안전하다. */
+        case 'copy':
+            $src = (int)($_POST['id'] ?? 0);
+            $rs  = $src ? $pf->ruleSetGet($src) : null;
+            if (!$rs) pf_api_done($back, 'err', '복제할 룰셋을 찾을 수 없습니다.');
+
+            $new = $pf->ruleSetSave([
+                'name'       => pf_unique_name((string)$rs['name'] . ' (사본)', $pf->ruleSets()),
+                'volatility' => $rs['volatility'],
+                'memo'       => (string)$rs['memo'],
+            ]);
+            $pf->ruleStepsReplace($new, array_values($rs['steps']));
+            pf_api_done($back . '&rid=' . $new, 'ok',
+                '「' . $rs['name'] . '」 을 복제했습니다. 여기서 고치면 원본은 그대로 남습니다.');
 
         case 'reorder':
             // 드래그로 바뀐 순서를 그대로 sort_no 에 넣는다 (0,1,2…)
@@ -224,7 +320,7 @@ function api_ruleset(string $action, PDO $pdo, Pf $pf): void
         case 'simulate':
             // ajax 미리보기 (화면 JS 가 자체 계산하므로 예비용)
             $rid   = (int)($_GET['rid'] ?? 0);
-            $limit = (float)($_GET['limit'] ?? 0);
+            $limit = (float)str_replace(',', '', (string)($_GET['limit'] ?? 0));
             header('Content-Type: application/json; charset=utf-8');
             echo json_encode(pf_simulate($pf->ruleSteps($rid), $limit), JSON_UNESCAPED_UNICODE);
             exit;
@@ -245,8 +341,8 @@ function api_position(string $action, PDO $pdo, Pf $pf): void
 
             if ($code === '') pf_api_done('/stock/index.php?mode=position&id=new', 'err', '종목코드를 입력하세요.');
 
-            $inLast = trim((string)($_POST['last_price'] ?? ''));
-            $inHigh = trim((string)($_POST['high_price'] ?? ''));
+            $inLast = str_replace(',', '', trim((string)($_POST['last_price'] ?? '')));
+            $inHigh = str_replace(',', '', trim((string)($_POST['high_price'] ?? '')));
 
             // 종목명·현재가를 비워 두면 all_stock_info 에서 채운다
             $last = ($inLast !== '') ? (float)$inLast : null;
@@ -323,6 +419,8 @@ function pf_positions_payload(Pf $pf): array
         $last   = ($p['last_price'] !== null) ? (float)$p['last_price'] : null;
         $prm    = pf_cost_params($p, $feeMap[(int)$p['broker_id']] ?? []);
         $c      = pf_position_calc($steps, pf_trades_by_step($rows), (float)$p['limit_amt'], $last, $prm, pf_ledger($rows, $prm));
+        // 종료 포지션은 계획·신호를 지운다 (화면과 같은 규칙 — pf_calc_closed 주석 참조)
+        if ($p['status'] === 'closed') $c = pf_calc_closed($c);
 
         $out[] = [
             'id'           => (int)$p['id'],
@@ -360,8 +458,9 @@ function api_trade(string $action, PDO $pdo, Pf $pf): void
             $back = '/stock/index.php?mode=position&id=' . $pid;
 
             $side  = (($_POST['side'] ?? 'buy') === 'sell') ? 'sell' : 'buy';
-            $qty   = (int)($_POST['qty'] ?? 0);
-            $price = (float)($_POST['price'] ?? 0);
+            // 화면 입력칸(.num-comma)이 콤마째 보낸다 — 걷지 않으면 (float)"1,630,000" = 1 로 저장된다
+            $qty   = (int)str_replace(',', '', (string)($_POST['qty'] ?? 0));
+            $price = (float)str_replace(',', '', (string)($_POST['price'] ?? 0));
             $date  = ($_POST['traded_at'] ?? '') ?: date('Y-m-d');
 
             if ($qty <= 0 || $price <= 0) pf_api_done($back, 'err', '체결가와 수량을 확인하세요.');
@@ -499,9 +598,9 @@ function api_broker(string $action, PDO $pdo, Pf $pf): void
             $tiers = [];
             foreach ($mins as $i => $min) {
                 $tiers[] = [
-                    'min_amt'   => max(0, (int)$min),
+                    'min_amt'   => max(0, (int)str_replace(',', '', (string)$min)),
                     'fee_rate'  => max(0, (float)pf_arr('fee_rate', $i, 0)) / 100,
-                    'fee_fixed' => max(0, (int)pf_arr('fee_fixed', $i, 0)),
+                    'fee_fixed' => max(0, (int)str_replace(',', '', (string)pf_arr('fee_fixed', $i, 0))),
                 ];
             }
             usort($tiers, fn($a, $b) => $a['min_amt'] <=> $b['min_amt']);
@@ -673,6 +772,15 @@ function api_dart(string $action, PDO $pdo, Pf $pf): void
 
     require_once $_SERVER['DOCUMENT_ROOT'] . '/env/dart.inc';
     $dart = new Dart($pdo);
+
+    /* 종목 검색만은 DB 만 본다 — 인증키도 테이블 생성도 필요 없다.
+     * 아래 hasKey() 게이트 앞에 두는 이유가 그것이다. 키가 없어도 이미 받아 둔 재무는 볼 수 있어야 한다. */
+    if ($action === 'search') {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode($dart->searchCorp(trim($_GET['q'] ?? '')), JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
     if (!$dart->hasKey()) pf_api_done($back, 'err', 'DART 인증키가 없습니다 (env/dart.inc).');
     $dart->ensureTables();
 
@@ -704,14 +812,32 @@ function api_dart(string $action, PDO $pdo, Pf $pf): void
                 "{$code} 재무지표 " . count($rows) . "개 연도를 저장했습니다 ("
                 . min($ys) . '~' . max($ys) . ').');
 
+        /* ── 한 (사업연도 × 보고서) 의 전종목 재무제표.
+         *    100종목씩 묶어 부르므로 40회 · 20초쯤이면 끝나 화면에서 눌러도 된다.
+         *    새 분기보고서가 나왔을 때 그 분기만 받아 오는 용도다.
+         *    11년치를 통째로 받는 것처럼 긴 작업은 cron/dart_collect.php (cron_job.php?task=dart_*) 가 맡는다. */
+        case 'quarter':
+            $y  = (int)($_POST['year'] ?? $_GET['year'] ?? 0);
+            $rc = (string)($_POST['rc'] ?? $_GET['rc'] ?? '');
+            if (!isset(Dart::REPRT_INFO[$rc]))  pf_api_done($back, 'err', '보고서 종류를 고르세요.');
+            if ($y < Dart::MIN_YEAR || $y > (int)date('Y')) pf_api_done($back, 'err', '사업연도가 올바르지 않습니다.');
+
+            $r = $dart->collectFinancials($y, $rc);
+            if (!$r['companies']) pf_api_done($back, 'warn',
+                "{$y}년 " . Dart::reprtName($rc) . ' — DART 에 아직 자료가 없습니다.');
+
+            pf_api_done($back . '&y=' . $y . '&rc=' . $rc, 'ok',
+                "{$y}년 " . Dart::reprtName($rc) . ' — ' . number_format($r['saved']) . '종목을 저장했습니다.');
+
         // ── 연도별 주식수 채우기 (PER·PBR 을 그 해 기준으로 맞추려고)
         //    종목별 호출이라 한 번에 다 못 한다 — 이미 채운 행은 건너뛰므로 반복 실행하면 이어진다.
+        //    한 종목에 0.22초쯤 걸린다. 화면에서 기다릴 수 있는 선이 300종목(약 1분)이라 그걸 기본으로 둔다.
         case 'shares':
             $y     = (int)($_POST['year']  ?? $_GET['year']  ?? 0);
-            $limit = (int)($_POST['limit'] ?? $_GET['limit'] ?? 800);
+            $limit = (int)($_POST['limit'] ?? $_GET['limit'] ?? 300);
             if ($y <= 0) $y = (int)date('Y') - 1;
 
-            $r = $dart->collectShares($y, max(1, $limit));
+            $r = $dart->collectShares($y, max(1, min(1000, $limit)));
             pf_api_done($back . '&y=' . $y, $r['remain'] > 0 ? 'warn' : 'ok',
                 "{$y}년 주식수 — 이번에 {$r['done']}종목 처리(채움 {$r['filled']} · 값없음 {$r['empty']})"
                 . ($r['remain'] > 0 ? " · 남은 {$r['remain']}종목은 버튼을 다시 누르면 이어서 받습니다." : ' · 완료'));
@@ -744,6 +870,73 @@ function api_krx(string $action, PDO $pdo, Pf $pf): void
 
             pf_api_done($back, 'ok',
                 $r['date'] . ' 기준 ' . number_format($r['rows']) . '종목의 시세·상장주식수를 받았습니다.');
+
+        default:
+            pf_api_done($back, 'err', '알 수 없는 action 입니다.');
+    }
+}
+
+// ══ 관심종목 ════════════════════════════════════════════════════════════
+// 재무분석에서 눈에 띈 종목을 가볍게 담아 둔다. 포트폴리오·룰셋은 정하지 않는다 —
+// 그건 실제로 사기로 마음먹었을 때 「포트폴리오에 담기」로 넘어가서 정한다.
+function api_watch(string $action, PDO $pdo, Pf $pf): void
+{
+    $back = $_POST['back'] ?? $_SERVER['HTTP_REFERER'] ?? '/stock/index.php?mode=watch';
+    $back = preg_replace('/[?&]msg=[^&]*/', '', $back);
+
+    $code = preg_replace('/[^0-9A-Za-z]/', '', (string)($_POST['code'] ?? $_GET['code'] ?? ''));
+    $name = trim((string)($_POST['name'] ?? ''));
+
+    switch ($action) {
+        // 담기/빼기를 한 액션으로 — 스크리너의 ☆ 를 누를 때마다 뒤집힌다
+        case 'toggle':
+            if (!preg_match('/^\w{6}$/', $code)) pf_api_done($back, 'err', '종목코드가 올바르지 않습니다.');
+            $label = $name !== '' ? $name : $code;
+            if ($pf->watchDel($code)) {
+                pf_api_done($back, 'ok', "{$label} 을 관심종목에서 뺐습니다.");
+            }
+            $pf->watchAdd($code, trim((string)($_POST['memo'] ?? '')));
+            pf_api_done($back, 'ok', "{$label} 을 관심종목에 담았습니다.");
+
+        case 'del':
+            if (!preg_match('/^\w{6}$/', $code)) pf_api_done($back, 'err', '종목코드가 올바르지 않습니다.');
+            $pf->watchDel($code);
+            pf_api_done($back, 'ok', '관심종목에서 뺐습니다.');
+
+        case 'memo':
+            if (!preg_match('/^\w{6}$/', $code)) pf_api_done($back, 'err', '종목코드가 올바르지 않습니다.');
+            $pf->watchMemo($code, (string)($_POST['memo'] ?? ''));
+            pf_api_done($back, 'ok', '메모를 저장했습니다.');
+
+        default:
+            pf_api_done($back, 'err', '알 수 없는 action 입니다.');
+    }
+}
+
+// ══ 저장한 스크리너 조건 ════════════════════════════════════════════════
+// 조건을 쿼리스트링 통째로 담는다 — 화면이 이미 조건을 주소에 싣고 있어 그대로 쓰면 된다.
+function api_preset(string $action, PDO $pdo, Pf $pf): void
+{
+    $back = $_POST['back'] ?? $_SERVER['HTTP_REFERER'] ?? '/stock/index.php?mode=fund';
+    $back = preg_replace('/[?&]msg=[^&]*/', '', $back);
+
+    switch ($action) {
+        case 'save':
+            $name = trim((string)($_POST['name'] ?? ''));
+            $cond = trim((string)($_POST['cond'] ?? ''));
+            /* 조건이 하나도 없으면 저장할 것이 없다 — 체크박스만 담긴 빈 조건을
+             * 이름 붙여 쌓아 두면 배지만 늘고 쓸모가 없다. */
+            if ($cond === '') pf_api_done($back, 'warn', '저장할 조건이 없습니다 — 값을 하나 이상 넣고 검색한 뒤 저장하세요.');
+
+            $r = $pf->presetSave($name, $cond, (string)($_POST['memo'] ?? ''));
+            pf_api_done($back, 'ok', $r === 'update'
+                ? '같은 이름이 있어 조건을 덮어썼습니다.' : '조건을 저장했습니다.');
+
+        case 'del':
+            $id = (int)($_POST['id'] ?? $_GET['id'] ?? 0);
+            if ($id <= 0) pf_api_done($back, 'err', '대상을 찾지 못했습니다.');
+            $pf->presetDel($id);
+            pf_api_done($back, 'ok', '저장한 조건을 지웠습니다.');
 
         default:
             pf_api_done($back, 'err', '알 수 없는 action 입니다.');

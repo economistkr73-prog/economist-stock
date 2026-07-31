@@ -280,6 +280,20 @@ function pf_sim_run(array $prices, array $steps, array $opt = [], array $p = [])
     ];
 }
 
+/**
+ * 사이클 <b>전부</b> — 닫힌 것 + 미청산.
+ *
+ * ★ 미청산 사이클은 `cycles` 가 아니라 <b>`open_cycle` 에 따로</b> 담긴다.
+ *   `cycles` 만 보면 「물린 사이클 0개」 라는 거짓 결론이 나온다(2026-07-30 사이클 분석에서
+ *   실제로 그렇게 속았다 — 종목 19개가 물려 있는데 물림 0 으로 집계됐다). 합쳐 주는 자리를 하나로 둔다.
+ */
+function pf_sim_all_cycles(array $res): array
+{
+    $out = $res['cycles'] ?? [];
+    if (!empty($res['open_cycle'])) $out[] = $res['open_cycle'];
+    return $out;
+}
+
 /** 결과 없음 (입력 부족) */
 function pf_sim_empty(): array
 {
