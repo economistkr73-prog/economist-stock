@@ -1,0 +1,315 @@
+<?php
+/**
+ * ChartIndicator.class — 사용자 지표(차트) DB 전담
+ *
+ * 수식은 저장만 한다 — 해석·계산·표시는 전부 클라이언트(style/dailychart.js)가 맡는다.
+ * 서버는 수식을 실행하지 않으므로 수식 내용으로 인한 서버측 위험이 없다.
+ *
+ * draw: line  = 수식 값을 선으로 긋는다
+ *       point = 수식(조건)이 참인 봉에 점을 찍는다
+ * vars_json: {"N":20,"K":2} — 수식 속 변수의 기본값. 적용 시 화면에서 바꿀 수 있다.
+ */
+class ChartIndicator
+{
+    private PDO $pdo;
+
+    public function __construct(PDO $pdo)
+    {
+        $this->pdo = $pdo;
+        $this->ensureTable();
+    }
+
+    private function ensureTable(): void
+    {
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS chart_indicator (
+                id         INT AUTO_INCREMENT PRIMARY KEY,
+                name       VARCHAR(60)  NOT NULL,
+                draw       ENUM('line','point') NOT NULL DEFAULT 'line',
+                expr       TEXT         NOT NULL,
+                vars_json  VARCHAR(500) NOT NULL DEFAULT '{}',
+                color      VARCHAR(20)  NOT NULL DEFAULT '#7b1fa2',
+                note       VARCHAR(200) NOT NULL DEFAULT '',
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                           ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
+        // 수식칸 1~4 (키움 수식관리자 방식) — [{name,body,on,color}] JSON. 반복 실행 안전
+        $this->pdo->exec("ALTER TABLE chart_indicator ADD COLUMN IF NOT EXISTS lines_json TEXT NULL AFTER expr");
+
+        /* 차트틀 = 이름 붙인 지표 세트 (키움 「차트틀 적용/관리」).
+         * 틀 하나가 일/주/월 세트를 각각 들고 있어 축을 바꿔도 그 축의 구성으로 따라간다. */
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS chart_preset (
+                id        INT AUTO_INCREMENT PRIMARY KEY,
+                name      VARCHAR(60) NOT NULL,
+                sets_json TEXT NOT NULL,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
+        /* 화면별 「마지막 적용 틀」 — 열 때 그대로 되살린다 */
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS chart_pref (
+                chart_key VARCHAR(40) NOT NULL PRIMARY KEY,
+                preset_id INT NOT NULL,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
+    }
+
+    /** 지표 세트 정규화 — [{id, vars:{}, exts:{수식칸위치:연장수}?}] */
+    private static function cleanItems($items): array
+    {
+        if (is_string($items)) $items = json_decode($items, true);
+        $out = [];
+        if (is_array($items)) {
+            foreach ($items as $it) {
+                $id = (int)($it['id'] ?? 0);
+                if ($id <= 0) continue;
+                $vars = [];
+                if (isset($it['vars']) && is_array($it['vars'])) {
+                    foreach ($it['vars'] as $k => $v) {
+                        if (preg_match('/^[A-Za-z_가-힣][A-Za-z0-9_가-힣]*$/u', (string)$k) && is_numeric($v)) {
+                            $vars[$k] = $v + 0;
+                        }
+                    }
+                }
+                // exts = 칩 모달의 「연장」 즉석 조정 (지표 정의의 ext 를 이 차트에서만 덮어씀)
+                $exts = [];
+                if (isset($it['exts']) && is_array($it['exts'])) {
+                    foreach ($it['exts'] as $k => $v) {
+                        if (is_numeric($k) && (int)$k >= 0 && (int)$k <= 3 && is_numeric($v)) {
+                            $exts[(string)(int)$k] = max(0, min(10, (int)$v));
+                        }
+                    }
+                }
+                $row = ['id' => $id, 'vars' => $vars];
+                // ★(object) 캐스팅 — [0=>5] 를 그냥 두면 json_encode 가 배열 [5] 로 만들어 키가 사라진다
+                if ($exts) $row['exts'] = (object)$exts;
+                $out[] = $row;
+            }
+        }
+        return $out;
+    }
+
+    /** 차트틀 목록 → [{id, name, sets:{day:[],week:[],month:[]}}] */
+    public function presets(): array
+    {
+        $rows = $this->pdo->query("SELECT id, name, sets_json FROM chart_preset ORDER BY name")
+                          ->fetchAll(PDO::FETCH_ASSOC);
+        $out = [];
+        foreach ($rows as $r) {
+            $sets = json_decode($r['sets_json'], true);
+            if (!is_array($sets)) $sets = [];
+            // view = 저장 당시의 그래프 포맷(기간 인덱스) + 시간축 — sets 와 같은 칸에 산다
+            $view = (isset($sets['view']) && is_array($sets['view'])) ? $sets['view'] : null;
+            unset($sets['view']);
+            foreach (['day', 'week', 'month'] as $tf) {
+                if (!isset($sets[$tf]) || !is_array($sets[$tf])) $sets[$tf] = [];
+            }
+            $out[] = ['id' => (int)$r['id'], 'name' => $r['name'], 'sets' => $sets, 'view' => $view];
+        }
+        return $out;
+    }
+
+    /** 그래프 포맷 정규화 — {tf, index:0~3|null, bars:± 로 직접 정한 봉 수|null} */
+    private static function cleanView($view): ?array
+    {
+        if (is_string($view)) $view = json_decode($view, true);
+        if (!is_array($view)) return null;
+        $tf = (string)($view['tf'] ?? 'day');
+        if (!in_array($tf, ['day', 'week', 'month'], true)) $tf = 'day';
+        $i  = $view['index'] ?? null;
+        $b  = $view['bars'] ?? null;
+        return [
+            'tf'    => $tf,
+            'index' => (is_numeric($i) ? (int)$i : null),
+            'bars'  => (is_numeric($b) && (int)$b > 0) ? min(5000, (int)$b) : null,
+        ];
+    }
+
+    /** 차트 저장 — id 있으면 그 차트의 <b>해당 축 세트만</b> 갱신(다른 축은 보존), 없으면 새 차트.
+     *  view(기간·시간축)는 차트 하나에 하나 — 저장할 때마다 지금 화면 기준으로 갱신한다. */
+    public function presetSave(array $d): int
+    {
+        $name  = trim((string)($d['name'] ?? ''));
+        $tf    = (string)($d['tf'] ?? 'day');
+        if (!in_array($tf, ['day', 'week', 'month'], true)) $tf = 'day';
+        $items = self::cleanItems($d['items'] ?? null);
+        $view  = self::cleanView($d['view'] ?? null);
+        $id    = (int)($d['id'] ?? 0);
+
+        if ($id > 0) {
+            $st = $this->pdo->prepare("SELECT name, sets_json FROM chart_preset WHERE id=?");
+            $st->execute([$id]);
+            $row = $st->fetch(PDO::FETCH_ASSOC);
+            if (!$row) throw new InvalidArgumentException('없는 차트입니다.');
+            $sets = json_decode($row['sets_json'], true);
+            if (!is_array($sets)) $sets = [];
+            $sets[$tf] = $items;                       // ★ 그 축만 덮어쓴다
+            if ($view) $sets['view'] = $view;          // 기간·시간축은 차트 전체의 기준값
+            if ($name === '') $name = $row['name'];
+            $st = $this->pdo->prepare("UPDATE chart_preset SET name=?, sets_json=? WHERE id=?");
+            $st->execute([$name, json_encode($sets, JSON_UNESCAPED_UNICODE), $id]);
+            return $id;
+        }
+        if ($name === '') throw new InvalidArgumentException('차트 이름이 필요합니다.');
+        $sets = ['day' => [], 'week' => [], 'month' => []];
+        $sets[$tf] = $items;
+        if ($view) $sets['view'] = $view;
+        $st = $this->pdo->prepare("INSERT INTO chart_preset (name, sets_json) VALUES (?,?)");
+        $st->execute([$name, json_encode($sets, JSON_UNESCAPED_UNICODE)]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public function presetDelete(int $id): void
+    {
+        $this->pdo->prepare("DELETE FROM chart_preset WHERE id=?")->execute([$id]);
+        $this->pdo->prepare("DELETE FROM chart_pref WHERE preset_id=?")->execute([$id]);
+    }
+
+    /** 화면별 마지막 적용 틀 → {chart_key: preset_id} */
+    public function prefs(): array
+    {
+        $rows = $this->pdo->query("SELECT chart_key, preset_id FROM chart_pref")
+                          ->fetchAll(PDO::FETCH_ASSOC);
+        $out = [];
+        foreach ($rows as $r) $out[$r['chart_key']] = (int)$r['preset_id'];
+        return $out;
+    }
+
+    /** 화면별 마지막 적용 틀 기록 (presetId<=0 이면 해제) */
+    public function prefSave(string $chartKey, int $presetId): void
+    {
+        $chartKey = preg_replace('/[^a-z0-9_]/i', '', $chartKey);
+        if ($chartKey === '') throw new InvalidArgumentException('chart_key 누락');
+        if ($presetId <= 0) {
+            $this->pdo->prepare("DELETE FROM chart_pref WHERE chart_key=?")->execute([$chartKey]);
+            return;
+        }
+        $st = $this->pdo->prepare(
+            "INSERT INTO chart_pref (chart_key, preset_id) VALUES (?,?)
+             ON DUPLICATE KEY UPDATE preset_id=VALUES(preset_id)"
+        );
+        $st->execute([$chartKey, $presetId]);
+    }
+
+    /** 선 종류 — lightweight-charts LineStyle 과 1:1 (style/dailychart.js STYLE_MAP) */
+    private const LINE_STYLES = ['solid', 'dotted', 'dashed', 'ldashed', 'sdotted'];
+
+    /** 수식칸 배열 정규화 — 최대 4칸, 각 {name,body,on,color,ext,w,st} */
+    private static function cleanLines($lines): array
+    {
+        if (is_string($lines)) $lines = json_decode($lines, true);
+        if (!is_array($lines)) return [];
+        $out = [];
+        foreach (array_slice(array_values($lines), 0, 4) as $s) {
+            if (!is_array($s)) continue;
+            $body = trim((string)($s['body'] ?? ''));
+            if ($body === '') continue;
+            $color = trim((string)($s['color'] ?? ''));
+            if (!preg_match('/^#[0-9a-fA-F]{6}$/', $color)) $color = '';
+            $out[] = [
+                'name'  => mb_substr(trim((string)($s['name'] ?? '')), 0, 40),
+                'body'  => $body,
+                'on'    => (int)($s['on'] ?? 1) ? 1 : 0,
+                'color' => $color,
+                // def=1 은 「수식 정의」 칸 — 변수만 만들고 그리지 않는다
+                'def'   => (int)($s['def'] ?? 0) ? 1 : 0,
+                // ext = 계단선(VALUEWHEN 류)의 옛 단계를 오른쪽으로 몇 개까지 연장할지 (0=안 함)
+                'ext'   => max(0, min(10, (int)($s['ext'] ?? 0))),
+                // exs = 연장선 종류 (기본 파선 — 지금 값과 지나간 자리를 구분한다)
+                'exs'   => in_array((string)($s['exs'] ?? ''), self::LINE_STYLES, true)
+                             ? (string)$s['exs'] : 'dashed',
+                // exw = 연장선 두께 1~5pt (기본 1 — 본선보다 가늘게 시작)
+                'exw'   => max(1, min(5, (int)($s['exw'] ?? 1))),
+                // 선 모양 — w=두께 1~5pt · st=종류
+                'w'     => max(1, min(5, (int)($s['w'] ?? 2))),
+                'st'    => in_array((string)($s['st'] ?? ''), self::LINE_STYLES, true)
+                             ? (string)$s['st'] : 'solid',
+            ];
+        }
+        return $out;
+    }
+
+    /** 전체 목록 (이름순) — vars·lines 는 디코드해서 넘긴다 */
+    public function list(): array
+    {
+        $rows = $this->pdo->query(
+            "SELECT id, name, draw, expr, lines_json, vars_json, color, note FROM chart_indicator ORDER BY name"
+        )->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($rows as &$r) {
+            $r['id']    = (int)$r['id'];
+            $r['vars']  = json_decode($r['vars_json'], true) ?: new stdClass();
+            $lines      = $r['lines_json'] ? json_decode($r['lines_json'], true) : null;
+            $r['lines'] = is_array($lines) ? $lines : [];   // 빈 배열이면 프론트가 expr(구형)로 폴백
+            unset($r['vars_json'], $r['lines_json']);
+        }
+        return $rows;
+    }
+
+    /** 저장 — id 가 있으면 수정, 없으면 신규. 새/수정된 id 반환 */
+    public function save(array $d): int
+    {
+        $name  = trim((string)($d['name'] ?? ''));
+        $draw  = ($d['draw'] ?? 'line') === 'point' ? 'point' : 'line';
+        $color = trim((string)($d['color'] ?? '#7b1fa2'));
+        $note  = trim((string)($d['note'] ?? ''));
+        $lines = self::cleanLines($d['lines'] ?? null);
+        $expr  = trim((string)($d['expr'] ?? ''));       // 구형 단일 수식 폴백
+        if ($name === '') throw new InvalidArgumentException('이름은 필수입니다.');
+        if (!$lines && $expr === '') throw new InvalidArgumentException('수식칸이 전부 비어 있습니다.');
+        if (!preg_match('/^#[0-9a-fA-F]{6}$/', $color)) $color = '#7b1fa2';
+        $linesJson = json_encode($lines, JSON_UNESCAPED_UNICODE);
+
+        // vars 정규화 (숫자만·한글 변수명 허용).
+        // 신형 = {day:{},week:{},month:{}} 시간축별 세트(일=기본, 주/월=덮어쓰기) / 구형 = 평평한 맵(전 축 공통)
+        $vars = $d['vars'] ?? '{}';
+        if (is_string($vars)) $vars = json_decode($vars, true);
+        $cleanMap = function ($m): array {
+            $out = [];
+            if (is_array($m)) {
+                foreach ($m as $k => $v) {
+                    if (preg_match('/^[A-Za-z_가-힣][A-Za-z0-9_가-힣]*$/u', (string)$k) && is_numeric($v)) {
+                        $out[$k] = $v + 0;
+                    }
+                }
+            }
+            return $out;
+        };
+        $clean = [];
+        if (is_array($vars)) {
+            if (isset($vars['day']) || isset($vars['week']) || isset($vars['month'])) {
+                foreach (['day', 'week', 'month'] as $tf) {
+                    $sub = $cleanMap($vars[$tf] ?? null);
+                    if ($sub) $clean[$tf] = $sub;
+                }
+            } else {
+                $clean = $cleanMap($vars);
+            }
+        }
+        $varsJson = json_encode($clean, JSON_UNESCAPED_UNICODE);
+
+        $id = (int)($d['id'] ?? 0);
+        if ($id > 0) {
+            $st = $this->pdo->prepare(
+                "UPDATE chart_indicator SET name=?, draw=?, expr=?, lines_json=?, vars_json=?, color=?, note=? WHERE id=?"
+            );
+            $st->execute([$name, $draw, $expr, $linesJson, $varsJson, $color, $note, $id]);
+            return $id;
+        }
+        $st = $this->pdo->prepare(
+            "INSERT INTO chart_indicator (name, draw, expr, lines_json, vars_json, color, note) VALUES (?,?,?,?,?,?,?)"
+        );
+        $st->execute([$name, $draw, $expr, $linesJson, $varsJson, $color, $note]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public function delete(int $id): void
+    {
+        $st = $this->pdo->prepare("DELETE FROM chart_indicator WHERE id=?");
+        $st->execute([$id]);
+    }
+}
+?>
