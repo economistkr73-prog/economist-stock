@@ -285,6 +285,95 @@ t_eq('빈 결과도 안전', 0, count(pf_sim_all_cycles(pf_sim_empty())));
 $acAll = pf_sim_all_cycles(['cycles' => [['no' => 1]], 'open_cycle' => ['no' => 2, 'open' => true]]);
 t_eq('미청산이 맨 뒤에 온다', true, !empty(end($acAll)['open']));
 
+// ══ 계단관통 손절 (stair_stop · 사다리×퀀트 결합 연구 2026-08-01) ═══════
+/*
+ * 신호 = 거래대금(c×v)이 직전 120봉 최고를 넘는 날 · 계단 = 그 박스 L 아래 레벨을 주는 최근 박스 2개.
+ * 관통선 = 계단 최저값. 보유 중 종가가 관통선 −2% 아래로 마감하면 전량 청산(체결도 종가).
+ * 픽스처: 121봉 워밍업(100원·소량) 뒤 신호 A(200)→B(300)→C(400) 계단을 쌓고,
+ *   마지막 사이클이 400 에 진입 → 300(2차) → 190(관통선 200 의 −2%=196 아래) 로 무너진다.
+ */
+t_head('★ 계단관통 손절 — 지지구조가 전부 뚫리면 사다리를 중단한다');
+
+$vrows = [];
+for ($i = 0; $i < 121; $i++) $vrows[] = [100, 10];           // 워밍업 (이력 120봉 요건)
+$vrows[] = [200, 1000];                                       // 신호 A — 첫 박스(계단 없음)
+for ($i = 0; $i < 4; $i++) $vrows[] = [210, 10];
+$vrows[] = [300, 2000];                                       // 신호 B — 계단 = A(200)
+$vrows[] = [310, 10];
+$vrows[] = [400, 3000];                                       // 신호 C — 계단 = B(300)·A(200) → 관통선 200
+$vrows[] = [400, 10];                                         // 마지막 사이클 1차 진입 @400
+$vrows[] = [300, 10];                                         // 2차 (400×0.9=360 이하)
+$vrows[] = [190, 10];                                         // 종가 190 < 196 → 관통 청산
+$vseries = [];
+$vt = strtotime('2020-01-06');
+foreach ($vrows as [$vc, $vv]) { $vseries[] = ['d' => date('Y-m-d', $vt), 'c' => (float)$vc, 'v' => (float)$vv]; $vt += 86400; }
+
+$ssOn  = pf_sim_run($vseries, $R3, ['limit_amt' => 10000000, 'reenter' => true, 'wait' => 0, 'stair_stop' => true],  $P0);
+$ssOff = pf_sim_run($vseries, $R3, ['limit_amt' => 10000000, 'reenter' => true, 'wait' => 0],                        $P0);
+
+t_true('옵션 켜짐(stair_used)',             $ssOn['stair_used']);
+t_eq('관통 청산 1회(stair_count)',    1,    $ssOn['stair_count']);
+t_eq('마지막 사이클은 관통 청산',      true, !empty(end($ssOn['cycles'])['stair']));
+t_eq('관통 체결가 = 그 날 종가 190',  190,  end($ssOn['cycles'])['exit_price']);
+t_eq('관통 후 보유 0',                0,    $ssOn['held_qty']);
+t_eq('앞선 정상 청산은 stair 아님',    true, empty($ssOn['cycles'][0]['stair']));
+
+// 같은 시세에서 옵션이 꺼져 있으면 — 마지막 사이클은 3차까지 담고 물린 채 끝난다
+t_eq('OFF: 관통 청산 0회',            0,    $ssOff['stair_count']);
+t_true('OFF: 미청산 사이클로 남는다',        $ssOff['open_cycle'] !== null);
+t_eq('OFF: 매도 횟수는 정상청산만',    $ssOn['sell_count'] - 1, $ssOff['sell_count']);
+
+// 진입가가 이미 관통선 아래면 손절 없음 (알려진 지지 아래에서 시작한 사이클은 자르지 않는다)
+$vlow = array_slice($vseries, 0, 129);                        // 신호 C 봉까지만 자름
+$vt2  = strtotime(end($vlow)['d']) + 86400;
+foreach ([150, 100, 90] as $c2) { $vlow[] = ['d' => date('Y-m-d', $vt2), 'c' => (float)$c2, 'v' => 10.0]; $vt2 += 86400; }
+$ssLow = pf_sim_run($vlow, $R3, ['limit_amt' => 10000000, 'reenter' => true, 'wait' => 0, 'stair_stop' => true], $P0);
+t_eq('관통선 아래 진입 → 손절 미적용', 0,   $ssLow['stair_count']);
+t_true('  물린 채 미청산으로 남는다',        $ssLow['open_cycle'] !== null);
+
+// 거래량이 없는 데이터는 옵션을 켜도 조용히 꺼진다
+$noV = pf_sim_run(t_series([10000, 9000, 8100]), $R3, ['limit_amt' => 10000000, 'stair_stop' => true], $P0);
+t_eq('거래량 없으면 stair_used=false', false, $noV['stair_used']);
+
+// ── 차수 지연 (룰셋 차수별 delay_days) — 느린 「한 차수」 하락은 건너뛰고 한 차수 더 아래에서 산다
+/*
+ * 픽스처: 1차 @10,000 → 40일 횡보(9,500 — 트리거 없음) → 9,000(2차 트리거·41일 경과 > 30 → 스킵)
+ *   → 8,100(3차 이론가 = 9,000×0.9) 도달 → 무조건 매수. catch-up 이 2차 몫까지 흡수:
+ *   누적목표 1,000만 − 투입 200만 = 800만 ÷ 8,100 = 987주.
+ */
+$R3D = $R3;
+$R3D[2]['delay_days'] = 30;          // 2차에만 지연 30일
+$slow = t_series(array_merge([10000], array_fill(0, 40, 9500), [9000, 9000, 8100]));
+$dOn  = pf_sim_run($slow, $R3D, ['limit_amt' => 10000000], $P0);
+$dOff = pf_sim_run($slow, $R3,  ['limit_amt' => 10000000], $P0);
+t_eq('스킵 1회(delay_skips)',        1,    $dOn['delay_skips']);
+t_eq('매수 2회 (2차는 건너뜀)',       2,    $dOn['buy_count']);
+t_eq('두번째 매수는 3차로 기록',      3,    $dOn['trades'][1]['step']);
+t_eq('  체결가 8,100 (한 차수 아래)', 8100, $dOn['trades'][1]['price']);
+t_eq('  수량 987 = catch-up 흡수',    987,  $dOn['trades'][1]['qty']);
+t_eq('지연 없는 룰셋: 매수 3회',      3,    $dOff['buy_count']);
+
+// 지연이 「그 차수에만」 붙는다 — 2차는 지연 없음이라 느려도 사고, 3차(지연 30)는 느리면 스킵.
+// 3단계 룰셋이라 3차 아래가 없어 스킵된 금액은 그대로 안 쓰인다(가장 깊은 구간 노출 축소).
+$R3E = $R3;
+$R3E[3]['delay_days'] = 30;
+$slow2 = t_series(array_merge([10000], array_fill(0, 40, 9500), [9000], array_fill(0, 40, 8500), [8100, 8100]));
+$dSel = pf_sim_run($slow2, $R3E, ['limit_amt' => 10000000], $P0);
+t_eq('2차(지연없음)는 느려도 산다',   2,    $dSel['trades'][1]['step']);
+t_eq('3차(지연30)는 느려서 스킵',     1,    $dSel['delay_skips']);
+t_eq('  매수는 1·2차 두 번뿐',        2,    $dSel['buy_count']);
+
+// 같은 날 두 차수 이상 급락은 지연과 무관하게 그대로 산다 (스킵은 「느린 단독 하락」에만)
+$crash = t_series(array_merge([10000], array_fill(0, 40, 9500), [8100]));
+$dCr = pf_sim_run($crash, $R3D, ['limit_amt' => 10000000], $P0);
+t_eq('급락(2차수 점프)은 스킵 없음',  0,    $dCr['delay_skips']);
+t_eq('  그날 3차까지 매수',           3,    $dCr['max_step']);
+
+// 빠른 하락(지연 이내)은 정상 매수
+$fast = pf_sim_run(t_series([10000, 9000, 8100]), $R3D, ['limit_amt' => 10000000], $P0);
+t_eq('빠른 하락은 스킵 없음',         0,    $fast['delay_skips']);
+t_eq('  매수 3회 그대로',             3,    $fast['buy_count']);
+
 // ══════════════════════════════════════════════════════════════════════
 echo "\n" . str_repeat('═', 74) . "\n";
 printf(" 결과: %d PASS / %d FAIL  (총 %d)\n",

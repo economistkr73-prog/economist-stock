@@ -1585,6 +1585,103 @@ t_eq('365일 = 1.0년', '1.0년', pf_age_txt(365));
 t_eq('1,206일 = 3.3년', '3.3년', pf_age_txt(1206));
 t_eq('null 은 대시',   '-',    pf_age_txt(null));
 
+// ══ 차수 지연 실전 반영 (pf_delay_adjust · 2026-08-02) ═══════════════════
+// 다음 차수에 delay_days 가 있고 직전 매수 후 그 일수를 넘기면 그 차수는 만료 —
+// 신호를 끄고 계획을 한 차수 아래로. 급락(더 깊이 도달)은 무조건 매수라 손대지 않는다.
+$D5D = $DROP_5;
+$D5D[2]['delay_days'] = 30;
+
+$dc = pf_position_calc($D5D, $hbTrades, 375_000_000, 51000);   // 2차 이론가(50,920) 위 — 신호 전
+t_eq('경과 이내면 그대로',        2,     pf_delay_adjust($dc, $D5D, '2026-01-01', '2026-01-21')['next_step']);
+$b = pf_delay_adjust($dc, $D5D, '2026-01-01', '2026-02-10');   // 40일 경과 > 30
+t_eq('만료 시 다음차수 3차',      3,     $b['next_step']);
+t_eq('  다음매수가 = 3차 이론가', 46840, $b['next_price']);
+t_eq('  매수신호 꺼짐',           false, $b['buy_signal']);
+t_eq('  delay_skip 기록',         2,     $b['delay_skip']['step']);
+
+$dc2 = pf_position_calc($D5D, $hbTrades, 375_000_000, 50000);  // 2차 도달 상태
+t_eq('도달 상태 원본은 매수신호', true,  $dc2['buy_signal']);
+$b2 = pf_delay_adjust($dc2, $D5D, '2026-01-01', '2026-02-10');
+t_eq('  만료면 억제',             false, $b2['buy_signal']);
+t_eq('  buy_qty 0',               0,     $b2['buy_qty']);
+
+$dc3 = pf_position_calc($D5D, $hbTrades, 375_000_000, 40000);  // 3차까지 급락 (reach 3 > next 2)
+$b3 = pf_delay_adjust($dc3, $D5D, '2026-01-01', '2026-02-10');
+t_eq('급락(더 깊이 도달)은 그대로', true, ($b3['buy_qty'] ?? 0) > 0);
+t_eq('  delay_skip 없음',           true, !isset($b3['delay_skip']));
+
+t_eq('지연 미정의면 그대로', 2,
+     pf_delay_adjust(pf_position_calc($DROP_5, $hbTrades, 375_000_000, 51000), $DROP_5, '2026-01-01', '2026-02-10')['next_step']);
+t_eq('직전 매수 없으면 그대로', 1,
+     pf_delay_adjust(pf_position_calc($D5D, [], 375_000_000, 51000), $D5D, null, '2026-02-10')['next_step']);
+
+// ══ 박스 사다리 (pf_box_ladder_build + pf_position_calc $levels · 2026-08-02) ═══
+// 가격이 절대값 — 이론가 체인 대신 편입 때 확정한 지지선 표를 쓴다.
+$BXL = pf_box_ladder_build([10000, 8900, 8000, 7000]);
+t_eq('비중이 풀린다',            true,  $BXL !== null);
+t_eq('  4차수',                    4,   count($BXL['levels']));
+t_eq('  1차 가격(최고값)',     10000,   $BXL['levels'][1]['price']);
+t_eq('  비중합 100%',            1.0,   array_sum(array_map(fn($l) => $l['weight'], $BXL['levels'])), 0.001);
+t_eq('  1차>2차 역전 없음',      true,  $BXL['levels'][2]['weight'] >= $BXL['levels'][1]['weight'] - 0.001);
+t_eq('  3차부터 지연 20일',       20,   $BXL['levels'][3]['delay_days']);
+t_eq('간격 없으면 null',        null,   pf_box_ladder_build([10000, 9990, 9980]));
+t_eq('2개는 null',              null,   pf_box_ladder_build([10000, 9000]));
+
+// 해 선택 정책 (2026-08-02) — 계단형(내려갈수록 비중 비감소) 우선 · 보수적 BE 우선.
+// 옛 정책(공격 BE 첫 해)은 간격이 불균등하면 산봉우리(중간 48%·마지막 11%)를 골라
+// 지지가 다 깨졌을 때 손실이 컸다 — 실사례 가격으로 회귀를 박아 둔다.
+t_eq('균등 계단은 계단형 해',    true,  $BXL['mono']);
+t_eq('  마지막 차수가 최대 비중', true,  $BXL['levels'][4]['weight'] >= $BXL['levels'][3]['weight'] - 0.001);
+$BXU = pf_box_ladder_build([1804000, 1557000, 846000, 532000]);   // 사용자 실사례 (간격 불균등)
+t_eq('불균등 간격도 계단형 해',   true,  $BXU['mono']);
+t_eq('  1차 비중',             0.099,   $BXU['levels'][1]['weight'], 0.01);
+t_eq('  4차 비중(최대)',       0.407,   $BXU['levels'][4]['weight'], 0.01);
+t_eq('  4차 ≥ 3차',              true,  $BXU['levels'][4]['weight'] >= $BXU['levels'][3]['weight'] - 0.001);
+t_eq('  최종 BE 보수화',      -0.282,   end($BXU['be']), 0.01);   // 옛 정책은 −0.458
+
+// pf_box_ladder_detail — 확정본·미리보기 상세표의 파생값 (비중·가격만의 함수)
+$BXD = pf_box_ladder_detail($BXU['levels']);
+t_eq('상세 4행',                    4,  count($BXD));
+t_eq('  1차 변동율 없음',        null,  $BXD[1]['chg']);
+t_eq('  2차 변동율',          -0.1369,  $BXD[2]['chg'], 0.001);
+t_eq('  누적비중 100%',           1.0,  $BXD[4]['cum'], 0.001);
+t_eq('  1차 평단 = 1차 가격', 1804000,  $BXD[1]['avg'], 1);
+t_eq('  1차 손실률 0',            0.0,  $BXD[1]['be'], 0.0001);
+t_eq('  최종 손실률 = 풀이 BE', end($BXU['be']), $BXD[4]['be'], 0.002);
+t_eq('  평단은 단조 하락',       true,  $BXD[2]['avg'] > $BXD[3]['avg'] && $BXD[3]['avg'] > $BXD[4]['avg']);
+t_eq('  탈출가 = 평단×(1+목표)', $BXD[3]['avg'] * 1.25, $BXD[3]['exit'], 0.01);
+
+// calc — 레벨이 있으면 이론가 = 절대가격, 1차도 가격 조건(매복)
+$bc = pf_position_calc([], [], 10000000, 10500, [], [], $BXL['levels']);
+t_eq('1차 이론가 = 레벨1',     10000,   $bc['steps'][1]['theory_price']);
+t_eq('  현재가 위면 1차 신호 없음', false, $bc['buy_signal']);
+t_eq('  다음매수가 = 레벨1',   10000,   $bc['next_price']);
+$bc2 = pf_position_calc([], [], 10000000, 9900, [], [], $BXL['levels']);
+t_eq('지지 터치 시 1차 신호',    true,  (bool)$bc2['buy_signal']);
+// 1차 체결 후 급락 — 레벨3까지 도달하면 catch-up (누적목표 − 투입, 절대가 기준)
+$bTrades = [1 => ['price' => 9900, 'qty' => 100, 'traded_at' => '2026-01-05']];
+$bc3 = pf_position_calc([], $bTrades, 10000000, 7900, [], [], $BXL['levels']);
+t_eq('도달 차수 = 3 (8,000 이하)', 3,   $bc3['reach_step']);
+t_eq('  catch-up 매수금액 > 0',  true,  (float)$bc3['buy_amount'] > 0);
+t_eq('  2차 이론가는 체결과 무관', 8900, $bc3['steps'][2]['theory_price']);
+// 지연 — 레벨 행의 delay_days 를 rows 가 실어 pf_delay_adjust 가 읽는다
+$bc4 = pf_position_calc([], $bTrades, 10000000, 8950, [], [], $BXL['levels']);   // 2차(8,900) 위
+$bc4a = pf_delay_adjust($bc4, [], '2026-01-05', '2026-01-10');
+t_eq('2차는 지연 0 — 그대로',      2,   $bc4a['next_step']);
+$bTr2 = [1 => ['price' => 9900, 'qty' => 100], 2 => ['price' => 8850, 'qty' => 150, 'traded_at' => '2026-01-20']];
+$bc5 = pf_position_calc([], $bTr2, 10000000, 8100, [], [], $BXL['levels']);      // 3차(8,000) 위
+$bc5a = pf_delay_adjust($bc5, [], '2026-01-20', '2026-03-01');                   // 40일 > 20일
+t_eq('3차 만료 → 다음 4차',        4,   $bc5a['next_step']);
+t_eq('  다음매수가 = 레벨4',    7000,   $bc5a['next_price']);
+
+// pf_last_buy_at — 마지막 「매수」 일자 (매도는 무시)
+t_eq('마지막 매수일', '2026-03-05', pf_last_buy_at([
+    ['side' => 'buy',  'traded_at' => '2026-01-10 09:00:00'],
+    ['side' => 'sell', 'traded_at' => '2026-04-01'],
+    ['side' => 'buy',  'traded_at' => '2026-03-05'],
+]));
+t_eq('매수 없으면 null', null, pf_last_buy_at([['side' => 'sell', 'traded_at' => '2026-04-01']]));
+
 // ══ 결과 ════════════════════════════════════════════════════════════════
 $pass = $GLOBALS['pf_pass'];
 $fail = $GLOBALS['pf_fail'];

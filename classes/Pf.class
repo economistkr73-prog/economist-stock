@@ -216,9 +216,28 @@ class Pf
               weight      DECIMAL(7,4) NOT NULL DEFAULT 0,
               drop_rate   DECIMAL(7,4) NOT NULL DEFAULT 0,
               target_rate DECIMAL(7,4) NOT NULL DEFAULT 0,
+              delay_days  INT          NOT NULL DEFAULT 0,   -- 차수 지연(달력일·0=끔): 직전 매수 후 이 일수를 넘겨 오면 건너뛴다
               PRIMARY KEY (rule_set_id, step_no),
               CONSTRAINT fk_pf_step_set FOREIGN KEY (rule_set_id)
                 REFERENCES pf_rule_set(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        /* 박스 사다리(2026-08-02) — 포지션별 차수 가격표. 룰셋(상대 하락률)과 달리
+         * 편입 때 그 종목의 실제 박스 지지선을 절대가격으로 확정한다. 비중·목표·지연도
+         * 그 가격 간격으로 푼 값이라 여기 같이 산다(pf_box_ladder_build). 있으면 이 표가
+         * 룰셋 차수를 대체한다(pf_position_calc $levels). */
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS pf_position_level (
+              position_id INT          NOT NULL,
+              step_no     TINYINT      NOT NULL,
+              price       DECIMAL(12,2) NOT NULL,
+              weight      DECIMAL(7,4) NOT NULL DEFAULT 0,
+              target_rate DECIMAL(7,4) NOT NULL DEFAULT 0,
+              delay_days  INT          NOT NULL DEFAULT 0,
+              PRIMARY KEY (position_id, step_no),
+              CONSTRAINT fk_pf_level_pos FOREIGN KEY (position_id)
+                REFERENCES pf_position(id) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         ");
 
@@ -277,6 +296,7 @@ class Pf
               reenter     TINYINT(1)  NOT NULL DEFAULT 1,
               wait_days   INT         NOT NULL DEFAULT 10,   -- 청산 후 쉬는 거래일 (PF_SIM_WAIT_DEFAULT 와 맞출 것)
               intraday    TINYINT(1)  NOT NULL DEFAULT 1,
+              stair_stop  TINYINT(1)  NOT NULL DEFAULT 0,   -- 계단관통 손절 (사다리×퀀트 연구 2026-08-01)
               -- 목록에 뿌릴 요약만 캐시한다. cache_key 는 시세버전+조건+룰셋/수수료/세율 지문이라
               -- 무엇 하나라도 바뀌면 키가 달라져 저절로 무효가 된다 (결과를 '저장'하는 게 아니다).
               data_ver    INT         NOT NULL DEFAULT 0,
@@ -353,6 +373,11 @@ class Pf
             }
         }
 
+        // 차수 지연(2026-08-01) — 룰셋 차수마다 「직전 매수 후 이 일수를 넘겨 오면 건너뛴다」
+        if ($this->tableExists('pf_rule_step') && !$this->columnExists('pf_rule_step', 'delay_days')) {
+            $this->pdo->exec("ALTER TABLE pf_rule_step ADD delay_days INT NOT NULL DEFAULT 0");
+        }
+
         /*
          * 시뮬레이터는 종목을 키로 삼는다 (같은 종목 재업로드 = 시세 갱신).
          * 별도 이름 컬럼은 종목명과 중복이라 없애고, 대신 마지막 실행조건을 들고 있는다.
@@ -372,6 +397,7 @@ class Pf
                 'wait_days'   => 'INT NOT NULL DEFAULT 10',
                 'has_ohlc'    => 'TINYINT(1) NOT NULL DEFAULT 0',
                 'intraday'    => 'TINYINT(1) NOT NULL DEFAULT 1',
+                'stair_stop'  => 'TINYINT(1) NOT NULL DEFAULT 0',
                 'data_ver'    => 'INT NOT NULL DEFAULT 0',
                 'cache_key'   => "VARCHAR(40) NOT NULL DEFAULT ''",
                 'cache_json'  => "VARCHAR(255) NOT NULL DEFAULT ''",
@@ -875,7 +901,7 @@ class Pf
     {
         return $this->pdo->query("
             SELECT id, stock_code, stock_name, from_date, to_date, bar_count, has_ohlc, created_at,
-                   rule_set_id, broker_id, market, limit_amt, opt_from, opt_to, reenter, wait_days, intraday,
+                   rule_set_id, broker_id, market, limit_amt, opt_from, opt_to, reenter, wait_days, intraday, stair_stop,
                    data_ver, cache_key, cache_json, cached_at
             FROM pf_sim_data ORDER BY stock_name, stock_code
         ")->fetchAll(PDO::FETCH_ASSOC);
@@ -967,7 +993,7 @@ class Pf
          * simDataGet() 은 rows_json(수 MB) 을 통째로 읽어 풀므로 플래그 세 개 때문에 부를 수 없다. */
         $st = $this->pdo->prepare("
             SELECT id, stock_code, stock_name, from_date, to_date, bar_count, has_ohlc,
-                   reenter, wait_days, intraday
+                   reenter, wait_days, intraday, stair_stop
             FROM pf_sim_data WHERE stock_code = ? LIMIT 1
         ");
         $st->execute([$code]);
@@ -982,7 +1008,7 @@ class Pf
     {
         $st = $this->pdo->prepare("
             UPDATE pf_sim_data
-            SET rule_set_id=?, broker_id=?, market=?, limit_amt=?, opt_from=?, opt_to=?, reenter=?, wait_days=?, intraday=?
+            SET rule_set_id=?, broker_id=?, market=?, limit_amt=?, opt_from=?, opt_to=?, reenter=?, wait_days=?, intraday=?, stair_stop=?
             WHERE id=?
         ");
         $st->execute([
@@ -990,7 +1016,8 @@ class Pf
             (int)($o['limit'] ?? 0),
             ($o['from'] ?? '') !== '' ? $o['from'] : null,
             ($o['to']   ?? '') !== '' ? $o['to']   : null,
-            !empty($o['re']) ? 1 : 0, (int)($o['wait'] ?? 0), !empty($o['intraday']) ? 1 : 0, $id,
+            !empty($o['re']) ? 1 : 0, (int)($o['wait'] ?? 0), !empty($o['intraday']) ? 1 : 0,
+            !empty($o['ss']) ? 1 : 0, $id,
         ]);
     }
 
@@ -1080,6 +1107,7 @@ class Pf
                 'weight'      => (float)$r['weight'],
                 'drop_rate'   => (float)$r['drop_rate'],
                 'target_rate' => (float)$r['target_rate'],
+                'delay_days'  => (int)($r['delay_days'] ?? 0),
             ];
         }
         return $out;
@@ -1102,6 +1130,7 @@ class Pf
                 'weight'      => (float)$r['weight'],
                 'drop_rate'   => (float)$r['drop_rate'],
                 'target_rate' => (float)$r['target_rate'],
+                'delay_days'  => (int)($r['delay_days'] ?? 0),
             ];
         }
         return $out;
@@ -1137,12 +1166,13 @@ class Pf
             $del->execute([$ruleSetId]);
 
             $ins = $this->pdo->prepare(
-                "INSERT INTO pf_rule_step (rule_set_id, step_no, weight, drop_rate, target_rate) VALUES (?,?,?,?,?)"
+                "INSERT INTO pf_rule_step (rule_set_id, step_no, weight, drop_rate, target_rate, delay_days) VALUES (?,?,?,?,?,?)"
             );
             foreach ($steps as $s) {
                 $ins->execute([
                     $ruleSetId, (int)$s['step_no'],
                     (float)$s['weight'], (float)$s['drop_rate'], (float)$s['target_rate'],
+                    (int)($s['delay_days'] ?? 0),
                 ]);
             }
             $this->pdo->commit();
@@ -1311,6 +1341,70 @@ class Pf
     }
 
     /** 포트폴리오에 등록된 종목코드 전부 (pf_stock 이 곧 종목 마스터다) */
+    /* ── 박스 사다리 레벨 (포지션별 절대가격 차수표) ── */
+    public function positionLevels(int $positionId): array
+    {
+        $st = $this->pdo->prepare("SELECT step_no, price, weight, target_rate, delay_days
+            FROM pf_position_level WHERE position_id = ? ORDER BY step_no");
+        $st->execute([$positionId]);
+        $out = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $out[(int)$r['step_no']] = [
+                'price'       => (float)$r['price'],
+                'weight'      => (float)$r['weight'],
+                'target_rate' => (float)$r['target_rate'],
+                'delay_days'  => (int)$r['delay_days'],
+            ];
+        }
+        return $out;
+    }
+
+    /** 여러 포지션의 레벨을 한 번에 (pf_load_calc 의 N+1 방지) — position_id => levels */
+    public function positionLevelsMap(array $positionIds): array
+    {
+        $ids = array_values(array_unique(array_map('intval', $positionIds)));
+        if (!$ids) return [];
+        $ph = implode(',', array_fill(0, count($ids), '?'));
+        $st = $this->pdo->prepare("SELECT position_id, step_no, price, weight, target_rate, delay_days
+            FROM pf_position_level WHERE position_id IN ($ph) ORDER BY position_id, step_no");
+        $st->execute($ids);
+        $out = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $out[(int)$r['position_id']][(int)$r['step_no']] = [
+                'price'       => (float)$r['price'],
+                'weight'      => (float)$r['weight'],
+                'target_rate' => (float)$r['target_rate'],
+                'delay_days'  => (int)$r['delay_days'],
+            ];
+        }
+        return $out;
+    }
+
+    public function positionLevelsReplace(int $positionId, array $levels): void
+    {
+        $this->pdo->beginTransaction();
+        try {
+            $del = $this->pdo->prepare("DELETE FROM pf_position_level WHERE position_id = ?");
+            $del->execute([$positionId]);
+            $ins = $this->pdo->prepare("INSERT INTO pf_position_level
+                (position_id, step_no, price, weight, target_rate, delay_days) VALUES (?,?,?,?,?,?)");
+            foreach ($levels as $n => $lv) {
+                $ins->execute([$positionId, (int)$n, (float)$lv['price'], (float)$lv['weight'],
+                    (float)$lv['target_rate'], (int)($lv['delay_days'] ?? 0)]);
+            }
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+    }
+
+    public function positionLevelsDelete(int $positionId): void
+    {
+        $st = $this->pdo->prepare("DELETE FROM pf_position_level WHERE position_id = ?");
+        $st->execute([$positionId]);
+    }
+
     public function stockCodes(): array
     {
         return $this->pdo->query("SELECT code FROM pf_stock")->fetchAll(PDO::FETCH_COLUMN);

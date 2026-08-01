@@ -17,7 +17,7 @@ $embed = !empty($_GET['embed']);
 echo "<!DOCTYPE html><html lang='ko'><head><meta charset='utf-8'>";
 echo "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
 echo "<title>차트 스타일 갤러리</title>";
-echo "<script src='/style/dailychart.js?v=26'></script>";
+echo "<script src='/style/dailychart.js?v=27'></script>";
 if (!$embed) nav_css();
 echo <<<'HTML'
 <style>

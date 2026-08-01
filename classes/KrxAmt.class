@@ -774,6 +774,108 @@ class KrxAmt
         return $out;
     }
 
+    /* ── 박스 사다리 후보 (2026-08-02) — 편입 시 「그 종목의 실제 지지선」을 고르기 위한 목록 ──
+     * 일봉 = krx_surge(거래대금 120일 신고가) 박스의 H·L. 주봉 = krx_amt 를 주 단위로 묶어
+     * 주간 거래대금이 직전 24주 최고를 넘는 주의 고·저 — 일봉 박스가 하루에 하나씩 생겨
+     * 변별력이 없을 때 쓴다(24주 ≈ 120거래일로 일봉 창과 정렬). 최신순. */
+
+    /** 일봉 박스 후보 — [['d','h','l'], ...] 최신순 */
+    public function dailyBoxCandidates(string $code, int $months = 6): array
+    {
+        $from = date('Y-m-d', strtotime("-{$months} month"));
+        $st = $this->pdo->prepare("
+            SELECT s.d, a.h, a.l FROM krx_surge s
+              JOIN krx_amt a ON a.code = s.code AND a.d = s.d
+             WHERE s.code = ? AND s.d >= ? AND a.h > 0 AND a.l > 0
+             ORDER BY s.d DESC");
+        $st->execute([$code, $from]);
+        return array_map(fn($r) => ['d' => $r['d'], 'h' => (float)$r['h'], 'l' => (float)$r['l']],
+            $st->fetchAll(PDO::FETCH_ASSOC));
+    }
+
+    /** 주봉 박스 후보 — 주간 거래대금이 직전 24주 최고를 넘는 주. [['d'(주 시작),'h','l'], ...] 최신순 */
+    public function weeklyBoxCandidates(string $code, int $months = 6): array
+    {
+        // 판정에 24주 워밍업이 필요해 조회 창보다 그만큼 더 당긴다
+        $from = date('Y-m-d', strtotime("-{$months} month -170 day"));
+        $st = $this->pdo->prepare("
+            SELECT d, h, l, amt FROM krx_amt
+             WHERE code = ? AND d >= ? AND amt > 0 AND c > 0 ORDER BY d");
+        $st->execute([$code, $from]);
+
+        $wk = [];   // 주키(월요일) => [amt합, 고, 저, 시작일]
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $t = strtotime($r['d']);
+            $mon = date('Y-m-d', strtotime('monday this week', $t));
+            if (!isset($wk[$mon])) $wk[$mon] = ['amt' => 0.0, 'h' => 0.0, 'l' => PHP_FLOAT_MAX, 'd' => $r['d']];
+            $wk[$mon]['amt'] += (float)$r['amt'];
+            if ((float)$r['h'] > $wk[$mon]['h']) $wk[$mon]['h'] = (float)$r['h'];
+            if ((float)$r['l'] > 0 && (float)$r['l'] < $wk[$mon]['l']) $wk[$mon]['l'] = (float)$r['l'];
+        }
+        ksort($wk);
+        $keys = array_keys($wk);
+        $minD = date('Y-m-d', strtotime("-{$months} month"));
+        $out = [];
+        foreach ($keys as $i => $mon) {
+            if ($i < 24 || $wk[$mon]['d'] < $minD) continue;
+            $mx = 0.0;
+            for ($j = $i - 24; $j < $i; $j++) if ($wk[$keys[$j]]['amt'] > $mx) $mx = $wk[$keys[$j]]['amt'];
+            if ($wk[$mon]['amt'] > $mx && $wk[$mon]['h'] > 0 && $wk[$mon]['l'] < PHP_FLOAT_MAX) {
+                $out[] = ['d' => $mon, 'h' => $wk[$mon]['h'], 'l' => $wk[$mon]['l']];
+            }
+        }
+        return array_reverse($out);
+    }
+    /* ── 단기급등 속도 (단기급등 연구 2026-08-01 · ~/_mom_filter_bt.php) ──
+     * 진입 전 20일 수익률 버킷별 승률: <10% 69.6% → ≥80% 51.6%(중앙 0.00%) 단조 악화.
+     * 위치 연구(⑥ 120일 저점대비 「얼마나」)와 달리 「얼마나 빨리」는 판별력이 있다.
+     * 단 극단 무리도 평균은 +7.1%(복권꼬리 양수)라 자동 차단이 아니라 ⚠표시만 한다.
+     * 손절 조정(급등만 유예 제거)은 기각 — 해당 부분집합 승률 56.8→45.1%(셰이크아웃에 털림). */
+    public const MOM_HOT20 = 0.80;   // 20거래일 +80% 이상
+    public const MOM_HOT40 = 1.00;   // 40거래일 +100% 이상
+
+    /** (code,d) 묶음의 신호일 기준 20·40거래일 수익률 — key "code|d" => [m20, m40, hot] */
+    public function momMany(array $sigs): array
+    {
+        if (!$sigs) return [];
+        $codes = []; $minD = null; $maxD = null;
+        foreach ($sigs as $s) {
+            $codes[$s['code']] = 1;
+            if ($minD === null || $s['d'] < $minD) $minD = $s['d'];
+            if ($maxD === null || $s['d'] > $maxD) $maxD = $s['d'];
+        }
+        $codes = array_keys($codes);
+        $inC = implode(',', array_fill(0, count($codes), '?'));
+        // 40거래일 ≈ 두 달 — 여유 있게 90일 전부터 (거래일만·정지일 제외 = 백테스트와 동일 잣대)
+        $from = date('Y-m-d', strtotime($minD . ' -90 day'));
+        $st = $this->pdo->prepare("
+            SELECT code, d, c FROM krx_amt
+             WHERE code IN ($inC) AND d BETWEEN ? AND ? AND amt > 0 AND c > 0 ORDER BY code, d");
+        $st->execute(array_merge($codes, [$from, $maxD]));
+        $ser = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) $ser[$r['code']][] = $r;
+
+        $out = [];
+        foreach ($sigs as $s) {
+            $key = $s['code'] . '|' . $s['d'];
+            if (isset($out[$key])) continue;
+            $bars = $ser[$s['code']] ?? [];
+            $i = null;
+            foreach ($bars as $j => $b) if ($b['d'] === $s['d']) { $i = $j; break; }
+            $m20 = $m40 = null;
+            if ($i !== null) {
+                $c1 = (float)$bars[$i]['c'];
+                if ($c1 > 0) {
+                    if ($i >= 20) { $c0 = (float)$bars[$i - 20]['c']; if ($c0 > 0) $m20 = $c1 / $c0 - 1; }
+                    if ($i >= 40) { $c0 = (float)$bars[$i - 40]['c']; if ($c0 > 0) $m40 = $c1 / $c0 - 1; }
+                }
+            }
+            $hot = ($m20 !== null && $m20 >= self::MOM_HOT20) || ($m40 !== null && $m40 >= self::MOM_HOT40);
+            $out[$key] = ['m20' => $m20, 'm40' => $m40, 'hot' => $hot];
+        }
+        return $out;
+    }
+
     /**
      * 매집형 박스 추적 — 최근 신호 중 매집형(20평비≤5 ∧ 등락 0~10%)만.
      * 경로 연구의 승자 규칙(돌파 매수·계단지지 매수)을 매일 화면에서 보기 위한 목록.

@@ -633,14 +633,133 @@ function job_shares(Dart $dart, int $from, int $to, int $budget, float $start, i
     say('주식수 수집 완료.');
 }
 
+// ── 정기보고서 접수일 원장 (job=rcept · 2026-08-02) ─────────────────────
+/**
+ * DART 공시목록(list.json)에서 <b>정기보고서의 실제 접수일</b>을 모은다.
+ *
+ * 왜: SUE(이익 서프라이즈) 신호일을 법정 마감일로 근사하면 늦게 내는 2~3%에
+ * 선견 편향이 생기고, 일찍 내는 회사의 드리프트 앞부분을 놓친다.
+ * 접수일이 있으면 「공시 다음 거래일 진입」을 정확히 잰다 (백테스트·어닝 탭 공용).
+ *
+ * 저장: dart_rcept — rcept_no PK 라 INSERT IGNORE 멱등. 정정공시([기재정정])도
+ * 별도 rcept_no 로 들어오므로 <b>원본 접수일 = MIN(rcept_dt)</b> 로 읽는 것이 소비자 규칙.
+ * ★분기보고서 월이 03/09 가 아니면(비12월 결산 ~2%) 1Q·3Q 를 가릴 수 없어 reprt_code NULL —
+ *   조인에서 저절로 빠진다(백테스트의 명시된 한계와 같은 자리).
+ */
+function rcept_table(PDO $pdo): void
+{
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS dart_rcept (
+          rcept_no   CHAR(14)     NOT NULL PRIMARY KEY,
+          corp_code  CHAR(8)      NOT NULL,
+          stock_code VARCHAR(10)  NOT NULL,
+          rcept_dt   DATE         NOT NULL,
+          report_nm  VARCHAR(150) NOT NULL,
+          bsns_year  SMALLINT     NULL,
+          reprt_code CHAR(5)      NULL,
+          KEY ix_code (stock_code, bsns_year, reprt_code),
+          KEY ix_dt (rcept_dt)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ");
+}
+
+/** list.json 한 페이지 — 실패는 예외로 (호출부가 세고 멈춘다) */
+function rcept_page(string $bgn, string $end, string $cls, string $ty, int $page): array
+{
+    $url = 'https://opendart.fss.or.kr/api/list.json?' . http_build_query([
+        'crtfc_key' => DART_API_KEY, 'bgn_de' => $bgn, 'end_de' => $end,
+        'corp_cls' => $cls, 'pblntf_detail_ty' => $ty,
+        'page_no' => $page, 'page_count' => 100,
+    ]);
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 30,
+        CURLOPT_FOLLOWLOCATION => true, CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_USERAGENT => 'Mozilla/5.0']);
+    $body = curl_exec($ch);
+    if ($body === false) { $e = curl_error($ch); curl_close($ch); throw new RuntimeException("curl: $e"); }
+    curl_close($ch);
+    $j = json_decode((string)$body, true);
+    if (!is_array($j)) throw new RuntimeException('list.json 응답이 JSON 이 아닙니다');
+    if (($j['status'] ?? '') === '013') return ['total_page' => 0, 'list' => []];   // 결과 없음
+    if (($j['status'] ?? '') !== '000') throw new RuntimeException('list.json status ' . ($j['status'] ?? '?') . ' ' . ($j['message'] ?? ''));
+    return $j;
+}
+
+function job_rcept(PDO $pdo, string $fromYmd, string $toYmd, int $budget, float $start, int $secs): void
+{
+    rcept_table($pdo);
+    $ins = $pdo->prepare("
+        INSERT IGNORE INTO dart_rcept (rcept_no, corp_code, stock_code, rcept_dt, report_nm, bsns_year, reprt_code)
+        VALUES (?,?,?,?,?,?,?)");
+
+    $cur  = new DateTimeImmutable(substr($fromYmd, 0, 4) . '-' . substr($fromYmd, 4, 2) . '-01');
+    $stop = new DateTimeImmutable(substr($toYmd, 0, 4) . '-' . substr($toYmd, 4, 2) . '-' . substr($toYmd, 6, 2));
+    $calls = 0; $saved = 0; $seen = 0;
+
+    while ($cur <= $stop) {
+        $wEnd = min($cur->modify('last day of this month'), $stop);
+        foreach (['Y', 'K'] as $cls) {                       // 코스피·코스닥만 (백테스트 모집단과 동일)
+            foreach (['A001', 'A002', 'A003'] as $ty) {      // 사업·반기·분기보고서
+                for ($page = 1; $page <= 40; $page++) {
+                    if ($budget > 0 && $calls >= $budget) { say("호출 예산 도달 — 다음 실행: from=" . $cur->format('Ymd')); return; }
+                    if (over($start, $secs))               { say("시간 예산 도달 — 다음 실행: from=" . $cur->format('Ymd')); return; }
+                    try {
+                        $j = rcept_page($cur->format('Ymd'), $wEnd->format('Ymd'), $cls, $ty, $page);
+                    } catch (Throwable $e) {
+                        say($cur->format('Y-m') . " $cls $ty p$page 실패: " . $e->getMessage());
+                        break;   // 이 (창×종류)만 접고 다음으로 — 멱등이라 다음 실행이 메운다
+                    }
+                    $calls++;
+                    foreach ($j['list'] ?? [] as $it) {
+                        $seen++;
+                        $stk = trim((string)($it['stock_code'] ?? ''));
+                        if ($stk === '') continue;           // 상장 종목만
+                        $y = null; $rc = null;
+                        if (preg_match('/(사업|반기|분기)보고서\s*\((\d{4})\.(\d{2})\)/u', (string)$it['report_nm'], $m)) {
+                            $y = (int)$m[2];
+                            $mm = (int)$m[3];
+                            $rc = match ($m[1]) {
+                                '사업' => Dart::REPRT_ANNUAL,
+                                '반기' => Dart::REPRT_H1,
+                                // 분기는 월로 1Q/3Q 를 가른다 — 03/09 가 아니면 비12월 결산이라 미상(NULL)
+                                '분기' => ($mm === 3 ? Dart::REPRT_Q1 : ($mm === 9 ? Dart::REPRT_Q3 : null)),
+                            };
+                        }
+                        $dt = (string)$it['rcept_dt'];
+                        $ins->execute([
+                            (string)$it['rcept_no'], (string)$it['corp_code'], $stk,
+                            substr($dt, 0, 4) . '-' . substr($dt, 4, 2) . '-' . substr($dt, 6, 2),
+                            mb_substr((string)$it['report_nm'], 0, 150),
+                            $rc !== null ? $y : null, $rc,
+                        ]);
+                        if ($ins->rowCount() > 0) $saved++;
+                    }
+                    if ($page >= (int)($j['total_page'] ?? 0)) break;
+                    usleep(100000);   // 포털 예의
+                }
+            }
+        }
+        $cur = $cur->modify('first day of next month');
+    }
+    $n = $pdo->query("SELECT COUNT(*), MIN(rcept_dt), MAX(rcept_dt) FROM dart_rcept")->fetch(PDO::FETCH_NUM);
+    say(sprintf('접수일 수집 — 호출 %d · 훑음 %s건 · 새로 %s건 · 원장 %s행 (%s ~ %s)',
+        $calls, number_format($seen), number_format($saved), number_format((int)$n[0]), $n[1], $n[2]));
+}
+
 // ── 실행 ───────────────────────────────────────────────────────────────
 $from = (int)($_GET['from'] ?? 0);
 $to   = (int)($_GET['to']   ?? 0);
 
 switch ($job) {
-    // ── 매일 새벽: DART 최신 슬롯 갱신
+    // ── 매일 새벽: DART 최신 슬롯 갱신 (+ 최근 3주 접수일 — 어닝 탭·SUE 신호일용)
     case 'fresh':
         job_fresh($dart, (int)($_GET['slots'] ?? 5), $budget, $start, $secs);
+        say('── 접수일 원장 (최근 21일)');
+        try {
+            job_rcept($pdo, date('Ymd', strtotime('-21 days')), date('Ymd'), 0, $start, $secs ?: 300);
+        } catch (Throwable $e) {
+            say('접수일 수집 실패(무시하고 계속): ' . $e->getMessage());
+        }
         break;
 
     // ── 매일 오전·오후: KRX 최근 거래일 시세·상장주식수
@@ -751,6 +870,16 @@ switch ($job) {
         if ($from <= 0) $from = Dart::MIN_YEAR;
         say("연도별 주식수 수집 — {$from}~{$to}년");
         job_shares($dart, $from, $to, $budget, $start, $secs);
+        break;
+
+    /* ── 정기보고서 접수일 원장 ─────────────────────────────────────────
+     *   매일분은 fresh 가 최근 21일을 같이 받는다 — 이 잡은 <b>과거 백필 전용</b>(SSH).
+     *   php cron/dart_collect.php job=rcept from=20160101 sec=540   ← 끊기면 안내대로 이어받기 */
+    case 'rcept':
+        $rFrom = preg_replace('/[^0-9]/', '', (string)($_GET['from'] ?? '')) ?: '20160101';
+        $rTo   = preg_replace('/[^0-9]/', '', (string)($_GET['to'] ?? ''))   ?: date('Ymd');
+        say("정기보고서 접수일 수집 — {$rFrom} ~ {$rTo}");
+        job_rcept($pdo, $rFrom, $rTo, $budget, $start, $secs);
         break;
 
     default:

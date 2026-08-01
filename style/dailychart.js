@@ -841,6 +841,7 @@
       _bars: [],            // 일봉 원본 (전체 — 화면 슬라이스와 무관)
       _tf: 'day',
       _viewDays: null,      // n 이면 마지막 n 봉만 표시 (신호 계산은 전체 기준)
+      _pinnedRange: null,   // zoomRange 로 잡은 과거 구간 — go() 재적용 때도 이 값으로 되돌아온다
       _main: null,          // 캔들 or 라인(폴백) 시리즈
       _mainIsCandle: null,
       _vol: null,
@@ -1331,9 +1332,17 @@
         var N = fullBars().length;
         if (!N) return;
         var ts = chart.timeScale();
-        if (!self._viewDays || self._viewDays >= N) { ts.fitContent(); return; }
-        try { ts.setVisibleLogicalRange({ from: N - self._viewDays, to: N - 1 }); }
-        catch (e) { ts.fitContent(); }
+        if (self._viewDays && self._viewDays < N) {
+          try { ts.setVisibleLogicalRange({ from: N - self._viewDays, to: N - 1 }); }
+          catch (e) { ts.fitContent(); }
+          return;
+        }
+        // 기간 버튼(viewDays)이 없을 땐 zoomRange 로 고정해 둔 과거 구간을 우선한다 —
+        // 없으면(둘 다 null) 그제서야 전체 보기.
+        if (self._pinnedRange) {
+          try { ts.setVisibleRange(self._pinnedRange); return; } catch (e) { /* fall through */ }
+        }
+        ts.fitContent();
       }
       go();
       setTimeout(go, 0);
@@ -1431,6 +1440,7 @@
        * 같은 데이터를 setData 로 다시 실으면 LWC 의 «같은 시간 구간 유지» 보정과
        * 경합해 창 이동이 먹히지 않는 일이 있다(실측). 창·창 기준 표시물만 갱신한다. */
       self._viewDays = n || null;
+      self._pinnedRange = null;                 // 기간 버튼을 누르면 zoomRange 로 고정한 구간은 해제
       drawSignalLines();                        // 전고점선은 «선택 창» 기준
       applyWindow();
       return self;
@@ -1506,10 +1516,16 @@
       var pad = (o.pad === undefined) ? 3 : o.pad;
       a = Math.max(0, a - pad);
       b = Math.min(dates.length - 1, b + pad);
-      chart.timeScale().setVisibleRange({ from: dates[a], to: dates[b] });
+      self._viewDays = null;                              // 기간 버튼 대신 이 구간을 우선
+      self._pinnedRange = { from: dates[a], to: dates[b] }; // setData 뒤 지연 재적용(go)도 이 구간으로 되돌아온다
+      chart.timeScale().setVisibleRange(self._pinnedRange);
       return self;
     };
-    self.zoomAll = function () { chart.timeScale().fitContent(); return self; };
+    self.zoomAll = function () {
+      self._viewDays = null; self._pinnedRange = null;    // 「전체」도 상태로 남겨야 다음 재적용에 안 밀린다
+      chart.timeScale().fitContent();
+      return self;
+    };
     self.refreshChips = overlaysSoon;
 
     /* ── 전체화면 ──

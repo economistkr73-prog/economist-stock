@@ -16,7 +16,7 @@
  * 그때 이 값을 올리면 저장된 요약 캐시가 전부 한 번에 무효가 된다.
  * (calc.php 의 매매 규칙이나 sim.php 의 체결 가정을 바꿀 때마다 반드시 올릴 것)
  */
-const PF_SIM_VER = '2026-07-28.1';
+const PF_SIM_VER = '2026-08-01.3';
 
 /**
  * 새 종목을 등록했을 때 "청산 후 대기(거래일)" 기본값.
@@ -43,9 +43,27 @@ const PF_SIM_WAIT_DEFAULT = 10;
  *
  * 전량 매도하면 한 사이클이 끝난다. reenter 면 wait 일 뒤 새 사이클로 다시 1차부터 시작한다.
  *
- * @param array $prices [['d'=>,'c'=>, (o,h,l)], ...] 오름차순
- * @param array $steps  step_no => ['weight','drop_rate','target_rate']
- * @param array $opt    limit_amt · reenter(bool) · wait(int) · intraday(bool)
+ * 계단관통 손절 (stair_stop · 사다리×퀀트 결합 연구 2026-08-01):
+ *   사다리의 구조적 결함은 출구가 목표 도달뿐이라 장기 하락추세에서 물림이 영원하다는 것.
+ *   「거래대금 120일 신고가 박스의 아래 계단(지지구조)이 전부 종가로 뚫리면 사다리 중단·전량 청산」을
+ *   얹으면 물림이 절반(11.3→5.2%·양 기간 일관), 비용은 중앙 −0.8%p 였다(krx_amt 원장 실측).
+ *   판정·체결 모두 <b>종가</b>다(백테스트와 같은 잣대 — 장중 모드여도 관통 청산은 종가 체결).
+ *   신호·계단은 이 시세(수정주가) 자체에서 거래대금 근사(c×v)로 계산한다 — 거래량 없는 옛
+ *   데이터에서는 조용히 비활성(stair_used=false). ★관통 청산 사이클은 손실로 닫히므로
+ *   「닫힌 사이클 = 전부 이익」 동어반복이 이 옵션에서는 깨진다(win_rate 가 비로소 뜻을 가진다).
+ *
+ * 차수 지연 (룰셋 차수별 delay_days · 0=끔 · 사용자 제안 2026-08-01 — 강제 손절을 밀어내고 채택):
+ *   직전 매수 후 달력일이 <b>그 차수의 delay_days</b> 를 넘겨 딱 한 차수 내려온 것은 느린 하락(=추세)로
+ *   보고 그 차수를 건너뛴다 — 한 차수 더 내려와야 산다(건너뛴 금액은 누적목표 catch-up 이 흡수해
+ *   더 낮은 값에 실린다). 같은 날 두 차수 이상 급락(공포 급락)은 그대로 산다. 파는 규칙이 아니다.
+ *   차수마다 다르게 줄 수 있다(예: 앞 차수는 짧게·깊은 차수는 길게). 1차는 직전 매수가 없어 무의미.
+ *   20종목 실측(단일값 시절): 20일 기준 중앙 −2.8%p(제동장치 중 유일하게 거의 중립) · 느린 하락 종목은
+ *   크게 개선(한국주철관 +37%p) / 스킵한 차수 근처가 바닥인 종목은 손해(바디텍 −104%p) —
+ *   종목별 편차가 크므로 룰셋 비교표의 「지연 없이」 열로 그 종목의 답을 직접 확인하고 쓴다.
+ *
+ * @param array $prices [['d'=>,'c'=>, (o,h,l,v)], ...] 오름차순
+ * @param array $steps  step_no => ['weight','drop_rate','target_rate',(delay_days)]
+ * @param array $opt    limit_amt · reenter(bool) · wait(int) · intraday(bool) · stair_stop(bool)
  * @param array $p      pf_params() 오버라이드 (수수료·세율·호가단위)
  */
 function pf_sim_run(array $prices, array $steps, array $opt = [], array $p = []): array
@@ -55,6 +73,14 @@ function pf_sim_run(array $prices, array $steps, array $opt = [], array $p = [])
     $reenter  = !empty($opt['reenter']);
     $wait     = max(0, (int)($opt['wait'] ?? 0));
     $intraday = !empty($opt['intraday']);
+    $lastBuyD = null;                                     // 이번 사이클 마지막 매수일 (차수 지연 판정용)
+    $skipStep = null;                                     // 건너뛰기로 한 차수 (이 레벨에서는 안 산다)
+    $skips    = 0;
+
+    // 계단관통 손절 — 거래량이 있어야 신고가·계단을 계산할 수 있다 (없으면 조용히 끔)
+    $stairStops = !empty($opt['stair_stop']) ? pf_sim_stair_stops($prices) : [];
+    $stairUsed  = $stairStops !== [];
+    $curStop    = null;   // 진행 중 사이클의 관통선 (진입 시점에 고정)
 
     if (!$prices || !$steps || $limit <= 0) {
         return pf_sim_empty();
@@ -76,7 +102,9 @@ function pf_sim_run(array $prices, array $steps, array $opt = [], array $p = [])
     $maxUsed  = 0.0;
     $maxStep  = 0;
 
+    $bi = -1;   // 봉 인덱스 — 계단관통선 조회용 (키가 연속이 아닐 수 있어 직접 센다)
     foreach ($prices as $row) {
+        $bi++;
         $d  = $row['d'];
         $px = (float)$row['c'];
 
@@ -98,9 +126,12 @@ function pf_sim_run(array $prices, array $steps, array $opt = [], array $p = [])
         $sp      = $c['sell_price'];
         $hitSell = $intra ? ($sp !== null && $hi >= $sp) : !empty($c['sell_signal']);
 
-        if ((int)$led['held_qty'] > 0 && $hitSell) {
-            // ── 자동매도가 도달 → 전량 매도
-            $fillS    = $intra ? min($hi, max((float)$sp, $op)) : $px;
+        // 계단관통 — 종가가 관통선(−2% 여유) 아래로 마감하면 사다리 전제(반등)가 깨진 것
+        $hitStair = $curStop !== null && !$hitSell && $px < $curStop * 0.98;
+
+        if ((int)$led['held_qty'] > 0 && ($hitSell || $hitStair)) {
+            // ── 자동매도가 도달(정상) 또는 계단관통(강제) → 전량 매도. 관통 청산은 종가 체결.
+            $fillS    = $hitSell ? ($intra ? min($hi, max((float)$sp, $op)) : $px) : $px;
             $qty      = (int)$led['held_qty'];
             $gross    = $fillS * $qty;
             $fee      = pf_sell_cost($gross, $p);
@@ -112,7 +143,7 @@ function pf_sim_run(array $prices, array $steps, array $opt = [], array $p = [])
             $realizedTotal += $cycleRealized - (float)$led['realized_pl'];
 
             $act = ['d' => $d, 'side' => 'sell', 'step' => 0, 'price' => $fillS, 'qty' => $qty,
-                    'amount' => $gross, 'fee' => $fee, 'cash' => $cash];
+                    'amount' => $gross, 'fee' => $fee, 'cash' => $cash, 'stair' => $hitStair];
             $all[] = $act;
 
             if ($cycle !== null) {
@@ -121,6 +152,7 @@ function pf_sim_run(array $prices, array $steps, array $opt = [], array $p = [])
                 $cycle['days']        = pf_sim_days($cycle['entry_date'], $d);
                 $cycle['realized_pl'] = $cycleRealized;
                 $cycle['return']      = ($cycle['invested'] > 0) ? $cycleRealized / $cycle['invested'] : null;
+                $cycle['stair']       = $hitStair;   // 관통 강제청산이면 true (목표 도달과 구별)
                 $cycles[] = $cycle;
                 $cycle = null;
             }
@@ -128,12 +160,34 @@ function pf_sim_run(array $prices, array $steps, array $opt = [], array $p = [])
             // 사이클 종료 → 체결 초기화 (다음 사이클은 1차부터)
             $trades   = [];
             $cooldown = $wait;
+            $curStop  = null;
+            $lastBuyD = null;
+            $skipStep = null;
             if (!$reenter) $stopped = true;
 
         } elseif (!$stopped && $cooldown <= 0 && (float)$c['buy_amount'] > 0) {
             // ── 다음 차수 도달 → 매수. 금액은 누적목표가, 수량은 체결가가 정한다.
             $step   = (int)$c['reach_step'];
             $theory = $c['steps'][$step]['theory_price'] ?? null;
+
+            /* 차수 지연 — 느린 「한 차수」 하락은 쉬고, 한 차수 더 내려오면 무조건 산다.
+             *   판정 기준은 <b>도달한 차수의 delay_days</b>(룰셋 정의·0=규칙 없음) — 차수마다 다르게 줄 수 있다.
+             *   같은 날 두 차수 이상 도달(reach > cur+1 = 급락)은 판정 없이 그대로 산다.
+             *   건너뛴 차수의 금액은 catch-up(누적목표 − 투입)이 다음 매수에 흡수한다.
+             *   ★그 날을 건너뛰는 게 아니라 매수만 막는다 — equity 기록은 그대로 남아야 한다. */
+            $dN = (int)($steps[$step]['delay_days'] ?? 0);
+            $blocked = false;
+            if ($skipStep !== null && $step <= $skipStep) {
+                $blocked = true;      // 건너뛴 레벨 — 다음 차수가 내려올 때까지 관망
+            } elseif ($skipStep === null && $dN > 0 && $lastBuyD !== null
+                && $step === (int)$c['cur_step'] + 1
+                && pf_sim_days($lastBuyD, $d) > $dN) {
+                $skipStep = $step;    // 이 차수는 쉰다
+                $skips++;
+                $blocked = true;
+            } else {
+                $skipStep = null;     // 스킵 상태에서 더 깊이 도달 — 무조건 매수
+            }
 
             $fillB = $px;
             if ($intra) {
@@ -147,8 +201,9 @@ function pf_sim_run(array $prices, array $steps, array $opt = [], array $p = [])
             $amt = $fillB * $qty;
             $fee = pf_buy_cost($amt, $p);
 
-            if ($qty > 0 && $amt + $fee <= $cash + 1e-6) {   // 예수금 부족이면 건너뛴다
+            if (!$blocked && $qty > 0 && $amt + $fee <= $cash + 1e-6) {   // 예수금 부족이면 건너뛴다
                 $cash    -= $amt + $fee;
+                $lastBuyD = $d;
                 $trades[] = ['id' => ++$seq, 'side' => 'buy', 'step_no' => $step, 'traded_at' => $d, 'price' => $fillB, 'qty' => $qty];
 
                 $act = ['d' => $d, 'side' => 'buy', 'step' => $step, 'price' => $fillB, 'qty' => $qty,
@@ -159,7 +214,14 @@ function pf_sim_run(array $prices, array $steps, array $opt = [], array $p = [])
                     $cycle = ['no' => count($cycles) + 1, 'entry_date' => $d, 'entry_price' => $fillB,
                               'exit_date' => null, 'exit_price' => null, 'days' => null,
                               'max_step' => $step, 'buys' => 0, 'invested' => 0.0,
-                              'realized_pl' => 0.0, 'return' => null];
+                              'realized_pl' => 0.0, 'return' => null, 'stair' => false];
+                    /* 관통선 = 진입 시점에 알려진 가장 깊은 계단 (사이클 동안 고정 — 백테스트와 동일).
+                     * ★진입가가 이미 관통선 아래면 손절 없음 — 알려진 지지 아래에서 시작한 사이클을
+                     *   다음 날 바로 자르는 건 측정한 규칙이 아니다. */
+                    if ($stairUsed) {
+                        $s0 = $stairStops[$bi] ?? null;
+                        $curStop = ($s0 !== null && $fillB > $s0 * 0.98) ? $s0 : null;
+                    }
                 }
                 $cycle['buys']++;
                 $cycle['invested'] += $amt;
@@ -263,6 +325,9 @@ function pf_sim_run(array $prices, array $steps, array $opt = [], array $p = [])
         'buy_count'   => count(array_filter($all, fn($t) => $t['side'] === 'buy')),
         'sell_count'  => count(array_filter($all, fn($t) => $t['side'] === 'sell')),
         'cycle_count' => count($closed),
+        'stair_used'  => $stairUsed,
+        'stair_count' => count(array_filter($closed, fn($cy) => !empty($cy['stair']))),
+        'delay_skips' => $skips,
         'win_count'   => $win,
         'win_rate'    => $closed ? $win / count($closed) : null,
         'avg_days'    => $closed ? $sumDay / count($closed) : null,
@@ -278,6 +343,62 @@ function pf_sim_run(array $prices, array $steps, array $opt = [], array $p = [])
         'trades'      => $all,
         'equity'      => $equity,
     ];
+}
+
+/**
+ * 계단관통선 사전 계산 — 봉 인덱스 → 「그 시점에 알려진 가장 깊은 계단」 (없으면 null).
+ *
+ * 신호 = 거래대금(c×v 근사)이 직전 120봉 최고를 넘는 날 (이력 120봉 미만 구간은 신호 없음).
+ * 계단 = 그 신호 박스의 L 아래 레벨(H·L)을 주는 <b>최근 박스 2개</b> — 퀀트 boxStatusMany 와 같은 정의.
+ * 관통선 = 그 계단들의 최저값. 새 신호가 뜨면 관통선도 그 박스 기준으로 갱신된다.
+ *
+ * ★수정주가×거래량은 실제 거래대금과 다르다(분할 소급 왜곡) — 창 안 상대비교라 근사로 충분하지만
+ *   (일봉차트 「최고_거래대금선」 지표와 같은 타협·실측 0.99% 오차) 완전 동일하진 않다.
+ * ★거래량 없는 봉이 하나라도 아니라 <b>전부</b>면 빈 배열 = 기능 꺼짐 신호.
+ */
+function pf_sim_stair_stops(array $prices): array
+{
+    $n = count($prices);
+    if ($n < 121) return [];
+    $amt = array_fill(0, $n, 0.0);
+    $hasVol = false;
+    $i = 0;
+    foreach ($prices as $row) {
+        $v = (float)($row['v'] ?? 0);
+        if ($v > 0) { $hasVol = true; $amt[$i] = $v * (float)$row['c']; }
+        $i++;
+    }
+    if (!$hasVol) return [];
+
+    $sigs  = [];                          // 지난 신호 박스들 ['h','l']
+    $stops = array_fill(0, $n, null);
+    $cur   = null;
+    $i = 0;
+    foreach ($prices as $row) {
+        if ($i >= 120 && $amt[$i] > 0) {
+            $mx = 0.0;
+            for ($k = $i - 120; $k < $i; $k++) if ($amt[$k] > $mx) $mx = $amt[$k];
+            if ($amt[$i] > $mx) {
+                $c = (float)$row['c'];
+                $h = (isset($row['h']) && $row['h'] > 0) ? (float)$row['h'] : $c;
+                $l = (isset($row['l']) && $row['l'] > 0) ? (float)$row['l'] : $c;
+                $lv = []; $nb = 0;
+                for ($p = count($sigs) - 1; $p >= 0 && $nb < 2; $p--) {
+                    $cand = [];
+                    foreach (['h', 'l'] as $f) {
+                        $v2 = $sigs[$p][$f];
+                        if ($v2 > 0 && $v2 < $l * 0.98) $cand[] = $v2;
+                    }
+                    if ($cand) { $nb++; foreach ($cand as $v2) $lv[] = $v2; }
+                }
+                $sigs[] = ['h' => $h, 'l' => $l];
+                $cur = $lv ? min($lv) : null;   // 계단 없는 첫 폭발 박스면 관통선도 없다
+            }
+        }
+        $stops[$i] = $cur;
+        $i++;
+    }
+    return $stops;
 }
 
 /**
@@ -355,6 +476,8 @@ function pf_sim_options(?array $data, array $rules, array $brokers, array $marke
     $fromForm = ($query !== null && isset($query['go']));
     $re = $fromForm ? isset($query['re'])       : ((int)($data['reenter']  ?? 1) === 1);
     $in = $fromForm ? isset($query['intraday']) : ((int)($data['intraday'] ?? 1) === 1);
+    // 계단관통 손절 — 새 옵션이라 기본 OFF (기존 데이터의 결과를 조용히 바꾸지 않는다)
+    $ss = $fromForm ? isset($query['ss'])       : ((int)($data['stair_stop'] ?? 0) === 1);
 
     // 고가·저가가 없는 데이터는 장중 모드를 켤 수 없다
     if (empty($data['has_ohlc'])) $in = false;
@@ -369,6 +492,8 @@ function pf_sim_options(?array $data, array $rules, array $brokers, array $marke
         're'       => $re,
         'wait'     => max(0, (int)$q('wait', (int)($data['wait_days'] ?? PF_SIM_WAIT_DEFAULT))),
         'intraday' => $in,
+        'ss'       => $ss,
+        // 차수 지연은 옵션이 아니라 룰셋 차수(delay_days)의 속성이다 — 룰셋을 고르면 따라온다
     ];
 }
 

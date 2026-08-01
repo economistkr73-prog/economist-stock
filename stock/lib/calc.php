@@ -846,10 +846,34 @@ function pf_allocate_holdings(array $stepQty, int $soldQty): array
  *                              (매도가 없는 화면/테스트는 생략 가능 — 매수만으로 계산)
  * @return array
  */
-function pf_position_calc(array $steps, array $trades, float $limitAmt, ?float $lastPrice = null, array $p = [], array $ledger = []): array
+function pf_position_calc(array $steps, array $trades, float $limitAmt, ?float $lastPrice = null, array $p = [], array $ledger = [], array $levels = []): array
 {
-    $p      = pf_params($p);
-    $ladder = pf_theory_ladder($steps, $trades, $p, $lastPrice);
+    $p = pf_params($p);
+
+    if ($levels !== []) {
+        /* ── 박스 사다리 (2026-08-02) — 차수 가격이 <b>절대값</b>(그 종목의 실제 박스 지지선).
+         * 룰셋의 하락률 체인 대신 편입 때 확정한 가격표(pf_position_level)가 사다리를 정의한다.
+         * 비중·목표·지연도 레벨 행이 들고 온다(가격 간격이 종목마다 달라 비중도 그 가격으로 푼 값이다).
+         * 이 치환 한 곳만 지나면 누적목표·catch-up·신호·지연·매도 전부 기존 체인 그대로다.
+         * ★1차도 가격 조건을 갖는다(이론가 = 1차 지지선) — 하락률 모드의 「보유 0 이면 즉시 1차」와 달리
+         *   지지까지 내려와야 신호가 선다(매복형). */
+        ksort($levels, SORT_NUMERIC);
+        $steps = []; $ladder = []; $prev = null;
+        foreach ($levels as $n => $lv) {
+            $px = (float)$lv['price'];
+            $steps[$n] = [
+                'step_no'     => $n,
+                'weight'      => (float)$lv['weight'],
+                'drop_rate'   => ($prev !== null && $prev > 0) ? $px / $prev - 1 : 0.0,   // 표시용 실효 간격
+                'target_rate' => (float)$lv['target_rate'],
+                'delay_days'  => (int)($lv['delay_days'] ?? 0),
+            ];
+            $ladder[$n] = ['base_price' => $px, 'base_from' => 'box', 'theory_price' => $px];
+            $prev = $px;
+        }
+    } else {
+        $ladder = pf_theory_ladder($steps, $trades, $p, $lastPrice);
+    }
 
     $stepNos = array_keys($ladder);
     sort($stepNos, SORT_NUMERIC);
@@ -881,6 +905,7 @@ function pf_position_calc(array $steps, array $trades, float $limitAmt, ?float $
             'weight'        => (float)$s['weight'],
             'drop_rate'     => (float)$s['drop_rate'],
             'target_rate'   => isset($s['target_rate']) ? (float)$s['target_rate'] : null,
+            'delay_days'    => (int)($s['delay_days'] ?? 0),   // 지연 판정의 정본 — 박스 모드는 레벨 행 값
             'plan_amount'   => $amt,
             'base_price'    => $ladder[$n]['base_price'],
             'base_from'     => $ladder[$n]['base_from'],
@@ -1112,6 +1137,191 @@ function pf_position_calc(array $steps, array $trades, float $limitAmt, ?float $
  * ★ 남은 한도·남은 차수 계획(plan_remain 등)은 손대지 않는다. 그건 룰셋이 말하는 값이라
  *   포지션의 종료 여부와 무관하고, 어디에서도 합산되지 않는다.
  */
+/**
+ * 박스 사다리 비중 풀기 — 사용자가 고른 지지선 가격들(내림차순)에서 비중·목표·지연을 만든다.
+ *
+ * 비중은 자동생성기와 같은 수식(w_n = [p_n·Q_{n−1} − C_{n−1}(1+b_n)]/b_n)을 실제 가격 간격에
+ * 적용해 푼다. 손익분기 곡선의 최종값은 깊이×비율(0.40~0.65), 곡률 k 는 1.0~1.8 을 전부 훑어
+ * <b>계단형(내려갈수록 비중 비감소) 해를 먼저, 그 안에서 보수적 BE(비율 낮은 쪽)를 먼저</b> 고른다.
+ * 예전에는 공격적 BE(0.65)부터 첫 해를 반환했는데, 가격 간격이 크게 불균등하면 해가
+ * 「산봉우리형」(중간 차수에 절반·마지막 차수는 몇 %)으로 나와 지지가 다 깨졌을 때
+ * 손실이 큰 쪽으로 쏠렸다 — 실사례 비중 20/21/48/11·최종 BE −45.8% 가 계단형 우선으로
+ * 10/10/39/41·−28.2% 가 된다(같은 가격·같은 수식 — 고르는 기준만 바꿈).
+ * 계단형 해가 아예 없으면(좁은 칸 섞임) 산봉우리형 중 보수 BE 를 쓴다 — 좁은 칸에
+ * 비중이 얇게 붙는 것은 수식상 정상이고 미리보기 상세표로 드러난다.
+ * 금지는 「1차 > 2차 역전」과 1차 5% 미만.
+ * 목표수익률은 rs4 앞 구간(15/20/25/30/35 — 코호트 실측에서 낮은 목표는 사이클당 수익만 깎았다),
+ * 지연은 0/0/20/20/20 (실측 중립~유리 구간·앞 두 차수는 박스 안 출렁임이라 지연 없음).
+ *
+ * @param array $prices 내림차순 절대가격 (3~5개)
+ * @return ?array ['levels'=>[step=>['price','weight','target_rate','delay_days']], 'be'=>[], 'k','ratio','depth','mono'] · 해 없으면 null
+ */
+function pf_box_ladder_build(array $prices): ?array
+{
+    $prices = array_values(array_filter(array_map('floatval', $prices), fn($v) => $v > 0));
+    rsort($prices);
+    $N = count($prices);
+    if ($N < 3 || $N > 5) return null;
+
+    $pF = [];
+    foreach ($prices as $px) $pF[] = $px / $prices[0];
+    $depth = end($pF) - 1.0;
+    if ($depth >= -0.005) return null;   // 간격이 없다시피 하면 사다리가 아니다
+
+    $TGT = [0.15, 0.20, 0.25, 0.30, 0.35];
+    $DLY = [0, 0, 20, 20, 20];
+
+    $best = null;   // [monoRank(0=계단형), ratio, k] 사전순 최소가 승자
+    foreach ([0.40, 0.45, 0.50, 0.55, 0.60, 0.65] as $ratio) {
+        $beF = $depth * $ratio;
+        for ($k = 100; $k <= 180; $k += 5) {
+            $kk = $k / 100;
+            $b = [0.0];
+            for ($n = 1; $n < $N; $n++) $b[$n] = $beF * pow($n / ($N - 1), $kk);
+            $w = [1.0]; $Q = 1.0; $C = 1.0;
+            $ok = true;
+            for ($n = 1; $n < $N; $n++) {
+                $wn = ($pF[$n] * $Q - $C * (1 + $b[$n])) / $b[$n];
+                if ($wn <= 0) { $ok = false; break; }
+                $w[$n] = $wn; $Q += $wn / $pF[$n]; $C += $wn;
+            }
+            if (!$ok) continue;
+            $sum = array_sum($w);
+            $wN = array_map(fn($x) => $x / $sum, $w);
+            if ($wN[1] < $wN[0] - 0.0005 || $wN[0] < 0.05) continue;
+
+            $mono = true;
+            for ($n = 1; $n < $N; $n++) {
+                if ($wN[$n] < $wN[$n - 1] - 0.0005) { $mono = false; break; }
+            }
+            // 스캔이 (보수 BE → 공격 BE, 곡률 낮은 → 높은) 순이라
+            // 첫 계단형 해 = 계단형 중 가장 보수적, 첫 유효 해 = 산봉우리 폴백 중 가장 보수적.
+            $sol = ['w' => $wN, 'be' => $b, 'k' => $kk, 'ratio' => $ratio, 'mono' => $mono];
+            if ($mono) { $best = $sol; break 2; }
+            if ($best === null) $best = $sol;
+        }
+    }
+    if ($best === null) return null;
+
+    $levels = [];
+    for ($n = 0; $n < $N; $n++) {
+        $levels[$n + 1] = [
+            'price'       => $prices[$n],
+            'weight'      => round($best['w'][$n], 4),
+            'target_rate' => $TGT[$n],
+            'delay_days'  => $DLY[$n],
+        ];
+    }
+    return ['levels' => $levels, 'be' => $best['be'], 'k' => $best['k'],
+            'ratio' => $best['ratio'], 'depth' => $depth, 'mono' => $best['mono']];
+}
+
+/**
+ * 박스 사다리 상세표 — 확정본(pf_position_level)이든 방금 푼 해든, levels 만으로
+ * 룰셋 화면처럼 차수별 파생값을 만든다: 직전 대비 변동율·1차 대비·누적비중·
+ * 그 차수까지 계획대로 샀을 때의 평균단가·그 가격에서의 평가손실률(=손익분기 도달거리)·탈출가.
+ *
+ * ★전부 비중·가격만의 함수라 저장 없이 재계산해도 항상 같다(파생값 무저장 원칙).
+ *   평가손실률 be = p_n/평단 − 1 — 「그 지지선까지 내려와 다 샀을 때 계좌에 찍히는 수익률」.
+ *   탈출가 = 평단 × (1+목표) — 그 차수에서 자동매도가 걸리는 자리(수수료 제외).
+ *
+ * @param array $levels [step=>['price','weight','target_rate','delay_days']] (step 1..N)
+ * @return array [step=>['price','chg','from1','weight','cum','avg','be','target_rate','exit','delay_days']]
+ */
+function pf_box_ladder_detail(array $levels): array
+{
+    ksort($levels);
+    $rows = [];
+    $p1 = null; $prev = null; $cum = 0.0; $C = 0.0; $Q = 0.0;
+    foreach ($levels as $step => $lv) {
+        $px = (float)$lv['price'];
+        $w  = (float)$lv['weight'];
+        if ($p1 === null) $p1 = $px;
+        $cum += $w;
+        $C   += $w;
+        $Q   += ($px > 0) ? $w / $px : 0.0;
+        $avg  = ($Q > 0) ? $C / $Q : $px;
+        $tgt  = (float)($lv['target_rate'] ?? 0);
+        $rows[$step] = [
+            'price'       => $px,
+            'chg'         => ($prev !== null && $prev > 0) ? $px / $prev - 1 : null,
+            'from1'       => ($p1 > 0) ? $px / $p1 - 1 : null,
+            'weight'      => $w,
+            'cum'         => $cum,
+            'avg'         => $avg,
+            'be'          => ($avg > 0) ? $px / $avg - 1 : null,
+            'target_rate' => $tgt,
+            'exit'        => $avg * (1 + $tgt),
+            'delay_days'  => (int)($lv['delay_days'] ?? 0),
+        ];
+        $prev = $px;
+    }
+    return $rows;
+}
+
+/** 마지막 「매수」 체결일 — 차수 지연 판정의 기준점 (매도는 세지 않는다) */
+function pf_last_buy_at(array $tradeRows): ?string
+{
+    $last = null;
+    foreach ($tradeRows as $t) {
+        if (($t['side'] ?? '') !== 'buy') continue;
+        $d = substr((string)$t['traded_at'], 0, 10);
+        if ($last === null || $d > $last) $last = $d;
+    }
+    return $last;
+}
+
+/**
+ * 차수 지연을 <b>실전 신호</b>에 반영 — 시뮬 엔진(pf_sim_run)과 같은 규칙의 무상태 판정.
+ *
+ * 다음 차수(next_step)에 delay_days 가 정의돼 있고 직전 매수 후 그 일수를 넘겼으면
+ * 그 차수는 「만료」 — 느린 한 차수 하락은 추세로 보고 쉬어간다:
+ *   · 그 차수의 매수 신호를 끈다 (buy_signal/buy_amount/buy_qty)
+ *   · 다음매수 계획(next_*)을 한 차수 아래로 옮긴다 (건너뛴 금액은 누적목표가 흡수 — 이월과 같은 식)
+ *   · 현재가가 이미 그 아래 차수까지 내려와 있으면(reach_step > next) 손대지 않는다
+ *     — 급락 예외이자 「스킵 후 다음 도달은 무조건 매수」(엔진과 동일)
+ *   · 마지막 차수가 만료되면 다음매수 없음 (가장 깊은 구간 노출 축소)
+ *
+ * ★엔진과 달리 무상태다 — 「트리거 도달 시점의 경과일」이 아니라 「지금의 경과일」로 판정한다.
+ *   빨리 내려와 놓고 안 산 채 시간이 지나면 실전은 만료로 읽는다(지금 판단으로는 그게 맞다).
+ * ★1차 대기(직전 매수 없음)와 종료 포지션은 규칙 밖 — 여기·호출부가 함께 거른다.
+ * ★적용 지점은 pf_calc_closed 와 같은 3곳(pf_load_calc·종목상세·api payload) —
+ *   하나라도 빼먹으면 같은 종목이 화면마다 다른 판정을 한다.
+ */
+function pf_delay_adjust(?array $c, array $steps, ?string $lastBuyAt, string $today): ?array
+{
+    if ($c === null || $lastBuyAt === null) return $c;
+    if ((int)($c['cur_step'] ?? 0) < 1) return $c;
+    $n = (int)($c['next_step'] ?? 0);
+    if ($n <= 0) return $c;
+    // 정본은 calc 가 rows 에 실어 둔 값 — 박스 사다리(레벨별 지연)도 이 한 줄로 커버된다
+    $dN = (int)($c['steps'][$n]['delay_days'] ?? ($steps[$n]['delay_days'] ?? 0));
+    if ($dN <= 0) return $c;
+
+    $elapsed = (int)floor((strtotime($today) - strtotime($lastBuyAt)) / 86400);
+    if ($elapsed <= $dN) return $c;
+    if ((int)($c['reach_step'] ?? 0) > $n) return $c;   // 이미 더 깊이 도달 — 무조건 매수 구간
+
+    $c['delay_skip'] = ['step' => $n, 'elapsed' => $elapsed, 'limit' => $dN];
+    $c['buy_signal'] = false;
+    $c['buy_amount'] = 0.0;
+    $c['buy_qty']    = 0;
+
+    $m = null;
+    foreach (array_keys($c['steps'] ?? []) as $k) if ($k > $n) { $m = $k; break; }
+    if ($m === null) {
+        $c['next_step'] = null; $c['next_price'] = null; $c['next_amount'] = null; $c['next_qty'] = null;
+        return $c;
+    }
+    $c['next_step']   = $m;
+    $c['next_price']  = $c['steps'][$m]['theory_price'] ?? null;
+    $c['next_amount'] = isset($c['plan_cum'][$m])
+        ? max(0.0, (float)$c['plan_cum'][$m] - (float)($c['used_amount'] ?? 0)) : null;
+    $c['next_qty']    = ($c['next_price'] !== null && $c['next_price'] > 0 && $c['next_amount'] !== null)
+        ? (int)floor(round($c['next_amount'] / $c['next_price'], 6)) : null;
+    return $c;
+}
+
 function pf_calc_closed(?array $c): ?array
 {
     if (!$c) return $c;

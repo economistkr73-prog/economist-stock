@@ -79,7 +79,7 @@ echo <<<'PAGE'
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>상승종목 분석 대시보드</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css"/>
-<script src="/style/dailychart.js?v=26"></script>
+<script src="/style/dailychart.js?v=27"></script>
 <style>
   :root{
     --bg:#0e1320; --panel:#141b2b; --panel-2:#1b2335; --line:#26304a;

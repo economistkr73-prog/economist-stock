@@ -220,6 +220,8 @@ function api_ruleset(string $action, PDO $pdo, Pf $pf): void
                         'weight'      => (float)pf_arr('weight', $i, 0)      / 100,
                         'drop_rate'   => (float)pf_arr('drop_rate', $i, 0)   / 100,
                         'target_rate' => (float)pf_arr('target_rate', $i, 0) / 100,
+                        // 차수 지연(달력일·0=규칙없음). 1차는 직전 매수가 없어 항상 0
+                        'delay_days'  => ($i === 0) ? 0 : max(0, (int)pf_arr('delay_days', $i, 0)),
                     ];
                 }
                 if (!$steps) {
@@ -334,6 +336,36 @@ function api_ruleset(string $action, PDO $pdo, Pf $pf): void
 function api_position(string $action, PDO $pdo, Pf $pf): void
 {
     switch ($action) {
+        /* ── 박스 사다리 (2026-08-02) — 후보 조회 → 비중 계산(미리보기) → 저장/해제.
+         * boxlv/boxsolve 는 JSON 을 그대로 돌려준다(모달의 fetch 가 소비 — positions payload 와 같은 방식). */
+        case 'boxlv': {
+            $code   = preg_replace('/[^0-9]/', '', (string)($_GET['code'] ?? ''));
+            $months = ((int)($_GET['months'] ?? 6) === 12) ? 12 : 6;
+            $tf     = (($_GET['tf'] ?? 'day') === 'week') ? 'week' : 'day';
+            header('Content-Type: application/json; charset=utf-8');
+            if (!preg_match('/^\d{6}$/', $code)) { echo json_encode(['err' => '종목코드가 없습니다.']); exit; }
+            try {
+                $krx = new KrxAmt($pdo);
+                $cands = $tf === 'week' ? $krx->weeklyBoxCandidates($code, $months)
+                                        : $krx->dailyBoxCandidates($code, $months);
+                echo json_encode(['candidates' => $cands, 'tf' => $tf, 'months' => $months], JSON_UNESCAPED_UNICODE);
+            } catch (Throwable $e) {
+                echo json_encode(['err' => '박스 조회 실패 — krx 원장을 확인하세요.'], JSON_UNESCAPED_UNICODE);
+            }
+            exit;
+        }
+        case 'boxsolve': {
+            header('Content-Type: application/json; charset=utf-8');
+            $prices = array_map(fn($v) => (float)str_replace(',', '', (string)$v), (array)($_POST['prices'] ?? []));
+            $r = pf_box_ladder_build($prices);
+            if ($r === null) {
+                echo json_encode(['err' => '이 가격들로는 비중이 풀리지 않습니다 — 지지선을 3~5개, 간격이 있게 고르세요.'], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+            $r['detail'] = pf_box_ladder_detail($r['levels']);   // 룰셋처럼 차수별 파생값(변동율·누적·평단·손실률)
+            echo json_encode($r, JSON_UNESCAPED_UNICODE);
+            exit;
+        }
         case 'save':
             $id   = (int)($_POST['id'] ?? 0);
             $code = trim($_POST['stock_code'] ?? '');
@@ -368,6 +400,21 @@ function api_position(string $action, PDO $pdo, Pf $pf): void
                 'high_price' => $high,
             ]);
 
+            /* 박스 사다리 — 매수 방식이 box 면 <b>저장 전에</b> 가격 조합이 풀리는지 검증한다.
+             * 안 풀리는데 포지션부터 만들면 사다리 없는 반쪽 등록이 남는다. 룰셋 종목을 박스로
+             * 전환하는 흐름은 없다 — 방식은 편입 때 정해지고, 박스 포지션의 재조정만 이 길로 온다. */
+            $buyMode  = (($_POST['buy_mode'] ?? 'rule') === 'box') ? 'box' : 'rule';
+            $boxBuilt = null;
+            if ($buyMode === 'box') {
+                $bxPrices = array_map(fn($v) => (float)str_replace(',', '', (string)$v), (array)($_POST['box_prices'] ?? []));
+                $boxBuilt = pf_box_ladder_build($bxPrices);
+                if ($boxBuilt === null) {
+                    pf_api_done($id ? '/stock/index.php?mode=position&id=' . $id . '&edit=1'
+                                    : '/stock/index.php?mode=position&id=new&pid=' . (int)($_POST['portfolio_id'] ?? 0),
+                        'err', '박스 사다리: 지지선 3~5개를 간격 있게 고르고 「비중 풀기」까지 확인한 뒤 저장하세요.');
+                }
+            }
+
             // 상태는 매매에 따라 자동으로 바뀐다 (첫 매수 → 보유, 전량매도 → 종료).
             // 화면에서 직접 고르지 않으므로 기존 값을 유지하고, 신규는 관심(watch)으로 시작한다.
             $cur = $id ? $pf->positionGet($id) : null;
@@ -382,7 +429,9 @@ function api_position(string $action, PDO $pdo, Pf $pf): void
                 'status'       => $cur['status'] ?? 'watch',
                 'memo'         => trim($_POST['memo'] ?? ''),
             ]);
-            pf_api_done('/stock/index.php?mode=position&id=' . $pid, 'ok', '종목 설정을 저장했습니다.');
+            if ($boxBuilt !== null) $pf->positionLevelsReplace($pid, $boxBuilt['levels']);
+            pf_api_done('/stock/index.php?mode=position&id=' . $pid, 'ok',
+                '종목 설정을 저장했습니다.' . ($boxBuilt !== null ? ' (박스 사다리 ' . count($boxBuilt['levels']) . '차 확정)' : ''));
 
         case 'delete':
             $id  = (int)($_POST['id'] ?? 0);
@@ -409,18 +458,22 @@ function pf_positions_payload(Pf $pf): array
     $stepsMap  = $pf->ruleStepsMap(array_column($positions, 'rule_set_id'));
     $tradesMap = $pf->tradesMap(array_column($positions, 'id'));
     $feeMap    = $pf->brokerFeesMap(array_column($positions, 'broker_id'));
+    $lvMap     = $pf->positionLevelsMap(array_column($positions, 'id'));
 
     $out = [];
     foreach ($positions as $p) {
         $steps  = $stepsMap[(int)$p['rule_set_id']] ?? [];
-        if (!$steps) continue;
+        $lvs    = $lvMap[(int)$p['id']] ?? [];
+        if (!$steps && !$lvs) continue;
 
         $rows   = $tradesMap[(int)$p['id']] ?? [];
         $last   = ($p['last_price'] !== null) ? (float)$p['last_price'] : null;
         $prm    = pf_cost_params($p, $feeMap[(int)$p['broker_id']] ?? []);
-        $c      = pf_position_calc($steps, pf_trades_by_step($rows), (float)$p['limit_amt'], $last, $prm, pf_ledger($rows, $prm));
+        $c      = pf_position_calc($steps, pf_trades_by_step($rows), (float)$p['limit_amt'], $last, $prm, pf_ledger($rows, $prm), $lvs);
         // 종료 포지션은 계획·신호를 지운다 (화면과 같은 규칙 — pf_calc_closed 주석 참조)
         if ($p['status'] === 'closed') $c = pf_calc_closed($c);
+        // 차수 지연 — pf_load_calc 와 같은 규칙 (세 적용 지점이 같아야 화면 간 판정이 일치한다)
+        elseif ($c !== null) $c = pf_delay_adjust($c, $steps, pf_last_buy_at($rows), date('Y-m-d'));
 
         $out[] = [
             'id'           => (int)$p['id'],
