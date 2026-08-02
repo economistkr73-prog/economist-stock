@@ -17,7 +17,7 @@ $embed = !empty($_GET['embed']);
 echo "<!DOCTYPE html><html lang='ko'><head><meta charset='utf-8'>";
 echo "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
 echo "<title>차트 스타일 갤러리</title>";
-echo "<script src='/style/dailychart.js?v=27'></script>";
+echo "<script src='/style/dailychart.js?v=28'></script>";
 if (!$embed) nav_css();
 echo <<<'HTML'
 <style>
@@ -272,11 +272,11 @@ echo <<<'HTML'
   </div>
 
   <div class="card dark">
-    <h3>4. 분석형 — 신호칩 + 전고점선 + 당일전고 + 현재가 (다크)</h3>
+    <h3>4. 분석형 — 당일전고 + 현재가 (다크)</h3>
     <div class="use">사용처: <a href="/stock_analysis.php?mode=updash" target="_blank">상승종목 대시보드</a>
-      · 흰칩 ▲N.Nx=60봉 신고가+거래량 2배(금색=5배+) · 아래 %=추정 승률</div>
+      · 하늘색 실선 = 당일 기준 직전 60봉 최고가 (관찰용 기준선)</div>
     <div class="host" id="c4"></div>
-    <div class="note">신호·전고점선은 데모가 아니라 실제 계산값입니다. 주봉 전환 시 60주 기준으로 다시 계산됩니다.</div>
+    <div class="note">구 신호칩(신고가+거래량 흰칩·추정 승률)은 2026-08-02 폐기 — 정적 추정 승률이 실측과 어긋나는 잘못된 신호였습니다.</div>
   </div>
 
   <div class="card dark">
@@ -293,7 +293,7 @@ DailyChart.load().then(function(){
   var c1 = DailyChart.create('c1', { theme:'light', key:'gallery', legend:'gIndLeg' });
   var c2 = DailyChart.create('c2', { theme:'light', markers:{chips:true} });
   var c3 = DailyChart.create('c3', { theme:'light', volAlpha:'44', markers:{chips:false} });
-  var c4 = DailyChart.create('c4', { theme:'dark', signals:{}, curPrice:'#d9a441' });
+  var c4 = DailyChart.create('c4', { theme:'dark', todayHigh:true, curPrice:'#d9a441' });
   var c5 = DailyChart.create('c5', { theme:'dark', kind:'minute' });
   charts = [c1, c2, c3, c4];
 

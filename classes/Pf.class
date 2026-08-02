@@ -12,6 +12,9 @@ class Pf
 {
     private PDO $pdo;
 
+    /** 화면 계층이 가벼운 조회(종목명 등)에 같은 연결을 쓰도록 내어 준다 */
+    public function pdo(): PDO { return $this->pdo; }
+
     public function __construct(PDO $pdo)
     {
         $this->pdo = $pdo;
@@ -95,6 +98,11 @@ class Pf
               added_at    DATETIME     NOT NULL,
               added_price BIGINT       NULL COMMENT '담을 때 주가 — 이후 등락을 재는 기준',
               memo        VARCHAR(200) NOT NULL DEFAULT '',
+              source      VARCHAR(10)  NOT NULL DEFAULT '' COMMENT '발굴 채널 quant/earn/fund',
+              adopt_at    DATETIME     NULL COMMENT '편입 관심종목 지정 시각 — 포트폴리오 미지정 편입 저장. 실제 편입되면 NULL 로 원복',
+              adopt_bm    VARCHAR(4)   NOT NULL DEFAULT '' COMMENT '편입 대기 매수방식 rule/box',
+              adopt_rule  INT          NULL COMMENT '편입 대기 룰셋 id',
+              adopt_prices VARCHAR(120) NOT NULL DEFAULT '' COMMENT '편입 대기 박스 지지선 가격(콤마 구분·높은 값이 1차)',
               PRIMARY KEY (stock_code),
               KEY idx_pf_watch_at (added_at)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -252,6 +260,9 @@ class Pf
               status       ENUM('watch','open','closed') NOT NULL DEFAULT 'watch',
               sort_no      INT         NOT NULL DEFAULT 0,
               memo         VARCHAR(200) NOT NULL DEFAULT '',
+              source       VARCHAR(10) NOT NULL DEFAULT '' COMMENT '발굴 채널 quant/earn/fund/watch — 채널별 성과 측정용',
+              wl_added_at  DATETIME    NULL COMMENT '관심종목에 처음 담은 시각(승계)',
+              wl_price     BIGINT      NULL COMMENT '관심종목에 담을 때 주가(승계)',
               UNIQUE KEY uk_pf_pos (portfolio_id, stock_code),
               KEY idx_pf_pos_pf (portfolio_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -336,6 +347,29 @@ class Pf
     {
         if ($this->tableExists('pf_account') && !$this->tableExists('pf_portfolio')) {
             $this->pdo->exec("RENAME TABLE pf_account TO pf_portfolio");
+        }
+
+        // 발굴 출처 기록 (2026-08-02) — 어느 탐색 채널(quant/earn/fund)이 실제 수익을 내는지
+        // 나중에 매매히스토리에서 채널별로 가르기 위한 씨앗. 지금 안 심으면 데이터가 영영 없다.
+        if ($this->tableExists('pf_watchlist') && !$this->columnExists('pf_watchlist', 'source')) {
+            $this->pdo->exec("ALTER TABLE pf_watchlist ADD source VARCHAR(10) NOT NULL DEFAULT '' COMMENT '발굴 채널 quant/earn/fund' AFTER memo");
+        }
+
+        // 편입 관심종목 (2026-08-02) — 포트폴리오 미지정 상태로 종목추가를 저장한 것.
+        // 포트폴리오의 종목추가 하단 목록이 이 플래그만 보여 준다. 실제 편입되면 NULL 로 돌아간다.
+        if ($this->tableExists('pf_watchlist') && !$this->columnExists('pf_watchlist', 'adopt_at')) {
+            $this->pdo->exec("ALTER TABLE pf_watchlist ADD adopt_at DATETIME NULL COMMENT '편입 관심종목 지정 시각' AFTER source");
+        }
+        // 편입 대기 때 골라 둔 매수방식·룰셋·박스 지지선도 보관한다 — 「선택」이 그대로 불러온다
+        if ($this->tableExists('pf_watchlist') && !$this->columnExists('pf_watchlist', 'adopt_bm')) {
+            $this->pdo->exec("ALTER TABLE pf_watchlist ADD adopt_bm VARCHAR(4) NOT NULL DEFAULT '' COMMENT '편입 대기 매수방식 rule/box' AFTER adopt_at");
+            $this->pdo->exec("ALTER TABLE pf_watchlist ADD adopt_rule INT NULL COMMENT '편입 대기 룰셋 id' AFTER adopt_bm");
+            $this->pdo->exec("ALTER TABLE pf_watchlist ADD adopt_prices VARCHAR(120) NOT NULL DEFAULT '' COMMENT '편입 대기 박스 지지선 가격(콤마)' AFTER adopt_rule");
+        }
+        if ($this->tableExists('pf_position') && !$this->columnExists('pf_position', 'source')) {
+            $this->pdo->exec("ALTER TABLE pf_position ADD source VARCHAR(10) NOT NULL DEFAULT '' COMMENT '발굴 채널 — 채널별 성과 측정용' AFTER memo");
+            $this->pdo->exec("ALTER TABLE pf_position ADD wl_added_at DATETIME NULL COMMENT '관심종목에 처음 담은 시각(승계)' AFTER source");
+            $this->pdo->exec("ALTER TABLE pf_position ADD wl_price BIGINT NULL COMMENT '관심종목에 담을 때 주가(승계)' AFTER wl_added_at");
         }
 
         if ($this->tableExists('pf_position') && $this->columnExists('pf_position', 'account_id')) {
@@ -1290,7 +1324,8 @@ class Pf
     public function watchList(): array
     {
         return $this->pdo->query("
-            SELECT w.stock_code, w.added_at, w.added_price, w.memo,
+            SELECT w.stock_code, w.added_at, w.added_price, w.memo, w.source,
+                   w.adopt_at, w.adopt_bm, w.adopt_rule, w.adopt_prices,
                    COALESCE(NULLIF(n.stock_name,''), c.corp_name, w.stock_code) AS stock_name,
                    n.stock_price AS last_price
               FROM pf_watchlist w
@@ -1300,13 +1335,22 @@ class Pf
         ")->fetchAll(PDO::FETCH_ASSOC);
     }
 
+    /** 관심종목 한 건 — 편입 시 added_at/added_price/source 를 pf_position 으로 승계할 때 쓴다 */
+    public function watchGet(string $code): ?array
+    {
+        $st = $this->pdo->prepare("SELECT stock_code, added_at, added_price, memo, source FROM pf_watchlist WHERE stock_code = ?");
+        $st->execute([$code]);
+        $r = $st->fetch(PDO::FETCH_ASSOC);
+        return $r ?: null;
+    }
+
     /**
      * 관심종목에 담는다. 이미 있으면 <b>메모만</b> 갱신하고 담은 시각·가격은 지키다 —
      * 처음 담은 때가 기준이라야 "그 뒤로 얼마나 움직였나"가 뜻을 갖는다.
      *
      * @return bool 새로 담았으면 true
      */
-    public function watchAdd(string $code, string $memo = ''): bool
+    public function watchAdd(string $code, string $memo = '', string $source = ''): bool
     {
         $st = $this->pdo->prepare("SELECT COUNT(*) FROM pf_watchlist WHERE stock_code = ?");
         $st->execute([$code]);
@@ -1320,10 +1364,45 @@ class Pf
         $price = (int)$px->fetchColumn();
 
         $ins = $this->pdo->prepare("
-            INSERT INTO pf_watchlist (stock_code, added_at, added_price, memo) VALUES (?, NOW(), ?, ?)
+            INSERT INTO pf_watchlist (stock_code, added_at, added_price, memo, source) VALUES (?, NOW(), ?, ?, ?)
         ");
-        $ins->execute([$code, $price > 0 ? $price : null, mb_substr($memo, 0, 200)]);
+        $ins->execute([$code, $price > 0 ? $price : null, mb_substr($memo, 0, 200),
+                       mb_substr($source, 0, 10)]);
         return true;
+    }
+
+    /**
+     * 편입 관심종목 지정 — 포트폴리오 미지정 상태의 종목추가 저장이 여기로 온다.
+     * 관심종목에 없으면 먼저 담고(담은 시각·가격 확보), adopt_at 을 찍는다.
+     * 이미 담긴 종목은 담은 기록을 지키고 메모·플래그만 갱신한다 (watchAdd 와 같은 원칙).
+     *
+     * 폼에서 골라 둔 매수방식·룰셋·박스 지지선도 함께 보관한다 — 하단 목록의 「선택」이
+     * 그대로 폼에 복원해 주므로, 편입 대기 중에 한 선택이 사라지지 않는다.
+     */
+    public function watchAdopt(string $code, string $memo = '', string $source = '',
+                               string $bm = 'rule', int $ruleId = 0, array $prices = []): void
+    {
+        $this->watchAdd($code, $memo, $source);
+        $st = $this->pdo->prepare("
+            UPDATE pf_watchlist
+               SET adopt_at = NOW(), adopt_bm = ?, adopt_rule = ?, adopt_prices = ?
+             WHERE stock_code = ?");
+        $st->execute([
+            $bm === 'box' ? 'box' : 'rule',
+            $ruleId > 0 ? $ruleId : null,
+            implode(',', array_map(static fn($p) => rtrim(rtrim(number_format((float)$p, 2, '.', ''), '0'), '.'), $prices)),
+            $code,
+        ]);
+    }
+
+    /** 편입 대기 해제 — 관심종목 항목은 남기고 편입 표시·보관값(방식·룰셋·지지선)만 비운다 */
+    public function watchUnadopt(string $code): void
+    {
+        $st = $this->pdo->prepare("
+            UPDATE pf_watchlist
+               SET adopt_at = NULL, adopt_bm = '', adopt_rule = NULL, adopt_prices = ''
+             WHERE stock_code = ?");
+        $st->execute([$code]);
     }
 
     public function watchDel(string $code): bool
@@ -1516,6 +1595,7 @@ class Pf
     public function positionSave(array $d): int
     {
         if (!empty($d['id'])) {
+            // source/wl_* 는 편입 시점의 사실 — 수정 저장이 덮지 않는다
             $st = $this->pdo->prepare("
                 UPDATE pf_position
                 SET portfolio_id=?, stock_code=?, rule_set_id=?, limit_amt=?, started_at=?, status=?, sort_no=?, memo=?
@@ -1529,15 +1609,25 @@ class Pf
             return (int)$d['id'];
         }
 
+        // 신규 편입 — 관심종목에 담겨 있던 종목이면 담은 시각·가격을 승계하고 출처를 남긴다
+        $wl  = $this->watchGet($d['stock_code']);
+        $src = trim((string)($d['source'] ?? ''));
+        if ($src === '' && $wl) $src = $wl['source'] !== '' ? $wl['source'] : 'watch';
+
         $st = $this->pdo->prepare("
-            INSERT INTO pf_position (portfolio_id, stock_code, rule_set_id, limit_amt, started_at, status, sort_no, memo)
-            VALUES (?,?,?,?,?,?,?,?)
+            INSERT INTO pf_position (portfolio_id, stock_code, rule_set_id, limit_amt, started_at, status, sort_no, memo,
+                                     source, wl_added_at, wl_price)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
         ");
         $st->execute([
             (int)$d['portfolio_id'], $d['stock_code'], (int)$d['rule_set_id'], (int)$d['limit_amt'],
             ($d['started_at'] ?? '') ?: null, $d['status'] ?? 'watch',
             (int)($d['sort_no'] ?? 0), $d['memo'] ?? '',
+            mb_substr($src, 0, 10), $wl['added_at'] ?? null, $wl['added_price'] ?? null,
         ]);
+
+        // 편입이 됐으니 「편입 관심종목」 대기 표시·보관값은 비운다 — 종목추가 하단 목록에서 빠진다
+        if ($wl) $this->watchUnadopt($d['stock_code']);
         return (int)$this->pdo->lastInsertId();
     }
 

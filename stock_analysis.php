@@ -79,7 +79,7 @@ echo <<<'PAGE'
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>상승종목 분석 대시보드</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css"/>
-<script src="/style/dailychart.js?v=27"></script>
+<script src="/style/dailychart.js?v=28"></script>
 <style>
   :root{
     --bg:#0e1320; --panel:#141b2b; --panel-2:#1b2335; --line:#26304a;
@@ -190,8 +190,21 @@ echo <<<'PAGE'
   .seg.dseg button{padding:2px 9px;font-size:11px;}   /* 일봉 기간 토글: 차트바용 축소 */
   .chart-bar .px{font-size:11px;color:var(--ink-dim);}
   .chart-host{flex:1;min-height:0;position:relative;}
-  /* 일봉 상승셋업 흰색 칩(배수+승률) */
-  /* 일봉 신호 칩(.dc-chip)·전고점선 스타일은 style/dailychart.js 가 주입한다 */
+  /* 퀀트 배지 (종목 행 둘째 줄) — 퀀트 화면과 같은 어휘·임계, 다크 톤 */
+  .qb,.qbx{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:6px;font-size:11px;
+    font-weight:700;vertical-align:middle;line-height:1.5;letter-spacing:.01em;white-space:nowrap;}
+  .qb-acc{background:#12341f;color:#5dd58a;border:1px solid #1e5c3a;}     /* 🟢매집형 */
+  .qb-neu{background:#1e2637;color:#93a4c3;border:1px solid #2c3a55;}     /* 중립 */
+  .qb-exp{background:#3a2410;color:#f0a13b;border:1px solid #6b4a1a;}     /* 폭발형 */
+  .qb-chase{background:#3b1518;color:#f87171;border:1px solid #6e2429;}   /* 추격주의 */
+  /* 20·40일 모멘텀 — 등락색 <b>단색</b> 배경 + 흰 글씨 (밝은 화면의 .mkt.t-up/.t-down 과 같은 규칙) */
+  .qb-hot{background:#c62828;color:#fff;border:1px solid #c62828;}     /* 급등 (실측 근거 있음) */
+  .qb-cold{background:#1565c0;color:#fff;border:1px solid #1565c0;}    /* 급락 (근거 없음·참고) */
+  .qbx{border-radius:9px;}                                                 /* 박스 상태 */
+  .qbx.bx-brk{background:#12341f;color:#5dd58a;}   .qbx.bx-lad{background:#152742;color:#7fb1e8;}
+  .qbx.bx-dn{background:#3b1518;color:#f87171;}    .qbx.bx-in{background:#1e2637;color:#93a4c3;}
+  .qbx.bx-new{background:#242c3d;color:#8893ab;}   .qbx.bx-fake{background:#3a2410;color:#f0a13b;}
+  .qbx.bx-na{background:#242c3d;color:#5b6884;}
   #selBar{display:flex;align-items:baseline;gap:12px;padding:8px 14px;background:var(--panel-2);border-bottom:1px solid var(--line);}
   #selBar .snm{font-size:16px;font-weight:800;letter-spacing:-.02em;}
   #selBar .scode{font-size:11px;color:var(--ink-mute);}
@@ -252,7 +265,7 @@ echo <<<'PAGE'
       </div>
       <div class="charts">
         <div class="chart-block">
-          <div class="chart-bar"><span class="lbl" id="dailyLbl">일봉</span><button type="button" id="toggleHighLine" class="cline-chip on" title="신호일 전고점(돌파레벨) 수평선 표시/숨김">전고점선</button><button type="button" id="toggleTodayHigh" class="cline-chip on" title="당일 기준 전고점(직전 60일 최고가=현 돌파레벨) 수평선">당일전고</button><button type="button" id="toggleCurPrice" class="cline-chip" title="현재가격선 표시/숨김">현재가</button><span id="dPBar"></span><span id="dIBar"></span><span id="dIndLeg" class="dc-leg-dark"></span><span class="px">OHLC + 거래량 &nbsp; 흰칩 ▲N.Nx=신고가+대량거래·아래숫자=승률 · 금색=거래량5배+</span></div>
+          <div class="chart-bar"><span class="lbl" id="dailyLbl">일봉</span><button type="button" id="toggleTodayHigh" class="cline-chip on" title="당일 기준 전고점(직전 60일 최고가) 수평선 — 관찰용 기준선">당일전고</button><button type="button" id="toggleCurPrice" class="cline-chip" title="현재가격선 표시/숨김">현재가</button><span id="dPBar"></span><span id="dIBar"></span><span id="dIndLeg" class="dc-leg-dark"></span><span class="px">OHLC + 거래량</span></div>
           <div class="chart-host" id="dailyChart"></div>
         </div>
         <div class="chart-block bottom">
@@ -279,11 +292,12 @@ function fmtPrice(p){return Math.round(Number(p)||0).toLocaleString();}
 function fmtRate(r){r=Number(r)||0; return (r>=0?'+':'')+r.toFixed(2)+'%';}
 // 날짜·시각 축 포맷(한글 날짜·HH:MM)은 style/dailychart.js 모듈이 맡는다
 
-/* ---- 차트 (공용 모듈 style/dailychart.js — 신호칩·전고점선·당일전고·현재가선 포함) ----
- * 신호 조건('종가 60봉 신고가 돌파 + 거래량 2배+')과 승률 칩은 모듈 단일본이다. */
+/* ---- 차트 (공용 모듈 style/dailychart.js — 당일전고·현재가선 포함) ----
+ * 구 신호칩('60봉 신고가 돌파+거래량 2배' 흰칩·전고점선)은 2026-08-02 폐기 — 정적 추정
+ * 승률이 실측과 어긋나는 잘못된 신호였다(상승확률 엔진 폐기의 마무리). */
 let daily=null, minute=null;   // DailyChart 핸들 (load 후 생성)
 const dcReady = DailyChart.load().then(()=>{
-  daily = DailyChart.create('dailyChart', {theme:'dark', signals:{}, curPrice:'#d9a441',
+  daily = DailyChart.create('dailyChart', {theme:'dark', todayHigh:true, curPrice:'#d9a441',
                                            key:'updash', legend:'dIndLeg'});
   minute = DailyChart.create('minuteChart', {theme:'dark', kind:'minute'});
   // 기간 바 [일봉|주봉 ┃ 기간 4개] = 공용 컴포넌트 (일봉 160/240/480/전체 ↔ 주봉 24/48/96주/전체)
@@ -294,12 +308,6 @@ const dcReady = DailyChart.load().then(()=>{
   });
   DailyChart.indicatorBar('dIBar', daily, { theme: 'dark', key: 'updash' });   // 사용자 지표 + 차트틀
 });
-// 일봉 '전고점선' 칩 토글 (기본 ON)
-$('toggleHighLine').onclick=function(){
-  const on=!this.classList.contains('on');
-  this.classList.toggle('on', on);
-  if(daily) daily.setSignalLines(on);
-};
 // '당일전고' 칩 토글 (기본 ON)
 $('toggleTodayHigh').onclick=function(){
   const on=!this.classList.contains('on');
@@ -360,6 +368,26 @@ async function loadPage(cursor, startRank){
   $('btnNext').disabled=(rows.length<30);   // 30개 미만이면 더 이상 없음
 }
 
+/* 퀀트 배지 — 유형(오늘 최고 거래대금 경신 시)·급등⚠·박스 상태. 판정은 서버(top30 API)가
+ * krx_amt/krx_surge 원장으로 내리고 여기선 그리기만 한다(임계·어휘 = 퀀트 화면과 동일). */
+const escq = t => String(t||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+function quantBadges(q){
+  if(!q) return '';
+  let h='';
+  if(q.t)   h+=`<span class="qb qb-${q.cls}" title="${escq(q.tip)}">${q.t}</span>`;
+  /* 20·40거래일 모멘텀 — 창별로 「20일 +112%」처럼. 급등은 실측 근거가 있어 경고색(qb-hot),
+     급락은 근거 없이 급등 임계의 로그 대칭일 뿐이라 정보색(qb-cold). 퀀트 화면과 같은 어휘. */
+  (q.mom||[]).forEach(m=>{
+    const up = m.hot ? '급등' : '급락';
+    const why = m.hot
+      ? ` 급등 — 이 무리의 돌파 매수는 백테스트에서 중앙 0%·승률 51.6%로 엣지가 없습니다(평균만 +7%인 복권꼬리). 금지가 아니라 고지입니다.`
+      : ` 급락 — 임계는 급등의 로그 대칭이라 백테스트 근거가 없습니다. 얼마나 빠르게 빠졌는지 보는 참고 표시입니다.`;
+    // ★ 기준 시점을 반드시 밝힌다 — 이 화면은 <b>현재가</b> 기준이다(퀀트 목록의 신호일 기준과 다르다)
+    h+=`<span class="qb ${m.hot?'qb-hot':'qb-cold'}" title="${escq('현재가 기준 '+m.w+'거래일 '+(m.v>0?'+':'')+m.v+'%'+why)}">${m.w}일 ${m.v>0?'+':''}${m.v}%</span>`;
+  });
+  if(q.bx)  h+=`<span class="qbx ${q.bx.st}" title="${escq(q.bx.tip)}">${q.bx.txt}</span>`;
+  return h;
+}
 function renderList(){
   listEl.innerHTML='';
   STOCKS.forEach((s,i)=>{
@@ -371,7 +399,7 @@ function renderList(){
     const turn=cap>0 ? (trade/cap*100) : 0;       // 회전율(%) = 거래대금/시총
     const etfTag=s.kind==='etf'?'<span class="ktag">ETF</span>':'';
     row.innerHTML=`<div class="nm"><b><span class="rank">${pageStart+i+1}</span>${s.name}${etfTag}${etfBadge(s.etfTop)}</b>
-        <span class="mono" style="padding-left:34px">${s.code}</span></div>
+        <span class="mono" style="padding-left:34px">${s.code}${quantBadges(s.q)}</span></div>
       <div class="rate mono ${up?'up':'down'}">${fmtRate(s.rate)}</div>
       <div class="val mono">${fmtVal(metric)}</div>
       <div class="turn mono">${turn>0?turn.toFixed(1)+'%':'–'}</div>`;
@@ -418,7 +446,7 @@ async function selectStock(s,row){
   ]);
 
   await dcReady;
-  daily.setData(d);     // 신호칩·전고점선·당일전고는 모듈이 그린다 (240 전체 기준)
+  daily.setData(d);     // 당일전고선은 모듈이 그린다
   minute.setData(m);
   renderNews(Array.isArray(news)?news:[]);
 }

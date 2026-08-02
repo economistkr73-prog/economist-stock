@@ -1004,18 +1004,17 @@ t_head('시장 신호 — 임계치를 넘은 것만');
 $base = pf_indicators([]);
 $sg = fn(array $o) => array_column(pf_market_signals(array_merge($base, $o), 9), 'key');
 t_eq('평범하면 신호 없음', 0, count($sg([])));
-t_eq('급락 2σ 이상',   true, in_array('plunge', $sg(['sigma' => -2.5, 'chg' => -0.03]), true));
-t_eq('1.9σ + 3%는 아님', false, in_array('plunge', $sg(['sigma' => -1.9, 'chg' => -0.03]), true));
-/* ★ σ 와 절대% 는 OR 다 — σ 하나로는 놓친다.
- *   실측(2026-07-30) 삼성전자 +5.52% 가 0.8σ 였다: 최근 20일이 출렁이면 sd20 이 커져 큰 움직임도 작아 보인다.
- *   그날 14종목 중 2σ 를 넘은 종목이 하나도 없었다. */
-t_eq('0.8σ 라도 +5.5%면 급등',  true, in_array('surge',  $sg(['sigma' => 0.8,  'chg' => 0.055]), true));
-t_eq('0.8σ 라도 −5.5%면 급락',  true, in_array('plunge', $sg(['sigma' => 0.8,  'chg' => -0.055]), true));
-t_eq('저변동주 +2%가 2.5σ면 급등', true, in_array('surge', $sg(['sigma' => 2.5, 'chg' => 0.02]), true));
-t_eq('4.9% · 1.9σ 는 둘 다 미달', false, in_array('surge', $sg(['sigma' => 1.9, 'chg' => 0.049]), true));
+t_eq('급락 3σ 이상',   true, in_array('plunge', $sg(['sigma' => -3.5, 'chg' => -0.03]), true));
+t_eq('2.5σ + 3%는 아님', false, in_array('plunge', $sg(['sigma' => -2.5, 'chg' => -0.03]), true));
+/* ★ σ 와 절대% 는 OR 다 — 최근 20일이 출렁이면 sd20 이 커져 큰 움직임도 작아 보인다(변동성 클러스터링).
+ *   임계 3σ·15% 는 사용자 지정(2026-08-02 · 2σ/5% 에서 상향) — 진짜 이례만 띄운다. */
+t_eq('0.8σ 라도 +15%면 급등',  true, in_array('surge',  $sg(['sigma' => 0.8,  'chg' => 0.155]), true));
+t_eq('0.8σ 라도 −15%면 급락',  true, in_array('plunge', $sg(['sigma' => 0.8,  'chg' => -0.155]), true));
+t_eq('저변동주 +2%가 3.5σ면 급등', true, in_array('surge', $sg(['sigma' => 3.5, 'chg' => 0.02]), true));
+t_eq('14.9% · 2.9σ 는 둘 다 미달', false, in_array('surge', $sg(['sigma' => 2.9, 'chg' => 0.149]), true));
 // 신뢰도 판정도 <b>같은 기준</b>을 써야 배지와 따로 놀지 않는다
-t_eq('신뢰도도 절대 5%를 인정', 'strong',
-     pf_signal_confidence('buy', array_merge($base, ['sigma' => 0.8, 'chg' => -0.06]))['level']);
+t_eq('신뢰도도 절대 15%를 인정', 'strong',
+     pf_signal_confidence('buy', array_merge($base, ['sigma' => 0.8, 'chg' => -0.16]))['level']);
 t_eq('거래량 2배',     true, in_array('vol', $sg(['vol_mult' => 2.1]), true));
 t_eq('1.9배는 아님',   false, in_array('vol', $sg(['vol_mult' => 1.9]), true));
 t_eq('52주 최저권',    true, in_array('low52', $sg(['pos52' => 0.03]), true));
@@ -1078,12 +1077,10 @@ t_eq('얇은 종목 3.6%는 분할 권장', 'split', pf_fill_gate($mkL(0.036, 't
 t_eq('풍부한 종목 3.6%는 충분',    'ok',    pf_fill_gate($mkL(0.036, 'deep'))['level']);
 t_eq('계획 수량 없으면 판정 없음', 'ok',    pf_fill_gate($liqDeep)['level']);
 
-t_head('유동성 배지 — 결정적인 경우만 세운다');
+t_head('유동성 배지 — 세우지 않는다 (2026-08-02 사용자 지시 · 「유동성」 열과 체결 게이트가 전담)');
 $sgL = fn(array $o, array $l) => array_column(pf_market_signals(array_merge($base, $o), 9, $l), 'key');
-t_eq('매우 얇으면 배지',   true,  in_array('illiq', $sgL([], $mkL(0, 'very_thin')), true));
-t_eq('얇음은 배지 아님',   false, in_array('illiq', $sgL([], $mkL(0, 'thin')), true));
-t_eq('풍부는 배지 아님',   false, in_array('illiq', $sgL([], $mkL(0, 'deep')), true));
-t_eq('유동성 정보가 없으면 배지 없음', false, in_array('illiq', $sg([]), true));
+t_eq('매우 얇아도 배지 없음', false, in_array('illiq', $sgL([], $mkL(0, 'very_thin')), true));
+t_eq('유동성 정보가 없어도 배지 없음', false, in_array('illiq', $sg([]), true));
 // 얇은 종목의 거래량 급증은 ★ 로 드러낸다
 $vThin = pf_market_signals(array_merge($base, ['vol_mult' => 3.2]), 9, $mkL(0, 'very_thin'));
 $vDeep = pf_market_signals(array_merge($base, ['vol_mult' => 3.2]), 9, $mkL(0, 'deep'));
@@ -1097,7 +1094,7 @@ t_eq('대기 종목은 판정 없음', 'normal', $cf(null, ['rsi14' => 20.0])['l
 t_eq('매수+과매도+거래량', 'strong',
      $cf('buy', ['rsi14' => 25.0, 'vol_mult' => 3.0])['level']);
 t_eq('잔여매수도 같게 본다', 'strong',
-     $cf('fill', ['sigma' => -2.5, 'vol_mult' => 3.0])['level']);
+     $cf('fill', ['sigma' => -3.5, 'vol_mult' => 3.0])['level']);
 // ★ 역배열 + 52주 최저권이면 과매도라도 <b>주의</b>가 이긴다 (하락추세 초기 물타기가 가장 위험)
 t_eq('매수+역배열+최저권 → 주의', 'caution',
      $cf('buy', ['rsi14' => 25.0, 'vol_mult' => 3.0, 'trend' => 'down', 'pos52' => 0.05])['level']);
@@ -1513,11 +1510,15 @@ t_eq('중간 날짜엔 상태가 나온다', true, count(pf_state_at($saBars, $m
  *   ★★ 이 단정이 처음에 실패해서 엔진 버그를 잡았다 — 하루 −0.5% 로 <b>일정하게</b> 내리는
  *   이 픽스처는 sd20 이 부동소수 잔여값까지 내려가, 예전 코드에서는 σ 가 −6경이 되어
  *   「급락 −0.5%」 가 떴다. PF_SD_MIN 하한을 넣어 고쳤다. */
-$mid  = array_column(pf_state_at($saBars, $midD, 3), 'label');
-$last = array_column(pf_state_at($saBars, $lastD, 3), 'label');
-t_eq('중간엔 급락이 없다',  false, (bool)preg_grep('/급락/u', $mid));
-t_eq('마지막엔 급락이 뜬다', true, (bool)preg_grep('/급락/u', $last));
-t_eq('하락 추세라 역배열',   true, (bool)preg_grep('/역배열/u', $last));
+/* ★ 단언은 <b>키</b>로 한다 — 라벨은 표시 문구라 바뀐다(2026-08-02 「급락 −N%」→「−N%」로 개편). */
+$mid  = array_column(pf_state_at($saBars, $midD, 3), 'key');
+$last = array_column(pf_state_at($saBars, $lastD, 3), 'key');
+t_eq('중간엔 급락이 없다',  false, in_array('plunge', $mid, true));
+t_eq('마지막엔 급락이 뜬다', true, in_array('plunge', $last, true));
+t_eq('하락 추세라 역배열',   true, in_array('downtrend', $last, true));
+// 라벨은 부호 붙은 % 하나 — 20·40일 모멘텀 칩(「20일 +112%」)과 같은 계열로 읽히게
+t_eq('라벨은 % 하나', true, (bool)preg_grep('/^−?-?\d+\.\d%$/u',
+     array_column(pf_state_at($saBars, $lastD, 3), 'label')));
 
 /* ★★ 변동성이 0 에 가까울 때 σ 가 폭발하지 않는지 — 위에서 잡은 버그의 회귀 시험 */
 t_head('★ σ 하한 (PF_SD_MIN) — 잔잔하면 σ 를 만들지 않는다');
@@ -1525,7 +1526,7 @@ $flatInd = pf_indicators(array_slice($saBars, 0, 41));      // 하루 −0.5% �
 t_eq('sd20 이 0 에 가깝다', true, $flatInd['sd20'] < 1e-6);
 t_eq('그럴 때 σ 는 null',   null, $flatInd['sigma']);
 t_eq('−0.5% 를 급락으로 보지 않는다', false,
-     (bool)preg_grep('/급락/u', array_column(pf_market_signals($flatInd, 3), 'label')));
+     in_array('plunge', array_column(pf_market_signals($flatInd, 3), 'key'), true));
 /* 반대로 변동성이 정상이면 σ 가 나오고 큰 하락은 급락으로 잡힌다 */
 $liveInd = pf_indicators($saBars);                          // 마지막 날 −10.45%
 t_eq('정상 변동성이면 σ 가 있다', true, $liveInd['sigma'] !== null);
@@ -1551,7 +1552,7 @@ foreach (['surge','plunge','vol','illiq','low52','high52','oversold','overbought
     t_eq("키 {$k} 에 이름 있음", true, pf_mkt_short($k) !== '');
 }
 
-// ══ 사이클 나이 · 「재평가」 경보 ═════════════════════════════════════════
+// ══ 사이클 나이 · 「장기물림」 경보 ═════════════════════════════════════════
 /*
  * 근거 = 사이클 226개 실측: 물림비율 5차 23%·6차 42%·7차 50%, 2년 초과의 1/3 은 안 닫힘.
  * ★ 자동 손절·동결이 아니라 <b>경보</b>다 — 백테스트에서 기계식 규칙은 수익을 깎았다.
@@ -1569,7 +1570,7 @@ t_eq('매도만 있으면 null',       null,         pf_cycle_age([['side'=>'sel
 t_eq('체결 없으면 null',         null,         pf_cycle_age([])['days']);
 t_eq('오늘 샀으면 0일',          0,            pf_cycle_age([['side'=>'buy','traded_at'=>'2024-03-01']], '2024-03-01')['days']);
 
-t_head('★ 「재평가」 경보 (pf_cycle_alert) — 2년 또는 5차, 먼저 오는 쪽');
+t_head('★ 「장기물림」 경보 (pf_cycle_alert) — 2년 또는 5차, 먼저 오는 쪽');
 t_eq('729일·4차 = 아직',        'none',  pf_cycle_alert(729, 4)['level']);
 t_eq('730일이면 경보',          'alert', pf_cycle_alert(730, 1)['level']);
 t_eq('5차면 나이 무관 경보',    'alert', pf_cycle_alert(10, 5)['level']);
@@ -1577,7 +1578,7 @@ t_eq('둘 다면 사유 두 개', true,
      str_contains(pf_cycle_alert(800, 6)['why'], '2년 경과') && str_contains(pf_cycle_alert(800, 6)['why'], '6차 도달'));
 t_eq('나이 없으면 차수만 본다', 'alert', pf_cycle_alert(null, 7)['level']);
 t_eq('둘 다 없으면 없음',       'none',  pf_cycle_alert(null, null)['level']);
-t_eq('경보 라벨',               '재평가', pf_cycle_alert(730, 1)['label']);
+t_eq('경보 라벨',               '장기물림', pf_cycle_alert(730, 1)['label']);
 
 // 나이 표시 — 1년 미만은 일수, 그 뒤는 년 (67일과 3.2년이 한 열에서 갈려야 한다)
 t_eq('84일',   '84일',  pf_age_txt(84));

@@ -629,7 +629,7 @@ class KrxAmt
         $codes = array_keys($codes);
         $inC   = implode(',', array_fill(0, count($codes), '?'));
 
-        // ① 신호일 H·L (잠정치 src='n' 은 OHLC 가 없어 '집계중'으로 나온다)
+        // ① 신호일 H·L (잠정치 src='n' 은 OHLC 가 없어 키 자체를 만들지 않는다 — 화면은 '-')
         $ph = implode(',', array_fill(0, count($pairs), '(?,?)'));
         $arg = [];
         foreach ($pairs as $p) { $arg[] = $p[0]; $arg[] = $p[1]; }
@@ -663,7 +663,7 @@ class KrxAmt
             $key = $s['code'] . '|' . $s['d'];
             [$H, $L] = $HL[$key] ?? [0.0, 0.0];
             if ($H <= 0 || $L <= 0) {
-                $out[$key] = ['st' => 'bx-na', 'txt' => '집계중', 'tip' => '신호일 고가·저가는 다음날 KRX 확정값에서 옵니다', 'h' => 0, 'l' => 0];
+                // 잠정치(src='n')는 OHLC 가 없어 판정 불가 — 배지를 만들지 않는다(「집계중」 삭제 · 2026-08-02 사용자 지시)
                 continue;
             }
 
@@ -704,28 +704,48 @@ class KrxAmt
             }
             $lastC = (float)end($bs)['c'];
 
+            /* 돌파 후 지지선을 잃었나 — 잃었으면 그 날부터 붕괴 경로로 넘긴다(2026-08-02).
+             * 예전엔 돌파 경로에 들어가면 L 을 다시 보지 않아, 지지선을 17% 아래로 뚫고도
+             * 「돌파후반락」으로 남았다(현대차 실측) — 「지지이탈↓」과 「계단관통↓」 경보의 사각지대였다. */
+            $afterBrk = '';   // 비어 있지 않으면 「돌파 뒤 이탈」 경로다
             if ($phase === 'A') {
                 /* ★삼성물산 사례(2026-07-31)로 고침 — 돌파 후 <b>두 달 지나</b> 반락한 것을
                  * "가짜돌파"라 부르면 +40% 간 성공 사례가 실패처럼 읽힌다.
                  * 경로 연구의 가짜돌파(A2)는 「+5일 내 재진입」이다 — 그 정의만 그 이름을 쓴다. */
                 $ago = count($bs) - $pi;   // 돌파 후 경과 거래일
+                $brkD = (string)$bs[$pi]['d'];
                 if ($lastC > $H) {
+                    // 지금 저항 위 — 지지선 질문은 성립하지 않는다
                     $out[$key] = ['st' => 'bx-brk', 'txt' => '돌파✓ ' . $ago . '일',
                         'tip' => $tipHL . ' — 종가가 저항 위 (매집형 돌파 매수 실측 +2.26%·승률 57.9%)', 'h' => $H, 'l' => $L];
-                } elseif ($ago <= 5) {
-                    $out[$key] = ['st' => 'bx-fake', 'txt' => '가짜돌파',
-                        'tip' => $tipHL . ' — 돌파 직후(5일 내) 박스 안으로 되돌아옴', 'h' => $H, 'l' => $L];
                 } else {
-                    $out[$key] = ['st' => 'bx-fake', 'txt' => '돌파후반락',
-                        'tip' => $tipHL . " — 돌파하고 {$ago}거래일 지나 저항 아래로 반락 (돌파 자체는 성립했던 박스)", 'h' => $H, 'l' => $L];
+                    $bi = null;                                   // 돌파 뒤 처음으로 L 을 깬 날
+                    for ($u = $pi + 1; $u < count($bs); $u++) {
+                        if ((float)$bs[$u]['c'] < $L) { $bi = $u; break; }
+                    }
+                    if ($bi !== null) {
+                        $phase = 'C'; $pi = $bi;                  // ↓ 아래 C 로직이 이어받는다
+                        $afterBrk = $brkD;
+                    } elseif ($ago <= 5) {
+                        $out[$key] = ['st' => 'bx-fake', 'txt' => '가짜돌파',
+                            'tip' => $tipHL . ' — 돌파 직후(5일 내) 박스 안으로 되돌아옴', 'h' => $H, 'l' => $L];
+                    } else {
+                        // 경과일을 <b>라벨에</b> 싣는다 — 형제 배지 「돌파✓ 3일」과 같은 형식
+                        $out[$key] = ['st' => 'bx-fake', 'txt' => '돌파후반락 ' . $ago . '일',
+                            'tip' => $tipHL . " — 돌파하고 {$ago}거래일 지나 저항 아래로 반락 (지지선 L 은 아직 지키는 중)", 'h' => $H, 'l' => $L];
+                    }
                 }
-            } elseif ($phase === 'C') {
+            }
+            if ($phase === 'C' && !isset($out[$key])) {
                 /* ★계단을 <b>차례로</b> 시험한다 — 한 계단을 지켰다가도 나중에 깨면 다음 계단으로 내려간다.
                  * (전엔 첫 지지에서 판정을 멈춰, 그 계단마저 깨진 뒤에도 「계단지지」로 남아 있었다 —
                  *  삼성물산이 정확히 그랬다: 7/16 1단(386,000) 지지 → 이탈 → 지금 2단(340,000) 시험 중) */
+                /* 돌파 뒤 이탈이면 그 이력을 툴팁에 남긴다 — 라벨만으로는 「돌파했던 박스」임이 사라진다 */
+                $abNote = $afterBrk === '' ? ''
+                    : ' · ★' . $afterBrk . ' 저항 돌파 후 지지선을 잃은 경로(경로 연구에서 측정한 적 없는 무리)';
                 if (!$lv) {
                     $out[$key] = ['st' => 'bx-dn', 'txt' => '붕괴↓',
-                        'tip' => $tipHL . ' — 받아줄 계단이 없음(첫 폭발)', 'h' => $H, 'l' => $L];
+                        'tip' => $tipHL . ' — 받아줄 계단이 없음(첫 폭발)' . $abNote, 'h' => $H, 'l' => $L];
                 } else {
                     $idx = 0; $touched = false; $pierced = false; $n = count($lv);
                     for ($u = $pi; $u < count($bs); $u++) {
@@ -735,30 +755,35 @@ class KrxAmt
                         if ($lo > 0 && $lo <= $lv[$idx] * (1 + $Z)) $touched = true;
                     }
                     if ($pierced) {
-                        $out[$key] = ['st' => 'bx-dn', 'txt' => '관통↓',
-                            'tip' => $tipHL . ' — 계단까지 전부 뚫림(실측 3.1%의 드문 케이스)', 'h' => $H, 'l' => $L];
+                        $out[$key] = ['st' => 'bx-dn', 'txt' => '지지이탈↓',
+                            'tip' => $tipHL . ' — 계단까지 전부 뚫림(실측 3.1%의 드문 케이스)' . $abNote, 'h' => $H, 'l' => $L];
                     } elseif (!$touched) {
                         $out[$key] = ['st' => 'bx-dn', 'txt' => '붕괴·표류',
-                            'tip' => $tipHL . sprintf(' — 지지 아래·%d단 계단(%s) 위에서 표류', $idx + 1, number_format($lv[$idx])), 'h' => $H, 'l' => $L];
+                            'tip' => $tipHL . sprintf(' — 지지 아래·%d단 계단(%s) 위에서 표류', $idx + 1, number_format($lv[$idx])) . $abNote, 'h' => $H, 'l' => $L];
                     } elseif ($lastC > $lv[$idx] * (1 + $Z)) {
                         /* ⚠ = 위치 연구(2026-08-01): 아래층 박스 3개 미만의 계단지지는 실측 음수 — 매수규칙 미충족 */
                         $flNote = $floors >= 3
                             ? sprintf(' · 아래층 박스 %d개 — 매수규칙 충족(매집형×아래층 3개↑ 실측 +2.40%%·승률 58.5%%)', $floors)
                             : sprintf(' · ⚠아래층 박스 %d개(3개 미만) — 실측 음수(−2.5%%·승률 45%%)라 관망', $floors);
-                        $out[$key] = ['st' => 'bx-lad', 'txt' => '계단지지 ' . ($idx + 1) . '단' . ($floors >= 3 ? '' : '⚠'),
-                            'tip' => $tipHL . sprintf(' — %d단(%s)이 받아 반등 중', $idx + 1, number_format($lv[$idx])) . $flNote,
+                        /* ★ 돌파 뒤 이탈 경로에도 ⚠ — 트리거 조건이 「⚠ 없음」이라 자동으로 빠진다.
+                         * 경보(지지이탈↓)만 살리고 <b>매수 규칙의 모집단은 넓히지 않는다</b>. */
+                        $badOK = ($floors >= 3 && $afterBrk === '');
+                        $out[$key] = ['st' => 'bx-lad', 'txt' => '계단지지 ' . ($idx + 1) . '단' . ($badOK ? '' : '⚠'),
+                            'tip' => $tipHL . sprintf(' — %d단(%s)이 받아 반등 중', $idx + 1, number_format($lv[$idx])) . $flNote . $abNote,
                             'h' => $H, 'l' => $L];
                     } else {
                         $out[$key] = ['st' => 'bx-lad', 'txt' => ($idx + 1) . '단 시험중',
                             'tip' => $tipHL . sprintf(' — 지금 %d단 계단(%s) 바로 위 — 지키면 반등 후보, 깨면 %s',
                                 $idx + 1, number_format($lv[$idx]),
                                 $idx + 1 < $n ? ($idx + 2) . '단(' . number_format($lv[$idx + 1]) . ')' : '계단 없음')
-                                . ($floors < 3 ? sprintf(' · ⚠아래층 박스 %d개 — 지지 확인돼도 매수규칙(3개↑) 미충족', $floors) : ''),
+                                . ($floors < 3 ? sprintf(' · ⚠아래층 박스 %d개 — 지지 확인돼도 매수규칙(3개↑) 미충족', $floors) : '') . $abNote,
                             'h' => $H, 'l' => $L];
                     }
                 }
-            } else {
-                /* ⚠ = 박스 기간 연구(2026-08-01·검증 탭 ⑦): 매집형 박스가 체류 10일을 넘기면
+            } elseif (!isset($out[$key])) {
+                /* ★ A 분기가 이미 판정을 채웠으면 여기로 오면 안 된다 — 예전 elseif 사슬을
+                 * 끊으면서 생긴 자리라 <b>반드시</b> isset 으로 막는다(안 막으면 돌파✓ 가 박스안으로 덮인다).
+                 * ⚠ = 박스 기간 연구(2026-08-01·검증 탭 ⑦): 매집형 박스가 체류 10일을 넘기면
                  * 돌파율이 60%→37%로 꺾이고(유통기한), 늦은 돌파는 사도 음수(−6.68%·n=6). */
                 $toH = $lastC > 0 ? ($H / $lastC - 1) * 100 : 0;
                 $days = count($bs);   // 신호 후 경과 거래일 (전부 박스 안)
@@ -831,10 +856,55 @@ class KrxAmt
      * 위치 연구(⑥ 120일 저점대비 「얼마나」)와 달리 「얼마나 빨리」는 판별력이 있다.
      * 단 극단 무리도 평균은 +7.1%(복권꼬리 양수)라 자동 차단이 아니라 ⚠표시만 한다.
      * 손절 조정(급등만 유예 제거)은 기각 — 해당 부분집합 승률 56.8→45.1%(셰이크아웃에 털림). */
+    /* 단기 급등 임계 — 실측(2026-08-01): 이 무리의 돌파 매수는 중앙 0%·승률 51.6% 로 엣지가 없다. */
     public const MOM_HOT20 = 0.80;   // 20거래일 +80% 이상
     public const MOM_HOT40 = 1.00;   // 40거래일 +100% 이상
+    /* 단기 급락 임계 — <b>백테스트 근거가 없다</b>(급등 쪽만 측정했다). 사용자가 정한 값이며,
+     * 화면에서도 경고색이 아니라 <b>정보색</b>으로 쓰고 표에도 「근거 없음」을 밝힌다.
+     * ★ 두 번 완화했다(2026-08-02): 급등의 로그 대칭(−44.4%/−50%) → −30%/−50% → <b>−30%/−40%</b>.
+     *   대칭값도 −50% 도 실제 급락을 놓쳤다 — 현대차는 40거래일 <b>−44.6%</b> 인데 둘 다 안 걸렸다.
+     *   실측 발생률(600종목·2026-07-31): 20일 −30% = 6.0% · 40일 −40% = 7.7%
+     *   (참고로 급등은 20일 +80% = 1.8% · 40일 +100% = 2.2% 라 급락이 3배쯤 자주 뜬다 —
+     *    하락장의 산물이며 근거 있는 대칭이 아니다. 표시일 뿐 규칙이 아니라는 뜻이다.)
+     * ★ 단순 부호 반전(−80%)은 20거래일에 사실상 일어나지 않아 기준이 되지 못한다. */
+    public const MOM_COLD20 = -0.30;   // 20거래일 −30% 이하
+    public const MOM_COLD40 = -0.40;   // 40거래일 −40% 이하 (−50% 는 실제 급락을 놓쳤다 — 아래 주석)
 
-    /** (code,d) 묶음의 신호일 기준 20·40거래일 수익률 — key "code|d" => [m20, m40, hot] */
+    /**
+     * <b>오늘(각 종목의 최신 봉) 기준</b> 20·40거래일 수익률 — code => momMany 와 같은 구조 + 'd'(기준일).
+     *
+     * ★ momMany(신호일 기준)와 <b>기준 시점이 다르다</b>. 신호가 반년 전이면 momMany 는 반년 전 사실을
+     *   말한다 — 실측(2026-08-02): 현대차는 신호일 2026-01-21 기준 +90.3% 인데 오늘 기준 −19.5% 였다.
+     *   「지금 어떤 자리인가」를 묻는 ① 시장 층에는 <b>이것</b>을 쓰고,
+     *   「그 신호가 어떤 자리에서 났나」를 묻는 신호 목록에는 momMany 를 쓴다.
+     */
+    public function momNow(array $codes): array
+    {
+        $codes = array_values(array_unique(array_filter($codes)));
+        if (!$codes) return [];
+        $in = implode(',', array_fill(0, count($codes), '?'));
+        // 종목마다 마지막 거래일이 다를 수 있다(거래정지 등) — 각자의 최신 봉을 기준일로 삼는다
+        $st = $this->pdo->prepare("SELECT code, MAX(d) d FROM krx_amt
+                                    WHERE code IN ($in) AND amt > 0 AND c > 0 GROUP BY code");
+        $st->execute($codes);
+        $sigs = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) $sigs[] = ['code' => $r['code'], 'd' => $r['d']];
+        if (!$sigs) return [];
+
+        $mm  = $this->momMany($sigs);
+        $out = [];
+        foreach ($sigs as $s) {
+            $v = $mm[$s['code'] . '|' . $s['d']] ?? null;
+            if ($v !== null) $out[$s['code']] = $v + ['d' => $s['d']];
+        }
+        return $out;
+    }
+
+    /**
+     * (code,d) 묶음의 신호일 기준 20·40거래일 수익률.
+     * key "code|d" => [m20, m40, hot20, hot40, cold20, cold40, hot]
+     * ★ hot 은 옛 소비자를 위한 합집합(hot20 ∨ hot40) — 새 화면은 창별 플래그를 쓴다.
+     */
     public function momMany(array $sigs): array
     {
         if (!$sigs) return [];
@@ -870,8 +940,13 @@ class KrxAmt
                     if ($i >= 40) { $c0 = (float)$bars[$i - 40]['c']; if ($c0 > 0) $m40 = $c1 / $c0 - 1; }
                 }
             }
-            $hot = ($m20 !== null && $m20 >= self::MOM_HOT20) || ($m40 !== null && $m40 >= self::MOM_HOT40);
-            $out[$key] = ['m20' => $m20, 'm40' => $m40, 'hot' => $hot];
+            $h20 = ($m20 !== null && $m20 >= self::MOM_HOT20);
+            $h40 = ($m40 !== null && $m40 >= self::MOM_HOT40);
+            $c20 = ($m20 !== null && $m20 <= self::MOM_COLD20);
+            $c40 = ($m40 !== null && $m40 <= self::MOM_COLD40);
+            $out[$key] = ['m20' => $m20, 'm40' => $m40,
+                           'hot20' => $h20, 'hot40' => $h40, 'cold20' => $c20, 'cold40' => $c40,
+                           'hot' => ($h20 || $h40)];
         }
         return $out;
     }

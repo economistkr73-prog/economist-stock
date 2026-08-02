@@ -1499,7 +1499,7 @@ function pf_indicators(array $bars, ?float $last = null): array
         }
         $out['sd20'] = pf_stdev($rets);
         // ★ PF_SD_MIN 미만이면 σ 를 만들지 않는다 (그 상수 주석 참조 — 0 에 가까운 σ 는 폭발한다).
-        //   σ 가 null 이면 급등락 판정은 「절대 5%」 규칙으로 떨어진다.
+        //   σ 가 null 이면 급등락 판정은 「절대 15%」 규칙으로 떨어진다.
         if ($out['sd20'] !== null && $out['sd20'] >= PF_SD_MIN && $out['chg'] !== null) {
             $out['sigma'] = $out['chg'] / $out['sd20'];
         }
@@ -1612,11 +1612,8 @@ function pf_liquidity(array $bars, int $planQty = 0, ?float $sd20 = null, float 
     return $out;
 }
 
-/** 유동성 등급 라벨 */
-function pf_liq_label(?string $grade): string
-{
-    return ['deep' => '풍부', 'ok' => '보통', 'thin' => '얇음', 'very_thin' => '매우 얇음'][$grade ?? ''] ?? '-';
-}
+/* 유동성 등급 라벨(풍부/보통/얇음/매우 얇음)은 2026-08-02 사용자 지시로 화면에서 삭제 —
+ * 유동성 열은 숫자(일평균 거래대금·참여율)만 보여 준다. grade 값 자체는 체결 게이트가 계속 쓴다. */
 
 /**
  * 체결 게이트 — 예수금 게이트의 짝. <b>돈이 있어도 물량이 없으면 못 산다.</b>
@@ -1656,7 +1653,9 @@ function pf_fill_gate(array $liq): array
  * ★ 17종목 × 8지표 = 136개 숫자를 다 보여 주면 아무것도 안 보인다. 그래서 지표가 아니라
  *   <b>이례적인 것</b>만 배지로 세우고, 순서는 행동에 가까운 것부터(급등락 → 거래량 → 위치 → 강도 → 추세)다.
  *
- * tone: 'buyish'(살 쪽에 유리) · 'sellish'(팔 쪽에 유리) · 'risk'(경고) · 'info'
+ * tone: 'up'/'down'(가격 움직임 % — 등락색 빨강/파랑) ·
+ *       'buyish'(살 쪽에 유리) · 'sellish'(팔 쪽에 유리) · 'risk'(경고) · 'warn' · 'info'
+ * ★ 두 팔레트를 섞어 쓴다(2026-08-02): %는 방향이 곧 사실이라 등락색, 나머지는 뜻이 먼저라 의미색.
  */
 function pf_market_signals(array $ind, int $max = 3, ?array $liq = null): array
 {
@@ -1668,21 +1667,28 @@ function pf_market_signals(array $ind, int $max = 3, ?array $liq = null): array
 
     /* 급등·급락 — <b>상대(σ) 또는 절대(%) 어느 한쪽</b>만 넘어도 신호로 본다.
      *
-     * ★ σ 하나로는 놓친다(실측 2026-07-30): 삼성전자가 <b>+5.52%</b> 인데 0.8σ 밖에 안 됐다 —
-     *   최근 20일이 유난히 출렁였으면 sd20 이 커져서 오늘의 큰 움직임도 작아 보인다(변동성 클러스터링).
-     *   그날 보유 14종목 중 2σ 를 넘은 종목이 <b>하나도 없었다</b>. 그건 기준이 아니라 체다.
-     * ★ 반대로 절대 % 하나로도 안 된다: 평소 0.4% 씩 움직이는 종목의 +2% 는 사건인데 5% 문턱을 못 넘는다.
-     *   그래서 둘을 OR 로 묶고, <b>표시는 등락률</b>(누구나 읽는 값)로 하고 σ 는 설명에 붙인다. */
+     * ★ σ 하나로는 놓친다: 최근 20일이 유난히 출렁였으면 sd20 이 커져서 오늘의 큰 움직임도
+     *   작아 보인다(변동성 클러스터링). 반대로 절대 % 하나로는 조용한 종목의 사건을 놓친다.
+     *   그래서 둘을 OR 로 묶고, <b>표시는 등락률</b>(누구나 읽는 값)로 하고 σ 는 설명에 붙인다.
+     * ★ 임계 3σ · 15% 는 사용자 지정(2026-08-02 · 2σ/5% 에서 상향) — 웬만한 등락에는 침묵하고
+     *   진짜 이례만 띄운다. 배지가 흔하면 표시가 아니다. */
     $sg  = $ind['sigma'];
     $chg = $ind['chg'];
-    $bigS = ($sg  !== null && abs($sg)  >= 2.0);
-    $bigP = ($chg !== null && abs($chg) >= 0.05);
+    $bigS = ($sg  !== null && abs($sg)  >= 3.0);
+    $bigP = ($chg !== null && abs($chg) >= 0.15);
+    /* ★ 라벨은 <b>부호 붙은 % 하나</b>다(2026-08-02 사용자 지시) — 「급등/급락」이라는 말을 빼서
+     *   20·40거래일 모멘텀 칩(「20일 +112%」)과 <b>기간만 다른 같은 계열</b>로 읽히게 했다.
+     *   방향은 부호와 색이 말하고, 이유(σ·절대%)는 툴팁이 말한다. */
     if ($bigS || $bigP) {
         $pct = sprintf('%+.1f%%', (float)$chg * 100);
-        $why = ($sg === null ? '' : '평소 변동의 ' . number_format(abs($sg), 1) . 'σ · ')
-             . '일간 ' . $pct . ($bigP && !$bigS ? ' (절대 5% 이상)' : '');
-        if ((float)$chg > 0) $add('surge',  '급등 ' . $pct, 'sellish', $why);
-        else                 $add('plunge', '급락 ' . $pct, 'buyish',  $why);
+        $why = '하루 ' . $pct . ' · ' . ($sg === null ? '' : '평소 변동의 ' . number_format(abs($sg), 1) . 'σ')
+             . ($bigP && !$bigS ? ($sg === null ? '' : ' · ') . '절대 15% 이상' : '')
+             . ' — 임계 3σ 또는 절대 15%';
+        /* ★ 색은 <b>등락색</b>(up=빨강·down=파랑) — 20·40거래일 모멘텀 칩과 같은 규칙(2026-08-02).
+         *   다른 상태 배지의 「초록=사는 쪽 유리」 팔레트를 여기에만 쓰지 않는 이유:
+         *   하루 −15% 를 초록으로 칠하면 20일 −52%(파랑) 와 나란히 놓였을 때 정반대로 읽힌다. */
+        if ((float)$chg > 0) $add('surge',  $pct, 'up',   $why);
+        else                 $add('plunge', $pct, 'down', $why);
     }
 
     /* 거래량 급증.
@@ -1702,16 +1708,9 @@ function pf_market_signals(array $ind, int $max = 3, ?array $liq = null): array
         $add('vol', ($thin ? '★ ' : '') . '거래량 ' . $mult, 'info', $ctx);
     }
 
-    /* 유동성이 <b>매우</b> 얇은 종목만 배지로 세운다.
-     * ★ 유동성은 사건이 아니라 상시 특성이라 배지 슬롯(3개)을 먹으면 정작 오늘 일어난 일을 밀어낸다.
-     *   그래서 결정적인 경우(일평균 거래대금 1억 미만)만 띄우고, 그 아래는
-     *   보유종목 표의 「유동성」 열과 신호 카드의 체결 게이트가 맡는다. */
-    if ($liq !== null && ($liq['grade'] ?? '') === 'very_thin') {
-        $add('illiq', '유동성 매우 얇음', 'risk',
-             '일평균 거래대금 ' . number_format(($liq['avg_val'] ?? 0) / 100000000, 2) . '억 · '
-             . '거래대금 1억 미만인 날이 ' . number_format(($liq['thin_ratio'] ?? 0) * 100, 0) . '% — '
-             . '계획 수량을 하루에 담기 어렵다');
-    }
+    /* 유동성은 배지로 세우지 않는다(2026-08-02 사용자 지시로 「유동성 매우 얇음」 배지 삭제).
+     * 사건이 아니라 상시 특성이라 배지 슬롯(3개)을 먹으면 정작 오늘 일어난 일을 밀어낸다 —
+     * 유동성은 보유종목 표의 「유동성」 열과 신호 카드의 체결 게이트가 전담한다. */
 
     $p = $ind['pos52'];
     if ($p !== null && $p <= 0.05)      $add('low52',  '52주 최저권', 'risk',   '52주 범위의 하단 5% — 하락추세일 수 있다');
@@ -1758,9 +1757,9 @@ function pf_signal_confidence(?string $kind, array $ind): array
 
     $over   = ($ind['rsi14'] !== null && $ind['rsi14'] <= 30);
     $under  = ($ind['rsi14'] !== null && $ind['rsi14'] >= 70);
-    // 급등락 판정은 배지와 <b>같은 기준</b>이어야 한다 (σ 또는 절대 5%) — 어긋나면 배지와 신뢰도가 따로 논다
-    $plunge = (($ind['sigma'] !== null && $ind['sigma'] <= -2.0) || ($ind['chg'] !== null && $ind['chg'] <= -0.05));
-    $surge  = (($ind['sigma'] !== null && $ind['sigma'] >=  2.0) || ($ind['chg'] !== null && $ind['chg'] >=  0.05));
+    // 급등락 판정은 배지와 <b>같은 기준</b>이어야 한다 (3σ 또는 절대 15%) — 어긋나면 배지와 신뢰도가 따로 논다
+    $plunge = (($ind['sigma'] !== null && $ind['sigma'] <= -3.0) || ($ind['chg'] !== null && $ind['chg'] <= -0.15));
+    $surge  = (($ind['sigma'] !== null && $ind['sigma'] >=  3.0) || ($ind['chg'] !== null && $ind['chg'] >=  0.15));
     $volUp  = ($ind['vol_mult'] !== null && $ind['vol_mult'] >= 2.0);
     $low52  = ($ind['pos52'] !== null && $ind['pos52'] <= 0.10);
     $high52 = ($ind['pos52'] !== null && $ind['pos52'] >= 0.90);
@@ -2285,7 +2284,8 @@ function pf_cycle_age(array $tradeRows, ?string $today = null): array
 }
 
 /**
- * 「재평가」 경보 — 2년 경과 <b>또는</b> 5차 도달, 먼저 오는 쪽.
+ * 「장기물림」 경보 — 2년 경과 <b>또는</b> 5차 도달, 먼저 오는 쪽.
+ * (2026-08-02 사용자 지시로 「재평가」에서 개명 — 무엇을 하라가 아니라 <b>무슨 상태인지</b>를 이름에 담는다.)
  *
  * ★ 손절·매수중단을 자동으로 걸지 않는다. 백테스트 실측 —
  *   1년 시간손절은 승자까지 잘랐고(1년 생존자의 78%가 결국 닫혔다),
@@ -2302,7 +2302,7 @@ function pf_cycle_alert(?int $days, ?int $curStep): array
     if ($old)  $what[] = '2년 경과(' . number_format($days) . '일)';
     if ($deep) $what[] = $curStep . '차 도달';
 
-    return ['level' => 'alert', 'label' => '재평가',
+    return ['level' => 'alert', 'label' => '장기물림',
             'why' => implode(' + ', $what) . ' — 실측(사이클 226개)에서 5차부터 물림비율이 23~50%로 꺾이고, '
                    . '2년을 넘긴 사이클의 3분의 1은 끝내 닫히지 않았습니다. '
                    . '기계식 손절·매수중단은 백테스트에서 수익을 깎았으므로 자동으로 막지 않습니다 — '

@@ -340,7 +340,9 @@ function api_position(string $action, PDO $pdo, Pf $pf): void
          * boxlv/boxsolve 는 JSON 을 그대로 돌려준다(모달의 fetch 가 소비 — positions payload 와 같은 방식). */
         case 'boxlv': {
             $code   = preg_replace('/[^0-9]/', '', (string)($_GET['code'] ?? ''));
-            $months = ((int)($_GET['months'] ?? 6) === 12) ? 12 : 6;
+            // 기간바(160/240/480일·24/48/96주·전체·±)를 개월수로 바꿔 온다 — 2~48 클램프
+            $months = (int)($_GET['months'] ?? 6);
+            $months = max(2, min(48, $months ?: 6));
             $tf     = (($_GET['tf'] ?? 'day') === 'week') ? 'week' : 'day';
             header('Content-Type: application/json; charset=utf-8');
             if (!preg_match('/^\d{6}$/', $code)) { echo json_encode(['err' => '종목코드가 없습니다.']); exit; }
@@ -372,6 +374,31 @@ function api_position(string $action, PDO $pdo, Pf $pf): void
             $name = trim($_POST['stock_name'] ?? '');
 
             if ($code === '') pf_api_done('/stock/index.php?mode=position&id=new', 'err', '종목코드를 입력하세요.');
+
+            /* 포트폴리오 미지정 신규 저장 = 편입 관심종목 등록 (2026-08-02 규칙).
+             * 포지션(차수 계획)은 포트폴리오가 있어야 뜻이 있다 — 없이 저장한 것은 「편입 대기」로
+             * pf_watchlist.adopt_at 에 표시하고, 실제 편입은 pid 폼 하단 목록에서 골라서 한다.
+             * ★폼에서 골라 둔 매수방식·룰셋·박스 지지선은 함께 보관한다(「선택」이 그대로 복원) —
+             *   한도만 포트폴리오 소속 값이라 편입 때 정한다. */
+            if (!$id && (int)($_POST['portfolio_id'] ?? 0) <= 0) {
+                if (!preg_match('/^\w{6}$/', $code)) {
+                    pf_api_done('/stock/index.php?mode=position&id=new', 'err', '종목을 검색해서 골라 주세요.');
+                }
+                $label = trim($_POST['stock_name'] ?? '') ?: $code;
+                $bxp = [];
+                foreach ((array)($_POST['box_prices'] ?? []) as $v) {
+                    $v = (float)str_replace(',', '', (string)$v);
+                    if ($v > 0) $bxp[] = $v;
+                }
+                $bm = (($_POST['buy_mode'] ?? 'rule') === 'box') ? 'box' : 'rule';
+                $pf->watchAdopt($code, trim((string)($_POST['memo'] ?? '')),
+                    preg_replace('/[^a-z]/', '', (string)($_POST['source'] ?? '')),
+                    $bm, (int)($_POST['rule_set_id'] ?? 0), $bm === 'box' ? $bxp : []);
+                pf_api_done('/stock/index.php?mode=position&id=new&code=' . urlencode($code), 'ok',
+                    "{$label} 을 편입 관심종목으로 등록했습니다"
+                    . ($bm === 'box' && $bxp ? ' (박스 지지선 ' . count($bxp) . '개 보관)' : '')
+                    . ' — 포트폴리오의 「＋ 종목 추가」 하단 목록에서 선택해 편입하세요.');
+            }
 
             $inLast = str_replace(',', '', trim((string)($_POST['last_price'] ?? '')));
             $inHigh = str_replace(',', '', trim((string)($_POST['high_price'] ?? '')));
@@ -428,6 +455,7 @@ function api_position(string $action, PDO $pdo, Pf $pf): void
                 'started_at'   => $_POST['started_at'] ?? '',
                 'status'       => $cur['status'] ?? 'watch',
                 'memo'         => trim($_POST['memo'] ?? ''),
+                'source'       => preg_replace('/[^a-z]/', '', (string)($_POST['source'] ?? '')),   // 발굴 채널(신규만 저장)
             ]);
             if ($boxBuilt !== null) $pf->positionLevelsReplace($pid, $boxBuilt['levels']);
             pf_api_done('/stock/index.php?mode=position&id=' . $pid, 'ok',
@@ -948,13 +976,21 @@ function api_watch(string $action, PDO $pdo, Pf $pf): void
             if ($pf->watchDel($code)) {
                 pf_api_done($back, 'ok', "{$label} 을 관심종목에서 뺐습니다.");
             }
-            $pf->watchAdd($code, trim((string)($_POST['memo'] ?? '')));
+            // src = 어느 화면의 ☆ 인가 (quant/earn/fund) — 채널별 성과 측정의 씨앗
+            $src = preg_replace('/[^a-z]/', '', (string)($_POST['src'] ?? ''));
+            $pf->watchAdd($code, trim((string)($_POST['memo'] ?? '')), $src);
             pf_api_done($back, 'ok', "{$label} 을 관심종목에 담았습니다.");
 
         case 'del':
             if (!preg_match('/^\w{6}$/', $code)) pf_api_done($back, 'err', '종목코드가 올바르지 않습니다.');
             $pf->watchDel($code);
             pf_api_done($back, 'ok', '관심종목에서 뺐습니다.');
+
+        // 편입 대기만 해제 — 관심종목 목록에는 남는다 (종목추가 하단 「편입 관심종목」의 삭제 버튼)
+        case 'unadopt':
+            if (!preg_match('/^\w{6}$/', $code)) pf_api_done($back, 'err', '종목코드가 올바르지 않습니다.');
+            $pf->watchUnadopt($code);
+            pf_api_done($back, 'ok', '편입 관심종목에서 뺐습니다 — 관심종목에는 그대로 남아 있습니다.');
 
         case 'memo':
             if (!preg_match('/^\w{6}$/', $code)) pf_api_done($back, 'err', '종목코드가 올바르지 않습니다.');

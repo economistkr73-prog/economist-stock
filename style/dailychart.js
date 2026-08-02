@@ -19,7 +19,7 @@
  *   volume     거래량 히스토그램 (기본 true)
  *   volAlpha   거래량 색 투명도 hex 2자리 (테마 기본값 있음)
  *   markers    { chips:true }  — 체결 마커. chips=true 면 HTML 칩(충돌회피), false 면 라이브러리 text
- *   signals    { }             — 신고가 돌파+대량 신호 칩·전고점선·당일전고선 (updash 계열)
+ *   todayHigh  true            — 당일전고선: 최신봉 제외 직전 60봉 최고가 수평선 (관찰용 기준선)
  *   curPrice   현재가선 색 (없으면 기능 자체 꺼짐. updash='#d9a441')
  *
  * 주봉: dc.setTf('week') — 보관해 둔 일봉을 주 단위로 접어 다시 그린다(월요일 기준,
@@ -172,16 +172,6 @@
       '.dc-mk .mk-l1{display:block}' +
       '.dc-mk .mk-l2{display:block;font-size:10px;font-weight:700;opacity:.82;margin-top:1px;' +
         'border-top:1px solid rgba(255,255,255,.35);padding-top:1px}' +
-      /* 신호 칩 — 흰 바탕 배수+승률 (updash 계열) */
-      '.dc-chip-layer{position:absolute;inset:0;pointer-events:none;overflow:hidden;z-index:3}' +
-      '.dc-chip{position:absolute;background:#fff;border-radius:7px;padding:2px 7px;' +
-        'font-size:10px;font-weight:800;line-height:1.2;text-align:center;' +
-        'box-shadow:0 1px 5px rgba(0,0,0,.45);white-space:nowrap;' +
-        'font-family:Pretendard,-apple-system,sans-serif}' +
-      '.dc-chip .r{display:block;color:#c0241a}' +
-      '.dc-chip .w{display:block;color:#111;font-variant-numeric:tabular-nums}' +
-      '.dc-chip .w.est{color:#666;font-style:italic}' +
-      '.dc-chip.gold{box-shadow:0 1px 6px rgba(184,134,11,.6)}.dc-chip.gold .r{color:#b8860b}' +
       /* 기간 바 — [일봉|주봉 ┃ 160일 240일 480일 전체] 를 한 박스로 감싼 세그먼트 */
       '.dc-pbar{display:inline-flex;align-items:center;border-radius:8px;padding:3px;gap:2px;vertical-align:middle}' +
       '.dc-pbar button{border:0;cursor:pointer;font-weight:700;font-size:12px;padding:4px 10px;' +
@@ -286,25 +276,9 @@
     document.head.appendChild(st);
   }
 
-  /* ── 신호 엔진 (updash 계열 공용 — 단일본) ──
-   * '종가 60봉 신고가 돌파 + 거래량 60봉평균 2배+'.
-   * 승률은 거래량 배수 기준 정적추정이다. */
-  function brkWinStatic(r) { return r >= 5 ? 90 : r >= 3 ? 82 : 78; }
-  function computeSignals(bars) {
-    var out = [], n = bars.length;
-    for (var i = 60; i < n; i++) {
-      var ph = -Infinity, vs = 0;
-      for (var k = i - 60; k < i; k++) {
-        if (bars[k].high > ph) ph = bars[k].high;
-        vs += bars[k].vol;
-      }
-      if (!(bars[i].close > ph)) continue;
-      var ratio = vs > 0 ? bars[i].vol / (vs / 60) : 0;
-      if (ratio < 2) continue;
-      out.push({ time: bars[i].time, low: bars[i].low, close: bars[i].close, ph: ph, ratio: ratio });
-    }
-    return out;
-  }
+  /* (구 신호 엔진 — '60봉 신고가 돌파+거래량 2배' 흰칩·전고점선 — 은 2026-08-02 삭제됨.
+   * 상승확률 엔진(rise_*) 폐기의 마무리: 정적 추정 승률(78/82/90%)이 실측과 어긋나
+   * 잘못된 신호를 계속 내보냈다. 복원하지 않는다 — [[session_상승확률분석]] 참조.) */
 
   /* ══════════════════════════════════════════════════════════════════════
    * 사용자 지표 수식 엔진 (키움 수식관리자 방식)
@@ -850,7 +824,7 @@
       _extra: [],           // 추가 선 [{opt, raw, series}]
       _marks: [],           // [{time,sell,text,state}]
       _mkLayer: null, _mkVisible: 0,
-      _signals: null,       // 신호 기능 상태
+      _th: null,            // 당일전고선 상태 {obj, show}
       _curPriceOn: false,
       _inds: [],            // 적용된 사용자 지표 [{def, vars}]
       _indSeries: [],       // 지표 선 시리즈들
@@ -882,7 +856,7 @@
       }
       self._mainIsCandle = wantCandle;
       self._plineObjs = [];          // 시리즈가 바뀌면 가격선도 다시 그려야 한다
-      if (self._signals) { self._signals.lineObjs = []; self._signals.todayObj = null; }
+      if (self._th) self._th.obj = null;   // 시리즈가 바뀌면 당일전고선도 다시 그린다
     }
 
     if (opts.volume !== false) {
@@ -1137,82 +1111,30 @@
       updateIndLegend();
     }
 
-    /* ── 신호 (updash 계열) ── */
-    function sigState() {
-      if (!self._signals) {
-        self._signals = {
-          list: [], lineObjs: [], todayObj: null,
-          showLines: true, showToday: true, layer: null
-        };
-      }
-      return self._signals;
-    }
-    function drawSignalChips() {
-      var S = self._signals;
-      if (!S || !S.layer) return;
-      S.layer.textContent = '';
-      var ts = chart.timeScale();
-      S.list.forEach(function (s) {
-        var x = ts.timeToCoordinate(s.time); if (x == null) return;
-        var y = self._main.priceToCoordinate(s.low); if (y == null) return;
-        var wpct = brkWinStatic(s.ratio);
-        var c = document.createElement('div');
-        c.className = 'dc-chip' + (s.ratio >= 5 ? ' gold' : '');
-        c.style.left = x + 'px';
-        c.style.top = (y + 8) + 'px';
-        c.title = '추정 승률 ' + wpct + '% · 거래량 배수 기준 정적추정';
-        c.innerHTML = '<span class="r">▲ ' + s.ratio.toFixed(1) + 'x</span>'
-                    + '<span class="w est">' + wpct + '%</span>';
-        S.layer.appendChild(c);
-      });
-    }
-    function drawSignalLines() {
-      var S = self._signals;
-      if (!S || !self._main) return;
-      S.lineObjs.forEach(function (o) { self._main.removePriceLine(o); });
-      S.lineObjs = [];
-      if (!S.showLines) return;
-      // 가로선은 차트 전체를 가로지른다 — 화면 밖(과거) 신호까지 그리면 긴 기간에서
-      // 점선이 수십 개 깔려 캔들을 덮으므로, 지금 보이는 구간의 신호만 그린다
-      var vb = viewBars();
-      if (!vb.length) return;
-      var from = vb[0].time, to = vb[vb.length - 1].time;
-      S.list.forEach(function (s) {
-        if (s.ph == null || s.time < from || s.time > to) return;
-        S.lineObjs.push(self._main.createPriceLine({
-          price: s.ph,
-          color: s.ratio >= 5 ? '#b8860b' : 'rgba(255,255,255,.45)',
-          lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: false
-        }));
-      });
+    /* ── 당일전고선 — 최신봉 제외 직전 60봉 최고가. 관찰용 기준선(전략 아님) ── */
+    function thState() {
+      if (!self._th) self._th = { obj: null, show: true };
+      return self._th;
     }
     function drawTodayHigh() {
-      var S = self._signals;
+      var S = self._th;
       if (!S || !self._main) return;
-      if (S.todayObj) { self._main.removePriceLine(S.todayObj); S.todayObj = null; }
-      if (!S.showToday) return;
+      if (S.obj) { self._main.removePriceLine(S.obj); S.obj = null; }
+      if (!S.show) return;
       var fb = fullBars(), n = fb.length;
       if (n < 2) return;
       var ph = -Infinity;
       for (var k = Math.max(0, n - 1 - 60); k < n - 1; k++) if (fb[k].high > ph) ph = fb[k].high;
       if (ph <= -Infinity) return;
-      S.todayObj = self._main.createPriceLine({
+      S.obj = self._main.createPriceLine({
         price: ph, color: '#22d3ee', lineWidth: 1,
         lineStyle: LWC.LineStyle.Solid, axisLabelVisible: false
       });
     }
-    function applySignals() {
-      if (!opts.signals) return;
-      var S = sigState();
-      if (!S.layer) {
-        S.layer = document.createElement('div');
-        S.layer.className = 'dc-chip-layer';
-        host.appendChild(S.layer);
-      }
-      S.list = computeSignals(fullBars());   // 신호는 화면 슬라이스가 아니라 전체 기준
-      drawSignalLines();
+    function applyTodayHigh() {
+      if (!opts.todayHigh) return;
+      thState();
       drawTodayHigh();
-      setTimeout(drawSignalChips, 0);
     }
 
     /* ── 박스 오버레이 (신호일 H~L 사각형 — 패턴분석의 지지·저항 박스) ──
@@ -1278,7 +1200,6 @@
       rafId = requestAnimationFrame(function () {
         rafId = 0;
         drawMarkChips();
-        drawSignalChips();
         drawBoxes();
       });
     }
@@ -1309,7 +1230,6 @@
         if (Math.abs(vis - cur) < 3) return;             // 반올림·fitContent 여유는 소음
         self._viewDays = (vis >= N) ? null : vis;
         if (self._pbar && self._pbar.syncBars) self._pbar.syncBars(vis, self);
-        drawSignalLines();                       // 전고점선도 새 창 기준으로 (updash 계열)
       }, 200);
     });
     function onResize() {
@@ -1381,7 +1301,7 @@
       applyPriceLines();
       renderIndicators();   // applyMarkers 전에 — 지표 점을 마커 목록에 넣는다
       applyMarkers();
-      applySignals();
+      applyTodayHigh();
       if (fit !== false) applyWindow();
       overlaysSoon();
     }
@@ -1441,7 +1361,6 @@
        * 경합해 창 이동이 먹히지 않는 일이 있다(실측). 창·창 기준 표시물만 갱신한다. */
       self._viewDays = n || null;
       self._pinnedRange = null;                 // 기간 버튼을 누르면 zoomRange 로 고정한 구간은 해제
-      drawSignalLines();                        // 전고점선은 «선택 창» 기준
       applyWindow();
       return self;
     };
@@ -1480,11 +1399,8 @@
       drawBoxes();
       return self;
     };
-    self.setSignalLines = function (on) {
-      var S = sigState(); S.showLines = !!on; drawSignalLines(); return self;
-    };
     self.setTodayHigh = function (on) {
-      var S = sigState(); S.showToday = !!on; drawTodayHigh(); return self;
+      var S = thState(); S.show = !!on; drawTodayHigh(); return self;
     };
     self.setCurPrice = function (on) {
       self._curPriceOn = !!on;
@@ -2276,7 +2192,6 @@
     fetchDaily: fetchDaily,
     fetchMinute: fetchMinute,
     resampleWeek: resampleWeek,
-    computeSignals: computeSignals,
     periodBar: periodBar,
     PERIODS: PERIODS,
     indicatorBar: indicatorBar,
