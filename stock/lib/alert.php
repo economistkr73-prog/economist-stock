@@ -45,8 +45,8 @@ function pf_alert_new(PDO $pdo, string $kind, string $ref): bool
 /** 배지 임계 — stock/index.php pf_surge_badge 와 같은 값 (여기선 라벨만 필요해 축약판) */
 function pf_alert_badge(?float $avgMul, ?float $chg): string
 {
-    if ($chg !== null && $chg >= 0.20) return '추격주의';
-    if ($avgMul !== null && $avgMul >= 20) return '폭발형';
+    if ($chg !== null && $chg >= 0.20) return '불꽃형';        // 옛 추격주의
+    if ($avgMul !== null && $avgMul >= 20) return '불꽃형';    // 옛 폭발형 (2026-08-02 통합)
     if ($avgMul !== null && $avgMul <= 5 && $chg !== null && $chg >= 0 && $chg < 0.10) return '매집형';
     return '중립';
 }

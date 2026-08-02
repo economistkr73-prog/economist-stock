@@ -460,9 +460,8 @@ label.fld,div.fld{display:flex;flex-direction:column;gap:4px;font-size:12px;font
 .sig-act{font-size:13px;margin-top:4px;font-variant-numeric:tabular-nums;color:#3c4d5e}
 .sig-act b{font-size:15.5px;font-weight:800}
 .sig-meta{font-size:11.5px;color:#8b98a5;margin-top:3px;font-variant-numeric:tabular-nums}
-.sig-fund{font-size:11.5px;font-weight:800;margin-top:5px;font-variant-numeric:tabular-nums}
-.sig-fund.fine{color:#0f8a5f}
-.sig-fund.short{color:#c62828}
+/* ⊖ 예수금 게이트 배지(.sig-fund)는 출력처가 없어 2026-08-02 삭제 — 스트립 머리의
+   「예수금 부족 N건」(.sig-cash b.short)은 남아 있다. 그건 배지가 아니라 집계다. */
 .sig-none{font-size:13px;color:#7d8b99}
 /* 종류별 색 — 배지·카드 왼쪽 띠가 같은 값을 쓴다 */
 .k-sell.sig-pill,.k-sell.sig-dot{background:#e6f5ee;color:#0f8a5f}
@@ -521,13 +520,7 @@ table.pf td.gap.near{color:#3c4d5e;font-weight:800}
 .sig-conf.lv-strong{color:#0f7a55}
 .sig-conf.lv-caution{color:#a95f16}
 
-/* ── 체결 게이트 / 유동성 ──────────────────────────────────────────────
- * 예수금 게이트(.sig-fund)와 같은 무게로 보이게 크기·자리를 맞춘다 —
- * 둘은 "실행할 수 있나"라는 같은 질문의 두 축(돈 / 물량)이다. */
-.sig-fill{margin-top:4px;font-size:11.5px;font-weight:800;cursor:help;font-variant-numeric:tabular-nums}
-.sig-fill.split{color:#a95f16}
-.sig-fill.hard{color:#c62828}
-.sig-fill .fi-imp{font-weight:700;color:#8b98a5}
+/* ⊖ 체결 게이트(.sig-fill)는 2026-08-02 삭제 — 배지 층 ③ 실행이 통째로 없어졌다 */
 /* 유동성 등급 — 낮을수록 눈에 띄어야 한다(위험이 그쪽에 있다) */
 .liq{display:inline-block;font-size:10.5px;font-weight:800;border-radius:5px;padding:1px 6px;border:1px solid}
 .liq.g-deep{border-color:#c9d4de;background:#f7fafc;color:#7d8b99}
@@ -541,7 +534,8 @@ table.pf td.gap.near{color:#3c4d5e;font-weight:800}
  * 인라인으로 복제하고 있었다 — 배지를 쓰는 화면이 늘 때마다 복제가 늘 구조였다. */
 .qb{display:inline-block;padding:2px 8px;border-radius:10px;font-size:12px;font-weight:700;white-space:nowrap}
 .qb-acc{background:#e6f4ea;color:#1e7e34}.qb-neu{background:#eef1f4;color:#667}
-.qb-exp{background:#fdecea;color:#c62828}.qb-chase{background:#c62828;color:#fff}
+/* 불꽃형 = 옛 폭발형+추격주의 (2026-08-02 통합) — 처방이 「매수 금지」 하나라 가장 강한 색 */
+.qb-flame{background:#c62828;color:#fff}
 .qb-hot{background:#fff3e0;color:#b26a00}.qb+.qb,.bx+.qb{margin-left:4px}
 /* 배지 안의 신호일 꼬리표 — 부차 정보라 작고 옅게(연한 배경 위라 진짜 회색을 쓴다) */
 .sig-d{font-size:9.5px;font-weight:700;opacity:.62;margin-left:2px}
@@ -1127,11 +1121,9 @@ function pf_signal_list(array $positions, array $calc, array $stats, array $dail
         $bars = $dailyMap[(string)$p['stock_code']] ?? [];
         $ind  = $bars ? pf_indicators($bars, $last) : [];
 
-        /* 유동성 판정에 쓸 수량: 지금 신호가 있으면 그 수량, 없으면 <b>다음 차수 계획 수량</b>.
-         * 대기 종목도 미리 알아야 쓸모가 있다 — "다음 차수에 닿으면 이만큼 필요한데 이 종목은 얇다"를
-         * 신호가 뜨기 <b>전에</b> 알면 한도나 룰셋을 미리 손볼 수 있다. */
-        $planQty = ((int)$sig['qty'] > 0) ? (int)$sig['qty'] : (int)($c['next_qty'] ?? 0);
-        $liq  = $bars ? pf_liquidity($bars, $planQty, $ind['sd20'] ?? null) : [];
+        /* 유동성 — 이제 <b>등급(grade)만</b> 쓴다. 얇은 종목에서 「★ 거래량 N배」를 강조하는 데 필요하다.
+         * ⊖ 계획 수량·참여율은 실행 게이트(2026-08-02 삭제)가 유일한 소비처였다 — 그래서 안 넘긴다. */
+        $liq  = $bars ? pf_liquidity($bars) : [];
         $rows[] = [
             'p' => $p, 'c' => $c, 's' => $sig,
             'pid' => $pid, 'fid' => $fid, 'last' => $last,
@@ -1139,7 +1131,6 @@ function pf_signal_list(array $positions, array $calc, array $stats, array $dail
             'fund_ok' => null, 'fund_left' => null,
             'ind'  => $ind,
             'liq'  => $liq,
-            'gate' => $liq ? pf_fill_gate($liq) : ['level' => 'ok', 'label' => '', 'why' => ''],
             'mkt'  => $ind ? pf_market_signals($ind, 3, $liq ?: null) : [],
             'conf' => $ind ? pf_signal_confidence($sig['kind'], $ind) : ['level' => 'normal', 'label' => '', 'why' => ''],
         ];
@@ -1554,23 +1545,8 @@ function pf_render_signal_strip(array $sigs, array $stats): void
                 echo '<div class="sig-meta">현재가 ' . pf_n($last) . ' ≤ 이론가 ' . pf_n($tp)
                    . ($kind === 'fill' ? ' · 그 차수 누적목표 미달' : '') . '</div>';
 
-                /* 예수금 게이트 표시는 2026-08-02 사용자 지시로 삭제 — 실행 게이트는 분할 경고 둘만 남긴다.
-                 * fund_ok 계산 자체는 유지(신호 정렬·다른 소비처). */
-
-                /* ── 체결 게이트 — <b>돈이 있어도 물량이 없으면 못 산다.</b>
-                 *   실측(2026-07-30): 매일홀딩스는 일평균 거래대금이 0.2억이고 다음 차수 267주가
-                 *   일평균 거래량의 11.5%다. 하루에 담으면 내가 가격을 밀어올린다.
-                 *   유동성이 충분한 종목(대형주)은 조용히 넘어간다 — 늘 뜨는 표시는 표시가 아니다. */
-                $gate = $g['gate'];
-                if ($gate['level'] !== 'ok' && $gate['label'] !== '') {
-                    echo '<div class="sig-fill ' . pf_h($gate['level']) . '" title="' . pf_h($gate['why']) . '">'
-                       . ($gate['level'] === 'hard' ? '⚠ ' : '△ ') . pf_h($gate['label']);
-                    if (($g['liq']['impact'] ?? null) !== null) {
-                        echo ' <span class="fi-imp">추정 슬리피지 ~'
-                           . number_format((float)$g['liq']['impact'] * 100, 1) . '%</span>';
-                    }
-                    echo '</div>';
-                }
+                /* ⊖ 실행 게이트(예수금 게이트 표시 · 체결 게이트 분할 경고)는 2026-08-02 사용자 지시로 삭제.
+                 *   fund_ok 계산 자체는 유지 — 스트립 머리의 「예수금 부족 N건」 집계가 쓴다. */
             }
 
             /* ── 시장 상태. 계획 신호를 <b>보정</b>하는 자리다.
@@ -2155,8 +2131,8 @@ function pf_page_all(PDO $pdo, Pf $pf): void
 
         echo '<td>' . (empty($g['mkt']) ? '<span class="flat">-</span>' : pf_mkt_badges($g['mkt'])) . '</td>';
 
-        /* 유동성 열은 2026-08-02 사용자 지시로 삭제 — 실행 게이트는 분할 경고 둘만 남긴다.
-         * 유동성 판정 자체는 체결 게이트(얇으면 2%부터 분할 권장)에 그대로 살아 있다. */
+        /* ⊖ 유동성 열(2026-08-02 삭제) · 실행 게이트(같은 날 삭제) — 이 자리에 있던 둘 다 없다.
+         *   유동성은 이제 「★ 거래량 N배」의 ★ 로만 드러난다. */
 
         echo '<td class="num">' . pf_n($g['last']) . '</td>';
         echo '<td class="num">' . pf_signed_pct($c['rate']) . '</td>';
@@ -2197,7 +2173,7 @@ function pf_page_all(PDO $pdo, Pf $pf): void
  *   목록에는 뜨는 어닝쇼크⚠·퀀트신호·박스가 상세에는 아예 없어서 화면끼리 말이 달랐다.
  * ★ <b>판정을 여기서 새로 만들지 않는다</b> — 전부 목록·관심종목·퀀트가 쓰는 그 함수를 부른다.
  *   (pf_market_signals · pf_surge_badge · boxStatusMany/momMany · pf_sue_stock ·
- *    pf_signal_confidence · pf_fill_gate · pf_cycle_alert · pf_stair_alert_map · pf_sue_badge_map)
+ *    pf_signal_confidence · pf_cycle_alert · pf_stair_alert_map · pf_sue_badge_map)
  *   그래서 두 화면이 구조적으로 어긋날 수 없다.
  * ★ 빈 층은 '-' 로 남긴다 — 자리를 지워 버리면 「없음」과 「이 화면엔 원래 안 나옴」이 구별되지 않는다.
  */
@@ -2208,7 +2184,7 @@ function pf_render_status_row(array $pos, ?array $c, array $tradeRow, ?array $me
     $none   = '<span class="sr-none" title="해당 없음">-</span>';
     $g      = [];   // [라벨, 내용HTML]
 
-    /* ── ① 퀀트신호 · 최고 거래대금 박스 · 20·40일 모멘텀 — 최근 신호 하나로 전부 만든다.
+    /* ── ② 퀀트(신호·경로) · 20·40일 모멘텀 — 최근 신호 하나로 전부 만든다.
      * ★ 20·40일 모멘텀 칩은 <b>시장 칸</b>에 붙는다(2026-08-02) — 거래대금이 아니라 가격의 움직임이라
      *   퀀트신호가 아니라 시장 계열이다. 하루치(「+16.2%」)와 시간축만 다르다. */
     $qb = $bx = $none; $mom = '';
@@ -2223,11 +2199,10 @@ function pf_render_status_row(array $pos, ?array $c, array $tradeRow, ?array $me
             $ka   = new KrxAmt($pdoG);
             $b    = pf_surge_badge($s['avg_mul'] !== null ? (float)$s['avg_mul'] : null,
                                    $s['chg']     !== null ? (float)$s['chg']     : null);
-            /* 라벨에 <b>신호일</b>을 붙인다 — 이 화면은 「가장 최근 신호」를 보여주므로 반년 전 것일 수 있다.
-             * 중립은 칩을 그리지 않는다(빈 칸 = 중립 = 관망) — 날짜는 그래도 적는다. */
+            /* 라벨에 <b>신호일</b>을 붙인다 — 이 화면은 「가장 최근 신호」를 보여주므로 반년 전 것일 수 있다. */
             $tag = pf_sig_date_tag((string)$s['d']);
-            /* ★ 중립도 <b>배지 모양</b>으로 그린다(2026-08-02 사용자) — 목록은 빈 칸이지만 이 화면은
-             *   칸이 하나뿐이라 비워 두면 「중립」과 「신호 이력 없음」이 구별되지 않는다.
+            /* ★ 중립도 <b>배지 모양</b>으로 그린다(2026-08-02 사용자) — 이제 목록도 같다.
+             *   비워 두면 「중립」과 「신호 이력 없음」이 구별되지 않고,
              *   맨 글씨로 두면 옆의 경로 배지와 무게가 안 맞아 판정이 아닌 것처럼 읽힌다. */
             $qb = '<span class="qb ' . $b[1] . '" title="'
                 . pf_h('신호일 ' . $s['d'] . ' — ' . $b[3]) . '">' . pf_h($b[2]) . $tag . '</span>';
@@ -2247,13 +2222,8 @@ function pf_render_status_row(array $pos, ?array $c, array $tradeRow, ?array $me
     } catch (Throwable $e) { /* 원장 없으면 모멘텀 칩 없이 */ }
     $mkt = (!empty($me['mkt']) ? pf_mkt_badges($me['mkt']) : '') . $mom;
     $g[] = ['시장', $mkt !== '' ? $mkt : $none];
-    /* ★ 퀀트신호와 박스 상태는 <b>한 덩이</b>로 묶는다(2026-08-02 사용자) — 둘 다 <b>같은 신호일</b>에서
-     * 나온 값이라 따로 세우면 서로 다른 사건처럼 읽힌다. 그 날의 성격 = 「신호」, 그 뒤의 흐름 = 「경로」. */
-    $g[] = ['퀀트 : 최고 거래대금',
-            '<span class="sr-sub">신호</span>' . $qb . '<span class="sr-sub">경로</span>' . $bx,
-            'box'];   // 좌측 라벨이 통째로 감싸는 상자 — 둘이 한 사건임이 모양으로 드러나게
 
-    // ── ① SUE (최신 분기) — 어닝 탭과 같은 계산 ────────────────────────
+    // ── ① 실적(SUE · 최신 분기) — 어닝 탭과 같은 계산 ──────────────────
     $sue = $none;
     try {
         /* ±1 밖이면 배지 하나로 끝난다 — 배지가 <b>이름·값·분기</b>를 다 담으므로 숫자를 따로 쓰지 않는다.
@@ -2281,7 +2251,14 @@ function pf_render_status_row(array $pos, ?array $c, array $tradeRow, ?array $me
     } catch (Throwable $e) { /* 재무 없음 */ }
     $g[] = ['SUE', $sue];
 
-    // ── ② 행동 — 오늘의 신호 + 신뢰도 (현황 카드와 같은 판정) ───────────
+    /* ── ② 퀀트 — 신호와 경로. ★둘은 <b>한 덩이</b>다(2026-08-02 사용자): 같은 신호일에서 나온 값이라
+     *   따로 세우면 서로 다른 사건처럼 읽힌다. 그 날의 성격 = 「신호」, 그 뒤의 흐름 = 「경로」.
+     * ★ 자리는 <b>실적(SUE) 다음</b>이다 — 신호분석의 분류 순서(①상태 = 시장·실적 → ②퀀트)와 같게 둔다. */
+    $g[] = ['퀀트 : 최고 거래대금',
+            '<span class="sr-sub">신호</span>' . $qb . '<span class="sr-sub">경로</span>' . $bx,
+            'box'];   // 좌측 라벨이 통째로 감싸는 상자 — 둘이 한 사건임이 모양으로 드러나게
+
+    // ── ③ 행동 — 오늘의 신호 + 신뢰도 (현황 카드와 같은 판정) ───────────
     $act = $none;
     if (!$closed && $me !== null) {
         $k    = $me['s']['kind'] ?? null;
@@ -2294,21 +2271,9 @@ function pf_render_status_row(array $pos, ?array $c, array $tradeRow, ?array $me
     }
     $g[] = ['행동', $act];
 
-    // ── ③ 실행 — 분할 경고 둘. 넉넉하면 침묵이 규칙이라 '충분'으로 적는다 ──
-    $gate = $me['gate'] ?? ['level' => 'ok', 'label' => '', 'why' => ''];
-    $liq  = $me['liq']  ?? [];
-    if (!$closed && $gate['level'] !== 'ok' && ($gate['label'] ?? '') !== '') {
-        $ex = '<span class="sig-fill ' . pf_h($gate['level']) . '" title="' . pf_h($gate['why']) . '">'
-            . ($gate['level'] === 'hard' ? '⚠ ' : '△ ') . pf_h($gate['label'])
-            . (($liq['impact'] ?? null) !== null
-                ? ' <span class="fi-imp">슬리피지 ~' . number_format((float)$liq['impact'] * 100, 1) . '%</span>' : '')
-            . '</span>';
-    } else {
-        $ex = '<span class="sr-none" title="계획 수량이 일평균 거래량의 5% 미만 — 한 번에 담아도 가격을 밀지 않습니다">충분</span>';
-    }
-    $g[] = ['실행', $ex];
+    /* ⊖ 「③ 실행」 칸은 2026-08-02 사용자 지시로 삭제 — 층 자체가 없어졌다(상태·행동·포트폴리오 3층). */
 
-    /* ── ④ 포트폴리오 — <b>내가 산 포지션</b>에서만 성립하는 셋 (2026-08-02 사용자 정의).
+    /* ── ③ 포트폴리오 — <b>내가 산 포지션</b>에서만 성립하는 셋 (2026-08-02 사용자 정의).
      *   장기물림(2년 or 5차) · N차 지연(룰셋 만료) · 계단관통↓(지지구조 소멸).
      *   ★ 어닝쇼크는 여기가 아니라 SUE 층이다 — 그건 포지션이 아니라 종목의 사실이다.
      *   ★ 판정은 목록(보유종목·현황)과 같은 함수를 그대로 부른다. */
@@ -2446,20 +2411,6 @@ function pf_render_badge_help(): void
       → <b>장중에는 오늘 거래량이 하루의 일부</b>라 이 배수는 늘 <b>하한</b>입니다.
       뜬 배지는 진짜이고, 아직 안 찬 것만 마감 뒤에 잡힙니다.<br>
       → 배수는 <b>주수로 재도 됩니다</b> — 같은 종목의 자기 비교라 단위가 상쇄됩니다.</td></tr>
-
-<tr><td><span class="sig-fill split">△ 분할 권장</span><br><span class="sig-fill hard">⚠ 3일 분할 필요</span></td>
-  <td><b>참여율</b> = 계획 수량 ÷ 일평균 거래량<br>
-      5% 미만 충분 · 5~10% 분할 권장 · <b>10% 이상 분할 필요</b><br>
-      <span class="muted">얇은 종목(일평균 거래대금 1억 미만 수준)은 2% 부터 분할 권장</span></td>
-  <td><b>신호가 떠도 물량이 없으면 살 수 없습니다.</b> 하루 거래량의 10%를 차지하면
-      <b>내가 가격을 밀어올려서</b> 사게 됩니다 — 실측(2026-07-30) 한국주철관 849주를 호가를 훑어 사면
-      평균 체결가가 계획가보다 <b>약 1.4%</b>(수수료의 4배) 높습니다.<br>
-      얇은 종목은 한 단계 올려 봅니다 — 평균 거래량은 "하루에 여러 번 나눠 거래된 결과"일 뿐,
-      지금 호가에 그만큼이 걸려 있지 않습니다. 척도는 주수가 아니라 <b>거래대금</b>입니다.</td>
-  <td>→ <b>추정 슬리피지</b>는 √법칙(변동성 × √참여율)입니다. <b>하루에 나눠 담는 기준</b>이라
-      즉시 시장가로 치면 이보다 큽니다 — <b>하한</b>으로 읽으세요.<br>
-      → 실측: 매일홀딩스는 다음 차수 267주가 일평균 거래량의 <b>11.5%</b>이고 거래대금 1억 미만인 날이
-      <b>85%</b>입니다. 이 종목은 계획을 며칠에 걸쳐 나눠야 합니다.</td></tr>
 
 <tr><td><span class="mkt t-up">+16.2%</span><span class="mkt t-down">−15.4%</span><br><span class="muted">하루 · 등락색</span></td>
   <td>|일간 등락| ≥ <b>3σ</b>(최근 20일 표준편차)<br><b>또는</b> ≥ <b>15%</b></td>
@@ -3164,11 +3115,11 @@ function pf_page_position(PDO $pdo, Pf $pf): void
     }
     $myBars = $dmap[(string)$pos['stock_code']] ?? [];
     if ($me === null && $myBars) {
-        // 폴백 — 종료된 종목 등. 예수금 게이트만 없고 지표·유동성은 같은 함수로 만든다
+        // 폴백 — 종료된 종목 등. 예수금 집계만 없고 지표·유동성은 같은 함수로 만든다
         $fInd = pf_indicators($myBars, $last);
-        $fLiq = pf_liquidity($myBars, (int)($c['next_qty'] ?? 0), $fInd['sd20'] ?? null);
+        $fLiq = pf_liquidity($myBars);
         $me = [
-            'ind' => $fInd, 'liq' => $fLiq, 'gate' => pf_fill_gate($fLiq),
+            'ind' => $fInd, 'liq' => $fLiq,
             'mkt' => pf_market_signals($fInd, 3, $fLiq),
             'conf' => pf_signal_confidence(pf_signal($c, $last)['kind'], $fInd),
             's' => pf_signal($c, $last), 'fund_ok' => null, 'fund_left' => null,
@@ -4440,7 +4391,7 @@ table.pf tbody tr.next-target{box-shadow:inset 4px 0 0 #c9d4de}
 /* 한 층 안의 갈래 이름(신호 / 경로) — 층 라벨보다 한 단계 옅게 */
 .status-row .sr-sub{font-size:10px;font-weight:700;color:#b6c1cb;margin:0 1px 0 3px}
 .status-row .sr-none{font-size:12px;color:#c2ccd6;font-weight:600}
-.status-row .sig-conf,.status-row .sig-fill{margin-top:0;cursor:help}
+.status-row .sig-conf{margin-top:0;cursor:help}
 .status-row .mkt,.status-row .qb,.status-row .bx{vertical-align:middle}
 .status-row .sr-help{margin-left:auto;font-size:11.5px;color:#9aa7b4;text-decoration:none;white-space:nowrap}
 .status-row .sr-help:hover{color:#1d5c93;text-decoration:underline}
@@ -8273,9 +8224,10 @@ function pf_page_watch(PDO $pdo, Pf $pf): void
             [, $bc, $bl, $bt] = $wBadge[$code]['b'];
             $sigD = (string)($wBadge[$code]['d'] ?? '');
             $tag  = pf_sig_date_tag($sigD);
-            // 중립은 배지를 그리지 않는다 — 퀀트 목록과 같은 규칙 (빈 칸 = 중립 = 관망)
-            $chips = ($bc === 'qb-neu' ? '' : '<span class="qb ' . $bc . '" title="'
-               . pf_h('신호일 ' . $sigD . ' — ' . $bt) . '">' . pf_h($bl) . $tag . '</span>')
+            /* ★ 중립도 배지로 그린다(2026-08-02 사용자) — 빈 칸으로 두면 「중립(판정됨·관망)」과
+             *   「최근 신호 이력 없음(판정 불가)」이 같은 모양이 된다. 아래 else 가 그 '-' 다. */
+            $chips = '<span class="qb ' . $bc . '" title="'
+               . pf_h('신호일 ' . $sigD . ' — ' . $bt) . '">' . pf_h($bl) . $tag . '</span>'
                . pf_mom_chips($wHot[$code] ?? null, $sigD, false);   // 신호일 기준
             echo '<td class="center" style="white-space:nowrap">'
                . ($chips !== '' ? $chips : '<span class="muted">-</span>') . '</td>';
@@ -8308,7 +8260,7 @@ function pf_page_watch(PDO $pdo, Pf $pf): void
        . '<b>★</b> = 목록에서 빼기 · <b>편입</b> = 종목 추가 폼(박스 사다리 기본 · 출처와 담은 기록 승계 · '
        . '포트폴리오 미지정 저장 = 편입 관심종목) · 메모는 칸을 벗어나면 저장.<br>'
        . '<b>트리거</b> = 백테스트로 검증된 매수규칙 둘(🟢매집형×돌파확인 +2.26% / 🟢매집형×계단지지·아래층3개↑ +2.40%)만 띄웁니다 — '
-       . '그 외 조합(중립·폭발·추격, 트리거 전 매집형)은 전부 <b>관망</b>이 규칙입니다. '
+       . '그 외 조합(중립·불꽃형, 트리거 전 매집형)은 전부 <b>관망</b>이 규칙입니다. '
        . 'SUE·신호·박스는 어닝·퀀트 탭과 같은 판정이라 화면끼리 어긋나지 않습니다.<br>'
        . '「담은뒤」는 <b>담을 때 주가 대비</b> 등락 — 여기서 고른 판단이 맞았는지 되짚는 자리입니다. '
        . 'PER·ROE 등은 담을 때 값이 아니라 <b>지금</b> 값입니다.</p>';
@@ -9566,25 +9518,31 @@ function pf_rate_pct(float $rate): string
 /**
  * 배지 판정 — <b>2026-07-31 백테스트로 확정한 임계</b> (창 120거래일 · 하한 100억 · 신호 6,942건).
  * 근거 수치는 mode=quantstat 에 전문이 있다. 우선순위는 "나쁜 쪽 먼저" —
- * 추격주의(중앙 −7.23%)가 매집형 조건과 겹치면 위험 쪽으로 판정해야 안전하다.
+ * 불꽃형(중앙 −4~−7%)이 매집형 조건과 겹치면 위험 쪽으로 판정해야 안전하다.
  *
  * ★ 120일 창에서는 <b>매집형 단독(20평비≤5)이 경계선</b>이었다(후반기 중앙 −0.13%로 부호 반전).
  *   견고하게 이긴 것은 <b>매집형 ∧ 등락 0~10%</b> 뿐(+1.74% · 55.2% · 두 기간 모두 ＋)
  *   → 🟢 배지에 등락 조건까지 넣는다. 등락이 밖이면(하락하며·급등하며 찍은 최고 거래대금) 중립.
+ *
+ * ★★ <b>불꽃형 = 옛 「폭발형」+「추격주의」</b> (2026-08-02 사용자: 둘은 같은 뜻이다).
+ *   거래대금이 20배로 터지든 주가가 +20% 뛰든 <b>과열되어 터진 하루</b>라는 성격이 같고,
+ *   처방도 같다(돌파해도 매수 금지 · −5.7~−7.6%). 그래서 <b>배지는 하나</b>로 합쳤다.
+ *   단 두 조건의 <b>실측은 각각 잰 것</b>이고 모집단도 겹치므로 <b>툴팁에는 어느 조건이 걸렸는지</b>를
+ *   그 조건의 수치와 함께 남긴다 — 합친 것은 이름이지 측정이 아니다.
  * @return array [정렬순서, 클래스, 라벨, 툴팁]
  */
 function pf_surge_badge(?float $avgMul, ?float $chg): array
 {
     if ($chg !== null && $chg >= 0.20) {
-        return [3, 'qb-chase', '추격주의', '신호일 등락 +20% 이상 — 실측 +20일 초과수익 중앙 -7.23% · 승률 34.6%'];
+        return [2, 'qb-flame', '불꽃형', '신호일 등락 +20% 이상 폭등 — 실측 +20일 초과수익 중앙 -7.23% · 승률 34.6%'];
     }
     if ($avgMul !== null && $avgMul >= 20) {
-        return [2, 'qb-exp', '폭발형', '20일 평균의 20배 이상 폭발 — 실측 중앙 -4.24% · 승률 36.7%'];
+        return [2, 'qb-flame', '불꽃형', '거래대금이 20일 평균의 20배 이상 폭발 — 실측 중앙 -4.24% · 승률 36.7%'];
     }
     if ($avgMul !== null && $avgMul <= 5 && $chg !== null && $chg >= 0 && $chg < 0.10) {
         return [0, 'qb-acc', '매집형', '20일 평균의 5배 이하 + 등락 0~10%로 조용히 차오른 최고 거래대금 — 실측 중앙 +1.74% · 승률 55.2%'];
     }
-    return [1, 'qb-neu', '중립', '실측상 우위도 열위도 뚜렷하지 않은 구간 (매집형인데 하락·급등하며 찍은 경우 포함)'];
+    return [1, 'qb-neu', '중립', '실측상 우위도 열위도 뚜렷하지 않은 구간 (매집형인데 하락·급등하며 찍은 경우 포함) — 중립×돌파도 실측 동전(-1.23% · 47.5%)'];
 }
 
 /** 공용 스타일 — 목록·검증 두 화면이 같이 쓴다 */
@@ -9689,7 +9647,7 @@ function pf_page_quant(PDO $pdo, Pf $pf): void
     unset($r);
     usort($rows, static fn($a, $b) => [$a['badge'][0], -(float)$a['amt']] <=> [$b['badge'][0], -(float)$b['amt']]);
 
-    $cnt = [0 => 0, 1 => 0, 2 => 0, 3 => 0];
+    $cnt = [0 => 0, 1 => 0, 2 => 0];   // 매집형 / 중립 / 불꽃형 — pf_surge_badge 의 정렬순서와 같은 자리
     foreach ($rows as $r) $cnt[$r['badge'][0]]++;
 
     // 우측 패널의 초기 선택 — 주소에 실려 새로고침·북마크에서도 유지된다
@@ -9776,12 +9734,12 @@ function pf_page_quant(PDO $pdo, Pf $pf): void
         echo '<div class="q-note">실측 규칙(검증 탭 ④~⑥): 매수 = <b>돌파✓</b>(+2.26%·57.9%) 또는 <b>계단지지 1단</b>'
            . '(<b>아래층 박스 3개 이상일 때만</b> +2.40%·58.5% — 1~2개는 실측 음수라 ⚠표시·관망) 확인일. '
            . '매도 = 손절선(진입박스 L·새 박스 생기면 상향) 기준 — <b>돌파 진입은 바로 아래 계단이 종가로 깨질 때</b>(시간 규칙 없음), '
-           . '<b>계단지지 진입은 20거래일 보유 후 손절선 이탈 시</b>. 폭발형·추격주의의 돌파는 금지(−5.7~−7.6%).</div></div>';
+           . '<b>계단지지 진입은 20거래일 보유 후 손절선 이탈 시</b>. 불꽃형의 돌파는 금지(−5.7~−7.6%).</div></div>';
     }
 
     echo '<div class="card"><h2>' . pf_h($day) . ' — ' . count($rows) . '종목 '
        . '<span class="q-note" style="display:inline">'
-       . '(🟢매집형 ' . $cnt[0] . ' · 중립 ' . $cnt[1] . '(빈 칸) · 폭발형 ' . $cnt[2] . ' · 추격주의 ' . $cnt[3]
+       . '(🟢매집형 ' . $cnt[0] . ' · 중립 ' . $cnt[1] . ' · 불꽃형 ' . $cnt[2]
        . ($hidden > 0 ? ' · 거래대금 ' . number_format($minEok) . '억 미만 <b>' . $hidden . '종목 숨김</b>' : '')
        . ')</span></h2>';
 
@@ -9812,9 +9770,9 @@ function pf_page_quant(PDO $pdo, Pf $pf): void
         $name = $names[$code] ?? $code;
         $bx = $box[$code . '|' . $day] ?? null;
         echo '<tr class="q-row' . ($code === $selCode ? ' q-sel' : '') . '" data-code="' . pf_h($code) . '">';
-        /* 중립은 배지를 그리지 않는다(2026-08-02 사용자 지시) — 정보가 없는 배지는 잡음.
-         * 분류·정렬·집계에는 그대로 남는다(빈 칸 = 중립 = 관망). */
-        $chips = ($bc === 'qb-neu' ? '' : '<span class="qb ' . $bc . '" title="' . pf_h($bt) . '">' . pf_h($bl) . '</span>')
+        /* ★ 중립도 배지로 그린다(2026-08-02 사용자) — 빈 칸은 「판정했더니 중립」과
+         *   「판정할 재료가 없음」을 구별하지 못한다. 중립이 45.5%로 가장 흔한 판정이라 더 그렇다. */
+        $chips = '<span class="qb ' . $bc . '" title="' . pf_h($bt) . '">' . pf_h($bl) . '</span>'
                . $hotChip($mom[$code . '|' . $day] ?? null, (string)$day);
         echo '<td class="center">' . ($chips !== '' ? $chips : '<span class="muted">-</span>') . '</td>';
         echo '<td class="center">' . ($bx
@@ -9841,7 +9799,7 @@ function pf_page_quant(PDO $pdo, Pf $pf): void
     echo '</tbody></table></div>';
     echo '<div class="q-note">행 클릭 = 재무분석 상세(11년 재무 + 일봉차트) · ☆ = 관심종목 · '
        . '편입 = 종목 추가 폼(포트폴리오 미지정 저장 = 편입 관심종목) · '
-       . '정렬 = 퀀트신호(매집형 먼저) → 거래대금 큰 순 · 중립은 빈 칸 · 거래대금 0(거래정지)인 날은 판정에서 제외 · '
+       . '정렬 = 퀀트신호(매집형 → 중립 → 불꽃형) → 거래대금 큰 순 · 거래대금 0(거래정지)인 날은 판정에서 제외 · '
        . '「20일 +N%」·「40일 +N%」 = 신호일까지의 모멘텀(시장 계열) — 20일 +80%·40일 +100% 이상이면 주황: 이 무리의 돌파 매수는 실측 엣지 없음(검증 탭 ⑧). 회색은 같은 창의 급락(20일 −30%·40일 −40% — 지정값·근거 없음)</div>';
     echo '</div>';
 
@@ -9852,7 +9810,8 @@ function pf_page_quant(PDO $pdo, Pf $pf): void
        . '신호 6,942건(2025-02~2026-07 · 하한 100억)의 <b>다음날 매수 → +20거래일 수익률에서 같은 날 전종목 중앙값을 뺀 초과수익</b>으로 판정했습니다.<br>'
        . '· 최고 거래대금 전체는 중앙 <b>−3.36%</b> · 승률 41.7% — "터진 종목 추격"은 절반 이상이 시장보다 못 갑니다.<br>'
        . '· 🟢 <b>매집형</b>(20일 평균의 5배 이하 <b>+ 등락 0~10%</b>): 중앙 <b>+1.74%</b> · 승률 55.2% — 유일하게 견고히 이기는 무리.<br>'
-       . '· <b>폭발형</b>(20배 이상): 중앙 −4.24% · 승률 36.7% / <b>추격주의</b>(등락 +20%↑): 중앙 <b>−7.23%</b> · 승률 34.6%.<br>'
+       . '· <b>불꽃형</b> — 20배 이상: 중앙 −4.24% · 승률 36.7% / 등락 +20%↑: 중앙 <b>−7.23%</b> · 승률 34.6%'
+       . ' <span class="muted">(둘은 같은 뜻이라 배지를 하나로 합쳤고, 수치는 조건별로 잰 것이라 따로 적습니다)</span>.<br>'
        . '· 두 기간으로 갈라도 부호가 유지됐습니다(매집형 단독은 후반기 반전이라 등락 조건을 붙였습니다).'
        . ' 자세한 표·방법·한계는 <a href="/stock/index.php?mode=quantstat">검증 탭</a>.'
        . '</div></details>';
@@ -9968,7 +9927,7 @@ function pf_page_quantstat(PDO $pdo, Pf $pf): void
        . '<tr><td><b>3~5배</b></td><td>824</td><td class="up">+1.15%</td><td>+4.68%</td><td><b>53.2%</b></td></tr>'
        . '<tr><td>5~10배</td><td>1,611</td><td class="down">−3.26%</td><td>+1.07%</td><td>42.4%</td></tr>'
        . '<tr><td>10~20배</td><td>1,430</td><td class="down">−4.79%</td><td>+0.45%</td><td>40.8%</td></tr>'
-       . '<tr><td><b>20배↑ (폭발형)</b></td><td>2,236</td><td class="down"><b>−4.24%</b></td><td>−0.29%</td><td><b>36.7%</b></td></tr></table></div>';
+       . '<tr><td><b>20배↑ (불꽃형)</b></td><td>2,236</td><td class="down"><b>−4.24%</b></td><td>−0.29%</td><td><b>36.7%</b></td></tr></table></div>';
 
     echo '<div class="card"><h2>③ 배지 조합 — 기간을 갈라도 부호가 유지되나</h2>';
     echo '<table class="qstat"><tr><th>조합 (+20일 · 다음날 매수)</th><th>표본</th><th>초과 중앙</th><th>승률</th>'
@@ -9977,8 +9936,13 @@ function pf_page_quantstat(PDO $pdo, Pf $pf): void
        . '<td class="down"><b>−0.13%</b> ⚠</td></tr>'
        . '<tr><td>🟢 <b>매집형 + 등락 0~10%</b> (배지 기준)</td><td>569</td><td class="up"><b>+1.74%</b></td>'
        . '<td><b>55.2%</b></td><td>+2.26%</td><td>+1.46%</td></tr>'
-       . '<tr><td>폭발형 (20평비 20↑)</td><td>2,236</td><td class="down">−4.24%</td><td>36.7%</td><td>−4.36%</td><td>−4.08%</td></tr>'
-       . '<tr><td>추격주의 (등락 20%↑)</td><td>1,345</td><td class="down">−7.23%</td><td>34.6%</td><td>−9.47%</td><td>−5.85%</td></tr></table>'
+       . '<tr><td><b>불꽃형</b> — 20평비 <b>20배↑</b></td><td>2,236</td><td class="down">−4.24%</td><td>36.7%</td><td>−4.36%</td><td>−4.08%</td></tr>'
+       . '<tr><td><b>불꽃형</b> — 등락 <b>+20%↑</b></td><td>1,345</td><td class="down">−7.23%</td><td>34.6%</td><td>−9.47%</td><td>−5.85%</td></tr></table>'
+       /* ★ 두 줄을 합치지 않는 이유 — 배지는 하나(불꽃형)로 합쳤지만 이 표는 <b>측정 기록</b>이고
+        * 두 조건의 모집단은 서로 겹친다(같은 신호가 양쪽에 들어간다). 합친 수치는 잰 적이 없다. */
+       . '<div class="q-note">★<b>불꽃형은 두 조건이 한 배지</b>(2026-08-02 통합) — 거래대금 20배 폭발이든 +20% 폭등이든'
+       . ' 「과열되어 터진 하루」로 성격이 같고 처방도 하나(돌파해도 매수 금지)입니다. 위 표를 두 줄로 남긴 것은'
+       . ' <b>측정이 조건별로 따로 이뤄졌고 두 모집단이 겹치기 때문</b>입니다 — 합친 수치는 잰 적이 없습니다.</div>'
        . '<div class="q-note">★120일 창에서 <b>매집형 단독은 후반기에 부호가 뒤집혔다</b>(레포 규칙: 그런 것은 믿지 않는다)'
        . ' → 🟢 배지에는 <b>등락 0~10% 조건을 함께</b> 건다. 이 조합은 두 기간 모두 ＋이고 60일판(+1.27%)보다도 강했다.'
        . ' 매집형은 475개 종목에 분산(종목당 2.7건) — 소수 종목의 반복이 아니다.</div></div>';
@@ -10002,9 +9966,9 @@ function pf_page_quantstat(PDO $pdo, Pf $pf): void
        . '<tr><td>🟢 매집형 × 계단지지 확인 (1단 지지 +1.76%·55.9% 가 주력 — 2단 이하는 n=7 로 판정 보류'
        . ' · <b>⑥ 위치 연구로 개선: 아래층 박스 3개 이상만 +2.40%·58.5%</b>)</td>'
        . '<td>134</td><td class="up">+0.97%</td><td>54.5%</td><td>+0.88%</td><td>+1.76%</td></tr>'
-       . '<tr><td>🚫 추격주의 × 돌파 (돌파율은 67.7%로 최고인데 사면 진다)</td><td>821</td>'
+       . '<tr><td>🚫 <b>불꽃형</b>(등락 +20%↑) × 돌파 (돌파율은 67.7%로 최고인데 사면 진다)</td><td>821</td>'
        . '<td class="down">−7.60%</td><td>35.7%</td><td>−10.68%</td><td>−5.44%</td></tr>'
-       . '<tr><td>🚫 폭발형 × 돌파</td><td>431</td><td class="down">−5.72%</td><td>37.4%</td><td>−4.88%</td><td>−6.78%</td></tr></table>'
+       . '<tr><td>🚫 <b>불꽃형</b>(20평비 20배↑) × 돌파</td><td>431</td><td class="down">−5.72%</td><td>37.4%</td><td>−4.88%</td><td>−6.78%</td></tr></table>'
        . '<div class="q-note">네 규칙 모두 기간 2분할에서 부호 유지 · 매집형 돌파는 178개 종목에 분산.'
        . ' 「계단 번호·대금 가속으로 막차를 미리 가려내기」는 판별력이 약해 채택하지 않았다(정직하게 기각).'
        . ' 계단 정의는 삼성물산 사례(직전 박스가 위에 겹쳐 진짜 아래층을 잃음)로 한 번 고쳐 재측정했다.'
@@ -10244,26 +10208,26 @@ function pf_page_pattern(PDO $pdo, Pf $pf): void
         ['id' => 'p4f', 'kind' => 'bad', 'name' => '시공테크', 'code' => '020710', 'sig' => '2025-04-11',
          'H' => 7290, 'L' => 6300, 'lv' => [6140, 4580],
          'buy' => '2025-04-14', 'exit' => '2025-05-16', 'from' => '2025-01-10', 'to' => '2025-07-01', 'pat' => 4,
-         'note' => '4/11 <b>+25.7% 폭등하며</b> 최고 거래대금(추격주의). 4/14 돌파 매수 8,060원 → 5/16 3,900원 —'
+         'note' => '4/11 <b>+25.7% 폭등하며</b> 최고 거래대금(불꽃형). 4/14 돌파 매수 8,060원 → 5/16 3,900원 —'
                  . ' <b>−51.6%</b>. 폭등일의 최고 거래대금은 돌파율이 67.7%로 가장 높아 「잘 가는 것처럼 보이는」 것이'
                  . ' 함정이다 — 사면 3번 중 2번 진다(중앙 −7.60%).'],
         ['id' => 'p4w', 'kind' => 'bait', 'name' => '광전자', 'code' => '017900', 'sig' => '2026-03-25',
          'H' => 3395, 'L' => 2560, 'lv' => [2160, 2055, 2040],
          'buy' => '2026-04-02', 'exit' => '2026-05-06', 'from' => '2025-12-15', 'to' => '2026-06-15', 'pat' => 4,
-         'note' => '같은 추격주의 돌파인데 <b>+205.8%</b>. <b>이런 사례가 미끼다</b> — 눈에 남는 건 이 한 방이지만'
+         'note' => '같은 불꽃형(+20% 폭등) 돌파인데 <b>+205.8%</b>. <b>이런 사례가 미끼다</b> — 눈에 남는 건 이 한 방이지만'
                  . ' 실측 분포는 중앙 −7.60%·승률 35.7%. 한 번의 +205%를 보고 들어가는 것은 기대값이 아니라'
                  . ' 복권을 사는 것이고, 복권값은 위 시공테크가 치른다.'],
         // 패턴5 소문난 잔치
         ['id' => 'p5f', 'kind' => 'bad', 'name' => '보해양조', 'code' => '000890', 'sig' => '2026-06-22',
          'H' => 2765, 'L' => 1981, 'lv' => [],
          'buy' => '2026-06-23', 'exit' => '2026-07-22', 'from' => '2026-03-20', 'to' => '', 'pat' => 5,
-         'note' => '6/22 거래대금이 20일 평균의 <b>20배 이상 폭발</b>(폭발형). 6/23 돌파 매수 3,040원 →'
+         'note' => '6/22 거래대금이 20일 평균의 <b>20배 이상 폭발</b>(불꽃형). 6/23 돌파 매수 3,040원 →'
                  . ' 7/22 1,442원 — <b>−52.6%</b>. 온 시장이 쳐다보는 날의 거래대금 폭발은 관심의 정점 ='
                  . ' 물량 소화의 자리다.'],
         ['id' => 'p5w', 'kind' => 'bait', 'name' => '동양고속', 'code' => '084670', 'sig' => '2025-11-24',
          'H' => 20000, 'L' => 12390, 'lv' => [12110, 10710, 10000, 8440],
          'buy' => '2025-12-03', 'exit' => '2026-01-09', 'from' => '2025-08-20', 'to' => '2026-02-27', 'pat' => 5,
-         'note' => '폭발형인데 <b>+177.3%</b> — 역시 미끼 사례. 폭발형 돌파의 실측 분포는 중앙 −5.72%·'
+         'note' => '불꽃형(20배↑)인데 <b>+177.3%</b> — 역시 미끼 사례. 이 조건의 돌파 실측 분포는 중앙 −5.72%·'
                  . '승률 37.4%·두 기간 모두 마이너스다. 승자 몇이 눈에 띄고, 다수의 패자가 조용히 사라진다.'],
         // ── 확장 사례 20건 (2026-08-01 · 시세 정합 확인 · RF머트리얼즈는 수정주가 불일치로 좋은사람들로 교체) ──
         ['id' => 'p1s2', 'kind' => 'ok', 'name' => 'DSC인베스트먼트', 'code' => '241520', 'sig' => '2026-01-29',
@@ -10427,13 +10391,14 @@ function pf_page_pattern(PDO $pdo, Pf $pf): void
               'feat' => '<b>②특징</b> — 붕괴하면 <b>받아줄 곳이 없다</b>(계단 있는 붕괴와 정반대). 돌파해도 이력이 쌓인 구간'
                       . ' 실측 −1.94%(표본 19건 — 작아서 금지 규칙까지는 안 갔다). 기본 행동은 <b>관망</b> — 지금 박스가'
                       . ' 훗날 다음 박스의 계단이 되고, 계단이 쌓인 뒤의 신호(패턴1·2)가 우리가 사는 자리다.'],
-        4 => ['t' => '패턴4 「마지막 불꽃」 (추격주의)', 'act' => '🚫 매수 금지', 'actc' => '#c62828',
-              'def' => '<b>①정의</b> — <b>등락 +20% 이상 폭등하며</b> 최고 거래대금 (=추격주의 배지). 돌파 여부와 무관하게 안 산다.',
+        4 => ['t' => '패턴4 「마지막 불꽃」 (불꽃형 — 등락 +20%↑)', 'act' => '🚫 매수 금지', 'actc' => '#c62828',
+              'def' => '<b>①정의</b> — <b>등락 +20% 이상 폭등하며</b> 최고 거래대금 (=<b>불꽃형</b> 배지의 두 조건 중 하나). 돌파 여부와 무관하게 안 산다.',
               'feat' => '<b>②특징</b> — 표본 821건 · 돌파 시 중앙 <b>−7.60%</b> · 승률 35.7% · 양기간 −. 역설이 핵심이다:'
                       . ' <b>돌파율은 67.7%로 전 패턴 중 최고</b> — 가장 잘 가는 것처럼 보이는 자리가 가장 지는 자리다.'
                       . ' 온 시장이 이미 알아버린 재료의 마지막 불꽃.'],
-        5 => ['t' => '패턴5 「소문난 잔치」 (폭발형)', 'act' => '🚫 매수 금지', 'actc' => '#c62828',
-              'def' => '<b>①정의</b> — 거래대금이 직전 20일 평균의 <b>20배 이상</b>으로 폭발하며 찍은 최고 거래대금 (=폭발형 배지).',
+        5 => ['t' => '패턴5 「소문난 잔치」 (불꽃형 — 20평비 20배↑)', 'act' => '🚫 매수 금지', 'actc' => '#c62828',
+              'def' => '<b>①정의</b> — 거래대금이 직전 20일 평균의 <b>20배 이상</b>으로 폭발하며 찍은 최고 거래대금 (=<b>불꽃형</b> 배지의 나머지 조건).'
+                     . ' 패턴4와 <b>배지는 같고</b>(불꽃형) 터지는 곳이 가격이냐 대금이냐만 다르다 — 실사례를 갈라 두려고 패턴 번호는 남긴다.',
               'feat' => '<b>②특징</b> — 표본 431건 · 돌파 시 중앙 <b>−5.72%</b> · 승률 37.4% · 양기간 −. 매집형과 정반대 극 —'
                       . ' 같은 최고 거래대금이라도 <b>조용히 찍는가, 온 동네가 알게 찍는가</b>가 승부를 가른다. 소문난 잔치에 먹을 것 없다.'],
     ];
@@ -10559,7 +10524,7 @@ JS;
  *
  *  ★ 여기의 임계값·실측치는 <b>설명이지 정본이 아니다</b> — 정본은 각 판정 함수
  *    (pf_market_signals · pf_surge_badge · KrxAmt::boxStatusMany/momMany · pf_sue_build ·
- *     pf_liquidity/pf_fill_gate · pf_cycle_alert · pf_stair_alert_map · pf_sue_badge_map).
+ *     pf_liquidity · pf_cycle_alert · pf_stair_alert_map · pf_sue_badge_map).
  *    판정 로직을 바꾸면 이 페이지의 해당 줄도 같이 고친다.
  * ══════════════════════════════════════════════════════════════════════ */
 function pf_page_signal(PDO $pdo, Pf $pf): void
@@ -10579,14 +10544,14 @@ function pf_page_signal(PDO $pdo, Pf $pf): void
 .sg-ly .ex:last-child{margin-bottom:0}
 .sg-ly .cap{flex:0 0 100%;font-size:11px;font-weight:700;color:#9aa7b4;letter-spacing:.02em}
 .sg-ly .nt{font-size:11.5px;color:#8a97a4;line-height:1.6;margin-top:8px;padding-top:7px;border-top:1px dashed #e6ecf2}
-.sg-ly .sig-fund,.sg-ly .sig-fill,.sg-ly .sig-conf{margin-top:0;cursor:default}
+.sg-ly .sig-conf{margin-top:0;cursor:default}
 /* 관심종목 트리거·출처 칩과 같은 모양 (그 화면의 .wl-go/.wl-src 사본) */
 .wl-go{display:inline-block;padding:2px 9px;border-radius:10px;font-size:12px;font-weight:800;
   background:#e6f4ea;color:#1e7e34;white-space:nowrap}
 .wl-src{display:inline-block;padding:0 6px;border-radius:5px;font-size:10.5px;font-weight:700;
   background:#eef3f8;color:#5f7183;vertical-align:middle}
 /* 표 안의 견본 칩 — 원래 화면의 margin-top 을 걷어 한 줄에 나란히 */
-table.sg .sig-fund,table.sg .sig-fill,table.sg .sig-conf{margin-top:0;display:inline-block;cursor:default}
+table.sg .sig-conf{margin-top:0;display:inline-block;cursor:default}
 /* 판정 규칙을 한 줄에 하나씩 — 라벨 칸 너비를 고정해 조건이 세로로 맞춰진다 */
 .sg-rule{display:flex;gap:10px;align-items:flex-start;padding:5px 0;border-top:1px dashed #eef2f6}
 .sg-rule:first-child{border-top:0;padding-top:0}
@@ -10627,18 +10592,18 @@ table.sg code{background:#f2f6fa;border-radius:4px;padding:1px 4px;font-size:11.
        . '<tr><td><b>배지</b></td><td>화면에 뜨는 <b>칩 전부</b>를 가리키는 총칭 — 특정 항목의 이름이 아닙니다.</td>'
        .   '<td>열 이름으로는 <b>쓰지 않습니다</b>(무엇을 담은 열인지 알 수 없으므로). 이 페이지처럼 "배지 전체"를 말할 때만.</td></tr>'
        . '<tr><td><b>퀀트신호</b><br><span class="qb qb-acc">매집형</span></td>'
-       .   '<td>거래대금이 <b>120거래일 중 최고</b>인 날 하나의 성격 — 매집형·폭발형·추격주의(중립은 빈 칸).</td>'
-       .   '<td>퀀트 목록·관심종목의 <b>「퀀트신호」 열</b> · 상승종목 대시보드. 정의는 아래 <b>1-b</b>.</td></tr>'
+       .   '<td>거래대금이 <b>120거래일 중 최고</b>인 날 하나의 성격 — <b>매집형 · 중립 · 불꽃형</b> 셋 중 하나입니다.</td>'
+       .   '<td>퀀트 목록·관심종목의 <b>「퀀트신호」 열</b> · 상승종목 대시보드. 정의는 아래 <b>2-a</b>.</td></tr>'
        . '<tr><td><b>최고 거래대금 박스</b><br><span class="bx bx-lad">계단지지 1단</span></td>'
        .   '<td>그 신호일의 <b>고가 H(저항)·저가 L(지지)</b>가 만드는 박스와, 그 뒤 가격이 걸어간 <b>경로</b>.</td>'
-       .   '<td>퀀트 목록·매집형 박스 추적·관심종목·어닝의 <b>「최고 거래대금 박스」 열</b>. 정의는 아래 <b>1-c</b>.</td></tr>'
+       .   '<td>퀀트 목록·매집형 박스 추적·관심종목·어닝의 <b>「최고 거래대금 박스」 열</b>. 정의는 아래 <b>2-b</b>.</td></tr>'
        . '<tr><td><b>신호일</b></td><td>그 퀀트신호가 발생한 날 (박스가 만들어진 날).</td><td>추적 카드의 「신호일」 열 · 배지 툴팁.</td></tr>'
        . '<tr><td><b>신호</b> <span class="sig-pill k-buy">매수</span></td>'
        .   '<td>퀀트신호와 <b>다릅니다</b> — 룰셋 차수표가 내는 <b>오늘의 행동</b>(매수·잔여매수·매도·대기).</td>'
-       .   '<td>현황 카드 · 보유종목의 「신호」 열. 정의는 아래 <b>②</b>.</td></tr>'
+       .   '<td>현황 카드 · 보유종목의 「신호」 열. 정의는 아래 <b>③</b>.</td></tr>'
        . '<tr><td><b>트리거</b> <span class="wl-go">🟢 돌파확인</span></td>'
-       .   '<td>검증된 <b>퀀트 매수규칙</b> 둘을 충족했다는 표시 — 퀀트신호 × 최고 거래대금 박스의 조합입니다.</td>'
-       .   '<td>관심종목의 「트리거」 열. 정의는 아래 <b>②</b>.</td></tr>'
+       .   '<td>검증된 <b>퀀트 매수규칙</b> 둘을 충족했다는 표시 — 퀀트신호 × 경로의 조합입니다.</td>'
+       .   '<td>관심종목의 「트리거」 열. 정의는 아래 <b>2-c</b>.</td></tr>'
        . '<tr><td><b>포트폴리오</b> <span class="mkt t-risk">계단관통↓</span></td>'
        .   '<td><b>이미 산 포지션</b>에서 판단을 다시 소집하는 셋(장기물림·N차 지연·계단관통↓) — 자동 매매는 없습니다.</td>'
        .   '<td>현황·보유종목. 정의는 아래 <b>④</b>.</td></tr></table>'
@@ -10659,49 +10624,55 @@ table.sg code{background:#f2f6fa;border-radius:4px;padding:1px 4px;font-size:11.
        .     '<span class="mkt t-risk">역배열</span><span class="mkt t-info">정배열</span>'
        .     '<span class="mkt t-info">이격 +12%</span>'
        .     '<span class="mkt t-buyish">4일 연속 하락</span><span class="mkt t-sellish">3일 연속 상승</span><span class="mkt t-up">20일 +112%</span><span class="mkt t-up">40일 +139%</span><span class="mkt t-down">20일 −52%</span></div>'
-       .   '<div class="ex"><span class="cap">퀀트신호</span>'
-       .     '<span class="qb qb-acc">매집형</span><span class="qb qb-exp">폭발형</span>'
-       .     '<span class="qb qb-chase">추격주의</span></div>'
-       .   '<div class="ex"><span class="cap">최고 거래대금 박스</span>'
+       .   '<div class="ex"><span class="cap">실적(SUE)</span><span class="sue-b up">공시매수 +2.1<span class="sue-q">26.1Q</span></span><span class="sue-b dn">어닝쇼크 -1.4<span class="sue-q">26.1Q</span></span></div>'
+       .   '<div class="nt">둘 다 <b>종목 자체의 사실</b>입니다 — 사지 않은 종목에도 그대로 성립합니다.'
+       .     ' 시세(시장)와 실적(SUE)은 <b>보는 시간축</b>이 다를 뿐 같은 질문에 답합니다: 지금 어떤 자리인가.</div></div>'
+
+       /* ★ 퀀트는 ① 상태에서 갈라낸 층이다(2026-08-02 사용자) — 시장·실적은 종목의 상태지만
+        *   퀀트신호·경로는 <b>한 사건(최고 거래대금 신호일)의 두 면</b>이라 성격이 다르다. */
+       . '<div class="sg-ly"><b class="t">② 퀀트 — 그 사건은 무엇이었고, 그 뒤 어떻게 됐나</b>'
+       .   '<div class="ex"><span class="cap">a 퀀트신호</span>'
+       .     '<span class="qb qb-acc">매집형</span><span class="qb qb-neu">중립</span>'
+       .     '<span class="qb qb-flame">불꽃형</span></div>'
+       .   '<div class="ex"><span class="cap">b 퀀트 경로</span>'
        .     '<span class="bx bx-new">新박스</span><span class="bx bx-in">박스안 H+3.2%</span>'
        .     '<span class="bx bx-brk">돌파✓ 3일</span><span class="bx bx-fake">가짜돌파</span>'
        .     '<span class="bx bx-fake">돌파후반락</span><span class="bx bx-lad">계단지지 1단</span>'
        .     '<span class="bx bx-lad">2단 시험중</span><span class="bx bx-dn">지지이탈↓</span>'
        .     '<span class="bx bx-dn">붕괴·표류</span><span class="bx bx-dn">붕괴↓</span></div>'
-       .   '<div class="ex"><span class="cap">SUE</span><span class="sue-b up">공시매수 +2.1<span class="sue-q">26.1Q</span></span><span class="sue-b dn">어닝쇼크 -1.4<span class="sue-q">26.1Q</span></span></div>'
-       .   '<div class="nt"><b>⚠ 접미사</b>(<span class="bx bx-in">박스안 24일⚠</span> '
-       .     '<span class="bx bx-lad">계단지지 1단⚠</span>)는 <b>경보가 아니라 상태 배지의 강등</b>입니다 — '
-       .     '같은 상태로 보여도 <b>매수규칙이 적용되지 않는 부분집합</b>이라는 표시(④와 구별).</div></div>'
+       .   '<div class="ex"><span class="cap">c 퀀트 매수원칙</span>'
+       .     '<span class="wl-go">🟢 돌파확인</span><span class="wl-go">🟢 계단지지</span>'
+       .     '<span class="muted" style="font-size:12px">관망</span></div>'
+       .   '<div class="nt">a 와 b 는 <b>같은 신호일</b>에서 나온 한 덩이입니다 — 그 날의 성격이 <b>신호</b>,'
+       .     ' 그 뒤 가격이 걸어간 길이 <b>경로</b>이고, <b>둘이 겹치는 두 자리</b>가 c 매수원칙입니다.<br>'
+       .     '<b>⚠ 접미사</b>(<span class="bx bx-in">박스안 24일⚠</span> '
+       .     '<span class="bx bx-lad">계단지지 1단⚠</span>)는 <b>경보가 아니라 경로 배지의 강등</b>입니다 — '
+       .     '같은 경로로 보여도 <b>매수규칙이 적용되지 않는 부분집합</b>이라는 표시(④와 구별).</div></div>'
 
-       . '<div class="sg-ly"><b class="t">② 행동 — 오늘 무엇을 하라는 것인가</b>'
+       . '<div class="sg-ly"><b class="t">③ 행동 — 오늘 무엇을 하라는 것인가</b>'
        .   '<div class="ex"><span class="cap">룰셋</span>'
        .     '<span class="sig-pill k-sell">매도</span><span class="sig-pill k-buy">매수</span>'
        .     '<span class="sig-pill k-fill">잔여매수</span><span class="sig-pill k-wait">대기</span></div>'
-       .   '<div class="ex"><span class="cap">트리거</span>'
-       .     '<span class="wl-go">🟢 돌파확인</span><span class="wl-go">🟢 계단지지</span><span class="muted" style="font-size:12px">관망</span></div>'
        .   '<div class="ex"><span class="cap">신뢰도</span>'
        .     '<span class="sig-conf lv-strong">◎ 근거 강함 — 투매</span>'
        .     '<span class="sig-conf lv-caution">△ 주의 — 하락추세</span>'
        .     '<span class="sig-conf lv-caution">△ 분할매도 고려</span></div></div>'
 
-       . '<div class="sg-ly"><b class="t">③ 실행 — 실제로 할 수 있는가</b>'
-       .   '<div class="ex"><span class="cap">물량</span>'
-       .     '<span class="sig-fill split">△ 분할 권장 (7.2%)</span>'
-       .     '<span class="sig-fill hard">⚠ 3일 분할 필요</span></div></div>'
-
        . '<div class="sg-ly"><b class="t">④ 포트폴리오 — 멈춰서 다시 판단하라</b>'
        .   '<div class="ex"><span class="mkt t-risk">장기물림</span><span class="mkt t-warn">4차 지연</span>'
        .     '<span class="mkt t-risk">계단관통↓</span></div>'
        .   '<div class="nt"><b>이 셋뿐입니다</b> — 셋 다 <b>내가 산 포지션</b>에서만 성립합니다(사지 않은 종목엔 뜻이 없습니다).<br>'
-       .     '①의 <span class="sue-b dn">어닝쇼크 -1.4<span class="sue-q">26.1Q</span></span>·<span class="mkt t-up">20일 +112%</span> 는 여기가 아닙니다 —'
-       .     ' 그건 <b>종목 자체의 사실</b>이라 ① 상태에 있습니다.</div></div>'
+       .     '<span class="sue-b dn">어닝쇼크 -1.4<span class="sue-q">26.1Q</span></span>·<span class="mkt t-up">20일 +112%</span> 는 여기가 아닙니다 —'
+       .     ' 그건 <b>종목 자체의 사실</b>이라 <b>① 상태</b>에 있습니다.</div></div>'
        . '</div>'
-       . '<div class="sg-note">예: 「오늘의 신호」 카드 하나에 <b>잔여매수</b>(행동) + <b>△분할 권장</b>(실행) +'
-       . ' <b>역배열</b>(상태)이 같이 뜹니다 — 중복이 아니라 <b>층이 다른</b> 것입니다.'
-       . ' 읽는 순서도 이 순서입니다: <b>무엇을 할까(행동) → 할 수 있나(실행) → 어떤 자리인가(상태) → 멈출 곳인가(경보)</b>.</div></div>';
+       . '<div class="sg-note">예: 「오늘의 신호」 카드 하나에 <b>잔여매수</b>(행동) + <b>역배열</b>(상태)이 같이 뜹니다'
+       . ' — 중복이 아니라 <b>층이 다른</b> 것입니다.'
+       . ' 읽는 순서도 이 순서입니다: <b>무엇을 할까(행동) → 어떤 자리인가(상태·퀀트) → 멈출 곳인가(포트폴리오)</b>.<br>'
+       . '<span class="muted">⊖ 예전에 있던 <b>실행</b> 층(△ 분할 권장 · ⚠ N일 분할 필요)은 2026-08-02 삭제했습니다 —'
+       . ' 참여율 임계가 백테스트가 아닌 지정값이었습니다.</span></div></div>';
 
     /* ── 1. 상태 배지 ── */
-    echo '<div class="card"><div class="sg-h2"><h2>① 상태 배지</h2><span class="w">지금 이 종목이 어떤 자리인가 — 네 계열이 서로 다른 시간축을 본다</span></div>'
+    echo '<div class="card"><div class="sg-h2"><h2>① 상태 배지</h2><span class="w">지금 이 종목이 어떤 자리인가 — 시세(시장)와 실적(SUE), 서로 다른 시간축의 두 계열</span></div>'
 
        . '<h3 style="font-size:13.5px;margin:14px 0 2px;color:#12406b">1-a. 시장지표 배지 — 최근 시세의 이례성 <span style="font-weight:600;color:#9aa7b4">(현황 카드 · 보유종목 · 매매히스토리)</span></h3>'
        . '<div class="sg-note" style="margin:2px 0 6px">임계치를 <b>넘은 것만</b>, 행동에 가까운 순으로 <b>최대 3개</b>만 띄웁니다 — 다 보여주면 아무것도 안 보입니다.'
@@ -10747,37 +10718,62 @@ table.sg code{background:#f2f6fa;border-radius:4px;padding:1px 4px;font-size:11.
        .   '<td class="crit"><b>3일</b> 이상 연속 (첫 낱말만 잘라 읽지 말 것 — 일수가 뜻입니다)</td>'
        .   '<td>단기 과매도/과열 국면 표시.</td></tr></table>'
 
-       . '<h3 style="font-size:13.5px;margin:18px 0 2px;color:#12406b">1-b. <b>퀀트신호</b> — 최고 거래대금 <b>신호일 하루</b>의 성격 <span style="font-weight:600;color:#9aa7b4">(퀀트 목록·관심종목의 「퀀트신호」 열 · 상승종목 대시보드)</span></h3>'
+       . '<h3 style="font-size:13.5px;margin:18px 0 2px;color:#12406b">1-b. <b>실적 (SUE)</b> — 분기 이익 서프라이즈 <span style="font-weight:600;color:#9aa7b4">(재무 스크리너 「SUE」 열 · 어닝 탭 · 관심종목 · 보유종목·현황의 종목명 옆 · 종목 상세 · 재무상세 차트 ▲▼ 마커)</span></h3>'
+       . '<table class="sg"><tr><th>SUE</th><th>판정 기준</th><th>어떻게 읽나</th></tr>'
+       . '<tr><td><b>SUE 값</b> <span class="muted">2.1 · 26.1Q</span></td><td class="crit">(당분기 영업이익 − 전년동기) ÷ σ(과거 최대 8개 분기 증감) — 당분기는 YTD 뺄셈·연결 우선</td>'
+       .   '<td>「예상 밖의 이익 변화가 평소 출렁임의 몇 배인가」. 8년 백테스트에서 5분위 단조 — 효과는 <b>상위 20% + 품질(YTD 영업흑자) + 매출동반</b>에 집중.</td></tr>'
+       . '<tr><td><span class="sue-b up">공시매수 +2.1<span class="sue-q">26.1Q</span></span></td><td class="crit">최신 분기 <b>SUE ≥ +1</b> (상위 20% 안팎)</td>'
+       .   '<td>공시 후 두 달 <b>상방</b> 드리프트가 실측된 자리 (어닝 탭·사례분석 참조). 재무상세 차트에는 접수일 다음 거래일에 ▲ 마커로도 찍힙니다.</td></tr>'
+       . '<tr><td><span class="sue-b dn">어닝쇼크 -1.4<span class="sue-q">26.1Q</span></span></td><td class="crit">최신 분기 <b>SUE ≤ −1</b></td>'
+       .   '<td>8년 중 거의 매년 음수·공시 후 두 달 <b>하방</b> 드리프트 — 회피 목록입니다. 차트에는 ▼ 마커.</td></tr></table>'
+       . '<div class="sg-note">★ <b>어닝쇼크는 ④ 포트폴리오 경보가 아닙니다</b> — 포트폴리오 경보 셋은 「내가 산 포지션」의 사정인데'
+       . ' SUE 는 <b>그 종목 자체의 사실</b>이라 사지 않은 종목에도 그대로 성립합니다. 그래서 목록에서도 포지션 칸(나이)이 아니라'
+       . ' <b>종목명 옆</b>에 붙습니다. ±1 안쪽은 배지를 그리지 않습니다(이례만 배지가 된다).</div>'
+       . '</div>';
+
+    /* ── 2. 퀀트 — 신호(그 날) 와 경로(그 뒤). 2026-08-02 사용자가 ① 상태에서 갈라낸 층이다:
+     *   시장·실적은 <b>종목의 상태</b>지만, 퀀트신호·경로는 <b>한 사건(최고 거래대금 신호일)</b>의 두 면이다. */
+    echo '<div class="card"><div class="sg-h2"><h2>② 퀀트 — 신호와 경로</h2>'
+       . '<span class="w">거래대금이 120거래일 중 최고인 날 하나 — 그 날의 성격(신호)과 그 뒤 가격이 걸어간 길(경로)</span></div>'
+       . '<h3 style="font-size:13.5px;margin:18px 0 2px;color:#12406b">2-a. <b>퀀트신호</b> — 최고 거래대금 <b>신호일 하루</b>의 성격 <span style="font-weight:600;color:#9aa7b4">(퀀트 목록·관심종목의 「퀀트신호」 열 · 상승종목 대시보드)</span></h3>'
        . '<div class="sg-note" style="margin:2px 0 6px">거래대금이 <b>120거래일 중 최고</b>인 날 하나를 20일 평균 대비 배수와 그날 등락률로 분류합니다.'
-       . ' 판정은 <b>나쁜 쪽 우선</b> — 매집형 조건과 추격주의가 겹치면 추격주의입니다.'
-       . ' <b>중립(어느 쪽도 아님)은 배지를 그리지 않습니다</b> — 빈 칸 = 중립 = 관망이며, 중립×돌파도 실측 동전(−1.23%·47.5%)입니다.</div>'
+       . ' 판정은 <b>매집형 · 중립 · 불꽃형</b> 셋 중 하나이고, <b>나쁜 쪽 우선</b>입니다 — 매집형 조건과 불꽃형이 겹치면 불꽃형입니다.'
+       . ' <b>셋 다 배지로 그립니다</b>(2026-08-02) — 빈 칸으로 두면 「중립이라고 판정한 것」과 「판정할 신호 이력이 없는 것」이 구별되지 않습니다.</div>'
        /* ★ 「표에는 세 가지가 있는데 화면엔 죄다 중립」이라는 오해를 막는다(2026-08-02 사용자 지적) —
         * 중립이 <b>가장 흔한 판정</b>이라는 사실이 문서에 없었다. 실측을 그대로 싣는다. */
        . '<div class="sg-note" style="margin:2px 0 8px;background:#f7fafc;border:1px solid #e9eff5;'
        . 'border-radius:8px;padding:8px 11px">★ <b>화면에서 「중립」이 자주 보이는 것이 정상입니다.</b>'
        . ' 실측 분포(krx_surge 전 이력 6,940건 · 하한 100억):<br>'
-       . '<span class="sr-none" style="font-size:12px">중립</span> <b>45.5%</b> · '
-       . '<span class="qb qb-exp">폭발형</span> <b>25.2%</b> · '
-       . '<span class="qb qb-chase">추격주의</span> <b>20.9%</b> · '
+       . '<span class="qb qb-neu">중립</span> <b>45.5%</b> · '
+       . '<span class="qb qb-flame">불꽃형</span> <b>46.1%</b> <span class="muted">(옛 폭발형 25.2 + 추격주의 20.9)</span> · '
        . '<span class="qb qb-acc">매집형</span> <b>8.4%</b><br>'
        . '거래대금 신고가의 <b>절반 가까이가 중립</b>이고, 매수 규칙이 걸리는 <b>매집형은 12건 중 1건</b>뿐입니다.'
-       . ' 배지가 안 보이는 날이 많은 것은 신호가 없어서가 아니라 <b>대부분이 관망 구간</b>이기 때문입니다.<br>'
-       . '<span class="muted">표기 차이: 목록(퀀트·관심종목)에서는 <b>빈 칸</b>, 종목 상세에서는 <b>「중립」</b>이라고 적습니다 —'
-       . ' 상세는 칸이 하나뿐이라 비워 두면 「중립」과 「신호 이력 없음(판정 불가)」이 구별되지 않습니다.</span></div>'
+       . ' 화면에 매집형이 드문 것은 신호가 없어서가 아니라 <b>대부분이 관망·금지 구간</b>이기 때문입니다.</div>'
        . '<table class="sg"><tr><th>퀀트신호</th><th>판정 기준</th><th>실측 (+20일 시장중앙 대비)</th></tr>'
        . '<tr><td><span class="qb qb-acc">매집형</span></td><td class="crit">20일 평균의 <b>5배 이하</b> ∧ 등락 <b>0~+10%</b> — 조용히 차오른 최고 거래대금</td>'
        .   '<td><span class="sg-good">+1.74% · 승률 55.2%</span> — 유일하게 견고히 이기는 무리. 단독(등락 조건 없이)은 후반기 부호가 반전해 등락 조건이 필수.</td></tr>'
-       . '<tr><td><span class="qb qb-exp">폭발형</span></td><td class="crit">20일 평균의 <b>20배 이상</b> 폭발</td>'
-       .   '<td><span class="sg-bad">−4.24% · 승률 36.7%</span> — 돌파해도 사지 않습니다.</td></tr>'
-       . '<tr><td><span class="qb qb-chase">추격주의</span></td><td class="crit">신호일 등락 <b>+20% 이상</b> 폭등</td>'
-       .   '<td><span class="sg-bad">−7.23% · 승률 34.6%</span> — 돌파율은 67.7%로 가장 높은데 사면 집니다(마지막 불꽃).</td></tr>'
+       . '<tr><td><span class="qb qb-neu">중립</span></td><td class="crit">위도 아래도 아닌 나머지 — 매집형인데 <b>하락하며</b> 찍었거나, 배수는 크지만 폭발 임계엔 못 미친 경우</td>'
+       .   '<td>−1.23% · 승률 47.5%(중립×돌파) — <b>동전</b>입니다. 가장 흔한 판정이고 행동은 관망.</td></tr>'
+       /* ★ 두 조건이 한 행이다 — 2026-08-02 사용자: 「폭발형과 추격주의는 같은 의미」.
+        * 수치를 한 칸에 합치지 않은 이유는 조건별로 잰 것이고 모집단이 겹치기 때문(검증 탭 ③ 주석과 같은 이야기). */
+       . '<tr><td><span class="qb qb-flame">불꽃형</span></td>'
+       .   '<td class="crit">20일 평균의 <b>20배 이상</b> 폭발 <b>또는</b> 신호일 등락 <b>+20% 이상</b> 폭등'
+       .     '<br><span class="muted">둘 중 하나만 걸려도 불꽃형 — 어느 쪽이 걸렸는지는 배지 툴팁에 적힙니다.</span></td>'
+       .   '<td><span class="sg-bad">20배↑ −4.24% · 승률 36.7%</span> / <span class="sg-bad">등락 +20%↑ −7.23% · 승률 34.6%</span><br>'
+       .     '<b>돌파해도 사지 않습니다</b>(돌파 매수 실측 −5.72% / −7.60%). 특히 폭등형은 돌파율이 67.7%로 가장 높은데'
+       .     ' 사면 집니다 — 가장 잘 가는 것처럼 보이는 자리가 가장 지는 자리(마지막 불꽃).</td></tr>'
        . '</table>'
+       . '<div class="sg-note">★ <b>불꽃형은 옛 「폭발형」과 「추격주의」를 합친 이름입니다</b>(2026-08-02) —'
+       . ' 거래대금이 터지든 주가가 터지든 <b>과열되어 터진 하루</b>라는 성격이 같고 처방도 하나(돌파해도 매수 금지)라'
+       . ' 배지를 둘로 나눠 둘 이유가 없었습니다. <b>합친 것은 이름이지 측정이 아닙니다</b> — 위 실측을 조건별로 남긴 것은'
+       . ' 두 조건의 모집단이 서로 겹쳐서, 합친 수치는 잰 적이 없기 때문입니다.'
+       . ' 실사례는 패턴분석의 <b>패턴4 「마지막 불꽃」</b>(등락 +20%↑)·<b>패턴5 「소문난 잔치」</b>(20배↑)에 갈라 두었습니다.</div>'
        . '<div class="sg-note">★ 예전에 이 자리에 있던 <b>급등⚠</b> 는 <b>1-a 시장</b>으로 옮겼습니다(2026-08-02) —'
        . ' 재는 것이 거래대금이 아니라 <b>가격의 최근 움직임</b>이라 시장지표와 같은 계열이고,'
        . ' 하루치 「<span class="mkt t-up">+16.2%</span>」와 <b>기간만 다르기</b> 때문입니다.'
        . ' 지금은 창별로 <span class="mkt t-up">20일 +112%</span> <span class="mkt t-up">40일 +139%</span> 처럼 따로 뜹니다.</div>'
 
-       . '<h3 style="font-size:13.5px;margin:18px 0 2px;color:#12406b">1-c. <b>최고 거래대금 박스</b> — 신호일 <b>이후의 경로</b> <span style="font-weight:600;color:#9aa7b4">(퀀트 목록·매집형 박스 추적·관심종목·어닝의 「최고 거래대금 박스」 열)</span></h3>'
+       . '<h3 style="font-size:13.5px;margin:18px 0 2px;color:#12406b">2-b. <b>퀀트 경로</b> — 신호일 <b>이후</b> 가격이 걸어간 길 <span style="font-weight:600;color:#9aa7b4">(= 「최고 거래대금 박스」)</span> <span style="font-weight:600;color:#9aa7b4">(퀀트 목록·매집형 박스 추적·관심종목·어닝의 「최고 거래대금 박스」 열)</span></h3>'
        . '<div class="sg-note" style="margin:2px 0 6px">신호일 고가 <b>H = 저항</b> · 저가 <b>L = 지지</b>가 박스입니다. 종가가 H를 넘으면 돌파, L을 깨면 붕괴 —'
        . ' 붕괴해도 아래 계단(현재 L 아래 레벨을 주는 최근 박스 2개의 H·L)이 <b>74.9%</b> 받아줍니다. 판정은 전부 <b>종가</b> 기준·계단 터치는 ±2%.</div>'
        . '<table class="sg"><tr><th>최고 거래대금 박스</th><th>뜻</th><th>어떻게 읽나</th></tr>'
@@ -10785,7 +10781,7 @@ table.sg code{background:#f2f6fa;border-radius:4px;padding:1px 4px;font-size:11.
        . '<tr><td><span class="bx bx-in">박스안 H+3.2%</span></td><td>박스 안 체류 중 (숫자 = 저항까지 거리)</td>'
        .   '<td>매집형 박스의 유통기한: 체류 1~3일 돌파율 59.9% → 11일 넘으면 37.5%로 급감. <b>10일 초과 시 N일⚠</b>이 붙고, 그 뒤의 돌파는 사도 실측 −6.68%.</td></tr>'
        . '<tr><td><span class="bx bx-brk">돌파✓</span></td><td>종가가 H를 넘음</td>'
-       .   '<td>🟢매집형이면 <b>매수 규칙 ①</b>(+2.26%·57.9%). 폭발형·추격주의의 돌파는 금지(−5.7~−7.6%).</td></tr>'
+       .   '<td>🟢매집형이면 <b>매수 규칙 ①</b>(+2.26%·57.9%). <b>불꽃형</b>의 돌파는 금지(−5.7~−7.6%).</td></tr>'
        . '<tr><td><span class="bx bx-fake">가짜돌파</span></td><td>돌파 후 <b>5일 내</b> H 아래로 재진입</td><td>돌파 실패 — 재돌파를 기다립니다(SK하이닉스 5/13→5/26 재돌파가 실체였던 사례).</td></tr>'
        . '<tr><td><span class="bx bx-fake">돌파후반락 12일</span></td><td>돌파 후 <b>늦게</b> 반락 (5일 이후)이고'
        .   ' <b>지지선 L 은 아직 지키는 중</b><br>'
@@ -10807,21 +10803,32 @@ table.sg code{background:#f2f6fa;border-radius:4px;padding:1px 4px;font-size:11.
        . '<tr><td><span class="bx bx-dn">지지이탈↓</span></td><td>알려진 계단을 <b>전부</b> 종가로 뚫고 내려감</td><td>지지 구조 소멸 — 붕괴의 2.5%뿐인 드문 사건이라 더 무겁게 읽습니다. 보유종목이면 ④의 계단관통↓ 경보로 이어집니다.</td></tr>'
        . '<tr><td><span class="bx bx-dn">붕괴·표류</span></td><td>붕괴했는데 닿을 계단이 없음 (첫 박스 등)</td><td>받아줄 곳이 없는 상태 — 패턴분석의 「첫 폭발」이 이 경로의 전형입니다.</td></tr></table>'
 
-       . '<h3 style="font-size:13.5px;margin:18px 0 2px;color:#12406b">1-d. <b>SUE</b> — 분기 실적 서프라이즈 <span style="font-weight:600;color:#9aa7b4">(재무 스크리너 「SUE」 열 · 어닝 탭 · 관심종목 · 보유종목·현황의 종목명 옆 · 종목 상세 · 재무상세 차트 ▲▼ 마커)</span></h3>'
-       . '<table class="sg"><tr><th>SUE</th><th>판정 기준</th><th>어떻게 읽나</th></tr>'
-       . '<tr><td><b>SUE 값</b> <span class="muted">2.1 · 26.1Q</span></td><td class="crit">(당분기 영업이익 − 전년동기) ÷ σ(과거 최대 8개 분기 증감) — 당분기는 YTD 뺄셈·연결 우선</td>'
-       .   '<td>「예상 밖의 이익 변화가 평소 출렁임의 몇 배인가」. 8년 백테스트에서 5분위 단조 — 효과는 <b>상위 20% + 품질(YTD 영업흑자) + 매출동반</b>에 집중.</td></tr>'
-       . '<tr><td><span class="sue-b up">공시매수 +2.1<span class="sue-q">26.1Q</span></span></td><td class="crit">최신 분기 <b>SUE ≥ +1</b> (상위 20% 안팎)</td>'
-       .   '<td>공시 후 두 달 <b>상방</b> 드리프트가 실측된 자리 (어닝 탭·사례분석 참조). 재무상세 차트에는 접수일 다음 거래일에 ▲ 마커로도 찍힙니다.</td></tr>'
-       . '<tr><td><span class="sue-b dn">어닝쇼크 -1.4<span class="sue-q">26.1Q</span></span></td><td class="crit">최신 분기 <b>SUE ≤ −1</b></td>'
-       .   '<td>8년 중 거의 매년 음수·공시 후 두 달 <b>하방</b> 드리프트 — 회피 목록입니다. 차트에는 ▼ 마커.</td></tr></table>'
-       . '<div class="sg-note">★ <b>어닝쇼크는 ④ 포트폴리오 경보가 아닙니다</b> — 포트폴리오 경보 셋은 「내가 산 포지션」의 사정인데'
-       . ' SUE 는 <b>그 종목 자체의 사실</b>이라 사지 않은 종목에도 그대로 성립합니다. 그래서 목록에서도 포지션 칸(나이)이 아니라'
-       . ' <b>종목명 옆</b>에 붙습니다. ±1 안쪽은 배지를 그리지 않습니다(이례만 배지가 된다).</div>'
+       /* ── 2-c. 퀀트 매수원칙 — 2026-08-02 사용자가 ③ 행동에서 옮겨 온 절.
+        *   트리거는 룰셋이 내는 「오늘의 행동」이 아니라 <b>2-a × 2-b 의 조합</b>이라 여기가 제자리다. */
+       . '<h3 style="font-size:13.5px;margin:18px 0 2px;color:#12406b">2-c. <b>퀀트 매수원칙</b> — <b>2-a × 2-b</b> 가 겹치는 두 자리만 산다 <span style="font-weight:600;color:#9aa7b4">(관심종목의 「트리거」 열)</span></h3>'
+       . '<div class="sg-note" style="margin:2px 0 6px">백테스트로 <b>검증된 매수규칙은 둘뿐</b>입니다 — 퀀트신호와 경로의'
+       . ' <b>특정 조합</b>에서만 실측 우위가 있었습니다. 그 밖은 전부 관망이고, 매도 규칙도 진입한 규칙마다 다릅니다.'
+       . ' 근거 전문은 <a href="/stock/index.php?mode=quantstat">검증 탭 ④~⑥</a>.</div>'
+       . '<table class="sg"><tr><th>트리거</th><th>조건 (2-a × 2-b)</th><th>실측 · 매도 규칙</th></tr>'
+       . '<tr><td><span class="wl-go">🟢 돌파확인</span></td>'
+       .   '<td class="crit"><span class="qb qb-acc">매집형</span> × <span class="bx bx-brk">돌파✓</span>'
+       .     ' <span class="muted">(종가가 저항 H 위)</span></td>'
+       .   '<td>실측 <b>+2.26%</b> · 승률 <b>57.9%</b> — 매도는 <b>한 계단 유예</b>(T① · 시간 규칙 없음).</td></tr>'
+       . '<tr><td><span class="wl-go">🟢 계단지지</span></td>'
+       .   '<td class="crit"><span class="qb qb-acc">매집형</span> × <span class="bx bx-lad">계단지지 N단</span>'
+       .     ' <span class="muted">(⚠ 없음 = 아래층 박스 3개↑)</span></td>'
+       .   '<td>실측 <b>+2.40%</b> · 승률 <b>58.5%</b> — 매도는 <b>20거래일 잠금 후 손절선</b>(T②).</td></tr>'
+       . '<tr><td><span class="sg-none">관망</span></td>'
+       .   '<td class="crit"><b>그 외 전부</b> — <span class="qb qb-neu">중립</span>·<span class="qb qb-flame">불꽃형</span>'
+       .     ' / 트리거 전 <span class="qb qb-acc">매집형</span> / <span class="bx bx-lad">계단지지 1단⚠</span>'
+       .     ' <span class="bx bx-lad">2단 시험중</span> / <span class="bx bx-dn">지지이탈↓</span></td>'
+       .   '<td><b>관망이 비어 보여도 그것이 답입니다.</b> 검증된 두 규칙 밖은 실측 우위가 없습니다.</td></tr></table>'
+       . '<div class="sg-note">★ 트리거는 <b>③ 행동의 「신호」와 다릅니다</b> — 신호는 <b>룰셋 차수표</b>가 내는 오늘의 행동이고,'
+       . ' 트리거는 <b>퀀트 조합</b>이 「지금이 그 두 자리 중 하나」라고 알리는 것입니다. 그래서 이 절이 ② 퀀트에 있습니다.</div>'
        . '</div>';
 
-    /* ── 2. 행동 신호 ── */
-    echo '<div class="card"><div class="sg-h2"><h2>② 행동 신호</h2><span class="w">오늘 무엇을 하라는 것인가 — 상태 배지와 달리 이것만이 매매 지시다</span></div>'
+    /* ── 3. 행동 신호 ── */
+    echo '<div class="card"><div class="sg-h2"><h2>③ 행동 신호</h2><span class="w">오늘 무엇을 하라는 것인가 — 상태 배지와 달리 이것만이 매매 지시다</span></div>'
        . '<table class="sg"><tr><th>신호</th><th>누가 계산하나</th><th>판정 기준</th></tr>'
        . '<tr><td><b>매수</b></td><td>룰셋 차수표 (현황 카드·보유종목)</td>'
        .   '<td class="crit">현재가 ≤ 다음 차수 이론가 — 계획 수량·금액은 누적목표(한도 × Σ비중)에서 옵니다.</td></tr>'
@@ -10829,21 +10836,8 @@ table.sg code{background:#f2f6fa;border-radius:4px;padding:1px 4px;font-size:11.
        .   '<td class="crit">이미 친 차수인데 <b>누적목표를 덜 채웠고</b> 현재가가 아직 그 차수 이론가 이하 — 카드에 「그 차수 누적목표 미달」로 이유가 적힙니다.</td></tr>'
        . '<tr><td><b>매도</b></td><td>룰셋 차수표</td><td class="crit">현재가 ≥ 탈출가(평균단가 × (1+목표)) — 매도가 항상 맨 위에 정렬됩니다.</td></tr>'
        . '<tr><td><b>대기</b></td><td>룰셋 차수표</td><td class="crit">위 어느 것도 아님 — 아무것도 안 하는 것이 계획입니다.</td></tr>'
-       . '<tr><td><b>트리거</b></td><td>퀀트 매수규칙<br><span class="muted">(관심종목 「트리거」 열)</span></td>'
-       .   '<td class="crit">'
-       .   '<div class="sg-rule"><span class="wl-go">🟢 돌파확인</span>'
-       .     '<span class="c"><span class="qb qb-acc">매집형</span> × 최고 거래대금 박스 <span class="bx bx-brk">돌파✓</span>'
-       .     ' <span class="muted">(종가가 저항 H 위)</span>'
-       .     '<span class="a">→ 실측 <b>+2.26%</b> · 승률 57.9%. 매도는 <b>한 계단 유예</b>(T①·시간 규칙 없음).</span></span></div>'
-       .   '<div class="sg-rule"><span class="wl-go">🟢 계단지지</span>'
-       .     '<span class="c"><span class="qb qb-acc">매집형</span> × 최고 거래대금 박스 <span class="bx bx-lad">계단지지 N단</span>'
-       .     ' <span class="muted">(⚠ 없음 = 아래층 박스 3개↑)</span>'
-       .     '<span class="a">→ 실측 <b>+2.40%</b> · 승률 58.5%. 매도는 <b>20거래일 잠금 후 손절선</b>(T②).</span></span></div>'
-       .   '<div class="sg-rule"><span class="sg-none">관망</span>'
-       .     '<span class="c"><b>그 외 전부</b> — 중립·폭발형·추격주의 / 트리거 전 매집형 /'
-       .     ' <span class="bx bx-lad">계단지지 1단⚠</span> <span class="bx bx-lad">2단 시험중</span> / <span class="bx bx-dn">지지이탈↓</span>'
-       .     '<span class="a">→ <b>관망이 비어 보여도 그것이 답입니다.</b> 검증된 두 규칙 밖은 실측 우위가 없습니다.</span></span></div>'
-       .   '</td></tr>'
+       /* ⊖ 「트리거」 행은 2026-08-02 사용자 지시로 <b>2-c 퀀트 매수원칙</b>으로 옮겼다 —
+        *   룰셋이 내는 행동이 아니라 퀀트신호 × 경로의 조합이라 ② 퀀트가 제자리다. */
        . '<tr><td><b>신뢰도 라벨</b></td><td>행동 신호 × 시장 상태<br><span class="muted">(카드·표에 덧붙음)</span></td>'
        .   '<td class="crit">'
        .   '<div class="sg-rule"><span class="sig-conf lv-caution">△ 주의 — 하락추세</span>'
@@ -10866,18 +10860,14 @@ table.sg code{background:#f2f6fa;border-radius:4px;padding:1px 4px;font-size:11.
        .   ' 급등락 판정(3σ ∨ 15%)은 배지와 같은 기준입니다.</div>'
        .   '</td></tr></table>'
        . '<div class="sg-note">행동 신호가 상태 배지와 반대로 보일 수 있습니다 — 사다리는 떨어질 때 사는 구조라 매수 신호는 대개'
-       . ' 나쁜 상태(급락·역배열)와 같이 옵니다. 그래서 상태가 행동을 <b>막지 않고</b>, 신뢰도 라벨로 <b>속도만 보정</b>합니다.</div></div>';
+       . ' 나쁜 상태(급락·역배열)와 같이 옵니다. 그래서 상태가 행동을 <b>막지 않고</b>, 신뢰도 라벨로 <b>속도만 보정</b>합니다.</div>'
+       . '<div class="sg-note">★ <b>트리거</b>(🟢 돌파확인 · 🟢 계단지지)는 여기가 아니라 <b>2-c 퀀트 매수원칙</b>에 있습니다 —'
+       . ' 룰셋 차수표가 내는 오늘의 행동이 아니라 <b>퀀트신호 × 경로의 조합</b>이기 때문입니다.</div></div>';
 
-    /* ── 3. 실행 게이트 ── */
-    echo '<div class="card"><div class="sg-h2"><h2>③ 실행 게이트</h2><span class="w">그 행동을 실제로 할 수 있는가 — 돈과 물량, 같은 질문의 두 축</span></div>'
-       . '<div class="sg-note" style="margin:2px 0 6px">실행 게이트는 <b>분할 경고 둘뿐</b>입니다 — 문제가 있을 때만 뜨고, 그 외에는 침묵합니다(성공은 조용히).</div>'
-       . '<table class="sg"><tr><th>표시</th><th>판정 기준</th><th>어떻게 읽나</th></tr>'
-       . '<tr><td><span class="sig-fill split">△ 분할 권장 (7.2%)</span></td><td class="crit">계획 수량이 일평균 거래량의 <b>5% 이상</b> (얇은 종목은 <b>2%</b>부터)</td>'
-       .   '<td>얇은 종목은 호가가 비어 있어 같은 참여율도 몇 호가 위로 밀립니다 — 기준을 한 단계 올려 봅니다. 5% 미만이면 침묵.</td></tr>'
-       . '<tr><td><span class="sig-fill hard">⚠ 3일 분할 필요</span></td><td class="crit">일평균 거래량의 <b>10% 이상</b> (일수 = 참여율 ÷ 10%)</td>'
-       .   '<td>하루에 담으면 내가 가격을 밀어올립니다 — 며칠에 나눠 담습니다. 툴팁의 추정 슬리피지는 √법칙(변동성×√참여율) 하한입니다.</td></tr></table></div>';
+    /* ⊖ 「③ 실행 게이트」 카드는 2026-08-02 사용자 지시로 삭제 — 층이 통째로 없어졌다.
+     *   판정 함수 pf_fill_gate 도 함께 지웠다(lib/calc.php 그 자리의 주석 참조). */
 
-    /* ── 4. 경보 ── */
+    /* ── 4. 포트폴리오 ── */
     echo '<div class="card"><div class="sg-h2"><h2>④ 포트폴리오 — 판단 소집</h2>'
        . '<span class="w">내가 산 포지션에서만 성립하는 셋 · 자동 조치 없음 — 기계식 손절·동결은 백테스트에서 수익을 깎았다</span></div>'
        . '<table class="sg"><tr><th>포트폴리오</th><th>판정 기준</th><th>무엇을 다시 판단하나</th></tr>'
@@ -10889,15 +10879,15 @@ table.sg code{background:#f2f6fa;border-radius:4px;padding:1px 4px;font-size:11.
        .   '<td>사다리의 전제(반등을 받아줄 지지 구조)가 소멸했다는 신호 — 백테스트에서 이 오버레이가 물림을 <b>11.3→5.2%</b>로 줄였습니다(비용 중앙 −0.8%p). 시뮬레이터의 「계단관통 손절」 옵션으로 이 종목에서의 효과를 확인할 수 있습니다.</td></tr>'
        . '</table>'
        . '<div class="sg-note">★ <b>이 셋뿐입니다</b> — 셋 다 <b>내가 산 포지션</b>의 사정이라, 사지 않은 종목에는 뜻이 없습니다.'
-       . ' <span class="sue-b dn">어닝쇼크 -1.4<span class="sue-q">26.1Q</span></span>는 여기가 아니라 <b>① SUE</b> 입니다(종목 자체의 사실).'
-       . ' ①의 <span class="bx bx-in">박스안 24일⚠</span> ·'
+       . ' <span class="sue-b dn">어닝쇼크 -1.4<span class="sue-q">26.1Q</span></span>는 여기가 아니라 <b>①-b 실적</b>입니다(종목 자체의 사실).'
+       . ' <b>②</b>의 <span class="bx bx-in">박스안 24일⚠</span> ·'
        . ' <span class="bx bx-lad">계단지지 1단⚠</span> 처럼 <b>⚠ 가 붙은 상태 배지도 여기가 아니라 강등</b>입니다'
        . ' — 「이 상태의 좋은 규칙이 여기엔 적용 안 된다」는 뜻이라 <b>아직 안 산 종목</b>을 거르는 쪽에서 씁니다.</div>'
        . '<div class="sg-note">★ <b>손절 플레이북</b>: 자동 손절은 없지만, <span class="mkt t-risk">계단관통↓</span>(수급 구조 소멸)과'
        . ' <span class="sue-b dn">어닝쇼크 -1.4<span class="sue-q">26.1Q</span></span>(실적 반증)가 <b>겹치는 자리</b>가 손절을 판단하는 자리입니다 — 층은 다르지만 함께 봅니다.'
        . ' 매도 규칙 자체는 검증 탭 ⑤: 돌파 진입 = 한 계단 유예 · 계단지지 진입 = 20거래일 보유 후 손절선.</div></div>';
 
-    /* ── 5. 화면별 지도 — ①상태를 a시장/b신호/c박스/d실적 으로 세분한 ○·✕ 매트릭스 (2026-08-02 사용자).
+    /* ── 5. 화면별 지도 — ①상태(a시장/b실적) × ②퀀트(a신호/b경로) 로 세분한 ○·✕ 매트릭스 (2026-08-02 사용자).
      * ★ 표의 O/X 는 <b>코드에서 확인한 것</b>이다(추측 금지 — 지도가 틀리면 지도가 아니다):
      *   매매히스토리엔 시장 배지가 없고(체결 당일 상태는 <b>종목 상세</b>·시뮬레이터에 있다),
      *   박스 열은 어닝 탭엔 있고 스크리너엔 없다. 화면을 고치면 이 표도 같이 고친다. */
@@ -10907,76 +10897,88 @@ table.sg code{background:#f2f6fa;border-radius:4px;padding:1px 4px;font-size:11.
     };
     echo '<div class="card"><h2>화면별 지도 — 어느 화면에 어떤 배지가 뜨나</h2>'
        . '<table class="sg sg-map"><tr>'
-       .   '<th rowspan="2">화면</th><th colspan="4" class="ctr">① 상태</th>'
-       .   '<th rowspan="2" class="ctr">② 행동</th><th rowspan="2" class="ctr">③ 실행</th>'
+       .   '<th rowspan="2">화면</th><th colspan="2" class="ctr">① 상태</th>'
+       .   '<th colspan="3" class="ctr">② 퀀트</th>'
+       .   '<th rowspan="2" class="ctr">③ 행동</th>'
        .   '<th rowspan="2" class="ctr">④ 포트폴리오</th><th rowspan="2">그 화면의 질문</th></tr>'
-       . '<tr><th class="ctr">a 시장</th><th class="ctr">b 퀀트신호</th>'
-       .   '<th class="ctr">c 최고 거래대금 박스</th><th class="ctr">d 실적(SUE)</th></tr>'
+       . '<tr><th class="ctr">a 시장</th><th class="ctr">b 실적(SUE)</th>'
+       .   '<th class="ctr">a 퀀트신호</th><th class="ctr">b 퀀트 경로</th><th class="ctr">c 트리거</th></tr>'
 
        . '<tr><td><a href="/stock/index.php">현황 (오늘의 신호)</a></td>'
        .   $ox(true, '역배열 · 급락 −15.4% · 52주 최저권 — 신호 카드마다 최대 3개')
        .   $ox(false) . $ox(false) . $ox(false)
+       .   $ox(false)
        .   $ox(true, '매도 · 매수 · 잔여매수 · 대기 + 신뢰도(◎ 근거 강함 / △ 주의)')
-       .   $ox(true, '△ 분할 권장 · ⚠ N일 분할 필요 (신호 카드에만)')
        .   $ox(true, '장기물림 · N차 지연 · 계단관통↓ — 종목 표의 「나이」 칸')
        .   '<td>오늘 실행할 것이 있나</td></tr>'
 
        . '<tr><td><a href="/stock/index.php?mode=all">보유종목</a></td>'
        .   $ox(true, '역배열 · 과매도 RSI 28 등 — 「시장」 열')
        .   $ox(false) . $ox(false) . $ox(false)
-       .   $ox(true, '매도 · 매수 · 잔여매수 · 대기 + 신뢰도 — 「신호」 열')
        .   $ox(false)
+       .   $ox(true, '매도 · 매수 · 잔여매수 · 대기 + 신뢰도 — 「신호」 열')
        .   $ox(true, '장기물림 · N차 지연 · 계단관통↓ — 포트폴리오 경보가 전부 모이는 화면')
        .   '<td>들고 있는 것들이 지금 어떤가</td></tr>'
 
        . '<tr><td><a href="/stock/index.php?mode=position&id=1">종목 상세</a></td>'
        .   $ox(true, '「시장」 줄의 배지 + 체결 이력의 그 날 시장 상태(산 날 기준으로 다시 계산)')
-       .   $ox(false) . $ox(false) . $ox(false)
+       .   $ox(true, 'SUE 칸 — 배지(공시매수·어닝쇼크) 또는 ±1 안쪽이면 값만')
+       .   $ox(true, '「퀀트 : 최고 거래대금」 상자의 「신호」 — 목록과 같은 판정')
+       .   $ox(true, '같은 상자의 「경로」 — 신호일 이후 박스가 어떻게 됐나')
+       .   $ox(false)
        .   $ox(true, '신뢰도(◎ 근거 강함 / △ 주의) — 현황 카드와 같은 판정')
-       .   $ox(true, '△ 분할 권장 · ⚠ N일 분할 필요')
        .   $ox(true, '장기물림 · N차 지연 · 계단관통↓ — 「포트폴리오」 칸 (목록과 같은 판정)')
        .   '<td>이 한 종목을 지금 어떻게 할까</td></tr>'
 
        . '<tr><td><a href="/stock/index.php?mode=hist">매매히스토리</a></td>'
        .   $ox(false) . $ox(false) . $ox(false) . $ox(false)
+       .   $ox(false)
        .   $ox(true, '잘 담았음 / 이르게 팔았음 — 오늘의 지시가 아니라 지난 행동의 채점')
-       .   $ox(false) . $ox(false)
+       .   $ox(false)
        .   '<td>그때의 판단이 맞았나 (되짚기)</td></tr>'
 
        . '<tr><td><a href="/stock/index.php?mode=watch">관심종목</a></td>'
        .   $ox(true, '20·40거래일 모멘텀 칩(「20일 +112%」)만 — 하루치 지표(역배열·RSI 등)는 pf_daily 가 보유·관심 종목만 담아 여기엔 없습니다')
-       .   $ox(true, '매집형 · 폭발형 · 추격주의 — 최근 신호일 기준')
-       .   $ox(true, '박스안 H+5.2% · 돌파✓ · 계단지지 N단 · 지지이탈↓')
        .   $ox(true, 'SUE 값 (최신 분기) — 어닝 탭과 같은 계산')
+       .   $ox(true, '매집형 · 중립 · 불꽃형 — 최근 신호일 기준')
+       .   $ox(true, '박스안 H+5.2% · 돌파✓ · 계단지지 N단 · 지지이탈↓')
        .   $ox(true, '🟢 돌파확인 · 🟢 계단지지 — 검증된 매수규칙 둘만. 그 외는 관망')
        .   $ox(false) . $ox(false)
        .   '<td>담아 둔 것 중 오늘 살 자리가 왔나 (관제탑)</td></tr>'
 
        . '<tr><td><a href="/stock/index.php?mode=quant">퀀트 목록</a></td>'
        .   $ox(true, '20·40거래일 모멘텀 칩(「20일 +112%」)만 — 하루치 지표(역배열·RSI 등)는 pf_daily 가 보유·관심 종목만 담아 여기엔 없습니다')
-       .   $ox(true, '매집형 · 폭발형 · 추격주의 (중립은 빈 칸)')
+       .   $ox(false)
+       .   $ox(true, '매집형 · 중립 · 불꽃형 — 셋 다 배지로 뜹니다')
        .   $ox(true, '新박스 · 박스안 · 돌파✓ · 계단지지 N단 · 지지이탈↓ · 붕괴·표류')
-       .   $ox(false) . $ox(false) . $ox(false) . $ox(false)
+       .   $ox(false)
+       .   $ox(false) . $ox(false)
        .   '<td>오늘 새로 발견할 것이 있나</td></tr>'
 
        . '<tr><td><a href="/stock/index.php?mode=fund">재무 스크리너</a></td>'
-       .   $ox(false) . $ox(false) . $ox(false)
+       .   $ox(false)
        .   $ox(true, 'SUE 열 (≥1 굵게) · 재무상세 차트의 ▲공시매수 ▼어닝쇼크 마커')
-       .   $ox(false) . $ox(false) . $ox(false)
+       .   $ox(false)
+       .   $ox(false) . $ox(false)
+       .   $ox(false) . $ox(false)
        .   '<td>실적으로 걸러낼 것이 있나</td></tr>'
 
        . '<tr><td><a href="/stock/index.php?mode=earn">어닝 서프라이즈</a></td>'
-       .   $ox(false) . $ox(false)
-       .   $ox(true, '박스 열 — 실적으로 고르고 수급(박스)으로 타이밍을 보는 다리')
+       .   $ox(false)
        .   $ox(true, 'SUE · 규칙 충족 여부')
-       .   $ox(false) . $ox(false) . $ox(false)
+       .   $ox(false)
+       .   $ox(true, '박스 열 — 실적으로 고르고 수급(박스)으로 타이밍을 보는 다리')
+       .   $ox(false)
+       .   $ox(false) . $ox(false)
        .   '<td>공시가 난 것 중 살 만한 게 있나</td></tr>'
 
        . '<tr><td><a href="/stock_analysis.php?mode=updash" target="_blank">상승종목 대시보드</a></td>'
        .   $ox(true, '20·40거래일 모멘텀 칩(「20일 +112%」)만 — 하루치 지표(역배열·RSI 등)는 pf_daily 가 보유·관심 종목만 담아 여기엔 없습니다')
-       .   $ox(true, '🟢매집형 · 폭발형 · 추격주의 — 오늘 최고 거래대금을 넘긴 종목만(장중 잠정)')
+       .   $ox(false)
+       .   $ox(true, '🟢매집형 · 중립 · 불꽃형 — 오늘 최고 거래대금을 넘긴 종목만(장중 잠정)')
        .   $ox(true, '최근 신호 박스의 현재 상태')
-       .   $ox(false) . $ox(false) . $ox(false) . $ox(false)
+       .   $ox(false)
+       .   $ox(false) . $ox(false)
        .   '<td>오늘 오르는 것 중 구조가 좋은 게 있나</td></tr></table>'
        . '<div class="sg-note"><b>○</b> = 그 층의 배지가 뜬다(칸에 마우스를 올리면 실제로 뜨는 배지) · <b>✕</b> = 안 뜬다.'
        . ' 배지의 생김새와 판정 기준은 위 ①~④ 절에 있습니다.</div>'
@@ -10986,8 +10988,8 @@ table.sg code{background:#f2f6fa;border-radius:4px;padding:1px 4px;font-size:11.
     echo '<div class="card"><h2>다섯 가지 공통 원칙</h2><div style="font-size:13px;line-height:2">'
        . '1. <b>임계값은 전부 실측에서 왔다</b> — 5배·20배·+20%·floors≥3·10일·2년·5차 같은 숫자는 감이 아니라 백테스트 측정값이고, 근거 전문이 <a href="/stock/index.php?mode=quantstat">검증 탭</a>에 있다.<br>'
        . '2. <b>이례적인 것만 배지가 된다</b> — 임계를 넘지 않으면 침묵한다. 배지가 없는 것도 정보다'
-       . ' (중립 신호·집계 전 박스는 그리지 않고, 실행 게이트는 분할 경고 둘만 남겼다).<br>'
-       . '3. <b>나쁜 쪽 우선 판정</b> — 좋은 조건과 나쁜 조건이 겹치면 나쁜 쪽으로 분류한다(매집형+폭등 = 추격주의).<br>'
+       . ' (집계 전 박스는 그리지 않는다). ⊖ 실행 게이트(분할 경고 둘)는 근거가 지정값이라 2026-08-02 삭제했다.<br>'
+       . '3. <b>나쁜 쪽 우선 판정</b> — 좋은 조건과 나쁜 조건이 겹치면 나쁜 쪽으로 분류한다(매집형+폭등 = 불꽃형).<br>'
        . '4. <b>경보는 소집이지 명령이 아니다</b> — 자동 손절·자동 차단은 백테스트에서 승자까지 잘랐다. 화면은 판단할 <b>지점</b>만 기억해 준다.<br>'
        . '5. <b>층이 다르면 같이 떠도 모순이 아니다</b> — 매수 신호(행동)와 역배열(상태)은 흔히 공존한다. 사다리는 원래 떨어질 때 사는 구조다.'
        . '</div></div>';

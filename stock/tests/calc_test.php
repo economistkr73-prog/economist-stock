@@ -1064,20 +1064,12 @@ t_eq('참여율 300%면 충격은 σ 로 상한', 0.02,
 t_eq('계획 수량 0이면 참여율 없음', null, $liqDeep['part']);
 t_eq('표본 부족이면 전부 null',     null, pf_liquidity($bars([100.0, 101.0]))['grade']);
 
-t_head('★ 체결 게이트 — 돈이 있어도 물량이 없으면 못 산다');
+/* ⊖ 「체결 게이트(pf_fill_gate)」 시험 7건은 2026-08-02 삭제 — 실행 게이트를 통째로 지웠다.
+ *   위 참여율·분할일수·시장충격 시험은 남긴다(측정은 그대로 살아 있고, 판정만 없어졌다). */
 $mkL = fn(float $part, string $grade) => ['part' => $part, 'days' => max(1, (int)ceil($part / 0.10)),
                                           'grade' => $grade, 'avg_val' => 0, 'thin_ratio' => 0];
-t_eq('2% → 충분',        'ok',    pf_fill_gate($mkL(0.02, 'deep'))['level']);
-t_eq('7% → 분할 권장',   'split', pf_fill_gate($mkL(0.07, 'deep'))['level']);
-t_eq('11.5% → 분할 필요', 'hard',  pf_fill_gate($mkL(0.115, 'very_thin'))['level']);
-t_eq('11.5%면 2일',      '2일 분할 필요', pf_fill_gate($mkL(0.115, 'very_thin'))['label']);
-/* ★ 얇은 종목은 한 단계 올려 본다 — 평균 거래량은 "하루에 여러 번 나눠 거래된 결과"일 뿐
- *   지금 호가에 그만큼이 걸려 있지 않다. 실측(한국주철관 849주 = 3.6%)에서 호가를 훑으면 +1.4% 밀렸다. */
-t_eq('얇은 종목 3.6%는 분할 권장', 'split', pf_fill_gate($mkL(0.036, 'thin'))['level']);
-t_eq('풍부한 종목 3.6%는 충분',    'ok',    pf_fill_gate($mkL(0.036, 'deep'))['level']);
-t_eq('계획 수량 없으면 판정 없음', 'ok',    pf_fill_gate($liqDeep)['level']);
 
-t_head('유동성 배지 — 세우지 않는다 (2026-08-02 사용자 지시 · 「유동성」 열과 체결 게이트가 전담)');
+t_head('유동성 배지 — 세우지 않는다 (2026-08-02 사용자 지시 · 얇음은 「★ 거래량 N배」로만 드러난다)');
 $sgL = fn(array $o, array $l) => array_column(pf_market_signals(array_merge($base, $o), 9, $l), 'key');
 t_eq('매우 얇아도 배지 없음', false, in_array('illiq', $sgL([], $mkL(0, 'very_thin')), true));
 t_eq('유동성 정보가 없어도 배지 없음', false, in_array('illiq', $sg([]), true));

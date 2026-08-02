@@ -1612,40 +1612,11 @@ function pf_liquidity(array $bars, int $planQty = 0, ?float $sd20 = null, float 
     return $out;
 }
 
-/* 유동성 등급 라벨(풍부/보통/얇음/매우 얇음)은 2026-08-02 사용자 지시로 화면에서 삭제 —
- * 유동성 열은 숫자(일평균 거래대금·참여율)만 보여 준다. grade 값 자체는 체결 게이트가 계속 쓴다. */
-
-/**
- * 체결 게이트 — 예수금 게이트의 짝. <b>돈이 있어도 물량이 없으면 못 산다.</b>
- *
- * ★ 판정은 참여율로 한다. 하루 거래량의 몇 %를 내가 차지하는가 —
- *   5% 이하면 사실상 티가 안 나고, 10%를 넘으면 내가 가격을 밀어올린다.
- * ★ 얇은 종목(thin/very_thin)은 참여율이 낮아도 한 단계 올려 본다. 호가가 비어 있어서
- *   평균 거래량이 "평소 여러 번 나눠 거래된 결과"일 뿐, 지금 당장 그만큼이 걸려 있지 않다.
- *
- * @return array ['level'=>'ok'|'split'|'hard', 'label'=>, 'why'=>]
- */
-function pf_fill_gate(array $liq): array
-{
-    $p = $liq['part'];
-    if ($p === null) return ['level' => 'ok', 'label' => '', 'why' => ''];
-
-    $pct  = number_format($p * 100, 1) . '%';
-    $days = (int)($liq['days'] ?? 1);
-    $thin = in_array($liq['grade'], ['thin', 'very_thin'], true);
-
-    if ($p >= 0.10) {
-        return ['level' => 'hard', 'label' => $days . '일 분할 필요',
-                'why'   => '계획 수량이 일평균 거래량의 ' . $pct . '입니다 — 하루에 담으면 내가 가격을 밀어올립니다.'];
-    }
-    if ($p >= 0.05 || ($thin && $p >= 0.02)) {
-        return ['level' => 'split', 'label' => '분할 권장 (' . $pct . ')',
-                'why'   => '일평균 거래량의 ' . $pct . '입니다'
-                         . ($thin ? ' — 호가가 얇아 한 번에 치면 몇 호가 위로 밀립니다.' : '.')];
-    }
-    return ['level' => 'ok', 'label' => '유동성 충분 (' . $pct . ')',
-            'why'   => '일평균 거래량의 ' . $pct . '이라 체결에 무리가 없습니다.'];
-}
+/* ⊖ <b>실행 게이트(체결 게이트 `pf_fill_gate`)는 2026-08-02 사용자 지시로 삭제했다.</b>
+ * 「△ 분할 권장」·「⚠ N일 분할 필요」 배지와 배지 층 ③ 실행이 통째로 없어졌다 —
+ * 참여율 임계(5%·10%·얇으면 2%)는 백테스트가 아니라 지정값이었고, 화면은 3층(상태·행동·포트폴리오)이 됐다.
+ * ★ 측정 자체는 남아 있다 — pf_liquidity 의 part/days/impact 를 부르면 언제든 다시 판정할 수 있다.
+ * ★ grade 는 계속 쓰인다(pf_market_signals 의 「★ 거래량 N배」 = 얇은 종목 강조). */
 
 /**
  * 시장 신호 배지 — 임계치를 <b>넘은 것만</b> 만든다.

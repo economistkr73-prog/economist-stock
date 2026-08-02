@@ -195,8 +195,8 @@ echo <<<'PAGE'
     font-weight:700;vertical-align:middle;line-height:1.5;letter-spacing:.01em;white-space:nowrap;}
   .qb-acc{background:#12341f;color:#5dd58a;border:1px solid #1e5c3a;}     /* 🟢매집형 */
   .qb-neu{background:#1e2637;color:#93a4c3;border:1px solid #2c3a55;}     /* 중립 */
-  .qb-exp{background:#3a2410;color:#f0a13b;border:1px solid #6b4a1a;}     /* 폭발형 */
-  .qb-chase{background:#3b1518;color:#f87171;border:1px solid #6e2429;}   /* 추격주의 */
+  /* 불꽃형 = 옛 폭발형+추격주의 (2026-08-02 통합) — 처방이 「매수 금지」 하나라 가장 강한 색 */
+  .qb-flame{background:#3b1518;color:#f87171;border:1px solid #6e2429;}
   /* 20·40일 모멘텀 — 등락색 <b>단색</b> 배경 + 흰 글씨 (밝은 화면의 .mkt.t-up/.t-down 과 같은 규칙) */
   .qb-hot{background:#c62828;color:#fff;border:1px solid #c62828;}     /* 급등 (실측 근거 있음) */
   .qb-cold{background:#1565c0;color:#fff;border:1px solid #1565c0;}    /* 급락 (근거 없음·참고) */
