@@ -53,9 +53,12 @@ function send_daily_summary(Schedule $sch): void {
     $dateStr = date('Y년 m월 d일') . " ({$dow})";
 
     if (empty($events)) {
+        /* 일정이 없어도 보낸다 — 매일 아침 오는 것 자체가 "알림 체인 생존 확인(heartbeat)"
+         * 역할을 한다 (2026-08-02 알림 정비 때 유지로 결정). */
         Notify::send(
             "📅 {$dateStr}\n오늘 등록된 일정이 없습니다.",
-            "https://economist.kr/schedule.php?mode=calendar"
+            "https://economist.kr/schedule.php?mode=calendar",
+            ['title' => '오늘 일정']
         );
         return;
     }
@@ -93,7 +96,7 @@ function send_daily_summary(Schedule $sch): void {
     $msg  .= "\n" . str_repeat('―', 18);
     $msg  .= "\n총 {$total}개 일정";
 
-    Notify::send($msg, "https://economist.kr/schedule.php?mode=calendar");
+    Notify::send($msg, "https://economist.kr/schedule.php?mode=calendar", ['title' => '오늘 일정']);
 }
 
 // =============================================================
@@ -119,7 +122,7 @@ function check_and_send_alerts(Schedule $sch): void {
             $msg .= "\n🏷 {$alert['category']}";
         }
 
-        $ok = Notify::send($msg, "https://economist.kr/schedule.php?mode=calendar");
+        $ok = Notify::send($msg, "https://economist.kr/schedule.php?mode=calendar", ['title' => '일정 알림']);
         if ($ok) {
             $sch->markAlertSent((int)$alert['alert_id']);
         }
@@ -156,7 +159,7 @@ function sync_holidays(PDO $pdo): void {
     $msg = "📅 공휴일 동기화 완료\n"
          . implode(', ', array_map(fn($y)=>"{$y}년", $years))
          . "\n총 {$totalSuccess}건 저장";
-    Notify::send($msg, "https://economist.kr/schedule.php?mode=calendar");
+    Notify::send($msg, "https://economist.kr/schedule.php?mode=calendar", ['title' => '공휴일 동기화']);
 }
 
 function format_alert_label(int $min): string {

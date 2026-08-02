@@ -760,6 +760,17 @@ switch ($job) {
         } catch (Throwable $e) {
             say('접수일 수집 실패(무시하고 계속): ' . $e->getMessage());
         }
+        /* ★ 실적 신호 알림 (2026-08-02) — 방금 갱신된 재무로 보유 어닝쇼크·관심 서프라이즈를
+         * 판정해 새로 생긴 것만 Pushover 로 쏜다. 판정은 화면(lib/sue.php)과 같은 단일본. */
+        say('── 실적 신호 알림');
+        try {
+            require_once $_SERVER['DOCUMENT_ROOT'] . '/stock/lib/alert.php';
+            $al = pf_alert_fresh($pdo);
+            say($al ? count($al) . '건 발송: ' . implode(' / ', array_slice($al, 0, 3)) : '새 신호 없음 — 발송 안 함');
+        } catch (Throwable $e) {
+            say('알림 실패(무시하고 계속): ' . $e->getMessage());
+            if (function_exists('pf_alert_fail')) pf_alert_fail('fresh', $e);   // §2.5 규칙 3 — 삼킨 예외는 직접 알림
+        }
         break;
 
     // ── 매일 오전·오후: KRX 최근 거래일 시세·상장주식수
@@ -806,6 +817,45 @@ switch ($job) {
             }
         } catch (Throwable $e) {
             say('잠정 적재 실패(무시하고 계속): ' . $e->getMessage());
+        }
+        /* ★ 데이터 레벨 감시 (2026-08-02)
+         * "크론은 성공했는데 데이터가 안 들어온" 케이스는 실행 감시(cron_job.php 중앙
+         * 실패 알림)로는 못 잡는다 — 마감 묶음이 끝난 시점에 all_stock_info 의 당일
+         * 갱신률을 직접 재서, 일부만 갱신됐으면(부분 응답·네이버 차단 등) 경고를 쏜다.
+         * 갱신 0건 = 휴장일(주말·공휴일)이므로 조용히 넘어간다 — 오탐 방지. */
+        try {
+            $r = $pdo->query(
+                "SELECT COUNT(*) AS t, COALESCE(SUM(DATE(uDate) = CURDATE()), 0) AS f
+                   FROM all_stock_info"
+            )->fetch(PDO::FETCH_ASSOC);
+            $tot = (int)$r['t']; $frs = (int)$r['f'];
+            $pct = $tot > 0 ? round($frs / $tot * 100, 1) : 0.0;
+            say(sprintf('── 당일 갱신률 점검 — %s/%s종목 (%.1f%%)',
+                number_format($frs), number_format($tot), $pct));
+            if ($frs > 0 && $pct < 80 && class_exists('Notify')) {
+                Notify::send(
+                    "마감 후 종가 갱신률이 낮습니다 — "
+                    . number_format($frs) . "/" . number_format($tot) . "종목 ({$pct}%)\n"
+                    . "네이버 부분 응답이나 시세 크론 실패 가능성. 화면 종가가 낡았을 수 있습니다.",
+                    "https://economist.kr/cron_job.php?task=dart_status&k=econ-cron-j7k2",
+                    ['title' => '⚠️ 종가 갱신률 저조', 'priority' => 1]
+                );
+                say('  → 경고 알림(Pushover) 발송');
+            }
+        } catch (Throwable $e) {
+            say('갱신률 점검 실패(무시): ' . $e->getMessage());
+        }
+        /* ★ 수급 신호 알림 (2026-08-02) — 방금 계산된 오늘 잠정 신호와 최근 박스 상태로
+         * ①관심종목 트리거(돌파확인·계단지지) ②보유 계단관통↓ ③오늘 신규 매집형을
+         * 새로 생긴 것만 Pushover 로 쏜다. 판정은 화면과 같은 단일본(boxStatusMany 등). */
+        say('── 수급 신호 알림');
+        try {
+            require_once $_SERVER['DOCUMENT_ROOT'] . '/stock/lib/alert.php';
+            $al = pf_alert_eod($pdo);
+            say($al ? count($al) . '건 발송: ' . implode(' / ', array_slice($al, 0, 3)) : '새 신호 없음 — 발송 안 함');
+        } catch (Throwable $e) {
+            say('알림 실패(무시하고 계속): ' . $e->getMessage());
+            if (function_exists('pf_alert_fail')) pf_alert_fail('eod', $e);     // §2.5 규칙 3 — 삼킨 예외는 직접 알림
         }
         break;
 

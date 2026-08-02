@@ -127,12 +127,12 @@ const TASKS = [
         'desc' => '[예비] 거래대금 이관 — 평소엔 dart_krx 가 대신한다. 등록 불필요',
     ],
     'dart_eod' => [
-        'file' => 'cron/dart_collect.php', 'bg' => false, 'cron' => '50 15 * * *',
+        'file' => 'cron/dart_collect.php', 'bg' => false, 'cron' => '50 15 * * 1-5',
         'get'  => ['key' => DART_KEY, 'job' => 'eod'],
         'desc' => '마감 뒤 묶음 — 시세 메우기 + 오늘 고·저 + 일봉 이력',
     ],
     'etf_update' => [
-        'file' => 'cron/keyword_collector.php', 'bg' => true, 'cron' => '20 16 * * *',
+        'file' => 'cron/keyword_collector.php', 'bg' => true, 'cron' => '20 16 * * 1-5',
         'get'  => ['ssk' => KWC_KEY, 'mode' => 'etf_update'],
         'desc' => 'ETF 편입종목 갱신 (ETF당 sleep 2초 · bg 필수)',
     ],
@@ -144,7 +144,7 @@ const TASKS = [
         'desc' => '네이버 맛집 전국 수집 (매월 1일 · 30회 fire 로 나눠 드레인)',
     ],
     'naver_stay' => [
-        'file' => 'cron/naver_collect.php', 'bg' => true, 'cron' => '0,10,20,30,40,50 3-7 2 * *',
+        'file' => 'cron/naver_collect.php', 'bg' => true, 'cron' => '1,12,22,30,39,50 3-7 2 * *',
         'get'  => ['key' => NAVER_KEY, 'cat' => 'stay', 'max' => '10', 'delay' => '4', 'max_sec' => '120'],
         'desc' => '네이버 스테이 수집 (매월 2일 · 스테이+펜션 합집합)',
     ],
@@ -348,5 +348,58 @@ if ($explain) {
     exit;
 }
 
-require $path;
+/* ── 중앙 실패 알림 (2026-08-02) ─────────────────────────────────────────
+ * 여기서 감싸면 <b>모든 task 가 한 번에</b> 커버된다 — 개별 크론에 실패 알림을
+ * 흩뿌릴 필요가 없다. bg 잡은 0.07초 만에 queued 를 반환해 cron-job.org 눈에는
+ * 항상 성공이므로, 뒤(run 모드)에서 죽는 실패는 <b>여기가 유일한 감지 지점</b>이다
+ * (되돌아온 run 요청도 이 디스패처를 거친다).
+ *
+ *   · 잡히지 않은 예외 → try/catch
+ *   · 치명 오류(파스·메모리 등) → register_shutdown_function + error_get_last()
+ *   · 같은 task 는 하루 1회만 알림 (연속 실패 폭탄 방지 · /tmp 플래그)
+ *   · priority 1 = 방해금지 무시 — "실패는 크게, 성공은 조용히"
+ * 읽기 전용 조회(log·status)는 화면에서 바로 보이므로 안 감싼다. */
+function cron_fail_notify(string $task, string $reason): void
+{
+    $flag = sys_get_temp_dir() . '/cron_fail_' . preg_replace('/[^a-z0-9_]/i', '', $task) . '.flag';
+    if (is_file($flag) && trim((string)@file_get_contents($flag)) === date('Y-m-d')) return;
+    @file_put_contents($flag, date('Y-m-d'));
+    /* 타깃이 cnt.inc(오토로더)를 로드하기 전에 죽었을 수 있다 — 직접 로드 폴백 */
+    if (!class_exists('Notify', false)) {
+        foreach (['/classes/PushoverNotify.class', '/classes/Notify.class'] as $c) {
+            if (is_file(__DIR__ . $c)) require_once __DIR__ . $c;
+        }
+    }
+    if (!class_exists('Notify')) { error_log("[cron_job] 실패(알림 불가) task={$task}: {$reason}"); return; }
+    // mbstring 미설치 환경(로컬 CLI 테스트 등)에서도 알림 자체는 나가게 폴백
+    $reason = function_exists('mb_strcut') ? mb_strcut($reason, 0, 500) : substr($reason, 0, 500);
+    try {
+        Notify::send(
+            "task={$task}\n" . $reason
+            . "\n\n로그: https://economist.kr/cron_job.php?task={$task}&k=" . CRON_JOB_KEY . "&log=1",
+            "https://economist.kr/cron_job.php?task=list&k=" . CRON_JOB_KEY,
+            ['title' => "⚠️ 크론 실패: {$task}", 'priority' => 1]
+        );
+    } catch (Throwable $e) {
+        error_log('[cron_job] 실패 알림 발송 불가: ' . $e->getMessage());
+    }
+}
+
+if (!$readOnly) {
+    register_shutdown_function(function () use ($task) {
+        $e = error_get_last();
+        if ($e && in_array($e['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
+            cron_fail_notify($task, "치명 오류: {$e['message']} @ " . basename($e['file']) . ":{$e['line']}");
+        }
+    });
+    try {
+        require $path;
+    } catch (Throwable $e) {
+        cron_fail_notify($task, get_class($e) . ': ' . $e->getMessage()
+            . ' @ ' . basename($e->getFile()) . ':' . $e->getLine());
+        throw $e;   // 원래 동작(500 + 서버 에러로그)은 그대로 둔다
+    }
+} else {
+    require $path;
+}
 ?>

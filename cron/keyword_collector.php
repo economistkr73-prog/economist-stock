@@ -27,7 +27,8 @@ require_once $_SERVER['DOCUMENT_ROOT'] . "/env/e.fnc";
 // env/ 는 .gitignore 대상이라 git 으로 따라오지 않는다 — 배포 누락을 알아볼 수 있게 가드
 if (!is_file($_SERVER['DOCUMENT_ROOT'] . "/env/cronbg.inc")) { http_response_code(500); die("env/cronbg.inc 없음 — env/ 는 git 제외라 수동 배포가 필요합니다.\n"); }
 require_once $_SERVER['DOCUMENT_ROOT'] . "/env/cronbg.inc";
-if (file_exists($_SERVER['DOCUMENT_ROOT'] . "/env/kakao.inc")) require_once $_SERVER['DOCUMENT_ROOT'] . "/env/kakao.inc"; // 카카오/Pushover 알림(선택)
+/* (2026-08-02) env/kakao.inc require 제거 — 알림은 Notify(오토로드)→PushoverNotify 가
+ * env/pushover.inc 를 스스로 읽는다. 이 파일은 카카오 키를 쓰지 않는다. */
 
 error_reporting(E_ALL & ~E_NOTICE);
 ini_set("display_errors", 1);
@@ -48,36 +49,41 @@ if (!empty($_GET['log'])) cron_bg_show_log(KWC_LOG, (int)($_GET['n'] ?? 60));
 cron_bg_begin(KWC_LOG, max(0, (int)($_GET['sec'] ?? 3600)));
 
 /**
- * ETF 업데이트 결과를 카카오톡(나에게)으로 전송
+ * ETF 편입종목 갱신 결과 Pushover
+ *
+ * (2026-08-02 통폐합) 매일 오던 "[성공] N개 완료 · 신규 없음" 을 없앴다 —
+ * <b>알릴 것이 있을 때만</b> 보낸다: 신규 ETF 발견 / 예산 도달(이어받기 안내).
+ * 평상시 완주는 무음이고, 실패는 catch 쪽에서 priority 1 로 따로 쏜다.
+ *
  * @param int   $updatedCount 업데이트된 ETF 수
  * @param array $newEtfList   신규 ETF "이름(코드)" 문자열 배열
+ * @param int   $left         예산 도달로 다음 실행에 넘긴 수 (0 = 완주)
  */
-function kakao_etf_notify(int $updatedCount, array $newEtfList): void
+function etf_notify(int $updatedCount, array $newEtfList, int $left = 0): void
 {
-    if (!class_exists('Notify')) return; // kakao.inc 미설치 시 조용히 패스
+    if (!class_exists('Notify')) return;
+    if (empty($newEtfList) && $left === 0) return;   // 평상시 완주 = 무음
 
-    $msg = "[성공] ETF {$updatedCount}개 편입종목 업데이트 완료.\n\n";
+    $msg = "ETF {$updatedCount}개 편입종목 갱신";
+    if ($left > 0) $msg .= "\n예산 도달 — 남은 {$left}개는 다음 실행이 이어받음";
 
-    if (empty($newEtfList)) {
-        $msg .= "신규 ETF는 없습니다.";
-    } else {
+    if (!empty($newEtfList)) {
         $total = count($newEtfList);
-        $msg  .= "신규 ETF는 다음과 같습니다.\n";
-        $shown = [];
+        $msg  .= "\n\n신규 ETF {$total}개:\n";
+        $shown = 0;
         foreach ($newEtfList as $item) {
-            // 카카오 텍스트 200자 제한 → 넘으면 자르고 "...외 N개" 표기
+            // Pushover 본문 한도 1024자 — 여유를 두고 900자에서 접는다
             $candidate = $msg . "- " . $item . "\n";
-            if (mb_strlen($candidate) > 180) {
-                $remain = $total - count($shown);
-                $msg   .= "…외 {$remain}개";
+            if (mb_strlen($candidate) > 900) {
+                $msg .= "…외 " . ($total - $shown) . "개";
                 break;
             }
             $msg .= "- {$item}\n";
-            $shown[] = $item;
+            $shown++;
         }
     }
 
-    Notify::send($msg, "https://economist.kr/etf_stock.php");
+    Notify::send($msg, "https://economist.kr/etf_stock.php", ['title' => 'ETF 편입종목 갱신']);
 }
 
 /* ★ 여기 있던 「Content-Length + Connection: close」 블록을 없앴다 (2026-07-30).
@@ -154,6 +160,12 @@ if ($mode === 'stock_etf_news' || $mode === '') {
     } catch (Exception $e) {
         if ($pdo->inTransaction()) $pdo->rollBack();
         echo "[실패] " . $e->getMessage() . "\n";
+        /* all_stock_info 의 단일 원천이 여기다 — 조용히 삼키면 시세가 낡은 채 방치된다.
+         * (여기서 잡아 버리면 cron_job.php 중앙 실패 알림에 안 걸리므로 직접 쏜다) */
+        if (class_exists('Notify')) {
+            Notify::send("⚠️ 시세·종목키워드 수집 실패 (stock_etf_news)\n" . $e->getMessage(),
+                '', ['title' => '크론 실패: stock_news', 'priority' => 1]);
+        }
     }
 
 // ============================================================
@@ -265,20 +277,29 @@ if ($mode === 'stock_etf_news' || $mode === '') {
         echo "[성공] {$today_date} - 신규 {$cnt_new}건 처리, "
            . "키워드 " . count($keywords) . "개 저장 (기준시간: {$since_label} → {$max_article_time})\n";
 
-        // 카카오톡 알림
-        if (class_exists('Notify')) {
+        /* 푸시는 하루 2회(08시·18시 fire)만 — 매회(10회/일) 보내면 노이즈가 돼 정작
+         * 중요한 알림이 묻힌다 (2026-08-02 통폐합). 데이터는 매회 그대로 쌓이므로
+         * 나머지 회차는 analysis_model.php?mode=daily 화면에서 본다. */
+        $pushHours = [8, 18];
+        if (class_exists('Notify') && in_array((int)date('G'), $pushHours, true)) {
             $kw_slice = array_slice($keywords, 0, 10, true);
             $kw_str   = implode("\n", array_map(fn($k, $v) => "#{$k}({$v})", array_keys($kw_slice), $kw_slice));
-            $msg = "[뉴스 키워드 업데이트]\n"
-                 . "일시: {$today_date} " . date('H:i') . "\n"
+            $msg = "일시: {$today_date} " . date('H:i') . "\n"
                  . "기사 {$cnt_new}건 → 키워드 " . count($keywords) . "개\n\n"
-                 . $kw_str . "\n\n"
-                 . "http://economist.kr/analysis_model.php?mode=daily&date={$today_date}";
-            Notify::send($msg);
+                 . $kw_str;
+            Notify::send($msg,
+                "https://economist.kr/analysis_model.php?mode=daily&date={$today_date}",
+                ['title' => '뉴스 키워드 TOP ' . count($kw_slice)]);
+        } else {
+            echo "(푸시 생략 — 08·18시 fire 에서만 발송)\n";
         }
 
     } catch (Exception $e) {
         echo "[실패] " . $e->getMessage() . "\n";
+        if (class_exists('Notify')) {
+            Notify::send("⚠️ 뉴스 키워드 수집 실패 (news)\n" . $e->getMessage(),
+                '', ['title' => '크론 실패: news', 'priority' => 1]);
+        }
     }
 
 // ============================================================
@@ -326,7 +347,7 @@ if ($mode === 'stock_etf_news' || $mode === '') {
 
         if (empty($etfs)) {
             echo "[완료] 오늘 업데이트할 ETF가 없습니다.\n";
-            kakao_etf_notify(0, $newEtfList);
+            etf_notify(0, $newEtfList);
         } else {
             $total = count($etfs);
             $updatedCount = 0; $budgetHit = false;
@@ -353,13 +374,14 @@ if ($mode === 'stock_etf_news' || $mode === '') {
                 cron_bg_log("완료 — ETF {$updatedCount}개 편입종목 갱신");
                 echo "[성공] ETF {$updatedCount}개 편입종목 업데이트 완료.\n";
             }
-            kakao_etf_notify($updatedCount, $newEtfList);
+            etf_notify($updatedCount, $newEtfList, $budgetHit ? ($total - $updatedCount) : 0);
         }
 
     } catch (Exception $e) {
         echo "[실패] " . $e->getMessage() . "\n";
         if (class_exists('Notify')) {
-            Notify::send("⚠️ ETF 편입종목 업데이트 실패\n" . $e->getMessage());
+            Notify::send("⚠️ ETF 편입종목 업데이트 실패\n" . $e->getMessage(),
+                '', ['title' => '크론 실패: etf_update', 'priority' => 1]);
         }
     }
 

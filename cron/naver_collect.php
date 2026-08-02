@@ -65,6 +65,19 @@ $delaySec = max(0, min(10, (int)($_GET['delay'] ?? 3)));
 $dry      = !empty($_GET['dry']);
 $START    = microtime(true);
 
+/** 정합(reconcile) 드레인 완료 Pushover — 수동 reconcile=1 경로·자동 정합 경로 공용 (2026-08-02 중복 통합) */
+function nc_notify_reconcile(string $catLabel, string $category, string $period, array $R): void
+{
+    if (!class_exists('Notify')) return;
+    Notify::send(
+        "🔧 네이버 {$catLabel} 정합 완료 — 회차 {$period}\n"
+        . "복구 {$R['recovered']} / 감시 {$R['watched']} / 폐업삭제 {$R['deleted']}",
+        "https://economist.kr/naver_trend.php?cat={$category}",
+        ["title" => "네이버 {$catLabel} 정합 완료 ({$period})"]
+    );
+    echo "📲 정합 완료 알림(Pushover) 발송함.\n";
+}
+
 /* 외부 HTTP 크론(cron-job.org)은 응답을 30초까지만 기다린다.
  * bg=1 → 자기 자신에게 비동기 요청을 던지고 즉시 성공 응답, 수집은 뒤에서 이어 돈다.
  *
@@ -203,14 +216,9 @@ if (!empty($_GET['reconcile'])) {
        . ($R['rate'] ? "  ⚠️429 감지—중단(다음 호출 재시도)" : ($R['budget'] ? "  (예산 도달—이어받기)" : "")) . "\n";
     if ($R['lines']) echo str_repeat('─', 52) . "\n" . implode("\n", array_map('htmlspecialchars', $R['lines'])) . "\n";
 
-    // 드레인 완료 알림(Pushover): 남은 0 & 이번 호출에 실제 작업 & 비dry & Notify 존재.
-    if (!$dry && $R['remaining'] === 0 && ($R['recovered'] + $R['deleted'] + $R['watched']) > 0 && class_exists('Notify')) {
-        $msg = "🔧 네이버 {$catLabel} 정합 완료 — 회차 {$period}\n"
-             . "복구 {$R['recovered']} / 감시 {$R['watched']} / 폐업삭제 {$R['deleted']}";
-        Notify::send($msg, "https://economist.kr/naver_trend.php?cat={$category}", [
-            "title" => "네이버 {$catLabel} 정합 완료 ({$period})",
-        ]);
-        echo "📲 정합 완료 알림(Pushover) 발송함.\n";
+    // 드레인 완료 알림(Pushover): 남은 0 & 이번 호출에 실제 작업 & 비dry.
+    if (!$dry && $R['remaining'] === 0 && ($R['recovered'] + $R['deleted'] + $R['watched']) > 0) {
+        nc_notify_reconcile($catLabel, $category, $period, $R);
     }
     echo "</pre>";
     exit;
@@ -402,14 +410,8 @@ if ($stat['pending'] === 0 && $stat['error'] === 0) {
                 if ($R['lines']) echo implode("\n", array_map('htmlspecialchars', $R['lines'])) . "\n";
             }
             // 드레인 완료 + 이번에 실제 작업 → Pushover 1회(삭제/복구가 있었음을 알림)
-            if ($R['remaining'] === 0 && ($R['recovered'] + $R['deleted'] + $R['watched']) > 0 && class_exists('Notify')) {
-                Notify::send(
-                    "🔧 네이버 {$catLabel} 정합 완료 — 회차 {$period}\n"
-                    . "복구 {$R['recovered']} / 감시 {$R['watched']} / 폐업삭제 {$R['deleted']}",
-                    "https://economist.kr/naver_trend.php?cat={$category}",
-                    ["title" => "네이버 {$catLabel} 정합 완료 ({$period})"]
-                );
-                echo "📲 정합 완료 알림(Pushover) 발송함.\n";
+            if ($R['remaining'] === 0 && ($R['recovered'] + $R['deleted'] + $R['watched']) > 0) {
+                nc_notify_reconcile($catLabel, $category, $period, $R);
             }
         } catch (\Throwable $e) {
             echo "⚠️ 자동 정합 오류(수집엔 영향 없음): " . htmlspecialchars($e->getMessage()) . "\n";

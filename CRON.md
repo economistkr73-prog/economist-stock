@@ -36,8 +36,8 @@
 | 5 | 매일 10회 `5 6,8-10,12,14,16,18,20,22 * * *` | 네이버뉴스 가져오기 | `cron/keyword_collector.php` `mode=news` | 4.5s | ✅ |
 | 6 | **평일 9회** `5 6-9,11,13,15,17,19 * * 1-5` | get_news_keyword (제목 `7회` 는 낡음) | `cron/keyword_collector.php` `mode=stock_etf_news` | 14.3s | ✅ |
 | 7 | 매일 13:05 | krx 상장주식수 | `cron/dart_collect.php` `job=krx` | 19.8s | ✅ **오후 1회로 확정** · 2026-07-31 **거래대금 장기보관 이관 추가**(krx_daily→krx_amt · API 0회) |
-| 8 | 매일 15:50 | 당일종가 (제목엔 15:40 — 제목이 낡음) | `cron/dart_collect.php` `job=eod` | ~3s | ✅ |
-| 9 | 매일 16:20 | ETF 편입종목 가져오기 | `cron/keyword_collector.php` `mode=etf_update` | 30s+ | ✅ 배포됨 · **`&bg=1` 추가만 남음** |
+| 8 | **평일** 15:50 `50 15 * * 1-5` | 당일종가 | `cron/dart_collect.php` `job=eod` | ~3s (2026-08-02 실측 9.1s — 잠정적재·신호 추가분) | ✅ 2026-08-02 EDIT 화면 실확인 |
+| 9 | **평일** 16:20 `20 16 * * 1-5` | ETF 편입종목 가져오기 | `cron/keyword_collector.php` `mode=etf_update` | 30s+ (bg) | ✅ 2026-08-02 EDIT 화면 실확인 · bg 는 레지스트리가 붙임 |
 | 11 | 매월 1일 새벽(10분 간격 반복) | 네이버 맛집 | `cron/naver_collect.php` `cat=food&bg=1` | 1.9s* | ✅ |
 | 12 | 매월 2일 새벽 03:01 | 네이버 스테이 | `cron/naver_collect.php` `cat=stay&bg=1` | 30s+ | ✅ **완료**(배포됨 · URL 이미 bg=1) |
 | 13 | 매월 3일 새벽 02:02 | 네이버 캠핑장 | `cron/naver_collect.php` `cat=camping&bg=1` | 30s+ | ✅ **완료**(배포됨 · URL 이미 bg=1) |
@@ -67,7 +67,7 @@
 - **평일(`1-5`) 전용은 #3·#6 둘이다.**
   - #6 → **`all_stock_info` 는 주말에 갱신되지 않는다.** 주말에 화면을 열면 금요일 값이다.
   - #3 → DART 공시 접수가 영업일 기준이라 평일만으로 **무해**하다. 단 금요일 야간~일요일에 정정공시가 올라오면 월요일 08:05까지 안 들어온다(주말 스크리너 열람 시 감안).
-  - 반면 **#7 `job=krx`·#8 `job=eod` 는 매일(`* * *`)** 이다. 휴장일에는 받을 게 없어 각각 "받을 거래일이 없습니다" / "저장할 값이 없습니다" 로 조용히 빠진다 — 정상이다.
+  - **#7 `job=krx` 는 매일(`* * *`)**, **#8 `job=eod` 는 평일(`1-5`)** 이다(2026-08-02 EDIT 화면 실확인 — 옛 기록 "eod 매일"은 낡음). 휴장일·주말에는 받을 게 없어 "받을 거래일이 없습니다" / "저장할 값이 없습니다" 로 조용히 빠지므로 어느 쪽이든 무해하다.
 - **#4 는 일요일 제외(`1-6`)**. 월요일 브리핑은 금요일 거래일을 기준일로 잡는다(기준일=투자자 매매동향 최신일).
 - **#4 의 `bg=1` 은 사실상 무효**다(패턴 A · apache2handler). 다만 전체가 15.6초라 30초 안에 끝나 문제가 되지 않는다.
 
@@ -254,12 +254,62 @@ bg 실행 로그 (뒤에서 돈 잡이 무엇을 했는지 — **bg 잡은 이�
 - `&n=` 으로 줄 수 조절.
 - **`log=1`·`status=1` 은 bg 를 붙이지 않는다** — 조회까지 뒤로 넘기면 결과가 화면이 아니라 로그로 가서 아무것도 못 본다. 디스패처가 읽기 전용으로 판정해 즉시·동기로 돌린다.
 
-### 2.5 알림 경로
+### 2.5 알림 경로 (2026-08-02 전면 정비)
 
 `Notify::send($text, $link, $opts)` → `PushoverNotify` (+선택적 `NotionArchive`).
-알림을 보내는 크론: `schedule_alert`(전부), `keyword_collector`(news·etf_update), `naver_collect`(회차 완료·정합 완료 각 1회), `ardent_crawl`(완주 시 1회), `market/crawl`(`&notify=1` 일 때).
 
-`class_exists('Notify')` 가드로 감싸여 있어 `env/kakao.inc` / `env/pushover.inc` 가 없으면 조용히 통과한다.
+**원칙: 성공은 조용히, 실패는 크게.** 정비 전에는 하루 최대 13~14건(뉴스 키워드 10건이 노이즈의 75%)이 오면서 정작 핵심 파이프라인(dart_collect)의 실패는 무음이었다. 지금은 반대다.
+
+**① 중앙 실패 알림 — `cron_job.php` 디스패처가 전 task 를 감싼다.**
+- 잡히지 않은 예외(try/catch) + 치명 오류(shutdown 훅 + `error_get_last`) → `⚠️ 크론 실패: <task>` **priority 1**(방해금지 무시).
+- bg 잡은 0.07초 만에 `queued` 라 **cron-job.org 눈에는 항상 성공** — run 모드 실패는 여기가 유일한 감지 지점이다(되돌아온 요청도 디스패처를 거친다).
+- 같은 task 는 **하루 1회만**(연속 실패 폭탄 방지 · `/tmp/cron_fail_<task>.flag`).
+- 읽기 전용 조회(`log=1`·`status=1`)는 화면에서 바로 보이므로 안 감싼다.
+- 타깃이 오토로더(cnt.inc)를 로드하기 전에 죽어도 되도록 Notify 직접 로드 폴백이 있다.
+- ⚠️ 타깃이 **자체 catch 로 삼키는 예외는 중앙에서 안 보인다** — 그런 곳(keyword_collector 3개 모드·etf_update)은 catch 안에서 직접 priority 1 로 쏜다.
+
+**② 데이터 레벨 감시 — `dart_collect job=eod` 끝에서 `all_stock_info` 당일 갱신률 점검.**
+"크론은 성공했는데 데이터가 안 들어온" 케이스용. 갱신 0건=휴장일이라 무음, **0 < 갱신률 < 80% 면 `⚠️ 종가 갱신률 저조` priority 1**.
+
+**③ 정기(성공) 알림 — 남긴 것만:**
+
+| 알림 | 빈도 | 조건 |
+|------|------|------|
+| 일정 사전 알림 (`check_alerts`) | 이벤트성 | 사용자가 건 알람만 |
+| 오늘 일정 요약 (`daily_summary` 07:00) | 1건/일 | 일정 없어도 발송 — **heartbeat 역할**로 유지 결정 |
+| 모닝브리핑 (`market` 08:10) | 1건/일 (월~토) | 매 성공 시 |
+| 뉴스 키워드 (`news`) | **2건/일 (08·18시 fire 만)** | 10회/일 발송을 축소 — 데이터는 매회 쌓인다 |
+| ETF 편입종목 (`etf_update`) | **조건부** | 신규 ETF 발견 · 예산 도달(이어받기)일 때만. 평상시 완주=무음 |
+| **📊 실적 신호** (`dart_fresh` 끝 · 08:05) | **조건부** | 보유 어닝쇼크(SUE≤−1)·관심 서프라이즈(SUE≥1) **신규만**. 구현 `stock/lib/alert.php` `pf_alert_fresh` · 중복방지 `pf_alert_log` · 새 신호 없으면 무음 (2026-08-02 신설) |
+| **📈 마감 신호** (`dart_eod` 끝 · 15:50) | **조건부** | 관심 트리거(돌파확인·계단지지)·보유 계단관통↓·오늘 매집형(잠정) **신규만**. 구현 `pf_alert_eod` — 판정은 화면과 같은 단일본(boxStatusMany·SUE lib) (2026-08-02 신설) |
+| 네이버 수집/정합 완료 | ≤2건/카테고리/월 | 회차 마지막 fire 1회만 |
+| 아덴트 AI 수집 완료 | 드묾 | 완주+실적 있을 때만 |
+| 공휴일 동기화 | 1건/년 | – |
+
+- **전 발송에 `title` 을 단다**(앱 알림 목록에서 한눈에 구분). priority: 실패/경고=1, 일상 정보=0(기본).
+- `class_exists('Notify')` 가드로 감싸여 있어 `env/pushover.inc` 가 없으면 조용히 통과한다.
+- 카카오 알림 잔재는 삭제됐다(`KakaoNotify.class`·`kakao_oauth.php` 제거, `kakao.inc` 는 지오코딩·공휴일 키 때문에 유지).
+
+**④ 새 푸시를 추가할 때 — 이 절이 유일한 참고처다.**
+
+```php
+// 클래스는 오토로더가 찾고, 자격증명은 PushoverNotify 가 env/pushover.inc 를 스스로 읽는다.
+// 별도 require 불필요 (cnt.inc 를 안 쓰는 파일만 classes/ 2개를 직접 require — market/report.php 참조)
+if (class_exists('Notify')) {
+    Notify::send(
+        "본문 (1024자 한도 — 내부에서 자름)",
+        "https://economist.kr/화면.php",              // 원탭 이동 — 본문에 평문 URL 넣지 말 것
+        ['title' => '짧은 제목', 'priority' => 0]     // 실패/경고=1 · 일상=0 · 그 외 옵션은 PushoverNotify.class 헤더
+    );
+}
+```
+
+지켜야 할 규칙 (이번 정비에서 확정):
+1. **실패는 크게(priority 1), 성공은 조용히** — "평소처럼 잘 됨" 은 보내지 않는다. 알릴 것(신규 발견·이어받기·경고)이 있을 때만.
+2. **title 필수** — 앱 목록에서 한눈에 구분되게.
+3. **크론 실행 실패 알림은 새로 만들지 않는다** — `cron_job.php` 중앙 실패 알림이 전 task 를 커버한다. 단 **자체 try/catch 로 예외를 삼키는 크론**은 그 catch 안에서 직접 priority 1 로 쏴야 한다(중앙에서 안 보인다).
+4. **완료 알림은 드레인 완료 순간 1회만** — 반복 fire 잡에서 no-op 회차마다 보내지 않는다(`naver_collect` 패턴).
+5. 반복 실패 가능성이 있으면 **스로틀**(하루 1회 등 · `/tmp` 플래그 — `cron_fail_notify()` 참조).
 
 ---
 
@@ -275,7 +325,7 @@ bg 실행 로그 (뒤에서 돈 잡이 무엇을 했는지 — **bg 잡은 이�
 |-----|------|---------|-----------|-------------|------|
 | `fresh` | 매일 1회 | **최신 5슬롯**(사업연도×보고서) 재무제표를 통째로 재수집 | DART OpenAPI `opendart.fss.or.kr` (100종목 묶음) | `stock_financial` | **78초** → `bg=1` 필수 |
 | `krx` | **매일 13:05 (오후 1회)** | 최근 거래일 전종목 **상장주식수**+시세, ★`krx_amt` **전종목 이관**(확정 src='k' · 잠정치 괴리 로그 · 2026-07-31~) + 신고가 신호 재계산(`krx_surge` 캐시), 오래된 기준일 정리 | KRX 오픈API `data-dbg.krx.co.kr` (시장 2개 = 2콜) | `krx_daily` → `krx_amt`, `krx_surge` | 8.9~19.8초 (+신호 수초) |
-| `eod` | 매일 15:50 | `quotes` + `range`(오늘분) + `daily`(일봉) + ★`krx_amt` **당일 잠정 적재**(src='n' · 퀀트 거래대금 신고가 T+0 · 2026-07-31~) + 오늘 신호 계산(`krx_surge` 캐시 — 화면이 8초 안 내게) **묶음** | 네이버 폴링API | `all_stock_info`, `stock_daily_range`, `stock_price_range`, `pf_daily`, `krx_amt`, `krx_surge` | 2.5~3초 (+신호 수초) |
+| `eod` | 평일 15:50 | `quotes` + `range`(오늘분) + `daily`(일봉) + ★`krx_amt` **당일 잠정 적재**(src='n' · 퀀트 거래대금 신고가 T+0 · 2026-07-31~) + 오늘 신호 계산(`krx_surge` 캐시 — 화면이 8초 안 내게) **묶음** | 네이버 폴링API | `all_stock_info`, `stock_daily_range`, `stock_price_range`, `pf_daily`, `krx_amt`, `krx_surge` | 2.5~3초 (+신호 수초) |
 | `quotes` | (eod에 포함) | NXT 크론이 못 훑은 종목의 낡은 시세 메우기 | `polling.finance.naver.com/api/realtime/domestic/stock/{코드,…}` 100종목/회 = 28회 | `all_stock_info` | 1.1초 |
 | `range` | (eod에 포함) | 오늘 고·저 1줄 추가 + 6개월 집계 재계산 + 오래된 행 정리 | 위와 같은 폴링API | `stock_daily_range`, `stock_price_range` | 1.5초 |
 | `range&full=1` | **SSH 1회** | 일별 고·저 **씨 뿌리기**(종목마다 일봉 1회) | `api.finance.naver.com/siseJson.naver` × 2,766 | `stock_daily_range` | **340초** |
@@ -351,8 +401,8 @@ bg 실행 로그 (뒤에서 돈 잡이 무엇을 했는지 — **bg 잡은 이�
 - 소비 화면: `analysis_model.php?mode=daily`
 - Pushover 알림 발송(키워드 TOP 10).
 
-#### `mode=etf_update` — ETF 편입종목 (bg=1 필수)
-등록: 매일 16:20 · **URL에 `&bg=1` 을 붙여야 한다**(§7 P2)
+#### `mode=etf_update` — ETF 편입종목 (bg 필수)
+등록: **평일 16:20** (`20 16 * * 1-5` · 2026-08-02 실확인). bg 는 새 진입점의 레지스트리(`'bg' => true`)가 붙여 주므로 URL에 쓸 필요 없다.
 
 1. `discover_new_domestic_etfs()` — 네이버에서 신규 국내 ETF(`etfTabCode` 1,2,3) 자동 등록
 2. `all_etf_info` 중 `skip_update=0` 이고 holdings 의 `MAX(uDate) < CURDATE()` 인 ETF를 골라
@@ -672,11 +722,11 @@ https://economist.kr/cron_job.php?task=etf_update&k=econ-cron-j7k2&log=1
 |------|------------------|-----------|
 | `job=krx` | 13:05 **오후 1회** | `cron/dart_collect.php` 주석의 "오전·오후 두 번" |
 | `job=fresh` | 08:05 | 주석의 "0 7 * * *" 권장 시각 |
-| `job=eod` | 15:50 | **크론 제목이 `당일종가(1일1회,15:40분)`** — 제목만 낡음 |
+| `job=eod` | 15:50 | ~~크론 제목 15:40~~ → **2026-08-02 확인: 제목 이미 15:50 으로 수정돼 있음. 해소** |
 | `market/crawl` | 08:10 **1개**로 `&report=1&notify=1&bg=1` 묶음 (월~토) | `market/README.md` 의 "06:00 crawl + 07:00 report 2줄" |
 | #6 회수 | **평일 9회**(`6-9,11,13,15,17,19`) | **크론 제목이 `get_news_keyword (1일 7회)`** |
 
-**조치(선택)**: 크론 제목 2개(`당일종가` → 15:50, `get_news_keyword` → 평일 9회)와 `market/README.md` 의 크론 절만 고치면 기록이 실제와 일치한다.
+**조치(선택)**: ~~크론 제목 2개~~ **2026-08-02 확인: 크론 제목들(`당일종가 15:50`·`get_news_keyword 1일 9회`)은 이미 수정돼 있다.** 남은 것은 `market/README.md` 의 크론 절뿐.
 
 ### 🟠 P3.5 — cron-job.org 모니터링 설정이 비어 있다 (코드 수정 없이 조치 가능)
 EDIT 화면 실측(2026-07-30) — 확인한 잡 전부 아래 상태였다.
