@@ -11,13 +11,25 @@ require_once "./env/auth_fnc.php";
 require_login();
 require_once "./env/nav.inc";
 
+/* 화면별 「기능 구성」 — 원본 카탈로그는 classes/ChartFeat.class,
+ * 저장은 chart_pref.features_json(카탈로그와의 차분만). 여기서 ChartIndicator 를 한 번 만들면
+ * ensureTable 이 컬럼까지 맞춰 둔다 — 설정 화면을 여는 것이 곧 이행이다. */
+$ci_feat  = new ChartIndicator($pdo);
+$feat_over = $ci_feat->featuresAll();
+$FEAT_VAL = [];
+$FEAT_VIEW = [];      // 화면이 기억한 보기 값 {h, tf, day{}, week{}} — 높이 칸이 읽고 쓴다
+foreach (array_keys(ChartFeat::SCREENS) as $sk) {
+    $FEAT_VAL[$sk]  = ChartFeat::merge($sk, $feat_over[$sk] ?? null);
+    $FEAT_VIEW[$sk] = $ci_feat->viewOf($sk);
+}
+
 header('Content-Type: text/html; charset=utf-8');
 // embed=1 — 주식포트폴리오 「설정 > 차트 설정」 iframe 에 얹힐 때: 사이트 네비 없이 본문만
 $embed = !empty($_GET['embed']);
 echo "<!DOCTYPE html><html lang='ko'><head><meta charset='utf-8'>";
 echo "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
 echo "<title>차트 스타일 갤러리</title>";
-echo "<script src='/style/dailychart.js?v=28'></script>";
+echo "<script src='/style/dailychart.js?v=36'></script>";
 if (!$embed) nav_css();
 echo <<<'HTML'
 <style>
@@ -111,9 +123,48 @@ echo <<<'HTML'
   .ind-menu button.del:hover{background:#fdecea}
   .syntax{font-size:12.5px;line-height:1.8;color:#3c4d5e}
   .syntax code{background:#eef3f7;border-radius:4px;padding:1px 5px;font-family:Consolas,monospace}
+  /* ── 화면별 구성 (기능 = 도구모음·레이어) ── */
+  .scr-card{background:#fff;border:1px solid #e3eaf0;border-radius:10px;padding:13px 15px;margin:12px 0}
+  .scr-hd{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:3px}
+  .scr-hd h4{margin:0;font-size:14.5px;color:#22303f}
+  .scr-hd .sty{font-size:11.5px;font-weight:800;color:#1d5c93;background:#eaf1f8;border-radius:20px;padding:2px 9px}
+  .scr-hd .go{margin-left:auto;font-size:12px;color:#1d5c93;text-decoration:none}
+  .scr-hd .go:hover{text-decoration:underline}
+  .scr-note{font-size:12px;color:#6b7c8e;margin:0 0 9px}
+  .scr-prev{margin-bottom:10px}
+  .fgrp{margin-top:9px}
+  .fgrp .gh{font-size:11.5px;font-weight:800;color:#8496a6;margin-bottom:5px}
+  .fgrp .gh em{font-style:normal;font-weight:600;color:#a8b4c0;margin-left:6px}
+  .flist{display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));gap:5px 14px}
+  .fitem{display:flex;align-items:flex-start;gap:7px;font-size:12.5px;color:#3c4d5e;
+    padding:4px 6px;border-radius:7px}
+  .fitem:hover{background:#f6f9fc}
+  .fitem input{margin-top:2px}
+  .fitem.lock{color:#8496a6}
+  .fitem.na{color:#b6c0ca}
+  .fitem b{font-weight:700;color:#22303f}
+  .fitem.lock b,.fitem.na b{color:inherit}
+  .fitem .why{display:block;font-size:11px;color:#8496a6;font-weight:400}
+  .fitem.na .why{color:#c2ccd5}
+  .scr-ft{display:flex;align-items:center;gap:10px;margin-top:11px;padding-top:9px;border-top:1px solid #eef3f7;
+    flex-wrap:wrap}
+  .scr-ft .st{font-size:12px;color:#8496a6;margin-left:auto}
+  .hbox{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:700;color:#3c4d5e}
+  .hbox input{width:76px;padding:5px 8px;border:1px solid #c9d4de;border-radius:7px;
+    font-size:12.5px;font-family:inherit;text-align:right}
+  .hbox .hnote{font-weight:400;color:#8496a6;font-size:11.5px}
+  .btn-sm{padding:5px 11px;font-size:12px}
+  .bareless{font-size:12px;color:#6b7c8e;line-height:1.9}
+  .bareless b{color:#3c4d5e}
 </style></head><body>
 HTML;
 if (!$embed) render_nav('chartgallery');
+// 기능 카탈로그(원본)와 화면별 현재값 — 목록·체크리스트·미리보기를 전부 이 둘로 그린다
+echo '<script>const FEAT_CAT=' . json_encode(ChartFeat::catalog(), JSON_UNESCAPED_UNICODE)
+   . ';const FEAT_VAL=' . json_encode($FEAT_VAL, JSON_UNESCAPED_UNICODE)
+   . ';const FEAT_VIEW=' . json_encode($FEAT_VIEW, JSON_UNESCAPED_UNICODE) . ';</script>';
+// 이 화면의 미리보기 차트도 제 구성을 따른다 (SUE 마커 등 모듈이 스스로 켜는 것들)
+echo ChartFeat::boot('gallery', $pdo);
 echo <<<'HTML'
 <div class="wrap">
   <h2>차트 스타일 갤러리</h2>
@@ -251,6 +302,18 @@ echo <<<'HTML'
   </div>
 
   <div class="card">
+    <div class="ind-head"><h3>화면별 구성 — 도구모음·레이어</h3></div>
+    <div class="use">아래 <b>스타일 5종</b>이 「어떻게 그리나」라면, 여기는 <b>「무엇을 보여주고 조작하게 하나」</b>입니다.
+      두 축은 독립이라 같은 스타일을 쓰는 두 화면이 다른 구성을 가질 수 있습니다
+      (②포트폴리오형을 함께 쓰는 「보유종목 상세」와 「종목추가 사다리」가 그렇습니다).
+      바꾸면 <b>즉시 저장</b>되고 미리보기가 따라옵니다.</div>
+    <div id="scrList"></div>
+    <details class="note"><summary>도구모음이 없는 차트 (설정 대상 아님)</summary>
+      <div class="bareless" id="barelessList"></div>
+    </details>
+  </div>
+
+  <div class="card">
     <h3>1. 기본형 — 캔들 + 거래량 (라이트)</h3>
     <div class="use">사용처: <a href="/stock/index.php?mode=fund" target="_blank">재무분석 종목상세</a></div>
     <div class="host" id="c1"></div>
@@ -267,7 +330,8 @@ echo <<<'HTML'
   <div class="card">
     <h3>3. 시뮬레이터형 — 누적단가·자동매도가 계단선 + 마커 텍스트 (라이트)</h3>
     <div class="use">사용처: <a href="/stock/index.php?mode=sim" target="_blank">시뮬레이터</a>
-      · 칩 대신 라이브러리 글자 마커(10년 구간용) · 거래량 투명도 더 낮음(44)</div>
+      · 체결 마커는 칩 대신 라이브러리 글자(10년 구간용) · 거래량 투명도 더 낮음(44)
+      · <b>SUE 공시 배지는 여기서도 칩</b> — 같은 사실은 어느 화면에서나 같은 모양이어야 합니다</div>
     <div class="host" id="c3"></div>
   </div>
 
@@ -290,11 +354,16 @@ echo <<<'HTML'
 DailyChart.load().then(function(){
   var stat = document.getElementById('gStat');
   var charts = [];   // 일봉 4개 — 전역 컨트롤이 한꺼번에 조작
-  var c1 = DailyChart.create('c1', { theme:'light', key:'gallery', legend:'gIndLeg' });
-  var c2 = DailyChart.create('c2', { theme:'light', markers:{chips:true} });
-  var c3 = DailyChart.create('c3', { theme:'light', volAlpha:'44', markers:{chips:false} });
-  var c4 = DailyChart.create('c4', { theme:'dark', todayHigh:true, curPrice:'#d9a441' });
-  var c5 = DailyChart.create('c5', { theme:'dark', kind:'minute' });
+  // 이 화면도 제 구성을 따른다 — 설정 화면이 제 설정을 안 지키면 그것부터 거짓말이 된다
+  var GF = FEAT_VAL.gallery || {};
+  /* screen:'', resize:true — 미리보기 5장은 «끌 수는 있되 기억하지 않는다».
+     한 화면에 차트가 다섯이라 높이를 하나로 기억하면 다섯이 같이 움직인다(실제 화면은 하나뿐). */
+  var c1 = DailyChart.create('c1', { theme:'light', key:'gallery', screen:'', resize:true,
+                                     legend: +GF['legend.values'] ? 'gIndLeg' : null });
+  var c2 = DailyChart.create('c2', { theme:'light', markers:{chips:true}, screen:'', resize:true });
+  var c3 = DailyChart.create('c3', { theme:'light', volAlpha:'44', markers:{chips:false}, screen:'', resize:true });
+  var c4 = DailyChart.create('c4', { theme:'dark', todayHigh:true, curPrice:'#d9a441', screen:'', resize:true });
+  var c5 = DailyChart.create('c5', { theme:'dark', kind:'minute', screen:'', resize:true });
   charts = [c1, c2, c3, c4];
 
   // 시뮬레이터형 추가 선 (한 번 만들고 데이터만 갈아끼움)
@@ -312,9 +381,11 @@ DailyChart.load().then(function(){
   }
 
   // 기간 바 [일봉|주봉 ┃ 기간 4개] = 공용 컴포넌트 — 일봉 4개 차트를 한꺼번에 조작
-  DailyChart.periodBar('gPBar', charts, { theme: 'light', defaultIndex: 1 });   // 240일
+  DailyChart.periodBar('gPBar', charts, { theme: 'light', defaultIndex: 1,
+                                          fullscreen: !!+GF['fullscreen'] });   // 240일
   // 지표 바 — 저장된 사용자 지표를 골라 4개 차트에 동시 적용
-  var ibar = DailyChart.indicatorBar('gIBar', charts, { theme: 'light', key: 'gallery' });
+  var ibar = DailyChart.indicatorBar('gIBar', charts, { theme: 'light', key: 'gallery',
+                                                        preset: !!+GF['preset.select'] });
   var G_ROWS = [];   // 마지막 조회 일봉 — 지표 「검사」가 실데이터로 돌려 본다
 
   window.gLoad = function(){
@@ -330,7 +401,8 @@ DailyChart.load().then(function(){
       G_ROWS = rows;
       var n = rows.length, L = rows[n-1].close;
 
-      charts.forEach(function(dc){ dc.setData(rows); });
+      // SUE 공시 마커 — 갤러리도 실제 화면과 같게(구성이 켜져 있으면) 모듈이 얹는다
+      charts.forEach(function(dc){ dc.setCode(code); dc.setData(rows); });
       c5.setData(min);
 
       // 2번 데모: 가격선 3종 + 체결 3건
@@ -728,6 +800,125 @@ DailyChart.load().then(function(){
 }).catch(function(){
   document.getElementById('gStat').textContent = '차트 라이브러리를 불러오지 못했습니다.';
 });
+
+/* ══ 화면별 구성 — 카탈로그(FEAT_CAT) 하나로 카드·체크리스트·미리보기를 다 그린다 ══
+ * 목록을 여기에 다시 적지 않는다. 기능을 늘리려면 classes/ChartFeat.class 에 한 줄. */
+(function(){
+  var wrap = document.getElementById('scrList');
+  if (!wrap || typeof FEAT_CAT === 'undefined') return;
+  function esc2(s){ var d=document.createElement('div'); d.textContent=(s==null?'':String(s)); return d.innerHTML; }
+  var STY = { 0:'구성 ①~⑤', 1:'구성 ① 기본형', 2:'구성 ② 포트폴리오형',
+              3:'구성 ③ 시뮬레이터형', 4:'구성 ④ 분석형 + ⑤ 분봉' };
+
+  function avail(sk, fk){
+    var f = FEAT_CAT.features[fk], s = FEAT_CAT.screens[sk];
+    return !f.dep || s.data.indexOf(f.dep) >= 0;
+  }
+  function locked(sk, fk){
+    return FEAT_CAT.features[fk].g === 'core' || FEAT_CAT.screens[sk].lock.indexOf(fk) >= 0;
+  }
+  function drawPrev(sk){
+    var s = FEAT_CAT.screens[sk];
+    DailyChart.toolbarPreview('prev_' + sk, FEAT_VAL[sk], { theme: s.style === 4 ? 'dark' : 'light' });
+  }
+  function save(sk, reset){
+    var st = document.getElementById('st_' + sk);
+    if (st) st.textContent = '저장 중…';
+    var body = new URLSearchParams();
+    body.set('module','ind'); body.set('action','feat_save'); body.set('screen', sk);
+    if (reset) body.set('reset','1'); else body.set('vals', JSON.stringify(FEAT_VAL[sk]));
+    fetch('/stock_analysis_api.php', { method:'POST', body: body, credentials:'same-origin' })
+      .then(function(r){ return r.json(); })
+      .then(function(r){
+        if (!r || !r.ok) { if (st) st.textContent = '저장 실패'; return; }
+        FEAT_VAL[sk] = r.values;          // 서버가 잠금·데이터 규칙을 다시 먹인 최종값
+        card(sk);                         // 같은 자리를 다시 그린다 (서버가 되돌린 값이 보이게)
+        var st2 = document.getElementById('st_' + sk);
+        if (st2) st2.textContent = reset ? '기본값으로 되돌렸습니다' : '저장했습니다';
+      })
+      .catch(function(){ if (st) st.textContent = '저장 실패'; });
+  }
+
+  /* 차트 높이 저장 — 기간(tf·day·week)과 같은 칸에 사니 통째로 보낸다(서로 지우지 않게).
+     빈칸 = 높이 기억을 지운다(화면 기본값으로 돌아간다). */
+  function saveHeight(sk, val){
+    var v = FEAT_VIEW[sk] || (FEAT_VIEW[sk] = {});
+    var n = parseInt(val, 10);
+    if (isFinite(n) && n > 0) v.h = Math.max(140, Math.min(1400, n)); else delete v.h;
+    var st = document.getElementById('st_' + sk);
+    if (st) st.textContent = '저장 중…';
+    var body = new URLSearchParams();
+    body.set('module','ind'); body.set('action','view_save');
+    body.set('chart_key', sk); body.set('view', JSON.stringify(v));
+    fetch('/stock_analysis_api.php', { method:'POST', body: body, credentials:'same-origin' })
+      .then(function(r){ return r.json(); })
+      .then(function(r){
+        FEAT_VIEW[sk] = (r && r.view) ? r.view : {};
+        var hi = document.getElementById('hi_' + sk);
+        if (hi) hi.value = FEAT_VIEW[sk].h || '';      // 서버가 자른 값(140~1400)을 그대로 보여 준다
+        if (st) st.textContent = FEAT_VIEW[sk].h ? ('높이 ' + FEAT_VIEW[sk].h + 'px 로 저장') : '기본 높이로';
+      })
+      .catch(function(){ if (st) st.textContent = '저장 실패'; });
+  }
+
+  function card(sk){
+    var s = FEAT_CAT.screens[sk], vals = FEAT_VAL[sk];
+    var el = document.getElementById('scr_' + sk);
+    if (!el) { el = document.createElement('div'); el.className = 'scr-card'; el.id = 'scr_' + sk; wrap.appendChild(el); }
+    var h = '<div class="scr-hd"><h4>' + esc2(s.label) + '</h4>'
+          + '<span class="sty">' + STY[s.style] + '</span>'
+          + '<a class="go" href="' + esc2(s.url) + '" target="_blank">화면 열기 ↗</a></div>'
+          + '<div class="scr-note">' + esc2(s.note) + '</div>'
+          + '<div class="scr-prev" id="prev_' + sk + '"></div>';
+    Object.keys(FEAT_CAT.groups).forEach(function(g){
+      var keys = Object.keys(FEAT_CAT.features).filter(function(k){ return FEAT_CAT.features[k].g === g; });
+      if (!keys.length) return;
+      h += '<div class="fgrp"><div class="gh">' + esc2(FEAT_CAT.groups[g].label)
+         + '<em>' + esc2(FEAT_CAT.groups[g].desc) + '</em></div><div class="flist">';
+      keys.forEach(function(k){
+        var f = FEAT_CAT.features[k], lk = locked(sk, k), av = avail(sk, k);
+        var cls = lk ? 'fitem lock' : (av ? 'fitem' : 'fitem na');
+        var why = av ? f.desc : ('데이터 없음 — ' + FEAT_CAT.data[f.dep]);
+        h += '<label class="' + cls + '">'
+           + '<input type="checkbox" data-k="' + k + '"' + (+vals[k] ? ' checked' : '')
+           + ((lk || !av) ? ' disabled' : '') + '>'
+           + '<span><b>' + esc2(f.label) + '</b>' + (lk ? ' 🔒' : '')
+           + '<span class="why">' + esc2(why) + '</span></span></label>';
+      });
+      h += '</div></div>';
+    });
+    // 차트 높이 — 차트 아래 가장자리를 끌어도 되고, 여기서 숫자로 정해도 된다 (같은 값)
+    var hv = (FEAT_VIEW[sk] && FEAT_VIEW[sk].h) ? FEAT_VIEW[sk].h : '';
+    h += '<div class="scr-ft">'
+       + '<label class="hbox">차트 높이 <input type="number" id="hi_' + sk + '" min="140" max="1400" step="10"'
+       +   ' value="' + hv + '" placeholder="기본"> px'
+       +   '<span class="hnote">비우면 화면 기본값 · 차트 아래 가장자리를 끌어도 됩니다</span></label>'
+       + '<button type="button" class="btn btn-outline btn-sm" data-reset="1">기본값으로 되돌리기</button>'
+       + '<span class="st" id="st_' + sk + '"></span></div>';
+    el.innerHTML = h;
+    el.onchange = function(e){
+      var hi = e.target.closest ? e.target.closest('input[type=number]') : null;
+      if (hi) { saveHeight(sk, hi.value); return; }
+      var cb = e.target.closest ? e.target.closest('input[type=checkbox]') : null;
+      if (!cb || !cb.dataset.k) return;
+      FEAT_VAL[sk][cb.dataset.k] = cb.checked ? 1 : 0;
+      drawPrev(sk);                      // 미리보기는 먼저, 저장은 뒤 — 손이 느리게 느껴지지 않게
+      save(sk, false);
+    };
+    el.onclick = function(e){
+      var b = e.target.closest ? e.target.closest('button[data-reset]') : null;
+      if (b) save(sk, true);
+    };
+    drawPrev(sk);
+  }
+
+  Object.keys(FEAT_CAT.screens).forEach(function(sk){ card(sk); });
+
+  var bl = document.getElementById('barelessList');
+  if (bl) bl.innerHTML = FEAT_CAT.bareless.map(function(b){
+    return '<div><b>' + esc2(b[0]) + '</b> — ' + esc2(b[2]) + ' <span style="color:#a8b4c0">(' + esc2(b[1]) + ')</span></div>';
+  }).join('');
+})();
 </script>
 </body></html>
 HTML;

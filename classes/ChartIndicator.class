@@ -48,7 +48,11 @@ class ChartIndicator
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
         );
-        /* 화면별 「마지막 적용 틀」 — 열 때 그대로 되살린다 */
+        /* 화면별 「마지막 적용 틀」 — 열 때 그대로 되살린다.
+         * 이 표는 두 종류의 행을 담는다 (부딪히지 않는다 — 키 모양이 다르다):
+         *   축 행    `fund_day` `fund_week`  = 그 화면×축에서 마지막에 쓴 차트틀
+         *   화면 행  `fund` `position` …     = 그 화면의 기능 구성(features_json). preset_id=0
+         * 축 행은 늘 `_day`/`_week`/`_month` 로 끝나므로 화면키 단독 행과 겹칠 수 없다. */
         $this->pdo->exec(
             "CREATE TABLE IF NOT EXISTS chart_pref (
                 chart_key VARCHAR(40) NOT NULL PRIMARY KEY,
@@ -56,6 +60,12 @@ class ChartIndicator
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
         );
+        // 기능 구성 = 카탈로그(ChartFeat) 기본값과의 차분. null = 전부 기본값. 반복 실행 안전
+        $this->pdo->exec("ALTER TABLE chart_pref ADD COLUMN IF NOT EXISTS features_json TEXT NULL AFTER preset_id");
+        /* 화면이 스스로 기억하는 «보기» 값 — 차트틀(공유물)이 아니라 이 화면의 것.
+         *   화면 행 `fund`      : {"h":420}  차트 높이 (축과 무관 — 사용자가 끌어서 정한다)
+         *   축 행   `fund_day`  : 기간(index·bars) 자리 — 화면마다 폭이 달라 기간도 달라야 한다 */
+        $this->pdo->exec("ALTER TABLE chart_pref ADD COLUMN IF NOT EXISTS view_json TEXT NULL AFTER features_json");
     }
 
     /** 지표 세트 정규화 — [{id, vars:{}, exts:{수식칸위치:연장수}?}] */
@@ -166,7 +176,8 @@ class ChartIndicator
     public function presetDelete(int $id): void
     {
         $this->pdo->prepare("DELETE FROM chart_preset WHERE id=?")->execute([$id]);
-        $this->pdo->prepare("DELETE FROM chart_pref WHERE preset_id=?")->execute([$id]);
+        // ★행을 지우지 않고 선택만 푼다 — 같은 행에 그 화면의 기능 구성(features_json)이 산다
+        $this->pdo->prepare("UPDATE chart_pref SET preset_id=0 WHERE preset_id=?")->execute([$id]);
     }
 
     /** 화면별 마지막 적용 틀 → {chart_key: preset_id} */
@@ -179,20 +190,111 @@ class ChartIndicator
         return $out;
     }
 
-    /** 화면별 마지막 적용 틀 기록 (presetId<=0 이면 해제) */
+    /** 화면별 마지막 적용 틀 기록 (presetId<=0 이면 「차트 없음」 = 0 으로 둔다)
+     *  ★해제할 때도 행을 지우지 않는다 — features_json 이 같은 행에 살기 때문 */
     public function prefSave(string $chartKey, int $presetId): void
     {
         $chartKey = preg_replace('/[^a-z0-9_]/i', '', $chartKey);
         if ($chartKey === '') throw new InvalidArgumentException('chart_key 누락');
-        if ($presetId <= 0) {
-            $this->pdo->prepare("DELETE FROM chart_pref WHERE chart_key=?")->execute([$chartKey]);
-            return;
-        }
         $st = $this->pdo->prepare(
             "INSERT INTO chart_pref (chart_key, preset_id) VALUES (?,?)
              ON DUPLICATE KEY UPDATE preset_id=VALUES(preset_id)"
         );
-        $st->execute([$chartKey, $presetId]);
+        $st->execute([$chartKey, max(0, $presetId)]);
+    }
+
+    /* ── 화면이 기억하는 보기 값 (차트 높이 …) ──
+     * 차트틀에 넣지 않는 이유: 차트틀은 여러 화면이 «공유»하는 물건이라, 거기에 높이를 넣으면
+     * 한 화면에서 늘린 것이 다른 화면까지 늘린다. 화면마다 차트 자리가 다른데. */
+
+    /** 저장된 보기 값 (없으면 빈 배열) */
+    public function viewOf(string $chartKey): array
+    {
+        $st = $this->pdo->prepare("SELECT view_json FROM chart_pref WHERE chart_key=?");
+        $st->execute([$chartKey]);
+        $d = json_decode((string)$st->fetchColumn(), true);
+        return is_array($d) ? $d : [];
+    }
+
+    /**
+     * 보기 값 정규화 — 아는 칸만 통과시킨다 (빈 배열이면 칸을 비운다 = 기본값으로).
+     *   {"h":480, "tf":"day", "day":{"index":1,"bars":null}, "week":{"index":2,"bars":60}}
+     * 기간을 축별로 담는 이유: 240일과 48주는 같은 값이 아니라 축마다 따로 기억해야 한다.
+     * 한 행에 모아 두는 이유: 화면이 열릴 때 «한 번의 조회»로 높이·축·기간이 다 와야 안 튄다.
+     */
+    private static function cleanViewPref(array $v): array
+    {
+        $out = [];
+        if (isset($v['h']) && is_numeric($v['h'])) {
+            $out['h'] = max(140, min(1400, (int)$v['h']));       // 모듈의 H_MIN·H_MAX 와 같은 범위
+        }
+        if (isset($v['tf']) && in_array($v['tf'], ['day', 'week', 'month'], true)) $out['tf'] = $v['tf'];
+        foreach (['day', 'week', 'month'] as $tf) {
+            $m = $v[$tf] ?? null;
+            if (!is_array($m)) continue;
+            $sub = [];
+            if (isset($m['index']) && is_numeric($m['index'])) $sub['index'] = max(0, min(3, (int)$m['index']));
+            // bars = ± 로 직접 정한 봉 수. null 이면 「버튼 중 하나」라는 뜻이라 칸을 비운다
+            if (isset($m['bars']) && is_numeric($m['bars']) && (int)$m['bars'] > 0) {
+                $sub['bars'] = max(20, min(5000, (int)$m['bars']));
+            }
+            if ($sub) $out[$tf] = $sub;
+        }
+        return $out;
+    }
+
+    /** 저장 — 빈 값이면 칸을 비운다(화면 기억 해제). 남은 값을 돌려준다 */
+    public function viewSave(string $chartKey, $view): array
+    {
+        $chartKey = preg_replace('/[^a-z0-9_]/i', '', $chartKey);
+        if ($chartKey === '') throw new InvalidArgumentException('chart_key 누락');
+        if (is_string($view)) $view = json_decode($view, true);
+        $clean = self::cleanViewPref(is_array($view) ? $view : []);
+        $json  = $clean ? json_encode($clean, JSON_UNESCAPED_UNICODE) : null;
+        $st = $this->pdo->prepare(
+            "INSERT INTO chart_pref (chart_key, preset_id, view_json) VALUES (?,0,?)
+             ON DUPLICATE KEY UPDATE view_json=VALUES(view_json)"
+        );
+        $st->execute([$chartKey, $json]);
+        return $clean;
+    }
+
+    /* ── 화면별 기능 구성 (도구모음·레이어) — 원본은 ChartFeat 카탈로그 ── */
+
+    /** 저장된 차분 전체 → {screen_key: {feature: 0|1}} (기능 행만) */
+    public function featuresAll(): array
+    {
+        $rows = $this->pdo->query(
+            "SELECT chart_key, features_json FROM chart_pref WHERE features_json IS NOT NULL"
+        )->fetchAll(PDO::FETCH_ASSOC);
+        $out = [];
+        foreach ($rows as $r) {
+            $d = json_decode((string)$r['features_json'], true);
+            if (is_array($d)) $out[$r['chart_key']] = $d;
+        }
+        return $out;
+    }
+
+    /** 한 화면의 기능 구성을 카탈로그 기본값과 병합해 돌려준다 */
+    public function featuresOf(string $screen): array
+    {
+        $st = $this->pdo->prepare("SELECT features_json FROM chart_pref WHERE chart_key=?");
+        $st->execute([$screen]);
+        return ChartFeat::merge($screen, $st->fetchColumn() ?: null);
+    }
+
+    /** 저장 — 차분만 담는다. $vals 가 비면(=기본값으로 되돌리기) 칸을 비운다 */
+    public function featuresSave(string $screen, array $vals, bool $reset = false): array
+    {
+        if (!ChartFeat::screen($screen)) throw new InvalidArgumentException('없는 화면입니다.');
+        $diff = $reset ? [] : ChartFeat::diff($screen, $vals);
+        $json = $diff ? json_encode($diff, JSON_UNESCAPED_UNICODE) : null;
+        $st = $this->pdo->prepare(
+            "INSERT INTO chart_pref (chart_key, preset_id, features_json) VALUES (?,0,?)
+             ON DUPLICATE KEY UPDATE features_json=VALUES(features_json)"
+        );
+        $st->execute([$screen, $json]);
+        return ChartFeat::merge($screen, $diff);
     }
 
     /** 선 종류 — lightweight-charts LineStyle 과 1:1 (style/dailychart.js STYLE_MAP) */

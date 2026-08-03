@@ -1,0 +1,308 @@
+<?php
+/**
+ * ChartFeat.class — 차트 「기능 구성」 카탈로그 (원본)
+ *
+ * 차트에는 축이 둘 있다.
+ *   스타일 = 어떻게 그리나 (색·마커 모양·라이트/다크)  → chart_gallery.php 의 구성 5종
+ *   기능   = 무엇을 보여주고 조작하게 하나 (도구모음 버튼·마커 레이어·보조 차트)  → 이 파일
+ * 두 축은 독립이다 — 같은 스타일을 쓰는 두 화면이 서로 다른 기능 구성을 가질 수 있다
+ * (②포트폴리오형을 함께 쓰는 「보유종목 상세」와 「종목추가 사다리」가 실제로 그렇다).
+ *
+ * ★이 파일이 유일한 원본이다. 화면·JS 어디에도 기능 목록을 다시 적지 않는다
+ *   (Thr.class 와 같은 결 — 손으로 옮겨 적으면 원본을 고칠 때 사본이 조용히 거짓이 된다).
+ *   기능을 하나 늘리려면 FEATURES 에 한 줄, 화면에 열어 주려면 SCREENS 에 한 글자.
+ *
+ * 저장: chart_pref.features_json — 카탈로그 기본값과의 <b>차분</b>만 담는다(null = 전부 기본값).
+ *       행 키는 축 접미사 없는 화면키(`fund`·`position`…). 축별 「마지막 쓴 차트」 행
+ *       (`fund_day`·`fund_week`)과 같은 표를 쓰되 서로 부딪히지 않는다 — ChartIndicator 참조.
+ */
+class ChartFeat
+{
+    /** 묶음 — 화면에서 이 순서로 보인다 */
+    public const GROUPS = [
+        'core'   => ['label' => '공통 핵심', 'desc' => '항상 표시 — 끌 수 없습니다'],
+        'common' => ['label' => '공통 선택', 'desc' => '화면마다 켜고 끕니다'],
+        'module' => ['label' => '이동 가능 모듈', 'desc' => '데이터가 있는 화면에서만 켜집니다'],
+    ];
+
+    /** 데이터 의존성 — 화면이 이 데이터를 갖고 있어야 그 기능을 켤 수 있다 */
+    public const DATA = [
+        'position' => '보유 포지션(누적단가·자동매도가)',
+        'fills'    => '체결 이력',
+        'intraday' => '당일 시세',
+        'minute'   => '분봉',
+        'surge'    => '최고 거래대금 박스(krx_surge)',
+    ];
+
+    /**
+     * 기능 카탈로그.
+     *   g    묶음 · dep 데이터 의존성(없으면 null) · def 기본값(화면이 따로 안 정했을 때)
+     *   ui   도구모음 미리보기에 그릴 모양 — 'seg'(버튼 묶음) · 'btn' · 'sel' · 'chip' · 'panel'
+     */
+    public const FEATURES = [
+        // ── 공통 핵심 (잠금) ──
+        'period.cycle' => [
+            'g' => 'core', 'label' => '일봉 / 주봉', 'dep' => null, 'def' => 1, 'ui' => 'seg',
+            'desc' => '시간축 전환. 축을 바꾸면 그 축의 지표 세트·기간 라벨이 따라온다',
+        ],
+        'period.preset' => [
+            'g' => 'core', 'label' => '기간 버튼 + ±', 'dep' => null, 'def' => 1, 'ui' => 'seg',
+            'desc' => '160/240/480/전체 · ± 로 20%씩 미세 조정',
+        ],
+        'save' => [
+            'g' => 'core', 'label' => '차트저장', 'dep' => null, 'def' => 1, 'ui' => 'btn',
+            'desc' => '지금 화면 그대로(기간·축·지표·변수) 한 벌로 저장',
+        ],
+        'indicator.add' => [
+            'g' => 'core', 'label' => '＋지표 · 적용중 칩', 'dep' => null, 'def' => 1, 'ui' => 'btn',
+            'desc' => '사용자 지표 선택 · 칩을 눌러 변수·연장 수정',
+        ],
+
+        // ── 공통 선택 ──
+        'fullscreen' => [
+            'g' => 'common', 'label' => '전체화면 ⛶', 'dep' => null, 'def' => 1, 'ui' => 'btn',
+            'desc' => '차트가 하나인 화면에서만 뜬다 — 도구모음도 함께 따라간다',
+        ],
+        'preset.select' => [
+            'g' => 'common', 'label' => '저장된 차트 ▾', 'dep' => null, 'def' => 1, 'ui' => 'sel',
+            'desc' => '이 축에 저장해 둔 차트 목록. 끄면 차트저장만 남는다',
+        ],
+        'legend.values' => [
+            'g' => 'common', 'label' => '지표 값 범례', 'dep' => null, 'def' => 1, 'ui' => 'legend',
+            'desc' => '차트 위에 지표의 지금 값을 글자로 (차트 안에는 글자를 넣지 않는다)',
+        ],
+        'period.full_range' => [
+            'g' => 'common', 'label' => '「전체 기간」 버튼', 'dep' => null, 'def' => 0, 'ui' => 'btn',
+            'desc' => '시세가 실제로 있는 구간 전체로 한 번에 되돌린다',
+        ],
+
+        // ── 이동 가능 모듈 ──
+        'overlay.position_lines' => [
+            'g' => 'module', 'label' => '가격선 3종', 'dep' => 'position', 'def' => 0, 'ui' => 'layer',
+            'desc' => '누적단가 · 자동매도가 · 다음매수가 수평선',
+        ],
+        'overlay.trade_markers' => [
+            'g' => 'module', 'label' => '체결 마커', 'dep' => 'fills', 'def' => 0, 'ui' => 'layer',
+            'desc' => '매수/매도 화살표 + 차수·그날 시장상태',
+        ],
+        /* ★2026-08-03 — 재무분석 전용에서 «모든 차트»로 풀었다(사용자 요청).
+         * 의존성이 없는 이유: 종목코드만 있으면 모듈이 stock_analysis_api.php?module=sue 로
+         * 직접 받아 온다(계산 단일본 = stock/lib/sue.php). 화면이 미리 들고 있을 필요가 없다. */
+        'overlay.sue_markers' => [
+            'g' => 'module', 'label' => 'SUE 공시 마커', 'dep' => null, 'def' => 1, 'ui' => 'btn',
+            'desc' => '▲어닝서프라이즈 · ▼어닝쇼크 (공시 다음 거래일) + 기간 바의 「SUE 공시 N」 토글',
+        ],
+        'overlay.intraday_ref' => [
+            'g' => 'module', 'label' => '당일전고 · 현재가', 'dep' => 'intraday', 'def' => 0, 'ui' => 'chip',
+            'desc' => '직전 60봉 최고가 기준선과 현재가선 (관찰용)',
+        ],
+        'panel.minute' => [
+            'g' => 'module', 'label' => '분봉 보조 차트', 'dep' => 'minute', 'def' => 0, 'ui' => 'panel',
+            'desc' => '일봉 아래 당일 09:00~15:30 · 1분',
+        ],
+        'overlay.box_ladder' => [
+            'g' => 'module', 'label' => '박스 사다리 후보', 'dep' => 'surge', 'def' => 0, 'ui' => 'layer',
+            'desc' => '후보 박스선 + 선택한 지지선 강조 — 이 화면이 존재하는 이유라 잠금',
+        ],
+    ];
+
+    /**
+     * 화면 등록부.
+     *   pref  차트틀(지표 세트) 기억 키 = chart_pref 의 축 행 접두어. 두 화면이 나눠 쓸 수 있다
+     *   style 차트 스타일 갤러리의 구성 번호
+     *   data  이 화면이 실제로 들고 있는 데이터 (여기 없는 의존성은 켤 수 없다)
+     *   lock  화면 성립 조건이라 끌 수 없는 기능
+     *   on/off 카탈로그 기본값을 화면 사정에 맞게 뒤집는 것
+     */
+    public const SCREENS = [
+        'fund' => [
+            'label' => '재무분석 종목상세', 'pref' => 'fund', 'style' => 1,
+            'url' => '/stock/index.php?mode=fund',
+            'data' => [], 'lock' => ['overlay.sue_markers'], 'on' => [], 'off' => [],
+            'note' => '실적과 주가를 견주는 자리 — 공시 마커가 이 화면의 뼈대라 잠금',
+        ],
+        'position' => [
+            'label' => '보유종목 → 종목 상세', 'pref' => 'position', 'style' => 2,
+            'url' => '/stock/index.php?mode=all',
+            'data' => ['position', 'fills'], 'lock' => [],
+            'on' => ['overlay.position_lines', 'overlay.trade_markers'], 'off' => [],
+            'note' => '★이미 산 종목을 보는 자리 — 오늘의 퀀트 판정은 여기 세우지 않는다(요건 §1)',
+        ],
+        'boxladder' => [
+            'label' => '종목추가 → 퀀트 사다리', 'pref' => 'position', 'style' => 2,
+            'url' => '/stock/index.php?mode=add',
+            'data' => ['surge'], 'lock' => ['overlay.box_ladder'], 'on' => [], 'off' => [],
+            'note' => '차트틀·지표는 보유종목 상세와 공유(pref=position), 기능 구성만 따로',
+        ],
+        'sim' => [
+            'label' => '시뮬레이터', 'pref' => 'sim', 'style' => 3,
+            'url' => '/stock/index.php?mode=sim',
+            'data' => ['fills'], 'lock' => [],
+            'on' => ['overlay.trade_markers', 'period.full_range'], 'off' => [],
+            'note' => '10년 구간이라 마커는 라이브러리 글자(칩은 겹쳐 못 읽는다)',
+        ],
+        'updash' => [
+            'label' => '상승종목 대시보드', 'pref' => 'updash', 'style' => 4,
+            'url' => '/stock_analysis.php?mode=updash',
+            'data' => ['intraday', 'minute'], 'lock' => [],
+            'on' => ['overlay.intraday_ref', 'panel.minute'], 'off' => [],
+            'note' => '관찰 화면 — 판정(승률·신호칩)은 2026-08-02 폐기됐다',
+        ],
+        'gallery' => [
+            'label' => '차트설정 (이 화면)', 'pref' => 'gallery', 'style' => 0,
+            'url' => '/chart_gallery.php',
+            'data' => [], 'lock' => [], 'on' => [], 'off' => ['fullscreen'],
+            'note' => '차트 4개를 바 하나로 조종하는 자리라 전체화면 대상이 모호하다 — 그래서 off',
+        ],
+    ];
+
+    /** 도구모음이 아예 없는 차트 — 설정 대상이 아니지만 지도에서 빠지면 「빠뜨린 것」이 된다 */
+    public const BARELESS = [
+        ['갤러리 2~5번 미리보기', 'chart_gallery.php', '상단 바 하나가 4개를 함께 조종'],
+        ['어닝 사례분석 (mode=earncase)', 'stock/index.php', '사례마다 작은 차트 — 박스+공시 마커 고정'],
+        ['퀀트 패턴분석 (mode=pattern)', 'stock/index.php', '사례마다 작은 차트 — 신호박스 고정'],
+        ['분봉 보조 차트', 'stock_analysis.php', '일봉 도구모음이 함께 조종'],
+    ];
+
+    public static function screen(string $key): ?array
+    {
+        return self::SCREENS[$key] ?? null;
+    }
+
+    /** 그 화면에서 이 기능을 켤 수 있나 (데이터 의존성) */
+    public static function available(string $screen, string $feat): bool
+    {
+        $s = self::SCREENS[$screen] ?? null;
+        $f = self::FEATURES[$feat] ?? null;
+        if (!$s || !$f) return false;
+        return $f['dep'] === null || in_array($f['dep'], $s['data'], true);
+    }
+
+    /** 잠금 = 끌 수 없음. 공통 핵심 전부 + 화면이 지정한 lock */
+    public static function locked(string $screen, string $feat): bool
+    {
+        $s = self::SCREENS[$screen] ?? null;
+        $f = self::FEATURES[$feat] ?? null;
+        if (!$s || !$f) return false;
+        return $f['g'] === 'core' || in_array($feat, $s['lock'], true);
+    }
+
+    /** 카탈로그 기본값 (사용자 저장분을 얹기 전) → {feature_key: 0|1} */
+    public static function defaults(string $screen): array
+    {
+        $s = self::SCREENS[$screen] ?? null;
+        if (!$s) return [];
+        $out = [];
+        foreach (self::FEATURES as $k => $f) {
+            $v = $f['def'];
+            if (in_array($k, $s['on'], true))  $v = 1;
+            if (in_array($k, $s['off'], true)) $v = 0;
+            if (!self::available($screen, $k)) $v = 0;          // 데이터가 없으면 켤 수 없다
+            if (self::locked($screen, $k))     $v = 1;
+            $out[$k] = (int)$v;
+        }
+        return $out;
+    }
+
+    /**
+     * 카탈로그 기본값 + 저장된 차분 → 최종 구성.
+     * $over 는 {feature_key: 0|1}. 잠금·데이터 없음은 저장값이 있어도 무시한다.
+     */
+    public static function merge(string $screen, $over): array
+    {
+        $out = self::defaults($screen);
+        if (is_string($over)) $over = json_decode($over, true);
+        if (is_array($over)) {
+            foreach ($over as $k => $v) {
+                if (!isset($out[$k])) continue;
+                if (self::locked($screen, $k) || !self::available($screen, $k)) continue;
+                $out[$k] = $v ? 1 : 0;
+            }
+        }
+        return $out;
+    }
+
+    /** 저장할 차분만 남긴다 — 기본값과 같은 항목은 버린다(카탈로그를 고치면 따라오게) */
+    public static function diff(string $screen, array $vals): array
+    {
+        $def = self::defaults($screen);
+        $out = [];
+        foreach ($vals as $k => $v) {
+            if (!isset($def[$k])) continue;
+            if (self::locked($screen, $k) || !self::available($screen, $k)) continue;
+            $v = $v ? 1 : 0;
+            if ($v !== $def[$k]) $out[$k] = $v;
+        }
+        return $out;
+    }
+
+    /**
+     * 화면이 쓸 최종 구성 — 페이지 렌더의 유일한 진입점.
+     * 표·컬럼이 아직 없어도(이행 전) 카탈로그 기본값으로 살아난다 — 설정 하나 때문에 화면이
+     * 죽으면 안 된다. 가벼운 단일 SELECT 라 ChartIndicator(ensureTable) 를 부르지 않는다.
+     */
+    private static array $cache = [];
+
+    public static function vals(string $screen, ?PDO $pdo = null): array
+    {
+        if (isset(self::$cache[$screen])) return self::$cache[$screen];
+        // 화면 함수들이 $pdo 를 늘 인자로 받지는 않는다 (폼·스크립트 조각) — 전역을 폴백으로
+        if (!$pdo instanceof PDO) $pdo = $GLOBALS['pdo'] ?? null;
+        $over = null;
+        if ($pdo instanceof PDO) {
+            try {
+                $st = $pdo->prepare("SELECT features_json FROM chart_pref WHERE chart_key=?");
+                $st->execute([$screen]);
+                $over = $st->fetchColumn() ?: null;
+            } catch (Throwable $e) {
+                $over = null;
+            }
+        }
+        return self::$cache[$screen] = self::merge($screen, $over);
+    }
+
+    /** 그 구성을 JS 로 넘기는 한 줄 — style/dailychart.js 의 DailyChart.feats() 가 읽는다 */
+    public static function script(array $vals): string
+    {
+        return '<script>var DC_FEATS=' . json_encode($vals, JSON_UNESCAPED_UNICODE) . ';</script>';
+    }
+
+    /**
+     * 화면이 차트를 그리기 «전에» 심는 한 줄 — 기능 구성 + 화면 식별자 + 화면이 기억한 보기 값.
+     *   DC_SCREEN 이 있어야 모듈이 「이 높이는 어느 화면 것인지」를 안다
+     *   (차트틀 키 opts.key 와 다르다 — 보유종목 상세와 종목추가 사다리는 차트틀만 공유한다).
+     *   DC_VIEW 를 «서버가» 심는 이유: 높이를 나중에 받아 오면 화면이 한 번 튄다.
+     */
+    public static function boot(string $screen, ?PDO $pdo = null): string
+    {
+        if (!$pdo instanceof PDO) $pdo = $GLOBALS['pdo'] ?? null;
+        $view = [];
+        if ($pdo instanceof PDO) {
+            try {
+                $st = $pdo->prepare("SELECT view_json FROM chart_pref WHERE chart_key=?");
+                $st->execute([$screen]);
+                $d = json_decode((string)$st->fetchColumn(), true);
+                if (is_array($d)) $view = $d;
+            } catch (Throwable $e) {
+                $view = [];          // 컬럼이 아직 없어도 화면은 페이지 기본 높이로 뜬다
+            }
+        }
+        return '<script>var DC_SCREEN=' . json_encode($screen)
+             . ';var DC_VIEW=' . json_encode($view ?: new stdClass(), JSON_UNESCAPED_UNICODE)
+             . ';var DC_FEATS=' . json_encode(self::vals($screen, $pdo), JSON_UNESCAPED_UNICODE)
+             . ';</script>';
+    }
+
+    /** 화면에 심을 카탈로그 (JS 가 체크리스트·미리보기를 그리는 데 쓴다) */
+    public static function catalog(): array
+    {
+        return [
+            'groups'   => self::GROUPS,
+            'data'     => self::DATA,
+            'features' => self::FEATURES,
+            'screens'  => self::SCREENS,
+            'bareless' => self::BARELESS,
+        ];
+    }
+}
+?>

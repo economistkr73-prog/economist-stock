@@ -21,6 +21,8 @@
  *   markers    { chips:true }  — 체결 마커. chips=true 면 HTML 칩(충돌회피), false 면 라이브러리 text
  *   todayHigh  true            — 당일전고선: 최신봉 제외 직전 60봉 최고가 수평선 (관찰용 기준선)
  *   curPrice   현재가선 색 (없으면 기능 자체 꺼짐. updash='#d9a441')
+ *   code       종목코드 6자리 — 주면 SUE 공시 마커(▲어닝서프라이즈·▼어닝쇼크)를 모듈이 스스로 얹는다.
+ *              종목이 바뀌는 화면은 dc.setCode(code). 차트설정의 overlay.sue_markers 로 켜고 끈다.
  *
  * 주봉: dc.setTf('week') — 보관해 둔 일봉을 주 단위로 접어 다시 그린다(월요일 기준,
  *       시가=주 첫 봉, 고저=주 내 최대·최소, 종가=주 마지막 봉, 거래량=합).
@@ -160,6 +162,15 @@
     st.textContent =
       /* 체결 칩 — 매수 빨강 / 매도 파랑 + 흰 글씨 (position 계열) */
       '.dc-mk-layer{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:2}' +
+      /* 높이 조절 손잡이 — 차트 아래 가장자리. 평소엔 거의 안 보이고 올리면 드러난다 */
+      '.dc-rsz{position:absolute;left:0;right:0;bottom:-3px;height:10px;z-index:5;cursor:ns-resize;' +
+        'display:flex;align-items:center;justify-content:center;touch-action:none}' +
+      /* 평소에도 옅게 보인다 — 안 보이면 있는 줄을 모른다(실제로 못 찾으셨다) */
+      '.dc-rsz::before{content:"";width:46px;height:3px;border-radius:3px;background:#c9d4de;opacity:.45;' +
+        'transition:opacity .12s,width .12s}' +
+      '.dc-rsz:hover::before,.dc-rsz.on::before{opacity:1;width:64px}' +
+      '.dc-rsz span{position:absolute;bottom:12px;padding:1px 7px;border-radius:20px;font-size:11px;' +
+        'font-weight:800;background:#22303f;color:#fff;pointer-events:none;white-space:nowrap}' +
       '.dc-bx-layer{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:1}' +
       '.dc-bx{position:absolute;box-sizing:border-box;border-radius:2px}' +
       '.dc-bx .bx-lb{position:absolute;top:1px;left:4px;font-size:10px;font-weight:700;white-space:nowrap;' +
@@ -232,6 +243,15 @@
       '.dc-ilg b{font-variant-numeric:tabular-nums}' +
       /* 지표 칩 = 클릭하면 변수 수정 모달 (✕ 는 제거) */
       '.dc-ichip{cursor:pointer}' +
+      /* ── 도구모음 미리보기 (차트설정 > 구성) — 진짜 바와 같은 클래스를 쓰고 배치만 여기서 ── */
+      '.dc-tbprev{display:flex;flex-direction:column;gap:7px;padding:9px 10px;border-radius:9px;' +
+        'background:#f6f9fc;border:1px solid #e3eaf0}' +
+      '.dc-tbprev.dark{background:#0e1320;border-color:#26304a}' +
+      '.dc-tbrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}' +
+      '.dc-tbleg{font-size:11.5px;font-weight:700;color:#5b6c7d}' +
+      '.dc-tbleg.dark{color:#dfe6f2}' +
+      '.dc-tbnote{font-size:11.5px;color:#8496a6}' +
+      '.dc-tbnote.dark{color:#8893ab}' +
       /* ── 모달 (지표 선택 · 변수 수정) — 화면 어디서 열어도 같은 모양 ── */
       '.dc-modal{position:fixed;inset:0;z-index:9999;background:rgba(10,20,35,.45);' +
         'display:flex;align-items:center;justify-content:center;padding:16px;' +
@@ -793,6 +813,33 @@
     if (opts.volAlpha) TH.volAlpha = opts.volAlpha;
     var kind = opts.kind || 'day';
 
+    /* ── 차트 높이 — 화면마다 «사용자가 끌어서» 정하고, 그 화면이 기억한다 ──
+     * hkey  = 높이를 기억하는 단위 = 화면(ChartFeat 의 screen). 차트틀 키(opts.key)와 다르다 —
+     *         보유종목 상세와 종목추가 사다리는 차트틀은 공유하지만(position) 화면은 다르니까.
+     * hTarget = 실제로 늘어나는 요소. 기본은 host 지만, updash 처럼 flex 형제와 자리를 나눠 갖는
+     *         배치에서는 페이지가 부모 블록을 지정한다(opts.resizeTarget) — host 에 높이를 박으면
+     *         flex 가 무시해서 「끌리지 않는 손잡이」가 된다.
+     * 저장값은 서버가 페이지에 심어 준다(DC_VIEW) — 비동기로 받으면 화면이 한 번 튄다. */
+    // screen:'' 를 명시하면 「끌 수는 있되 기억은 안 한다」 (갤러리 미리보기처럼 한 화면에 여럿일 때)
+    var hkey = (opts.screen !== undefined) ? String(opts.screen)
+             : (typeof window.DC_SCREEN === 'string' ? window.DC_SCREEN : '');
+    var hTarget = opts.resizeTarget
+      ? (typeof opts.resizeTarget === 'string' ? host.closest(opts.resizeTarget) : opts.resizeTarget)
+      : host;
+    if (!hTarget) hTarget = host;
+    var H_MIN = 140, H_MAX = 1400;
+    function applyHeight(h, fit) {
+      h = Math.max(H_MIN, Math.min(H_MAX, Math.round(h)));
+      if (hTarget === host) { host.style.height = h + 'px'; opts.height = h; }
+      else hTarget.style.flex = '0 0 ' + h + 'px';        // 형제(분봉)가 나머지를 가져간다
+      if (fit) onResize();
+      return h;
+    }
+    // 페이지가 원래 정해 둔 높이 — 저장값을 얹기 «전에» 기억해 둔다 (두 번 누르면 여기로 돌아온다)
+    var pageH = opts.height || (hTarget === host ? host.clientHeight : hTarget.clientHeight) || 0;
+    var savedH = (window.DC_VIEW && hkey && +window.DC_VIEW.h) ? +window.DC_VIEW.h : 0;
+    if (savedH && opts.resize !== false) applyHeight(savedH, false);   // 그리기 전에 — 튐 없이
+
     var chartOpt = {
       width: host.clientWidth, height: opts.height || host.clientHeight,
       layout: { background: { color: TH.bg }, textColor: TH.text, fontFamily: 'Pretendard' },
@@ -803,9 +850,16 @@
         timeFormatter: kind === 'minute' ? fmtHM : fmtKDate,
         priceFormatter: function (v) { return Math.round(v).toLocaleString(); }
       },
+      /* ★시간축을 «데이터 안»에 가둔다 (2026-08-03).
+       *   fixRightEdge — 최신 봉이 항상 오른쪽 끝. 휠로 줌아웃하면 왼쪽(과거)만 늘어난다.
+       *                  이게 없으면 커서 기준으로 벌어져 오른쪽에 빈 자리가 생긴다(실측).
+       *   fixLeftEdge  — 첫 봉보다 더 왼쪽으로는 못 간다. 전부 보이면 줌아웃이 거기서 멎는다.
+       *   HTS 와 같은 감각 — 데이터가 있는 만큼만 움직이고 빈 여백은 만들지 않는다. */
       timeScale: kind === 'minute'
-        ? { borderColor: TH.border, timeVisible: true,  secondsVisible: false, tickMarkFormatter: fmtHM }
-        : { borderColor: TH.border, timeVisible: false, secondsVisible: false, tickMarkFormatter: fmtTick }
+        ? { borderColor: TH.border, timeVisible: true,  secondsVisible: false, tickMarkFormatter: fmtHM,
+            fixLeftEdge: true, fixRightEdge: true, rightOffset: 0 }
+        : { borderColor: TH.border, timeVisible: false, secondsVisible: false, tickMarkFormatter: fmtTick,
+            fixLeftEdge: true, fixRightEdge: true, rightOffset: 0 }
     };
     var chart = LWC.createChart(host, chartOpt);
 
@@ -822,7 +876,9 @@
       _plines: [],          // [{price,color,style,width,axisLabel}]
       _plineObjs: [],
       _extra: [],           // 추가 선 [{opt, raw, series}]
-      _marks: [],           // [{time,sell,text,state}]
+      _marks: [],           // [{time,sell,text,state}] — 화면이 얹는 마커(체결 등)
+      _sueMarks: [],        // SUE 공시 마커 — 모듈이 스스로 받아 얹는 층 (setCode 참조)
+      _sueOn: true, _sueCode: '', _sueRaw: [], _sueFit: 0,   // _sueFit = 실린 봉 안에 «자리가 있는» 공시 수
       _mkLayer: null, _mkVisible: 0,
       _th: null,            // 당일전고선 상태 {obj, show}
       _curPriceOn: false,
@@ -834,6 +890,52 @@
       key: opts.key || ''   // 화면 식별자 (차트틀 기억용)
     };
 
+    /* ── 가격축 채우기 — 「보이는 봉」 기준 위 +10% · 아래 −10% ──
+     * 라이브러리 기본은 ⒜구간 폭에 비례한 여백(위 20%·아래 10%)을 더하고 ⒝가격선·지표선까지
+     * 스케일에 넣는다. 그래서 최고가 79만인 차트의 축이 95만까지 벌어져 캔들이 납작해졌다(실측).
+     * 여기서는 봉의 고·저만으로 범위를 정하고, 여백은 «가격의 %»로 준다 — 구간을 넓혀도 비율이 같다.
+     * ★가격선(누적단가·자동매도가·다음매수가)은 범위를 넓혀서라도 포함한다 — 「내가 산 자리」가
+     *   화면에서 사라지면 안 된다. 반대로 지표선은 제외한다(옛 레벨 하나 때문에 캔들이 눌린다).
+     */
+    var PAD = (opts.padPct === undefined) ? 0.10 : +opts.padPct;
+    function barScale(original) {
+      var fb = fullBars();
+      if (!fb.length) return original ? original() : null;
+      var from = 0, to = fb.length - 1, r = null;
+      try { r = chart.timeScale().getVisibleLogicalRange(); } catch (e) { r = null; }
+      if (r) {
+        from = Math.max(0, Math.floor(r.from));
+        to   = Math.min(fb.length - 1, Math.ceil(r.to));
+      }
+      if (to < from) return original ? original() : null;
+      var lo = Infinity, hi = -Infinity;
+      for (var i = from; i <= to; i++) {
+        var b = fb[i];
+        if (!b) continue;
+        var l = (b.low  === null || b.low  === undefined) ? b.close : b.low;
+        var h = (b.high === null || b.high === undefined) ? b.close : b.high;
+        if (l !== null && l !== undefined && l < lo) lo = l;
+        if (h !== null && h !== undefined && h > hi) hi = h;
+      }
+      if (!isFinite(lo) || !isFinite(hi) || hi <= 0) return original ? original() : null;
+      var B = lo * (1 - PAD), T = hi * (1 + PAD);      // 화면 «맨 아래·맨 위»에 오길 바라는 값
+      self._plines.forEach(function (L) {
+        var v = +L.price;
+        if (!isFinite(v)) return;
+        if (v < B) B = v * (1 - PAD / 2);
+        if (v > T) T = v * (1 + PAD / 2);
+      });
+      /* 라이브러리는 여기서 돌려준 범위에 scaleMargins(비율 여백)를 «또» 더해서 그린다.
+       * 그대로 두면 +10% 가 +12%,+15% 로 불어난다 — 여백만큼 미리 빼서 돌려준다.
+       * 그러면 화면 위·아래 끝이 정확히 최고가+10% · 최저가−10% 가 된다. */
+      var V = T - B;
+      return { priceRange: { minValue: B + MB * V, maxValue: T - MT * V } };
+    }
+    /* 라이브러리 비율 여백 — 아래를 조금 남기는 이유는 거래량 막대(별도 축)가 바닥을 쓰기 때문.
+     * 이 값은 barScale 이 되빼므로 «가격축 눈금»에는 영향이 없다(위 +10%·아래 −10% 그대로). */
+    var MT = 0.02, MB = (opts.volume === false) ? 0.02 : 0.06;
+    chart.priceScale('right').applyOptions({ scaleMargins: { top: MT, bottom: MB } });
+
     /* ── 메인 시리즈 — 시·고·저가 하나도 없으면 선 폴백(sim 의 옛 종가전용 데이터) ── */
     function ensureMain(wantCandle) {
       if (self._main && self._mainIsCandle === wantCandle) return;
@@ -843,7 +945,8 @@
           upColor: TH.up, downColor: TH.down,
           borderUpColor: TH.up, borderDownColor: TH.down,
           wickUpColor: TH.up, wickDownColor: TH.down,
-          priceLineVisible: false
+          priceLineVisible: false,
+          autoscaleInfoProvider: barScale        // 보이는 봉 ±10% 로 축을 꽉 채운다
         });
         if (opts.curPrice) {
           self._main.applyOptions({
@@ -852,7 +955,8 @@
           });
         }
       } else {
-        self._main = chart.addLineSeries({ color: '#22303f', lineWidth: 2, priceLineVisible: false });
+        self._main = chart.addLineSeries({ color: '#22303f', lineWidth: 2, priceLineVisible: false,
+                                          autoscaleInfoProvider: barScale });
       }
       self._mainIsCandle = wantCandle;
       self._plineObjs = [];          // 시리즈가 바뀌면 가격선도 다시 그려야 한다
@@ -948,7 +1052,13 @@
     function applyMarkers() {
       if (!self._main) return;
       var fb = fullBars();   // 데이터 전체가 실려 있으므로 마커도 전체 — 스크롤로 과거를 봐도 체결이 보인다
-      if (!fb.length || (!self._marks.length && !self._indMarks.length)) {
+      // 화면이 얹은 마커 + SUE 공시 층. 층이 여럿이어도 라이브러리엔 시간순 한 목록으로 넘긴다
+      var marks = self._sueMarks.length            // 칩 겹침 회피가 시간순을 전제로 한다 → 합치면 다시 정렬
+        ? self._marks.concat(self._sueMarks).sort(function (a, b) {
+            return a.time < b.time ? -1 : a.time > b.time ? 1 : 0;
+          })
+        : self._marks;
+      if (!fb.length || (!marks.length && !self._indMarks.length)) {
         self._main.setMarkers([]);
         self._mkChipData = [];
         self._mkVisible = 0;
@@ -960,20 +1070,26 @@
       var byTime = {};
       fb.forEach(function (b) { byTime[b.time] = b; });
 
+      /* 칩(HTML 말풍선) vs 라이브러리 글자 — 화면 기본값은 opts.markers.chips 가 정하지만
+       * 마커 하나가 m.chip 으로 뒤집을 수 있다. SUE 공시 마커가 그 경우다:
+       * 「어느 화면에서 봐도 같은 배지」여야 해서 시뮬레이터(chips:false)에서도 칩으로 그린다. */
       var chips = (opts.markers && opts.markers.chips) !== false;
-      var lib = [], chipData = [];
-      self._marks.forEach(function (m) {
+      var lib = [], chipData = [], pageSeen = 0;
+      marks.forEach(function (m) {
         var t = snapTime(m.time);
         if (t === null || t < from || t > to) return;
+        // 화면이 얹은 마커만 센다 — 「체결 마커 N개」 같은 문구가 SUE 층 때문에 부풀면 안 된다
+        if (self._sueMarks.indexOf(m) < 0) pageSeen++;
+        var useChip = (m.chip === undefined) ? chips : !!m.chip;
         lib.push({
           time: t,
           position: m.sell ? 'aboveBar' : 'belowBar',
           color: m.sell ? TH.down : TH.up,
           shape: m.sell ? 'arrowDown' : 'arrowUp',
-          text: chips ? '' : (m.text || '')
+          text: useChip ? '' : (m.text || '')
         });
         var b = byTime[t];
-        if (chips && b && b.high !== undefined) {
+        if (useChip && b && b.high !== undefined) {
           chipData.push({ time: t, text: m.text, state: m.state || '', sell: m.sell,
                           hi: b.high === null ? b.close : b.high,
                           lo: b.low  === null ? b.close : b.low });
@@ -986,9 +1102,10 @@
       });
       lib.sort(function (a, b) { return a.time < b.time ? -1 : a.time > b.time ? 1 : 0; });
       self._main.setMarkers(lib);
-      self._mkVisible = lib.length;
+      self._mkVisible = pageSeen;
       self._mkChipData = chipData;
-      if (chips && !self._mkLayer) {
+      // 칩이 하나라도 있으면 층을 만든다 (화면 기본이 「글자」여도 SUE 배지는 칩이다)
+      if (chipData.length && !self._mkLayer) {
         self._mkLayer = document.createElement('div');
         self._mkLayer.className = 'dc-mk-layer';
         host.appendChild(self._mkLayer);
@@ -1094,7 +1211,9 @@
             var s = chart.addLineSeries({
               color: pt.color, lineWidth: pt.w || 2,
               lineStyle: STYLE_MAP[pt.st] === undefined ? LWC.LineStyle.Solid : STYLE_MAP[pt.st],
-              priceLineVisible: false, lastValueVisible: false
+              priceLineVisible: false, lastValueVisible: false,
+              // ★가격축은 봉이 정한다 — 멀리 있는 지표 레벨 하나가 캔들을 납작하게 눌러선 안 된다
+              autoscaleInfoProvider: function () { return null; }
             });
             var pairs = fb.map(function (b, i) {
               var v = vals[i];
@@ -1240,6 +1359,66 @@
     if (window.ResizeObserver) new ResizeObserver(onResize).observe(host);
     window.addEventListener('resize', onResize);
 
+    /* ── 높이 조절 손잡이 — 차트 아래 가장자리를 끌면 높이가 바뀐다 ──
+     * 놓는 순간 그 «화면»의 높이로 저장된다(chart_pref.view_json). 두 번 누르면 기본값으로.
+     * 도구모음에 버튼을 늘리지 않는 이유: 높이는 눈으로 맞추는 값이라 끌어서 정하는 게 자연스럽다.
+     * 손잡이가 없는 곳 = 화면 식별자가 없는 미니 차트(사례분석·패턴) — 거기선 페이지가 정한 높이 그대로. */
+    var baseH = opts.baseHeight || pageH;      // 되돌리기 목표 = 페이지가 정한 높이
+    if (opts.resize !== false && (hkey || opts.resize === true)) {
+      if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+      var grip = document.createElement('div');
+      grip.className = 'dc-rsz';
+      grip.title = '끌어서 차트 높이 조절 · 두 번 누르면 기본 높이';
+      var tip = document.createElement('span');
+      grip.appendChild(tip);
+      host.appendChild(grip);
+
+      var dragging = false, startY = 0, startH = 0, saveT = null;
+      function curH() { return hTarget === host ? host.clientHeight : hTarget.clientHeight; }
+      function saveSoon(h) {
+        if (!hkey) return;
+        clearTimeout(saveT);
+        saveT = setTimeout(function () {
+          if (!window.DC_VIEW) window.DC_VIEW = {};
+          window.DC_VIEW.h = h;
+          apiPost('view_save', { chart_key: hkey, view: JSON.stringify({ h: h }) })
+            .catch(function () {});
+        }, 400);                         // 끌던 손이 멎은 뒤 한 번만 (드래그마다 쏘지 않는다)
+      }
+      grip.addEventListener('pointerdown', function (e) {
+        if (self._fs) return;            // 전체화면에선 화면이 높이를 정한다
+        dragging = true;
+        startY = e.clientY;
+        startH = curH();
+        try { grip.setPointerCapture(e.pointerId); } catch (err) { /* 캡처는 있으면 좋은 것뿐 */ }
+        grip.classList.add('on');
+        e.preventDefault();
+      });
+      grip.addEventListener('pointermove', function (e) {
+        if (!dragging) return;
+        var h = applyHeight(startH + (e.clientY - startY), true);
+        tip.textContent = h + 'px';
+      });
+      function endDrag() {
+        if (!dragging) return;
+        dragging = false;
+        grip.classList.remove('on');
+        tip.textContent = '';
+        saveSoon(curH());
+      }
+      grip.addEventListener('pointerup', endDrag);
+      grip.addEventListener('pointercancel', endDrag);
+      // 두 번 누르면 페이지가 정한 기본 높이로 (저장도 지운다)
+      grip.addEventListener('dblclick', function () {
+        if (!baseH) return;
+        applyHeight(baseH, true);
+        if (hkey) {
+          if (window.DC_VIEW) delete window.DC_VIEW.h;
+          apiPost('view_save', { chart_key: hkey, view: JSON.stringify({}) }).catch(function () {});
+        }
+      });
+    }
+
     /* ── 렌더 본체 ── */
     /* 선택된 기간(viewDays)을 «보이는 창»으로 적용 — HTS 방식.
      * 시리즈에는 전체 데이터가 실려 있으므로(아래 render), 기간 선택은 창 이동일 뿐이다.
@@ -1342,6 +1521,8 @@
     self.setData = function (raw, fit) {
       self._bars = normalize(raw);
       render(fit);
+      // 봉이 늦게 왔으면 SUE 마커 자리를 다시 잡는다 (스냅은 봉이 있어야 가능)
+      if (self._sueRaw && self._sueRaw.length) sueSnap();
       return self;
     };
     self.setTf = function (tf) {
@@ -1378,7 +1559,88 @@
       applyMarkers();
       return self;
     };
+    // 화면이 얹은 마커 중 보이는 수 (SUE 층·지표 점은 빼고 — 「체결 마커 N개」 문구용)
     self.markerCount = function () { return self._mkVisible; };
+
+    /* ── SUE 공시 마커 — 화면이 아니라 «모듈»이 들고 있는 층 ──
+     * 종목코드만 알려 주면(setCode) 나머지는 모듈이 한다: 받아오기 → 공시 다음 거래일로 스냅 →
+     * 기간 바에 [SUE 공시 N] 토글 달기. 그래서 어느 화면에서도 켤 수 있는 «이동 가능한 모듈»이다.
+     * ★위치가 접수일이 아니라 «다음 거래일»인 이유 — 백테스트의 매수 시점이 거기다.
+     *   공시 뒤 아직 장이 안 열렸으면 마지막 봉에 붙인다.
+     * ★★실린 봉보다 «오래된» 공시는 버린다(2026-08-03) — 예전엔 「m.d 보다 큰 첫 봉」이 언제나
+     *   찾아져서(맨 앞 봉) 옛 공시가 전부 첫 봉에 몰렸다. 화면에서는 왼쪽 끝에 배지가 «일렬»로 섰고,
+     *   그 자리는 실제 공시일이 아니라 «데이터가 시작한 날»이라 사실과 다른 말을 한다. */
+    function sueSnap() {
+      var raw = self._sueRaw || [], bars = self._bars;
+      if (!raw.length || !bars.length) { self._sueFit = 0; self._sueMarks = []; applyMarkers(); return; }
+      var first = bars[0].time, last = bars[bars.length - 1].time, fit = [];
+      raw.forEach(function (m) {
+        if (m.d < first) return;                 // 불러온 구간 이전의 공시 — 찍을 자리가 없다
+        var t = null;
+        for (var i = 0; i < bars.length; i++) if (bars[i].time > m.d) { t = bars[i].time; break; }
+        var shock = m.sue <= (self._sueShock === undefined ? -1 : self._sueShock);
+        // chip:true — 화면이 「라이브러리 글자」를 쓰더라도(시뮬레이터) 이 배지만은 칩으로.
+        // 같은 사실을 화면마다 다른 모양으로 보여 주면 그것이 곧 「다른 말」이 된다.
+        fit.push({ time: t || last, sell: shock, chip: true,
+                   text: shock ? '어닝쇼크' : '어닝서프라이즈',
+                   state: m.q + ' SUE ' + m.sue });
+      });
+      self._sueFit  = fit.length;
+      self._sueMarks = self._sueOn ? fit : [];
+      applyMarkers();
+      sueButton();   // 버린 옛 공시는 「SUE 공시 N」 에서도 빠진다 (버튼과 화면이 같은 말을 하도록)
+    }
+    /* 토글 버튼은 기간 바에 산다 — 차트 안에는 글자를 넣지 않는다(레포 공통 규칙).
+     * 기간 바가 없는 화면(사례분석 미니 차트 등)은 버튼 없이 마커만 나온다.
+     * ★버튼은 «바»의 것이지 «차트»의 것이 아니다 — 갤러리처럼 바 하나가 차트 넷을 조종하면
+     *   버튼도 하나여야 하고 누르면 넷이 함께 꺼진다(차트마다 달면 버튼이 넷 생긴다). */
+    function sueButton() {
+      var pb = self._pbar;
+      if (!pb || !pb.el) return;
+      var bar = pb.el;
+      if (!bar._sueDcs) bar._sueDcs = [];
+      if (bar._sueDcs.indexOf(self) < 0) bar._sueDcs.push(self);
+      var n = 0;
+      // 세는 건 «받아 온 수»가 아니라 «찍을 수 있는 수» — 봉이 아직이면 0(그때는 숨는다)
+      bar._sueDcs.forEach(function (dc) { n = Math.max(n, dc._sueFit || 0); });
+      if (!bar._sueBtn) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'on';
+        b.onclick = function () {
+          var on = !b.classList.contains('on');
+          b.classList.toggle('on', on);
+          bar._sueDcs.forEach(function (dc) { dc.setSue(on); });
+        };
+        bar.appendChild(b);
+        bar._sueBtn = b;
+      }
+      bar._sueBtn.textContent = 'SUE 공시 ' + n;
+      bar._sueBtn.title = '▲어닝서프라이즈·▼어닝쇼크 공시 마커 — 공시 다음 거래일에 찍는다'
+                        + ' (차트에 실린 구간의 공시만)';
+      bar._sueBtn.style.display = n ? '' : 'none';
+    }
+    self.setSue = function (on) { self._sueOn = !!on; sueSnap(); return self; };
+    /* 이 차트가 보고 있는 종목. 기능이 꺼져 있으면 부르지도 않는다(=조회 0회). */
+    self.setCode = function (code) {
+      code = String(code || '');
+      if (code === self._sueCode) return self;
+      self._sueCode = code;
+      self._sueRaw = [];
+      self._sueMarks = [];
+      if (!code || !feats('overlay.sue_markers')) { applyMarkers(); return self; }
+      sueLoad(code).then(function (d) {
+        if (self._sueCode !== code) return;          // 그 사이 다른 종목으로 바뀌었으면 버린다
+        self._sueRaw = d.marks || [];
+        self._sueShock = (d.shock === undefined) ? -1 : d.shock;
+        sueButton();
+        sueSnap();
+      });
+      return self;
+    };
+    self.sueMarkerCount = function () { return self._sueFit || 0; };   // 실제로 찍히는 수
+    // 기간 바가 나보다 늦게 만들어졌을 때 버튼을 뒤늦게 달기 위한 고리 (periodBar 가 부른다)
+    self._sueSyncBtn = sueButton;
     self.setIndicators = function (list) {      // [{def:{name,draw,expr,vars,color}, vars:{덮어쓸 변수}}]
       self._inds = list || [];
       renderIndicators();
@@ -1530,6 +1792,9 @@
       return self;
     };
 
+    // opts.code — 이 차트가 보는 종목. 주면 SUE 공시 마커를 모듈이 알아서 얹는다
+    if (opts.code) self.setCode(opts.code);
+
     return self;
   }
 
@@ -1541,6 +1806,14 @@
    *
    * periodBar(container, dc|[dc...], { theme:'light'|'dark',
    *                                    defaultIndex:1(=240일), onChange({tf,label,bars}) })
+   *
+   * ★기간의 주인은 «화면»이다 (2026-08-03).
+   *   차트틀(chart_preset)은 여러 화면이 공유하는 물건이라 거기에 기간을 넣으면 재무분석에서 맞춘
+   *   240일이 시뮬레이터까지 따라간다 — 화면마다 차트 폭이 다른데. 그래서 우선순위를 셋으로 둔다:
+   *     ① 이 화면이 기억한 기간 (chart_pref.view_json → 서버가 DC_VIEW 로 심어 준다)
+   *     ② 차트틀의 view — 그 차트틀을 «처음 쓰는» 화면의 시작값
+   *     ③ 화면 기본값 defaultIndex (재무·보유 160일 · 갤러리·사다리 240일 · 시뮬 전체)
+   *   기간을 만지면 ①만 갱신된다(차트틀은 안 건드림). 차트틀을 «고르면» ②가 적용되고 그것이 ①이 된다.
    */
   var PERIODS = {
     day:  [[160, '160일'], [240, '240일'], [480, '480일'], [null, '전체']],
@@ -1553,9 +1826,17 @@
     injectCss();
 
     var list = (Array.isArray(dcs) ? dcs : [dcs]).filter(Boolean);
-    var tf = 'day';
+    // 화면 식별자 — 있으면 이 바가 기간을 기억한다 (없으면 옛날처럼 기본값만)
+    var vkey = (cfg.screen !== undefined) ? String(cfg.screen)
+             : (typeof window.DC_SCREEN === 'string' ? window.DC_SCREEN : '');
+    var mem = (vkey && window.DC_VIEW) ? window.DC_VIEW : null;
+    var tf = (mem && (mem.tf === 'day' || mem.tf === 'week')) ? mem.tf : 'day';
     var idx = (cfg.defaultIndex === undefined) ? 1 : cfg.defaultIndex;
     var custom = null;          // ± 로 직접 정한 봉 수 (null 이면 위 4개 버튼 중 하나)
+    if (mem && mem[tf]) {       // 이 화면이 기억한 기간이 있으면 그것으로 시작한다
+      if (mem[tf].index !== undefined && mem[tf].index !== null) idx = +mem[tf].index;
+      if (mem[tf].bars) custom = +mem[tf].bars;
+    }
 
     var bar = document.createElement('div');
     bar.className = 'dc-pbar ' + (cfg.theme === 'dark' ? 'dark' : 'light');
@@ -1609,11 +1890,36 @@
       });
       readout.textContent = custom !== null ? (custom + unit()) : P[idx][1];
     }
+    /* 이 화면의 기간 기억 — 손이 멎은 뒤 한 번만 쓴다(버튼 연타·휠에 매번 쏘지 않게).
+     * 높이(h)와 같은 칸에 살므로 window.DC_VIEW 를 통째로 보낸다 — 서로 지우지 않는다. */
+    var saveT = null;
+    function saveView() {
+      if (!vkey) return;
+      clearTimeout(saveT);
+      saveT = setTimeout(function () {
+        var v = window.DC_VIEW || (window.DC_VIEW = {});
+        v.tf = tf;
+        v[tf] = { index: idx, bars: custom };
+        apiPost('view_save', { chart_key: vkey, view: JSON.stringify(v) }).catch(function () {});
+      }, 500);
+    }
+    /* 축을 바꾸면 그 축이 기억한 기간으로 (없으면 지금 버튼 위치를 유지 — 240일↔48주는 같은 자리) */
+    function useMem() {
+      var m = (window.DC_VIEW && window.DC_VIEW[tf]) || null;
+      custom = null;
+      if (m) {
+        if (m.index !== undefined && m.index !== null) idx = +m.index;
+        if (m.bars) custom = +m.bars;
+      }
+    }
+    var firstApply = true;
     function apply() {
       paint();
       var n = custom !== null ? custom : PERIODS[tf][idx][0];
       list.forEach(function (dc) { dc.setTf(tf); dc.setViewDays(n); });
       if (cfg.onChange) cfg.onChange({ tf: tf, label: readout.textContent, bars: n });
+      // 만들 때의 첫 적용은 «읽은 값을 그대로 그린 것»이라 되쓰지 않는다
+      if (firstApply) firstApply = false; else saveView();
     }
     /* 기간 ±20% — 지금 보이는 봉 수 기준. 「전체」에서 줄이면 전체의 80%부터 시작한다. */
     function zoom(dir) {
@@ -1628,8 +1934,8 @@
       custom = n;
       apply();
     }
-    bDay.onclick  = function () { if (tf !== 'day')  { tf = 'day';  custom = null; apply(); } };
-    bWeek.onclick = function () { if (tf !== 'week') { tf = 'week'; custom = null; apply(); } };
+    bDay.onclick  = function () { if (tf !== 'day')  { tf = 'day';  useMem(); apply(); } };
+    bWeek.onclick = function () { if (tf !== 'week') { tf = 'week'; useMem(); apply(); } };
     pBtns.forEach(function (b, i) { b.onclick = function () { idx = i; custom = null; apply(); }; });
     bMinus.onclick = function () { zoom(-1); };
     bPlus.onclick  = function () { zoom(1); };
@@ -1662,13 +1968,167 @@
           dc.setViewDays(custom);
         });
         if (cfg.onChange) cfg.onChange({ tf: tf, label: readout.textContent, bars: custom });
+        saveView();                    // 휠로 넓힌 것도 이 화면의 기간이다
         return ctl;
+      },
+      /* 이 화면이 그 축의 기간을 기억하고 있나 — 지표 바가 「차트틀의 기간을 덮어쓸지」 여기서 묻는다.
+       * 축별로 답한다: 일봉은 기억이 있고 주봉은 없을 수 있다. */
+      hasMemory: function (t) {
+        var m = window.DC_VIEW;
+        return !!(vkey && m && m[t || tf]);
       }
     };
+    ctl.el = bar;   // SUE 공시 토글 같은 모듈 소유 버튼이 여기에 붙는다
     // 지표 바가 「차트 저장/불러오기」에서 이 컨트롤러를 찾아 쓴다 (호출부 수정 없이)
-    list.forEach(function (dc) { dc._pbar = ctl; });
+    list.forEach(function (dc) {
+      dc._pbar = ctl;
+      if (dc._sueSyncBtn) dc._sueSyncBtn();   // 마커가 바보다 먼저 도착했으면 이제 버튼을 단다
+    });
     apply();
     return ctl;
+  }
+
+  /* ── 화면이 심어 둔 기능 구성 읽기 ──
+   * 각 화면은 서버에서 ChartFeat::merge() 한 결과를 <script>var DC_FEATS={...}</script> 로 심는다.
+   * 안 심은 곳(도구모음 없는 미니 차트 등)은 「켜짐」으로 본다 — 구성을 안 준다고 기능이
+   * 사라지면 안 된다. 끄고 싶으면 차트설정에서 그 화면을 등록해 명시적으로 끈다. */
+  function feats(k, dflt) {
+    var m = window.DC_FEATS;
+    if (!m || m[k] === undefined || m[k] === null) return dflt === undefined ? true : !!dflt;
+    return !!+m[k];
+  }
+
+  /* ── 도구모음 미리보기 (차트설정 > 구성) ──
+   * toolbarPreview(container, feats, { theme, sueCount })
+   *   feats = {feature_key: 0|1} — 서버 카탈로그(ChartFeat)가 병합해 준 최종값.
+   * ★진짜 바와 같은 CSS 클래스·같은 PERIODS 라벨로 그린다 — 실물 바를 고치면 미리보기도 따라온다.
+   *   진짜 바를 그대로 쓰지 않는 이유: 지표 바는 조작하면 서버에 「마지막 쓴 차트」를 기록한다.
+   *   설정 화면에서 6개를 늘어놓고 만지작거리는 순간 그 기록이 오염된다. 그래서 조작 불가 모형.
+   */
+  function toolbarPreview(container, feats, cfg) {
+    if (typeof container === 'string') container = document.getElementById(container);
+    if (!container) return null;
+    injectCss();
+    cfg = cfg || {};
+    feats = feats || {};
+    var dark = cfg.theme === 'dark';
+    var on = function (k) { return !!+feats[k]; };
+
+    container.innerHTML = '';
+    var box = document.createElement('div');
+    box.className = 'dc-tbprev' + (dark ? ' dark' : '');
+    box.style.pointerEvents = 'none';        // 보여 주기만 한다
+    container.appendChild(box);
+
+    function row() {
+      var r = document.createElement('div');
+      r.className = 'dc-tbrow';
+      box.appendChild(r);
+      return r;
+    }
+    function bar(cls) {
+      var b = document.createElement('span');
+      b.className = cls + ' ' + (dark ? 'dark' : 'light');
+      return b;
+    }
+    function btn(host, txt, isOn) {
+      var b = document.createElement('button');
+      b.type = 'button'; b.textContent = txt; b.tabIndex = -1;
+      if (isOn) b.className = 'on';
+      host.appendChild(b);
+      return b;
+    }
+    function div(host) {
+      var d = document.createElement('span');
+      d.className = 'dc-pdiv';
+      host.appendChild(d);
+    }
+
+    var r1 = row();
+    // 화면 전용 버튼·칩이 먼저 온다 (실제 화면들의 배치 순서)
+    if (on('overlay.intraday_ref')) {
+      var cb = bar('dc-pbar');
+      btn(cb, '당일전고', true); btn(cb, '현재가', false);
+      r1.appendChild(cb);
+    }
+    if (on('period.full_range')) {
+      var fb = bar('dc-pbar');
+      btn(fb, '전체 기간', false);
+      r1.appendChild(fb);
+    }
+    // 기간 바
+    if (on('period.cycle') || on('period.preset') || on('fullscreen')) {
+      var pb = bar('dc-pbar');
+      if (on('period.cycle')) { btn(pb, '일봉', true); btn(pb, '주봉', false); }
+      if (on('period.preset')) {
+        if (on('period.cycle')) div(pb);
+        PERIODS.day.forEach(function (p, i) { btn(pb, p[1], i === 1); });
+        div(pb);
+        btn(pb, '－', false);
+        var num = document.createElement('span');
+        num.className = 'dc-pnum'; num.textContent = '240일';
+        pb.appendChild(num);
+        btn(pb, '＋', false);
+      }
+      if (on('fullscreen')) { div(pb); btn(pb, '⛶', false); }
+      // SUE 공시 토글도 이 바에 산다 (모듈이 붙인다 — 공시가 있는 종목에서만 보인다)
+      if (on('overlay.sue_markers')) btn(pb, 'SUE 공시 ' + (cfg.sueCount || 6), true);
+      r1.appendChild(pb);
+    }
+    // 지표 바
+    if (on('preset.select') || on('save') || on('indicator.add')) {
+      var ib = bar('dc-ibar');
+      if (on('preset.select')) {
+        var sel = document.createElement('select');
+        sel.className = 'dc-pset';
+        var o = document.createElement('option');
+        o.textContent = '최고거래대금_일봉';
+        sel.appendChild(o);
+        ib.appendChild(sel);
+      }
+      if (on('save')) {
+        var sv = document.createElement('button');
+        sv.type = 'button'; sv.className = 'dc-iapply dc-psave'; sv.textContent = '차트저장';
+        sv.tabIndex = -1;
+        ib.appendChild(sv);
+      }
+      if (on('indicator.add')) {
+        var d2 = document.createElement('span'); d2.className = 'dc-pdiv2';
+        ib.appendChild(d2);
+        var ad = document.createElement('button');
+        ad.type = 'button'; ad.className = 'dc-iapply'; ad.textContent = '＋ 지표';
+        ad.tabIndex = -1;
+        ib.appendChild(ad);
+        var chip = document.createElement('span');
+        chip.className = 'dc-ichip';
+        var dot = document.createElement('i'); dot.style.background = '#d32f2f';
+        chip.appendChild(dot);
+        chip.appendChild(document.createTextNode('최고거래대금선(240)'));
+        var x = document.createElement('b'); x.textContent = '✕';
+        chip.appendChild(x);
+        ib.appendChild(chip);
+      }
+      r1.appendChild(ib);
+    }
+    if (on('legend.values')) {
+      var lg = document.createElement('div');
+      lg.className = 'dc-tbleg' + (dark ? ' dark' : '');
+      lg.textContent = '최고거래대금선(240) H 62,400 · L 51,900';
+      box.appendChild(lg);
+    }
+    // 도구모음에 자리를 갖지 않는 것들 — 차트 위에 얹히는 층
+    var layers = [];
+    if (on('overlay.position_lines')) layers.push('가격선 3종');
+    if (on('overlay.trade_markers'))  layers.push('체결 마커');
+    if (on('overlay.sue_markers'))    layers.push('SUE 공시 마커');
+    if (on('overlay.intraday_ref'))   layers.push('당일전고선·현재가선');
+    if (on('overlay.box_ladder'))     layers.push('박스 후보선·선택 지지선');
+    if (on('panel.minute'))           layers.push('분봉 보조 차트');
+    var note = document.createElement('div');
+    note.className = 'dc-tbnote' + (dark ? ' dark' : '');
+    note.textContent = layers.length ? '차트 위: ' + layers.join(' · ') : '차트 위: 얹히는 층 없음';
+    box.appendChild(note);
+    return box;
   }
 
   /* ── 공용 모달 — 지표 선택 / 변수 수정 ──
@@ -1729,6 +2189,18 @@
     return _indFetchP;
   }
 
+  /* ── SUE 공시 마커 — 종목당 한 번만 받아 캐시 (updash 처럼 종목을 갈아 끼우는 화면 대비) ── */
+  var _sueCache = {};
+  function sueLoad(code) {
+    if (_sueCache[code]) return _sueCache[code];
+    _sueCache[code] = fetch(API + '?module=sue&action=marks&code=' + encodeURIComponent(code),
+                            { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { return (d && d.marks) ? d : { marks: [] }; })
+      .catch(function () { return { marks: [] }; });   // 조용히 생략 — 마커 하나 때문에 화면이 죽지 않는다
+    return _sueCache[code];
+  }
+
   /* ── 차트틀 (이름 붙인 지표 세트 + 화면별 마지막 선택) ── */
   var _presetData = null, _presetP = null;
   function loadPresets(force) {
@@ -1778,11 +2250,11 @@
     // 차트(저장된 화면 상태) 영역
     var pSel = document.createElement('select');
     pSel.className = 'dc-pset';
-    pSel.title = '저장된 차트 — 기간·일봉/주봉·지표·변수를 통째로 불러온다';
+    pSel.title = '저장된 차트 — 지표·변수·일봉/주봉을 통째로 불러온다 (기간은 화면마다 따로 기억한다)';
     var pSave = document.createElement('button');
     pSave.type = 'button'; pSave.className = 'dc-iapply dc-psave';
     pSave.textContent = '차트저장';
-    pSave.title = '지금 화면 그대로 저장 — 기간·일봉/주봉·지표 선택·변수';
+    pSave.title = '지금 화면 그대로 저장 — 지표 선택·변수·일봉/주봉. 기간은 이 차트를 처음 쓰는 화면의 시작값으로만 담긴다';
     var pDiv = document.createElement('span');
     pDiv.className = 'dc-pdiv2';
 
@@ -1791,7 +2263,9 @@
     addBtn.textContent = '＋ 지표';
     addBtn.title = '차트에 그릴 지표 고르기';
     var chips = document.createElement('span');
-    wrap.appendChild(pSel); wrap.appendChild(pSave); wrap.appendChild(pDiv);
+    // preset:false — 「저장된 차트 ▾」를 숨긴다 (기능 구성 preset.select). 저장 버튼은 공통 핵심이라 남는다
+    if (cfg.preset !== false) wrap.appendChild(pSel);
+    wrap.appendChild(pSave); wrap.appendChild(pDiv);
     wrap.appendChild(addBtn); wrap.appendChild(chips);
     container.appendChild(wrap);
     // 전체화면에도 이 바를 데려간다 (차트 1개짜리 화면에서만 — 갤러리는 전체화면 자체가 없다)
@@ -2065,7 +2539,7 @@
     }
     // 새 이름으로 저장 (기존 차트가 있어도 별도로 하나 더 만든다)
     function saveAsNew() {
-      var nm = prompt('저장할 차트 이름 (지금의 기간·일봉/주봉·지표·변수를 그대로 저장합니다)');
+      var nm = prompt('저장할 차트 이름 (지표·변수·일봉/주봉을 저장합니다. 기간은 화면마다 따로 기억되며 여기에는 시작값으로만 담깁니다)');
       pSel.value = String(curPreset || 0);
       if (!nm || !nm.trim()) return;
       var tf = curTf();                    // ★저장을 누른 순간의 축 — 응답이 온 뒤엔 바뀌어 있을 수 있다
@@ -2124,6 +2598,8 @@
               if (curPreset !== want) return;       // 그 사이 다른 차트를 골랐으면 건드리지 않는다
               var pb = pbar();
               if (!pb) return;
+              // 이 축의 기간을 이 화면이 기억하고 있으면 그것이 이긴다 (차트틀 기간은 시작값일 뿐)
+              if (pb.hasMemory && pb.hasMemory(curTf())) return;
               restoring = true;
               try { pb.set(p.view.tf, p.view.index, p.view.bars); }
               finally { restoring = false; }
@@ -2145,7 +2621,12 @@
       prefs = r[1].prefs || {};
       var last = defaultFor(curTf()) || (chartKey ? +(prefs[chartKey] || 0) : 0);   // 옛 단일 키 폴백
       renderPSel();
-      if (last && findPreset(last)) applyPreset(last, false);
+      /* ★열 때는 «이 화면이 기억한 기간»이 이긴다 — 차트틀의 기간은 그것이 없을 때의 시작값일 뿐.
+       *   (차트틀은 여러 화면이 공유하므로, 열 때마다 덮어쓰면 화면마다 다른 기간을 가질 수 없다.
+       *    차트틀을 «고르는» 것은 명시적 행동이라 그때는 아래 pSel 쪽에서 기간까지 적용한다.) */
+      var pb0 = pbar();
+      var keepView = !!(pb0 && pb0.hasMemory && pb0.hasMemory());
+      if (last && findPreset(last)) applyPreset(last, false, keepView);
     });
 
     return {
@@ -2195,6 +2676,8 @@
     periodBar: periodBar,
     PERIODS: PERIODS,
     indicatorBar: indicatorBar,
+    toolbarPreview: toolbarPreview,   // 차트설정 > 구성의 도구모음 미리보기
+    feats: feats,                     // 화면에 심어 둔 기능 구성 읽기 (DC_FEATS)
     loadIndicators: loadIndicators,
     evalIndicator: evalIndicator,
     evalIndicatorMulti: evalIndicatorMulti,
