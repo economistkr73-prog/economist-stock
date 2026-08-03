@@ -49,10 +49,10 @@ function pf_sue_build(PDO $pdo, int $year, string $reprt): array
         $rv = pf_sue_qv($ys, 'rev');
         if (!isset($qv[$qk], $qv[$qk - 4])) continue;
         $hist = [];
-        for ($i = 1; $i <= 8; $i++) {
+        for ($i = 1; $i <= Thr::SUE_HIST_MAX; $i++) {
             if (isset($qv[$qk - $i], $qv[$qk - $i - 4])) $hist[] = $qv[$qk - $i] - $qv[$qk - $i - 4];
         }
-        if (count($hist) < 4) continue;   // 이력 부족이면 값 없음 — 0 으로 채우면 "서프라이즈 없음"으로 잘못 읽힌다
+        if (count($hist) < Thr::SUE_HIST_MIN) continue;   // 이력 부족이면 값 없음 — 0 으로 채우면 "서프라이즈 없음"으로 잘못 읽힌다
         $m = array_sum($hist) / count($hist);
         $var = 0.0;
         foreach ($hist as $h) $var += ($h - $m) ** 2;
@@ -66,7 +66,7 @@ function pf_sue_build(PDO $pdo, int $year, string $reprt): array
             'rev_up'  => (isset($rv[$qk], $rv[$qk - 4]) && $rv[$qk] !== null && $rv[$qk - 4] !== null)
                             ? ($rv[$qk] > $rv[$qk - 4]) : null,
             'quality' => ($yr !== null && $yr['op'] > 0 && $yr['ni'] !== null)
-                            ? (abs($yr['ni']) / $yr['op'] <= 1.5) : false,
+                            ? (abs($yr['ni']) / $yr['op'] <= Thr::SUE_QUALITY_NI_OP) : false,   // M5 — 임계 정본 Thr
             'ni_op'   => ($yr !== null && $yr['op'] > 0 && $yr['ni'] !== null) ? $yr['ni'] / $yr['op'] : null,
         ];
     }
@@ -131,10 +131,10 @@ function pf_sue_stock(PDO $pdo, string $code): array
     foreach ($qv as $qk => $v) {
         if (!isset($qv[$qk - 4])) continue;
         $hist = [];
-        for ($i = 1; $i <= 8; $i++) {
+        for ($i = 1; $i <= Thr::SUE_HIST_MAX; $i++) {
             if (isset($qv[$qk - $i], $qv[$qk - $i - 4])) $hist[] = $qv[$qk - $i] - $qv[$qk - $i - 4];
         }
-        if (count($hist) < 4) continue;   // 이력 부족이면 값 없음 — pf_sue_build 와 같은 원칙
+        if (count($hist) < Thr::SUE_HIST_MIN) continue;   // 이력 부족이면 값 없음 — pf_sue_build 와 같은 원칙
         $m = array_sum($hist) / count($hist);
         $var = 0.0;
         foreach ($hist as $h) $var += ($h - $m) ** 2;
@@ -142,6 +142,43 @@ function pf_sue_stock(PDO $pdo, string $code): array
         if ($sd <= 0) continue;
         $out[$qk] = ($v - $qv[$qk - 4]) / $sd;
     }
+    return $out;
+}
+
+/**
+ * 차트에 얹을 SUE 공시 마커 — 이 종목의 정기공시(원본 접수일 MIN · [기재정정] 재접수 무시)에
+ * 그 분기 SUE 를 붙인 것. [['d'=>접수일, 'q'=>'25.4Q', 'sue'=>7.7], …] 접수일 오름차순.
+ *
+ * ★서프라이즈(SUE ≥ +1)·쇼크(≤ −1)만 — 어닝 탭의 매수·회피 경계와 같은 상·하위 20% 문턱이고,
+ *   중간값까지 다 찍으면 분기마다 마커가 생겨 소음이 된다. 매수 시점(다음 거래일) 스냅은 JS 몫.
+ *
+ * 2026-08-03 재무상세 전용에서 여기로 옮겼다 — 「모든 차트에서 SUE 마커」(차트설정의
+ * overlay.sue_markers)가 두 번째 소비자다. 화면은 stock_analysis_api.php?module=sue 로 받는다.
+ */
+function pf_sue_marks(PDO $pdo, string $code): array
+{
+    if (!$pdo->query("SHOW TABLES LIKE 'dart_rcept'")->fetchColumn()) return [];   // 원장 아직 없음 — 마커 없이 그린다
+    $st = $pdo->prepare("
+        SELECT bsns_year, reprt_code, MIN(rcept_dt) dt
+          FROM dart_rcept
+         WHERE stock_code = ? AND reprt_code IS NOT NULL
+         GROUP BY bsns_year, reprt_code
+        HAVING dt >= DATE_SUB(CURDATE(), INTERVAL 1600 DAY)");   // 차트 데이터가 1000영업일(≈4.2년)까지다
+    $st->execute([$code]);
+
+    $qNoMap = ['11013' => 1, '11012' => 2, '11014' => 3, '11011' => 4];
+    $sue = null;                                   // 공시가 있을 때만 계산 (1~2ms 지만 습관)
+    $out = [];
+    foreach ($st as $r) {
+        $qNo = $qNoMap[$r['reprt_code']] ?? null;
+        if ($qNo === null) continue;
+        if ($sue === null) $sue = pf_sue_stock($pdo, $code);
+        $v = $sue[(int)$r['bsns_year'] * 4 + $qNo] ?? null;
+        // 문턱은 Thr 단일 원본 — 여기에 1.0 을 또 적으면 그것이 여섯 번째 사본이 된다
+        if ($v === null || ($v < Thr::SUE_HIT && $v > Thr::SUE_SHOCK)) continue;
+        $out[] = ['d' => $r['dt'], 'q' => ((int)$r['bsns_year'] % 100) . '.' . $qNo . 'Q', 'sue' => round($v, 1)];
+    }
+    usort($out, fn($a, $b) => strcmp($a['d'], $b['d']));
     return $out;
 }
 ?>

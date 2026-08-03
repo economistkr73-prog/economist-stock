@@ -24,6 +24,7 @@ try {
     switch ($module) {
         case 'stock': api_stock($action, $pdo); break;
         case 'ind':   api_ind($action, $pdo);   break;   // 사용자 지표 (style/dailychart.js 소비)
+        case 'sue':   api_sue($action, $pdo);   break;   // SUE 공시 마커 (모든 차트 공용 레이어)
         default:
             http_response_code(400);
             echo json_encode(['error' => "unknown module: {$module}"], JSON_UNESCAPED_UNICODE);
@@ -358,6 +359,10 @@ function quant_augment(PDO $pdo, array &$rows): void
 //   action=list             → [{id,name,draw,expr,vars,color,note}, ...]
 //   action=save (POST)      → {ok:1,id}   (id 있으면 수정)
 //   action=del  (POST id)   → {ok:1}
+//   action=preset|preset_save|preset_del|pref_save  → 차트틀(지표 세트)
+//   action=feat             → {catalog, values, over}  화면별 기능 구성 (원본 = ChartFeat)
+//   action=feat_save (POST screen, vals|reset) → {ok:1, values}
+//   action=view_save (POST chart_key, view)    → {ok:1, view}  화면이 기억하는 보기 값(차트 높이 …)
 // ==========================================================
 function api_ind(string $action, PDO $pdo): void
 {
@@ -405,9 +410,63 @@ function api_ind(string $action, PDO $pdo): void
             return;
         }
 
+        // ── 화면별 기능 구성 (도구모음·레이어) — 원본 카탈로그는 ChartFeat ──
+        case 'feat': {            // 카탈로그 + 화면별 최종값(기본값에 저장 차분을 얹은 것)
+            $over = $ci->featuresAll();
+            $vals = [];
+            foreach (array_keys(ChartFeat::SCREENS) as $sk) {
+                $vals[$sk] = ChartFeat::merge($sk, $over[$sk] ?? null);
+            }
+            echo json_encode(['catalog' => ChartFeat::catalog(), 'values' => $vals,
+                              'over' => $over], JSON_UNESCAPED_UNICODE);
+            return;
+        }
+        case 'view_save': {       // 화면이 기억하는 보기 값 (차트 높이 …)
+            $v = $ci->viewSave((string)($_POST['chart_key'] ?? ''), $_POST['view'] ?? '{}');
+            echo json_encode(['ok' => 1, 'view' => $v ?: new stdClass()], JSON_UNESCAPED_UNICODE);
+            return;
+        }
+        case 'feat_save': {
+            $screen = (string)($_POST['screen'] ?? '');
+            $reset  = !empty($_POST['reset']);
+            $vals   = $_POST['vals'] ?? '{}';
+            if (is_string($vals)) $vals = json_decode($vals, true);
+            if (!is_array($vals)) $vals = [];
+            $merged = $ci->featuresSave($screen, $vals, $reset);
+            echo json_encode(['ok' => 1, 'values' => $merged], JSON_UNESCAPED_UNICODE);
+            return;
+        }
+
         default:
             http_response_code(400);
             echo json_encode(['error' => "unknown action: {$action}"], JSON_UNESCAPED_UNICODE);
     }
+}
+
+// ==========================================================
+// sue 모듈 — 차트에 얹을 SUE 공시 마커 (모든 차트가 쓰는 공용 레이어)
+//   action=marks (?code=005930) → {marks:[{d:접수일, q:'25.4Q', sue:7.7}, …], hit, shock}
+//
+// 계산은 stock/lib/sue.php 단일본(pf_sue_marks). 여기는 그것을 화면에 열어 주는 창구다.
+// 「공시 다음 거래일」 스냅은 봉을 들고 있는 클라이언트(style/dailychart.js)가 한다.
+// ==========================================================
+function api_sue(string $action, PDO $pdo): void
+{
+    if ($action !== 'marks') {
+        http_response_code(400);
+        echo json_encode(['error' => "unknown action: {$action}"], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+    $code = preg_replace('/[^0-9A-Za-z]/', '', (string)($_GET['code'] ?? ''));
+    if (strlen($code) !== 6) { echo json_encode(['marks' => []]); return; }   // 빈 결과 = 200 (규칙)
+
+    require_once __DIR__ . '/stock/lib/sue.php';
+    try {
+        $marks = pf_sue_marks($pdo, $code);
+    } catch (Throwable $e) {
+        $marks = [];      // 재무·공시 원장이 아직 없는 종목이면 마커 없이 그린다 (조용히 생략)
+    }
+    echo json_encode(['marks' => $marks, 'hit' => Thr::SUE_HIT, 'shock' => Thr::SUE_SHOCK],
+                     JSON_UNESCAPED_UNICODE);
 }
 ?>

@@ -1,0 +1,210 @@
+<?php
+/**
+ * classes/Thr.class — 판정 임계 단일 정본 (threshold registry · M5 · 요건정의서 v0.3 §5)
+ *
+ * ★★ <b>왜 만들었나.</b> 현행조사보고서 §5.3 이 「같은 임계의 복수 사본」을 7 무리 찾아냈다.
+ *   가장 심한 것이 SUE ±1 <b>다섯 벌</b>과 매집형/불꽃형 <b>네 벌</b>인데, 사본 하나를 고치고
+ *   나머지를 잊으면 <b>화면과 알림이 다른 말을 한다</b>. 지금까지는 「같은 값이어야 한다」는
+ *   주석(언어적 약속)만 있었다 — 그것은 규칙이 아니라 희망이다.
+ *
+ * ★★ <b>왜 DB 테이블이 아니라 클래스 상수인가.</b> v0.3 §5 는 `threshold_registry` 테이블을
+ *   그렸는데, 실제로 만들어 보면 <b>정본이 둘</b>이 된다(코드의 기본값 ↔ DB 행). 그리고 이 값들은
+ *   사용자가 화면에서 바꾸는 설정이 아니라 <b>백테스트가 낳은 연구 결과</b>다 — 바꾸려면 근거를
+ *   다시 재고 회귀 테스트를 돌려야 하니 배포와 함께 가는 편이 옳다. 변경 이력은 git 이 갖는다.
+ *   ⇒ 레지스트리의 <b>목적</b>(단일 정본 + evidence 표기 + 문서 화면이 읽어 갈 곳)은 그대로 지키고,
+ *     저장소만 코드로 둔다. DB 로 옮겨야 할 이유가 생기면 all() 을 그대로 적재하면 된다.
+ *
+ * ★ <b>클래스인 이유</b>: 오토로더가 어디서든 읽어 준다 — stock/ 화면·api·lib 뿐 아니라
+ *   classes/KrxAmt.class 와 cron/ 까지. 평범한 include 파일이면 classes → stock 역참조가 생긴다.
+ *
+ * ★ <b>evidence</b> (보고서 §3 Q7-c 3분류):
+ *     measured    검증 탭(mode=quantstat)에 표·표본·기간분할이 있다
+ *     assumed     사용자 지정 — 백테스트 근거가 없다. 바꿔도 「틀렸다」고 말할 근거가 없는 값
+ *     operational 판정이 아니라 운영상의 선택(퇴화 방어·표본 하한·표시 상한)
+ *
+ * ★ 값을 고칠 때: 여기만 고친다. 그리고 all() 의 evidence·note 도 같이 고친다 —
+ *   문서 화면(퀀트 검증·신호분석)이 그것을 읽어 사람에게 설명한다.
+ */
+class Thr
+{
+    // ══ ① 2-a 퀀트신호 — 매집형 / 불꽃형 (measured · 검증 탭 ②③) ═══════════
+    /** 매집형: 거래대금이 20일 평균의 이 배수 <b>이하</b> */
+    public const ACC_AVGMUL_MAX = 5.0;
+    /** 매집형: 신호일 등락 하한(이상) */
+    public const ACC_CHG_MIN    = 0.0;
+    /** 매집형: 신호일 등락 상한(미만) */
+    public const ACC_CHG_MAX    = 0.10;
+    /** 불꽃형: 신호일 등락 이 값 이상이면 폭등 */
+    public const FLAME_CHG      = 0.20;
+    /** 불꽃형: 거래대금이 20일 평균의 이 배수 이상이면 폭발 */
+    public const FLAME_AVGMUL   = 20.0;
+
+    // ══ ② 2-b 경로 (박스·계단) ═════════════════════════════════════════════
+    /** 계단지지 매수규칙이 성립하는 아래층 박스 수 (measured — 1~2 는 실측 음수) */
+    public const FLOORS_MIN     = 3;
+    /** 레벨 허용오차 — 지지·저항을 ±이 비율로 본다 (operational · 경로 연구와 동일) */
+    public const BOX_LEVEL_TOL  = 0.02;
+    /** 박스 체류 유통기한(거래일) — 넘으면 돌파율이 60%→37% (measured · 검증 탭 ⑦) */
+    public const BOX_STALE_DAYS = 10;
+    /** 가짜돌파 판정 창(거래일) — 돌파 후 이 안에 박스로 되돌아오면 (measured) */
+    public const FAKE_BRK_DAYS  = 5;
+
+    // ══ ③ 신호 하한 (operational — 유동성 거르개이지 수익 필터가 아니다) ════
+    /** 퀀트 신호·매집형 추적의 거래대금 하한 (원) = 100억 */
+    public const SURGE_MIN_AMT  = 10000000000.0;
+    /** 어닝 규칙의 거래대금 하한 (원) = 10억 */
+    public const EARN_MIN_AMT   = 1000000000.0;
+
+    // ══ ④ 실적 SUE (measured · 8년 백테스트) ═══════════════════════════════
+    /** 어닝서프라이즈 무리 — 이 값 이상 ≈ 상위 20% */
+    public const SUE_HIT        = 1.0;
+    /** 어닝쇼크 무리 — 이 값 이하 */
+    public const SUE_SHOCK      = -1.0;
+    /** 품질 조건 — |당기순이익| ÷ 영업이익 이 값 이하 */
+    public const SUE_QUALITY_NI_OP = 1.5;
+
+    // ══ ⑤ ① 시장 지표 (전부 assumed — 검증 탭에 항목 자체가 없다) ══════════
+    /** 급등락: 평소 변동의 몇 σ 이상 (2026-08-02 사용자 지정 · 2σ→3σ 상향) */
+    public const SIGMA          = 3.0;
+    /** 급등락: 절대 등락률 (σ 와 OR — σ 하나로는 잔잔한 종목의 사건을 놓친다) */
+    public const CHG_ABS        = 0.15;
+    /** 거래량 급증 배수 (최근 20일 평균 대비) */
+    public const VOL_MULT       = 2.0;
+    /** RSI 과매도 / 과매수 */
+    public const RSI_OVERSOLD   = 30;
+    public const RSI_OVERBOUGHT = 70;
+    /** 20일선 이격 — 절대값이 이 이상이면 배지 */
+    public const DISP20         = 0.10;
+    /** 연속 상승·하락 일수 */
+    public const STREAK         = 3;
+
+    /* ★★ 52주 위치는 <b>용도마다 임계가 다르다</b> — 보고서 §5.3 이 짚은 D4 의 실증 사례다.
+     *   배지(사건 표시)는 5%/95% 로 좁게, 신뢰도(계획 보정)는 10%/90% 로 넓게 본다.
+     *   같은 지표라고 한 값으로 합치면 <b>둘 중 하나가 틀린다</b> — 그래서 키를 나눠 둔다. */
+    public const POS52_LOW_BADGE  = 0.05;
+    public const POS52_HIGH_BADGE = 0.95;
+    public const POS52_LOW_CONF   = 0.10;
+    public const POS52_HIGH_CONF  = 0.90;
+
+    // ══ ⑥ 유동성 등급 (operational — <b>종목 간</b> 비교 척도) ══════════════
+    /* ★척도는 주수가 아니라 <b>거래대금</b>이다 — 주수로 재면 저가주가 유동성 좋아 보인다.
+     *   (배수는 자기 비교라 주수로 재도 된다 — 그건 pf_market_signals 쪽 이야기다.) */
+    public const LIQ_DEEP_EOK = 50;    // 일평균 거래대금 50억↑ = 풍부
+    public const LIQ_OK_EOK   = 10;    // 10억↑ = 보통
+    public const LIQ_THIN_EOK = 1;     // 1억↑ = 얇음 / 미만 = 매우 얇음
+    /** 「못 사는 날」 판정 — 하루 거래대금이 이 아래면 저거래일로 센다 (1억) */
+    public const LIQ_THIN_DAY_AMT = 100000000;
+
+    // ══ ⑦ 표본 하한 (operational — 「표본 부족은 <b>아직 모름</b>」) ═════════
+    /* ★이 레포의 규칙: 표본이 모자라면 <b>계산하지 않는다</b>. 값을 0 이나 중립으로 채우면
+     *   「특이 없음」으로 읽히는데 사실은 「아직 모른다」다(52주 위치·MFE 표본 하한과 같은 원칙). */
+    public const BARS_SIGMA_MIN = 21;    // 일간수익률 20개를 만들려면 21봉
+    public const BARS_52W_MIN   = 200;   // 이보다 적으면 52주 위치를 만들지 않는다(신규상장 가짜 신고가 방지)
+    public const BARS_52W_WIN   = 250;   // 52주 ≈ 250거래일
+    public const BARS_DD_WIN    = 20;    // 최근 고점 대비 낙폭 창
+    public const RSI_N          = 14;    // RSI 기간 (Wilder)
+    public const SUE_HIST_MAX   = 8;     // σ 를 만들 때 보는 과거 ΔE 최대 개수
+    public const SUE_HIST_MIN   = 4;     // 이보다 적으면 SUE 를 만들지 않는다
+
+    /**
+     * 레지스트리 전체 — 문서 화면(퀀트 검증·신호분석)이 읽어 사람에게 설명하는 목록.
+     *
+     * ★ 값은 <b>위 상수를 그대로</b> 읽는다 — 여기에 숫자를 다시 쓰면 그것이 여덟 번째 사본이 된다.
+     * @return array [키 => ['v'=>값, 'u'=>단위, 'e'=>evidence, 'n'=>설명]]
+     */
+    public static function all(): array
+    {
+        $R = fn($v, $u, $e, $n) => ['v' => $v, 'u' => $u, 'e' => $e, 'n' => $n];
+        return [
+            'quant.accumulate.avg_mul_max' => $R(self::ACC_AVGMUL_MAX, '배', 'measured',
+                '매집형 — 거래대금이 20일 평균의 5배 이하. 단독으로는 후반기 부호가 뒤집혀(−0.13%) 등락 조건과 함께 건다'),
+            'quant.accumulate.chg_min'     => $R(self::ACC_CHG_MIN, '비율', 'measured',
+                '매집형 — 신호일 등락 0% 이상(하락하며 찍은 최고 거래대금은 제외)'),
+            'quant.accumulate.chg_max'     => $R(self::ACC_CHG_MAX, '비율', 'measured',
+                '매집형 — 신호일 등락 10% 미만. 이 조합만 두 기간 모두 ＋(중앙 +1.74%·승률 55.2%)'),
+            'quant.flame.chg'              => $R(self::FLAME_CHG, '비율', 'measured',
+                '불꽃형 — 신호일 +20% 이상 폭등. 초과수익 중앙 −7.23%·승률 34.6%'),
+            'quant.flame.avg_mul'          => $R(self::FLAME_AVGMUL, '배', 'measured',
+                '불꽃형 — 거래대금 20일 평균의 20배 이상 폭발. 중앙 −4.24%·승률 36.7%'),
+
+            'box.floors_min'      => $R(self::FLOORS_MIN, '개', 'measured',
+                '계단지지 매수규칙 — 아래층 박스 3개 이상일 때만 유효(+2.40%·58.5%). 1~2 는 −2.5%·45%'),
+            'box.level_tol'       => $R(self::BOX_LEVEL_TOL, '비율', 'operational',
+                '지지·저항 레벨 허용오차 ±2% — 경로 연구와 같은 값'),
+            'box.stale_days'      => $R(self::BOX_STALE_DAYS, '거래일', 'measured',
+                '박스 체류 유통기한 — 10일 넘으면 돌파율 60%→37%(검증 탭 ⑦)'),
+            'box.fake_brk_days'   => $R(self::FAKE_BRK_DAYS, '거래일', 'measured',
+                '가짜돌파 — 돌파 후 5일 내 박스 안으로 되돌아온 경우만 그 이름을 쓴다'),
+
+            'surge.min_amt'       => $R(self::SURGE_MIN_AMT, '원', 'operational',
+                '신호 하한 100억 — 「살 만한 유동성」 거르개다. 수익 필터가 아니다(하한을 걸면 오히려 나빠진다)'),
+            'earn.min_amt'        => $R(self::EARN_MIN_AMT, '원', 'operational',
+                '어닝 규칙의 거래대금 하한 10억'),
+
+            'sue.hit'             => $R(self::SUE_HIT, 'σ', 'measured',
+                'SUE ≥ +1 ≈ 상위 20%. 8년 백테스트에서 공시 후 두 달 상방 드리프트'),
+            'sue.shock'           => $R(self::SUE_SHOCK, 'σ', 'measured',
+                'SUE ≤ −1 = 어닝쇼크 무리. 거의 매년 음수'),
+            'sue.quality_ni_op'   => $R(self::SUE_QUALITY_NI_OP, '배', 'measured',
+                '품질 — |순이익| ÷ 영업이익 ≤ 1.5 (일회성 이익으로 부풀린 서프라이즈 배제)'),
+
+            'market.sigma'        => $R(self::SIGMA, 'σ', 'assumed',
+                '급등락 — 평소 변동의 3σ. 2026-08-02 사용자 지정(2σ 에서 상향). 백테스트 근거 없음'),
+            'market.chg_abs'      => $R(self::CHG_ABS, '비율', 'assumed',
+                '급등락 — 절대 15%. σ 와 OR 로 묶는다(σ 하나로는 잔잔한 종목의 사건을 놓친다)'),
+            'market.vol_mult'     => $R(self::VOL_MULT, '배', 'assumed',
+                '거래량 급증 — 최근 20일 평균의 2배'),
+            'market.rsi_oversold'   => $R(self::RSI_OVERSOLD, '', 'assumed', 'RSI 30 이하 = 과매도'),
+            'market.rsi_overbought' => $R(self::RSI_OVERBOUGHT, '', 'assumed', 'RSI 70 이상 = 과매수'),
+            'market.disp20'       => $R(self::DISP20, '비율', 'assumed', '20일선 이격 ±10%'),
+            'market.streak'       => $R(self::STREAK, '일', 'assumed', '연속 상승·하락 3일'),
+
+            'market.pos52_low.badge'  => $R(self::POS52_LOW_BADGE, '비율', 'assumed',
+                '52주 최저권 배지 — 하단 5%. ★신뢰도와 임계가 다르다(같은 지표·다른 용도)'),
+            'market.pos52_high.badge' => $R(self::POS52_HIGH_BADGE, '비율', 'assumed', '52주 최고권 배지 — 상단 5%'),
+            'market.pos52_low.conf'   => $R(self::POS52_LOW_CONF, '비율', 'assumed',
+                '신뢰도의 52주 최저권 — 하단 10%. 배지(5%)보다 넓게 본다(계획을 보정하는 자리라서)'),
+            'market.pos52_high.conf'  => $R(self::POS52_HIGH_CONF, '비율', 'assumed', '신뢰도의 52주 최고권 — 상단 10%'),
+
+            'liq.deep_eok'        => $R(self::LIQ_DEEP_EOK, '억', 'operational', '유동성 「풍부」 — 일평균 거래대금 50억 이상'),
+            'liq.ok_eok'          => $R(self::LIQ_OK_EOK, '억', 'operational', '유동성 「보통」 — 10억 이상'),
+            'liq.thin_eok'        => $R(self::LIQ_THIN_EOK, '억', 'operational', '유동성 「얇음」 — 1억 이상. 미만은 「매우 얇음」'),
+            'liq.thin_day_amt'    => $R(self::LIQ_THIN_DAY_AMT, '원', 'operational', '저거래일 판정 — 하루 거래대금이 1억 미만인 날'),
+
+            'bars.sigma_min'      => $R(self::BARS_SIGMA_MIN, '봉', 'operational', 'σ 를 만들려면 21봉(일간수익률 20개) 필요'),
+            'bars.52w_min'        => $R(self::BARS_52W_MIN, '봉', 'operational',
+                '52주 위치는 200봉 이상에서만 — 표본이 모자라면 「특이 없음」이 아니라 <b>아직 모름</b>이다(신규상장 가짜 신고가 방지)'),
+            'bars.52w_win'        => $R(self::BARS_52W_WIN, '봉', 'operational', '52주 ≈ 250거래일'),
+            'bars.dd_win'         => $R(self::BARS_DD_WIN, '봉', 'operational', '최근 고점 대비 낙폭(dd20) 창'),
+            'bars.rsi_n'          => $R(self::RSI_N, '봉', 'operational', 'RSI 기간 14 (Wilder 평활 — 증권사 화면과 같은 값이어야 믿고 쓴다)'),
+            'sue.hist_max'        => $R(self::SUE_HIST_MAX, '분기', 'operational', 'SUE 의 σ 를 만들 때 보는 과거 ΔE 최대 개수'),
+            'sue.hist_min'        => $R(self::SUE_HIST_MIN, '분기', 'operational',
+                '이보다 적으면 SUE 를 만들지 않는다 — 0 으로 채우면 「서프라이즈 없음」으로 잘못 읽힌다'),
+        ];
+    }
+
+    /**
+     * 비율 상수를 화면용 % 숫자 문자열로 (0.15 → '15' · 0.005 → '0.5').
+     * ★문서 화면이 임계를 <b>말로 설명</b>할 때 쓴다 — 설명에 숫자를 손으로 적으면
+     *   상수를 고쳤을 때 글이 거짓이 된다(M5 3차가 푸는 문제가 바로 그것이다).
+     */
+    public static function pct(float $v, int $dp = 2): string
+    {
+        return rtrim(rtrim(number_format($v * 100, $dp), '0'), '.');
+    }
+
+    /** 배수·개수처럼 그대로 쓰는 값 (5.0 → '5' · 1.5 → '1.5') */
+    public static function num(float $v, int $dp = 2): string
+    {
+        return rtrim(rtrim(number_format($v, $dp), '0'), '.');
+    }
+
+    /** evidence 별 개수 — 문서 화면의 머리말용 */
+    public static function counts(): array
+    {
+        $c = ['measured' => 0, 'assumed' => 0, 'operational' => 0];
+        foreach (self::all() as $r) $c[$r['e']] = ($c[$r['e']] ?? 0) + 1;
+        return $c;
+    }
+}
+?>

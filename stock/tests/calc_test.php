@@ -15,6 +15,10 @@ if (PHP_SAPI !== 'cli') {
     exit;
 }
 
+/* ★Thr 을 먼저 읽는다 — calc.php 의 판정 함수가 임계를 여기서 가져온다(M5).
+ *   웹에서는 cnt.inc 의 오토로더가 맡지만 이 테스트는 CLI 단독 실행이라 직접 건다.
+ *   (fmt.php 를 쓰게 됐을 때와 같은 사정 — 순수 상수라 CLI 안전) */
+require_once __DIR__ . '/../../classes/Thr.class';
 require_once __DIR__ . '/../lib/calc.php';
 require_once __DIR__ . '/../lib/fmt.php';   // pf_age_txt 등 표시 포맷터 (순수 함수라 CLI 안전)
 
@@ -1608,7 +1612,7 @@ t_eq('지연 미정의면 그대로', 2,
 t_eq('직전 매수 없으면 그대로', 1,
      pf_delay_adjust(pf_position_calc($D5D, [], 375_000_000, 51000), $D5D, null, '2026-02-10')['next_step']);
 
-// ══ 박스 사다리 (pf_box_ladder_build + pf_position_calc $levels · 2026-08-02) ═══
+// ══ 퀀트 사다리 (pf_box_ladder_build + pf_position_calc $levels · 2026-08-02) ═══
 // 가격이 절대값 — 이론가 체인 대신 편입 때 확정한 지지선 표를 쓴다.
 $BXL = pf_box_ladder_build([10000, 8900, 8000, 7000]);
 t_eq('비중이 풀린다',            true,  $BXL !== null);

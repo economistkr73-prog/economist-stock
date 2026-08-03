@@ -10,6 +10,16 @@
  */
 class Pf
 {
+    /**
+     * M1 백필 — 편입일에서 <b>몇 일 전까지의 신호</b>를 「그 종목을 산 이유였던 박스」로 인정하나.
+     *
+     * ★ 이 값 밖의 신호는 백필하지 않고 NULL(기준 박스 없음)로 둔다. 실측(2026-08-03 · 18 포지션):
+     *   6·36·47일 3건 / 105~186일 9건 / 273일 1건 / 신호 이력 없음 5건 —
+     *   상한이 없으면 <b>10건이 반년 넘은 남의 박스를 「내 기준 박스」로 물려받는다.</b>
+     * ★ 신규 편입(M2)은 그 자리에서 값을 잡으므로 이 상수와 무관하다 — <b>백필 전용</b>이다.
+     */
+    public const SURGE_BACKFILL_MAX_DAYS = 60;
+
     private PDO $pdo;
 
     /** 화면 계층이 가벼운 조회(종목명 등)에 같은 연결을 쓰도록 내어 준다 */
@@ -231,7 +241,8 @@ class Pf
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         ");
 
-        /* 박스 사다리(2026-08-02) — 포지션별 차수 가격표. 룰셋(상대 하락률)과 달리
+        /* 퀀트 사다리(2026-08-02 · 옛 이름 「박스 사다리」·내부 식별자는 box 그대로)
+         * — 포지션별 차수 가격표. 룰셋(상대 하락률)과 달리
          * 편입 때 그 종목의 실제 박스 지지선을 절대가격으로 확정한다. 비중·목표·지연도
          * 그 가격 간격으로 푼 값이라 여기 같이 산다(pf_box_ladder_build). 있으면 이 표가
          * 룰셋 차수를 대체한다(pf_position_calc $levels). */
@@ -319,6 +330,7 @@ class Pf
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         ");
 
+        $this->entrySnapshotEnsure();   // M4 — 편입 당시 기록 (pf_position 이 만들어진 뒤에)
         $this->seedPrincipalFlow();
     }
 
@@ -370,6 +382,68 @@ class Pf
             $this->pdo->exec("ALTER TABLE pf_position ADD source VARCHAR(10) NOT NULL DEFAULT '' COMMENT '발굴 채널 — 채널별 성과 측정용' AFTER memo");
             $this->pdo->exec("ALTER TABLE pf_position ADD wl_added_at DATETIME NULL COMMENT '관심종목에 처음 담은 시각(승계)' AFTER source");
             $this->pdo->exec("ALTER TABLE pf_position ADD wl_price BIGINT NULL COMMENT '관심종목에 담을 때 주가(승계)' AFTER wl_added_at");
+        }
+
+        /* ── M1 (요건정의서 v0.3 §2.4·§7 · 2026-08-03) — 편입 3축 + 기준 이벤트 고정 ──
+         *
+         * 왜 필요한가: 지금까지 「이 종목을 어떻게 담기로 했나」가 어디에도 안 남았다.
+         *   · ladder_method 는 pf_position_level 행 <b>존재 여부로 암묵 판정</b>하고 있었고
+         *   · entry_trigger 는 pf_page_watch 지역변수로만 계산돼 편입 순간 사라졌고
+         *   · 기준 박스는 매 요청 `SELECT MAX(d) FROM krx_surge` 라 <b>날마다 바뀌었다</b>
+         *     ⇒ 「계단관통↓」이 "내가 산 이유였던 박스가 무너졌다"가 아니라
+         *        "가장 최근에 뜬 아무 박스가 무너졌다"를 뜻하고 있었다.
+         *
+         * ★ 전부 NULL 허용 <b>추가만</b> 한다 — 무중단이고 되돌릴 때는 DROP COLUMN 하나다.
+         * ★ 백필은 이 가드 안에서 <b>한 번만</b> 돈다 (ensureTables 는 매 페이지 로드마다 불린다). */
+        if ($this->tableExists('pf_position') && !$this->columnExists('pf_position', 'ladder_method')) {
+            $this->pdo->exec("ALTER TABLE pf_position
+                ADD ladder_method ENUM('ruleset_pct','quant_ladder') NULL
+                    COMMENT '차수 가격을 무엇이 정하나 — 룰셋 하락률 / 퀀트 사다리(절대가) · NULL=옛 기록' AFTER rule_set_id");
+            $this->pdo->exec("ALTER TABLE pf_position
+                ADD entry_trigger ENUM('breakout','step_support','none') NULL
+                    COMMENT '편입 당시 검증된 매수자리 · NULL=기록 이전(모름)' AFTER ladder_method");
+            $this->pdo->exec("ALTER TABLE pf_position
+                ADD surge_event_d DATE NULL
+                    COMMENT '기준 최고거래대금 박스의 신호일 — krx_surge(d,code) 의 d. NULL=기준 박스 없음' AFTER entry_trigger");
+
+            /* ① ladder_method — 레벨 행이 있으면 퀀트 사다리, 없으면 룰셋 하락률.
+             *    ★실측(2026-08-03) pf_position_level 0행이라 결과는 전부 ruleset_pct 다. */
+            $this->pdo->exec("
+                UPDATE pf_position p
+                   SET p.ladder_method = CASE WHEN EXISTS
+                       (SELECT 1 FROM pf_position_level l WHERE l.position_id = p.id)
+                       THEN 'quant_ladder' ELSE 'ruleset_pct' END");
+
+            /* ② entry_trigger — <b>백필하지 않는다(NULL 유지)</b>.
+             *    v0.3 초안은 pf_alert_log(kind='trig') 에서 부분 복원을 예정했으나
+             *    실측 결과 그 종류의 행이 <b>0건</b>이다(알림 자체가 2026-08-02 신설이라 이력이 하루치).
+             *    'none' 으로 채우면 「트리거 없이 담았다」는 <b>사실 주장</b>이 되는데 우리는 모른다 —
+             *    이 레포의 「값 없으면 0이 아니라 null」 원칙(pf_trade_score) 그대로 NULL 로 둔다. */
+
+            /* ③ surge_event_d — 편입 시점 <b>이전</b>의 가장 가까운 신호. 기준일은 started_at,
+             *    없으면 첫 매수일(실측상 started_at NULL 은 0건이지만 방어).
+             *
+             *    ★★<b>간격 상한 PF_SURGE_BACKFILL_MAX_DAYS 를 둔다.</b> 실측(18개 포지션):
+             *      6·36·47일 = 3건 / 105~186일 = 9건 / 273일 = 1건 / 신호 이력 없음 5건.
+             *    상한이 없으면 273일 전 박스의 지지이탈이 「내가 산 이유가 무너졌다」로 표시된다 —
+             *    그 박스를 보고 산 것이 아니다(대부분 퀀트 도입 이전에 시작한 룰셋 포지션).
+             *    상한 밖은 NULL = 「기준 박스 없음」(v0.3 §2.2 가 정의한 상태) 로 남긴다.
+             *    ⇒ 상한을 바꾸려면 상수를 고치고 이 UPDATE 만 손으로 한 번 더 돌리면 된다. */
+            if ($this->tableExists('krx_surge')) {
+                $st = $this->pdo->prepare("
+                    UPDATE pf_position p
+                       SET p.surge_event_d = (
+                           SELECT MAX(s.d) FROM krx_surge s
+                            WHERE s.code = p.stock_code
+                              AND s.src  = 'k'
+                              AND s.d   <= COALESCE(p.started_at,
+                                    (SELECT MIN(t.traded_at) FROM pf_trade t
+                                      WHERE t.position_id = p.id AND t.side = 'buy'))
+                              AND s.d   >= DATE_SUB(COALESCE(p.started_at,
+                                    (SELECT MIN(t.traded_at) FROM pf_trade t
+                                      WHERE t.position_id = p.id AND t.side = 'buy')), INTERVAL ? DAY))");
+                $st->execute([self::SURGE_BACKFILL_MAX_DAYS]);
+            }
         }
 
         if ($this->tableExists('pf_position') && $this->columnExists('pf_position', 'account_id')) {
@@ -1420,7 +1494,7 @@ class Pf
     }
 
     /** 포트폴리오에 등록된 종목코드 전부 (pf_stock 이 곧 종목 마스터다) */
-    /* ── 박스 사다리 레벨 (포지션별 절대가격 차수표) ── */
+    /* ── 퀀트 사다리 레벨 (포지션별 절대가격 차수표) ── */
     public function positionLevels(int $positionId): array
     {
         $st = $this->pdo->prepare("SELECT step_no, price, weight, target_rate, delay_days
@@ -1595,7 +1669,10 @@ class Pf
     public function positionSave(array $d): int
     {
         if (!empty($d['id'])) {
-            // source/wl_* 는 편입 시점의 사실 — 수정 저장이 덮지 않는다
+            /* source/wl_* 와 M2 의 3축(ladder_method·entry_trigger·surge_event_d)은
+             * <b>편입 시점의 사실</b>이다 — 수정 저장이 덮지 않는다.
+             * 매수 방식은 애초에 전환 경로가 없고(v0.3 §4.3), 트리거·기준 박스는 「그때 그랬다」는 기록이라
+             * 나중에 다시 계산하면 뜻이 사라진다. 박스 재조정은 pf_position_level 만 바꾼다. */
             $st = $this->pdo->prepare("
                 UPDATE pf_position
                 SET portfolio_id=?, stock_code=?, rule_set_id=?, limit_amt=?, started_at=?, status=?, sort_no=?, memo=?
@@ -1614,25 +1691,165 @@ class Pf
         $src = trim((string)($d['source'] ?? ''));
         if ($src === '' && $wl) $src = $wl['source'] !== '' ? $wl['source'] : 'watch';
 
+        /* ── M2 (v0.3 §2.4) — 편입 3축을 <b>이 순간</b> 못박는다 ──────────────
+         *
+         * ★ `entry_trigger` 의 기본값이 'none' 인 것은 백필의 NULL 과 <b>뜻이 다르다</b>:
+         *   NULL = 「기록하지 않던 시절이라 모른다」(옛 18건) / 'none' = 「트리거 없이 담았다」(지금).
+         *   폼을 거쳐 들어온 이상 트리거가 실려 있지 않다는 것 자체가 사실이므로 'none' 이 맞다.
+         * ★ `surge_event_d` 는 <b>화면이 보여 준 그 신호</b>를 그대로 받는 것이 원칙이다
+         *   (관심종목·퀀트의 편입 버튼이 &sed= 로 실어 온다 — 사용자가 실제로 본 박스).
+         *   안 실려 오면(재무분석·수동 편입) 여기서 파생하되, 백필과 <b>같은 상한</b>을 건다 —
+         *   반년 전 박스를 「내가 산 이유」로 물려받지 않기 위해서다. 상한 밖이면 NULL(기준 박스 없음). */
+        $lm = in_array($d['ladder_method'] ?? '', ['ruleset_pct', 'quant_ladder'], true)
+            ? $d['ladder_method'] : 'ruleset_pct';
+        $tg = in_array($d['entry_trigger'] ?? '', ['breakout', 'step_support', 'none'], true)
+            ? $d['entry_trigger'] : 'none';
+
+        $sed = null;
+        $inSed = trim((string)($d['surge_event_d'] ?? ''));
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $inSed)) {
+            // 실려 온 값도 실재하는 확정 신호인지 확인한다 (주소로 아무 날짜나 넣을 수 있다)
+            $q = $this->pdo->prepare("SELECT d FROM krx_surge WHERE code = ? AND d = ? AND src = 'k'");
+            $q->execute([$d['stock_code'], $inSed]);
+            $sed = $q->fetchColumn() ?: null;
+        }
+        if ($sed === null) {
+            try {
+                $q = $this->pdo->prepare("
+                    SELECT MAX(d) FROM krx_surge
+                     WHERE code = ? AND src = 'k' AND d <= CURDATE()
+                       AND d >= DATE_SUB(CURDATE(), INTERVAL ? DAY)");
+                $q->execute([$d['stock_code'], self::SURGE_BACKFILL_MAX_DAYS]);
+                $sed = $q->fetchColumn() ?: null;
+            } catch (Throwable $e) { $sed = null; }   // krx_surge 미구축 환경
+        }
+
         $st = $this->pdo->prepare("
             INSERT INTO pf_position (portfolio_id, stock_code, rule_set_id, limit_amt, started_at, status, sort_no, memo,
-                                     source, wl_added_at, wl_price)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                                     source, wl_added_at, wl_price,
+                                     ladder_method, entry_trigger, surge_event_d)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ");
         $st->execute([
             (int)$d['portfolio_id'], $d['stock_code'], (int)$d['rule_set_id'], (int)$d['limit_amt'],
             ($d['started_at'] ?? '') ?: null, $d['status'] ?? 'watch',
             (int)($d['sort_no'] ?? 0), $d['memo'] ?? '',
             mb_substr($src, 0, 10), $wl['added_at'] ?? null, $wl['added_price'] ?? null,
+            $lm, $tg, $sed,
         ]);
 
-        // 편입이 됐으니 「편입 관심종목」 대기 표시·보관값은 비운다 — 종목추가 하단 목록에서 빠진다
-        if ($wl) $this->watchUnadopt($d['stock_code']);
+        // ★편입돼도 「편입 관심종목」에서 빼지 않는다 (2026-08-03 사용자 규칙) —
+        //   같은 종목을 다른 포트폴리오에도 편입할 수 있어야 하므로 보관값(방식·룰셋·지지선)째 남긴다.
+        //   목록에서 없애는 길은 「삭제」 버튼(watch/unadopt) 하나뿐이다.
         return (int)$this->pdo->lastInsertId();
+    }
+
+    // ══ 편입 스냅샷 (position_entry_snapshot · M4 · v0.3 §2.5) ═════════════
+    /**
+     * ★★ <b>왜 스냅샷인가.</b> 퀀트 판정(신호·경로·계단)은 날마다 바뀐다. 그런데 「내가 왜 이걸 담았나」는
+     *   <b>그때의 사실</b>이라 지금 다시 계산하면 뜻이 사라진다 — 반년 뒤에 보면 전혀 다른 이야기가 된다.
+     *   그래서 편입 순간의 판정을 <b>한 번 찍어 두고 다시 만들지 않는다</b>(v0.3 §2.1 「참조가 아니라 값」).
+     *
+     * ★ 이것은 <b>표시용이 아니라 회고용</b>이다 — 종목 상세의 「편입 당시」 한 줄과
+     *   나중의 성과 분해(어떤 자리에서 담은 것이 잘 됐나)가 소비자다.
+     *   오늘의 판정을 알고 싶으면 퀀트 화면으로 간다 — 그 경계가 D8 이다.
+     * ★ 과거분은 백필하지 않는다(v0.3 §9-3): 트리거 이력이 0건이고 기준 박스도 대부분 반년 넘게
+     *   낡아서, 채우면 「그때 그랬다」가 아니라 「지금 되짚어 보니」가 된다. 신규분부터만 쌓는다.
+     */
+    public function entrySnapshotEnsure(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS pf_entry_snapshot (
+              position_id  INT  NOT NULL PRIMARY KEY,
+              snapshot_at  DATE NOT NULL                COMMENT '편입일',
+              quant_signal ENUM('accumulate','neutral','flame','none') NOT NULL DEFAULT 'none'
+                                                        COMMENT '2-a 퀀트신호 — 매집형/중립/불꽃형',
+              flame_reason ENUM('by_volume','by_return','both') NULL
+                                                        COMMENT '불꽃형이면 어느 조건이 걸렸나',
+              box_path     VARCHAR(40) NOT NULL DEFAULT '' COMMENT '2-b 경로 — 편입 시점의 박스 상태 라벨',
+              floors_count INT  NULL                    COMMENT '기준 박스 아래층 박스 수',
+              box_levels   VARCHAR(120) NOT NULL DEFAULT ''
+                COMMENT '편입 시점 계단 레벨(내림차순·콤마) — 이게 있어야 스냅샷이 자기완결이다',
+              signal_date  DATE NULL                    COMMENT '기준 신호일 = pf_position.surge_event_d',
+              ret_20d      DECIMAL(10,6) NULL           COMMENT '신호일 기준 20거래일 수익률',
+              sue_latest   DECIMAL(10,4) NULL           COMMENT '편입 시점 최신 분기 SUE',
+              def_ver      INT NOT NULL DEFAULT 0       COMMENT '판정 정의 버전 — 임계가 바뀌면 올린다',
+              created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+              COMMENT='편입 당시의 퀀트 판정 — 다시 계산하지 않는 기록(v0.3 §2.5)'
+        ");
+        /* 2026-08-03 — 스냅샷을 <b>자기완결</b>로 만든다. floors_count(개수)만으로는 「어느 가격이
+         * 계단이었나」를 되짚을 수 없어서, 그 값은 여전히 krx_surge 를 다시 읽어야 나왔다.
+         * 레벨을 값으로 들고 있으면 캐시가 어떻게 되든 편입 당시 그림이 남는다(§2.1 「참조가 아니라 값」). */
+        if ($this->tableExists('pf_entry_snapshot') && !$this->columnExists('pf_entry_snapshot', 'box_levels')) {
+            $this->pdo->exec("ALTER TABLE pf_entry_snapshot
+                ADD box_levels VARCHAR(120) NOT NULL DEFAULT ''
+                    COMMENT '편입 시점 계단 레벨(내림차순·콤마)' AFTER floors_count");
+        }
+    }
+
+    /** 편입 스냅샷 저장 — 포지션당 한 벌. 이미 있으면 덮지 않는다(편입은 한 번이다) */
+    public function entrySnapshotSave(int $positionId, array $s): void
+    {
+        if ($positionId <= 0) return;
+        $this->entrySnapshotEnsure();
+        $st = $this->pdo->prepare("
+            INSERT IGNORE INTO pf_entry_snapshot
+                (position_id, snapshot_at, quant_signal, flame_reason, box_path,
+                 floors_count, box_levels, signal_date, ret_20d, sue_latest, def_ver)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)");
+        $st->execute([
+            $positionId,
+            $s['snapshot_at']  ?? date('Y-m-d'),
+            in_array($s['quant_signal'] ?? '', ['accumulate', 'neutral', 'flame'], true)
+                ? $s['quant_signal'] : 'none',
+            in_array($s['flame_reason'] ?? '', ['by_volume', 'by_return', 'both'], true)
+                ? $s['flame_reason'] : null,
+            mb_substr((string)($s['box_path'] ?? ''), 0, 40),
+            isset($s['floors_count']) ? (int)$s['floors_count'] : null,
+            mb_substr((string)($s['box_levels'] ?? ''), 0, 120),
+            ($s['signal_date'] ?? '') ?: null,
+            isset($s['ret_20d'])    && $s['ret_20d']    !== null ? (float)$s['ret_20d']    : null,
+            isset($s['sue_latest']) && $s['sue_latest'] !== null ? (float)$s['sue_latest'] : null,
+            (int)($s['def_ver'] ?? 0),
+        ]);
+    }
+
+    /**
+     * 그 포지션의 기준 신호일만 (없으면 null).
+     *
+     * ★positionGet() 을 쓰지 않는 이유: 그것은 pf_stock·pf_portfolio·pf_rule_set 과 <b>INNER JOIN</b> 이라
+     *   어느 하나라도 비면 <b>행 전체가 null</b> 로 돌아온다. 스냅샷을 찍는 자리에서 그 일이 나면
+     *   signal_date 가 조용히 비어 「기준 박스 없는 편입」으로 기록된다(실측으로 밟은 함정).
+     *   여기서 필요한 것은 컬럼 하나뿐이니 단일 테이블로 읽는다.
+     */
+    public function positionSurgeEventDate(int $id): ?string
+    {
+        $st = $this->pdo->prepare("SELECT surge_event_d FROM pf_position WHERE id = ?");
+        $st->execute([$id]);
+        return $st->fetchColumn() ?: null;
+    }
+
+    /** 편입 스냅샷 한 건 (없으면 null) */
+    public function entrySnapshot(int $positionId): ?array
+    {
+        try {
+            $st = $this->pdo->prepare("SELECT * FROM pf_entry_snapshot WHERE position_id = ?");
+            $st->execute([$positionId]);
+            return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+        } catch (Throwable $e) {
+            return null;   // 테이블 이전 환경 — 「편입 당시」 칸만 비면 된다
+        }
     }
 
     public function positionDelete(int $id): void
     {
+        /* 편입 스냅샷도 같이 지운다. FK CASCADE 를 안 쓰는 이유 — pf_position_level 처럼 FK 를 걸려면
+         * CREATE 순서에 묶이는데(부모가 먼저 있어야 한다), 이 테이블은 ensureTables 맨 끝에서 만든다.
+         * 지우는 곳이 여기 한 군데뿐이라 명시적으로 지우는 편이 순서 의존이 없다. */
+        try { $this->pdo->prepare("DELETE FROM pf_entry_snapshot WHERE position_id = ?")->execute([$id]); }
+        catch (Throwable $e) { /* 테이블 이전 환경 */ }
+
         $st = $this->pdo->prepare("DELETE FROM pf_position WHERE id = ?");
         $st->execute([$id]);
     }

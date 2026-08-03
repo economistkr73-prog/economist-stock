@@ -408,15 +408,38 @@ function pf_weights_from_be(array $p, array $b): array
  *                  exit_first(1차 탈출가 — 최초가 대비, 예 0.15) · exit_last(마지막 탈출가, 예 −0.10)
  * @return array ['ok','steps','rows','error'] — rows 는 차수별 진단(가격·평균단가·손익분기·탈출가)
  */
+/* ── 룰셋 자동 생성의 <b>기본값과 물리적 한계</b> (M5-2차 — 이름 붙이기) ──
+ *
+ * ★기본값은 <b>판정 임계가 아니라 폼의 출발점</b>이다 — 사용자가 화면에서 덮어쓴다.
+ *   그래서 레지스트리(Thr)에 올리지 않는다. 다만 「왜 이 숫자로 출발하는가」는 남길 값이 있다.
+ * ★clamp 는 <b>말이 되는 범위</b>다 — 하락률 0% 나 −95% 같은 입력이 들어오면 식이 뜻을 잃는다. */
+const PF_GEN_N_DEF        = 7;       // 기본 단계 수 (운영 룰셋 rs4 와 같다)
+const PF_GEN_N_MIN        = 2;
+const PF_GEN_N_MAX        = 12;
+const PF_GEN_BE_LAST_DEF  = -0.35;   // 최종 손익분기 기본 −35% (rs4 역산값 −35.31% 에서)
+const PF_GEN_BE_K_DEF     = 1.4;     // 곡률 기본 — rs4 를 되짚으면 ≈1.4 (4차가 최종의 37% 지점)
+const PF_GEN_BE_K_MIN     = 0.5;
+const PF_GEN_BE_K_MAX     = 3.0;
+const PF_GEN_DROP1_DEF    = -0.09;   // 2차 하락률 기본 −9% (rs4 와 같다)
+const PF_GEN_DROP_STEP_DEF = -0.042; // 차수마다 더 깊어지는 폭 −4.2%p
+const PF_GEN_DROP_MIN     = -0.9;    // clamp — 이보다 깊으면 가격이 사실상 0 이 된다
+const PF_GEN_DROP_MAX     = -0.001;  // clamp — 0 이면 「내려가지 않는 사다리」라 식이 안 풀린다
+const PF_GEN_EXIT1_DEF    = 0.15;    // 1차 탈출가 최초가 +15%
+const PF_GEN_EXITN_DEF    = -0.10;   // 마지막 탈출가 최초가 −10% (깊어지면 손실 감수)
+/** 통과 곡률 범위 탐색 — pf_rule_gen_k_range 가 훑는 구간 (사람이 손으로는 못 찾는다) */
+const PF_GEN_KR_LO   = 0.8;
+const PF_GEN_KR_HI   = 2.0;
+const PF_GEN_KR_STEP = 0.05;
+
 function pf_rule_gen(array $o): array
 {
-    $n  = max(2, min(12, (int)($o['n'] ?? 7)));
-    $beLast = (float)($o['be_last'] ?? -0.35);
-    $beK    = max(0.5, min(3.0, (float)($o['be_k'] ?? 1.4)));
-    $d1     = (float)($o['drop_first'] ?? -0.09);
-    $dStep  = (float)($o['drop_step']  ?? -0.042);
-    $eFirst = (float)($o['exit_first'] ?? 0.15);
-    $eLast  = (float)($o['exit_last']  ?? -0.10);
+    $n  = max(PF_GEN_N_MIN, min(PF_GEN_N_MAX, (int)($o['n'] ?? PF_GEN_N_DEF)));
+    $beLast = (float)($o['be_last'] ?? PF_GEN_BE_LAST_DEF);
+    $beK    = max(PF_GEN_BE_K_MIN, min(PF_GEN_BE_K_MAX, (float)($o['be_k'] ?? PF_GEN_BE_K_DEF)));
+    $d1     = (float)($o['drop_first'] ?? PF_GEN_DROP1_DEF);
+    $dStep  = (float)($o['drop_step']  ?? PF_GEN_DROP_STEP_DEF);
+    $eFirst = (float)($o['exit_first'] ?? PF_GEN_EXIT1_DEF);
+    $eLast  = (float)($o['exit_last']  ?? PF_GEN_EXITN_DEF);
 
     if ($beLast >= 0) return ['ok' => false, 'error' => '최종 손익분기율은 음수여야 합니다.', 'steps' => [], 'rows' => []];
     if ($d1 >= 0)     return ['ok' => false, 'error' => '2차 하락률은 음수여야 합니다.',     'steps' => [], 'rows' => []];
@@ -426,7 +449,7 @@ function pf_rule_gen(array $o): array
     $p    = [1 => 1.0];
     for ($i = 2; $i <= $n; $i++) {
         $d = $d1 + $dStep * ($i - 2);
-        $d = max(-0.9, min(-0.001, $d));           // 물리적으로 말이 되는 범위로 묶는다
+        $d = max(PF_GEN_DROP_MIN, min(PF_GEN_DROP_MAX, $d));           // 물리적으로 말이 되는 범위로 묶는다
         $drop[$i] = $d;
         $p[$i]    = $p[$i - 1] * (1 + $d);
     }
@@ -579,7 +602,7 @@ function pf_gen_opt(array $in, array $tight = []): array
  * ★ 「사다리가 깊다」 경고는 곡률과 무관(하락률이 정한다)하므로 여기서는 보지 않는다.
  * @return array ['from'=>float|null, 'to'=>float|null]
  */
-function pf_rule_gen_k_range(array $o, float $lo = 0.8, float $hi = 2.0, float $step = 0.05): array
+function pf_rule_gen_k_range(array $o, float $lo = PF_GEN_KR_LO, float $hi = PF_GEN_KR_HI, float $step = PF_GEN_KR_STEP): array
 {
     $limit = (float)($o['limit_amt'] ?? 0);
     $top   = (float)($o['top_price'] ?? 0);
@@ -851,7 +874,7 @@ function pf_position_calc(array $steps, array $trades, float $limitAmt, ?float $
     $p = pf_params($p);
 
     if ($levels !== []) {
-        /* ── 박스 사다리 (2026-08-02) — 차수 가격이 <b>절대값</b>(그 종목의 실제 박스 지지선).
+        /* ── 퀀트 사다리 (2026-08-02) — 차수 가격이 <b>절대값</b>(그 종목의 실제 박스 지지선).
          * 룰셋의 하락률 체인 대신 편입 때 확정한 가격표(pf_position_level)가 사다리를 정의한다.
          * 비중·목표·지연도 레벨 행이 들고 온다(가격 간격이 종목마다 달라 비중도 그 가격으로 푼 값이다).
          * 이 치환 한 곳만 지나면 누적목표·catch-up·신호·지연·매도 전부 기존 체인 그대로다.
@@ -1138,7 +1161,8 @@ function pf_position_calc(array $steps, array $trades, float $limitAmt, ?float $
  *   포지션의 종료 여부와 무관하고, 어디에서도 합산되지 않는다.
  */
 /**
- * 박스 사다리 비중 풀기 — 사용자가 고른 지지선 가격들(내림차순)에서 비중·목표·지연을 만든다.
+ * 퀀트 사다리 비중 풀기 — 사용자가 고른 지지선 가격들(내림차순)에서 비중·목표·지연을 만든다.
+ * ★이름은 「퀀트 사다리」(2026-08-03)이고 내부 식별자만 box 로 남았다 — DB 에 'box' 가 저장돼 있다.
  *
  * 비중은 자동생성기와 같은 수식(w_n = [p_n·Q_{n−1} − C_{n−1}(1+b_n)]/b_n)을 실제 가격 간격에
  * 적용해 푼다. 손익분기 곡선의 최종값은 깊이×비율(0.40~0.65), 곡률 k 는 1.0~1.8 을 전부 훑어
@@ -1156,25 +1180,41 @@ function pf_position_calc(array $steps, array $trades, float $limitAmt, ?float $
  * @param array $prices 내림차순 절대가격 (3~5개)
  * @return ?array ['levels'=>[step=>['price','weight','target_rate','delay_days']], 'be'=>[], 'k','ratio','depth','mono'] · 해 없으면 null
  */
+/* ── 퀀트 사다리 해 탐색 파라미터 (M5-2차 — 이름 붙이기) ──────────────────
+ *
+ * ★이것들은 <b>판정 임계가 아니라 알고리즘 내부값</b>이라 classes/Thr.class(레지스트리)에 올리지 않는다.
+ *   레지스트리는 「화면이 사람에게 설명해야 하는 기준」을 담는 곳이고, 여기 값들은 <b>해를 어떻게 찾는가</b>다.
+ *   섞으면 신호분석의 임계표가 읽을 수 없게 부푼다. 대신 이름과 근거를 여기 남긴다.
+ * ★사본이 없다(이 함수에서만 쓴다) — 그래서 M5 1차의 「사본 제거」 대상이 아니었다. */
+const PF_BOX_LV_MIN    = 3;      // 지지선 최소 개수 — 이보다 적으면 사다리가 아니다
+const PF_BOX_LV_MAX    = 5;      // 최대 (더 늘리면 차수당 비중이 잡음 수준으로 얇아진다)
+const PF_BOX_MIN_DEPTH = -0.005; // 1차→마지막 낙폭이 이보다 얕으면 간격이 없다시피 한 것
+const PF_BOX_RATIO     = [0.40, 0.45, 0.50, 0.55, 0.60, 0.65];  // 최종 손익분기 = 깊이 × 이 비율 (보수 → 공격 순)
+const PF_BOX_K_LO      = 100;    // 곡률 스캔 하한 ×100
+const PF_BOX_K_HI      = 180;    // 상한 ×100
+const PF_BOX_K_STEP    = 5;      // 간격 ×100
+const PF_BOX_W_EPS     = 0.0005; // 비중 비교 허용오차 (반올림 잡음으로 「역전」 판정하지 않게)
+const PF_BOX_W1_MIN    = 0.05;   // 1차 비중 하한 — 이보다 얇으면 고가주에서 1주도 못 산다
+
 function pf_box_ladder_build(array $prices): ?array
 {
     $prices = array_values(array_filter(array_map('floatval', $prices), fn($v) => $v > 0));
     rsort($prices);
     $N = count($prices);
-    if ($N < 3 || $N > 5) return null;
+    if ($N < PF_BOX_LV_MIN || $N > PF_BOX_LV_MAX) return null;
 
     $pF = [];
     foreach ($prices as $px) $pF[] = $px / $prices[0];
     $depth = end($pF) - 1.0;
-    if ($depth >= -0.005) return null;   // 간격이 없다시피 하면 사다리가 아니다
+    if ($depth >= PF_BOX_MIN_DEPTH) return null;   // 간격이 없다시피 하면 사다리가 아니다
 
     $TGT = [0.15, 0.20, 0.25, 0.30, 0.35];
     $DLY = [0, 0, 20, 20, 20];
 
     $best = null;   // [monoRank(0=계단형), ratio, k] 사전순 최소가 승자
-    foreach ([0.40, 0.45, 0.50, 0.55, 0.60, 0.65] as $ratio) {
+    foreach (PF_BOX_RATIO as $ratio) {
         $beF = $depth * $ratio;
-        for ($k = 100; $k <= 180; $k += 5) {
+        for ($k = PF_BOX_K_LO; $k <= PF_BOX_K_HI; $k += PF_BOX_K_STEP) {
             $kk = $k / 100;
             $b = [0.0];
             for ($n = 1; $n < $N; $n++) $b[$n] = $beF * pow($n / ($N - 1), $kk);
@@ -1188,11 +1228,11 @@ function pf_box_ladder_build(array $prices): ?array
             if (!$ok) continue;
             $sum = array_sum($w);
             $wN = array_map(fn($x) => $x / $sum, $w);
-            if ($wN[1] < $wN[0] - 0.0005 || $wN[0] < 0.05) continue;
+            if ($wN[1] < $wN[0] - PF_BOX_W_EPS || $wN[0] < PF_BOX_W1_MIN) continue;
 
             $mono = true;
             for ($n = 1; $n < $N; $n++) {
-                if ($wN[$n] < $wN[$n - 1] - 0.0005) { $mono = false; break; }
+                if ($wN[$n] < $wN[$n - 1] - PF_BOX_W_EPS) { $mono = false; break; }
             }
             // 스캔이 (보수 BE → 공격 BE, 곡률 낮은 → 높은) 순이라
             // 첫 계단형 해 = 계단형 중 가장 보수적, 첫 유효 해 = 산봉우리 폴백 중 가장 보수적.
@@ -1217,7 +1257,7 @@ function pf_box_ladder_build(array $prices): ?array
 }
 
 /**
- * 박스 사다리 상세표 — 확정본(pf_position_level)이든 방금 푼 해든, levels 만으로
+ * 퀀트 사다리 상세표 — 확정본(pf_position_level)이든 방금 푼 해든, levels 만으로
  * 룰셋 화면처럼 차수별 파생값을 만든다: 직전 대비 변동율·1차 대비·누적비중·
  * 그 차수까지 계획대로 샀을 때의 평균단가·그 가격에서의 평가손실률(=손익분기 도달거리)·탈출가.
  *
@@ -1294,7 +1334,7 @@ function pf_delay_adjust(?array $c, array $steps, ?string $lastBuyAt, string $to
     if ((int)($c['cur_step'] ?? 0) < 1) return $c;
     $n = (int)($c['next_step'] ?? 0);
     if ($n <= 0) return $c;
-    // 정본은 calc 가 rows 에 실어 둔 값 — 박스 사다리(레벨별 지연)도 이 한 줄로 커버된다
+    // 정본은 calc 가 rows 에 실어 둔 값 — 퀀트 사다리(레벨별 지연)도 이 한 줄로 커버된다
     $dN = (int)($c['steps'][$n]['delay_days'] ?? ($steps[$n]['delay_days'] ?? 0));
     if ($dN <= 0) return $c;
 
@@ -1492,7 +1532,7 @@ function pf_indicators(array $bars, ?float $last = null): array
     if ($out['sma20'] !== null && $out['sma20'] > 0) $out['disp20'] = $out['close'] / $out['sma20'] - 1;
 
     // 일간수익률 20개의 표준편차 → 오늘 움직임이 몇 σ 인가
-    if ($n >= 21) {
+    if ($n >= Thr::BARS_SIGMA_MIN) {
         $rets = [];
         for ($i = $n - 20; $i < $n; $i++) {
             if ($closes[$i - 1] > 0) $rets[] = $closes[$i] / $closes[$i - 1] - 1;
@@ -1505,15 +1545,15 @@ function pf_indicators(array $bars, ?float $last = null): array
         }
     }
 
-    $out['rsi14']    = pf_rsi($closes, 14);
+    $out['rsi14']    = pf_rsi($closes, Thr::RSI_N);
     $out['vol_ma20'] = pf_sma(array_slice($vols, 0, $n - 1), 20);   // 오늘을 뺀 최근 20일
     if ($out['vol_ma20'] !== null && $out['vol_ma20'] > 0) {
         $out['vol_mult'] = $out['vol'] / $out['vol_ma20'];
     }
 
     // 52주(250거래일) 고·저. 표본이 모자라면 계산하지 않는다 — 신규상장주에서 거짓 신고가가 뜬다
-    if ($n >= 200) {
-        $w = array_slice($closes, max(0, $n - 250));
+    if ($n >= Thr::BARS_52W_MIN) {
+        $w = array_slice($closes, max(0, $n - Thr::BARS_52W_WIN));
         $hi = max($w);
         $lo = min($w);
         $out['hi52'] = $hi;
@@ -1522,8 +1562,8 @@ function pf_indicators(array $bars, ?float $last = null): array
     }
 
     // 최근 20일 고점 대비 낙폭
-    if ($n >= 20) {
-        $hi20 = max(array_slice($closes, $n - 20));
+    if ($n >= Thr::BARS_DD_WIN) {
+        $hi20 = max(array_slice($closes, $n - Thr::BARS_DD_WIN));
         if ($hi20 > 0) $out['dd20'] = $out['close'] / $hi20 - 1;
     }
 
@@ -1591,13 +1631,14 @@ function pf_liquidity(array $bars, int $planQty = 0, ?float $sd20 = null, float 
     $out['avg_val'] = $val / count($win);
 
     // 못 사는 날의 비율 — 1억은 "몇 백만원 주문이 호가를 흔드는" 경계로 잡았다
-    $long = array_slice($b, max(0, $n - 250));
+    $long = array_slice($b, max(0, $n - Thr::BARS_52W_WIN));
     $thin = 0;
-    foreach ($long as $x) if ((float)$x['v'] * (float)$x['c'] < 100000000) $thin++;
+    foreach ($long as $x) if ((float)$x['v'] * (float)$x['c'] < Thr::LIQ_THIN_DAY_AMT) $thin++;
     $out['thin_ratio'] = $thin / count($long);
 
     $eok = $out['avg_val'] / 100000000;
-    $out['grade'] = ($eok >= 50) ? 'deep' : (($eok >= 10) ? 'ok' : (($eok >= 1) ? 'thin' : 'very_thin'));
+    $out['grade'] = ($eok >= Thr::LIQ_DEEP_EOK) ? 'deep'
+        : (($eok >= Thr::LIQ_OK_EOK) ? 'ok' : (($eok >= Thr::LIQ_THIN_EOK) ? 'thin' : 'very_thin'));
 
     if ($planQty > 0 && $out['avg_vol'] > 0) {
         $out['part'] = $planQty / $out['avg_vol'];
@@ -1645,16 +1686,17 @@ function pf_market_signals(array $ind, int $max = 3, ?array $liq = null): array
      *   진짜 이례만 띄운다. 배지가 흔하면 표시가 아니다. */
     $sg  = $ind['sigma'];
     $chg = $ind['chg'];
-    $bigS = ($sg  !== null && abs($sg)  >= 3.0);
-    $bigP = ($chg !== null && abs($chg) >= 0.15);
+    $bigS = ($sg  !== null && abs($sg)  >= Thr::SIGMA);      // M5 — 임계 정본은 classes/Thr.class
+    $bigP = ($chg !== null && abs($chg) >= Thr::CHG_ABS);
     /* ★ 라벨은 <b>부호 붙은 % 하나</b>다(2026-08-02 사용자 지시) — 「급등/급락」이라는 말을 빼서
      *   20·40거래일 모멘텀 칩(「20일 +112%」)과 <b>기간만 다른 같은 계열</b>로 읽히게 했다.
      *   방향은 부호와 색이 말하고, 이유(σ·절대%)는 툴팁이 말한다. */
     if ($bigS || $bigP) {
         $pct = sprintf('%+.1f%%', (float)$chg * 100);
+        $absPct = Thr::pct(Thr::CHG_ABS);
         $why = '하루 ' . $pct . ' · ' . ($sg === null ? '' : '평소 변동의 ' . number_format(abs($sg), 1) . 'σ')
-             . ($bigP && !$bigS ? ($sg === null ? '' : ' · ') . '절대 15% 이상' : '')
-             . ' — 임계 3σ 또는 절대 15%';
+             . ($bigP && !$bigS ? ($sg === null ? '' : ' · ') . '절대 ' . $absPct . '% 이상' : '')
+             . ' — 임계 ' . Thr::num(Thr::SIGMA) . 'σ 또는 절대 ' . $absPct . '%';
         /* ★ 색은 <b>등락색</b>(up=빨강·down=파랑) — 20·40거래일 모멘텀 칩과 같은 규칙(2026-08-02).
          *   다른 상태 배지의 「초록=사는 쪽 유리」 팔레트를 여기에만 쓰지 않는 이유:
          *   하루 −15% 를 초록으로 칠하면 20일 −52%(파랑) 와 나란히 놓였을 때 정반대로 읽힌다. */
@@ -1669,7 +1711,7 @@ function pf_market_signals(array $ind, int $max = 3, ?array $liq = null): array
      * ★ 배수는 <b>주수로 재도 된다</b> — 같은 종목의 자기 비교라 단위가 상쇄된다.
      *   거래대금이 필요한 자리는 종목 간 비교(유동성 등급)이고 그건 pf_liquidity 가 맡는다. */
     $vm = $ind['vol_mult'];
-    if ($vm !== null && $vm >= 2.0) {
+    if ($vm !== null && $vm >= Thr::VOL_MULT) {
         $mult = number_format($vm, 1) . '배';
         $ctx  = '최근 20일 평균 거래량의 ' . $mult . ' — 가격 움직임의 신뢰도가 높다';
         if ($thin) {
@@ -1683,26 +1725,30 @@ function pf_market_signals(array $ind, int $max = 3, ?array $liq = null): array
      * 사건이 아니라 상시 특성이라 배지 슬롯(3개)을 먹으면 정작 오늘 일어난 일을 밀어낸다 —
      * 유동성은 보유종목 표의 「유동성」 열과 신호 카드의 체결 게이트가 전담한다. */
 
-    $p = $ind['pos52'];
-    if ($p !== null && $p <= 0.05)      $add('low52',  '52주 최저권', 'risk',   '52주 범위의 하단 5% — 하락추세일 수 있다');
-    elseif ($p !== null && $p >= 0.95)  $add('high52', '52주 최고권', 'sellish', '52주 범위의 상단 5%');
+    /* ★52주 임계는 <b>배지용</b>이다 — 신뢰도(pf_signal_confidence)는 더 넓은 값을 쓴다.
+     *   같은 지표라도 용도가 다르면 임계가 다르다(Thr 이 키를 나눠 둔 이유 · 보고서 D4). */
+    $p   = $ind['pos52'];
+    $lo5 = Thr::pct(Thr::POS52_LOW_BADGE);
+    $hi5 = Thr::pct(1 - Thr::POS52_HIGH_BADGE);
+    if ($p !== null && $p <= Thr::POS52_LOW_BADGE)      $add('low52',  '52주 최저권', 'risk',   '52주 범위의 하단 ' . $lo5 . '% — 하락추세일 수 있다');
+    elseif ($p !== null && $p >= Thr::POS52_HIGH_BADGE) $add('high52', '52주 최고권', 'sellish', '52주 범위의 상단 ' . $hi5 . '%');
 
     $r = $ind['rsi14'];
-    if ($r !== null && $r <= 30)      $add('oversold',   '과매도 RSI ' . round($r), 'buyish',  'RSI 30 이하 — 단기 과매도');
-    elseif ($r !== null && $r >= 70)  $add('overbought', '과매수 RSI ' . round($r), 'sellish', 'RSI 70 이상 — 단기 과매수');
+    if ($r !== null && $r <= Thr::RSI_OVERSOLD)        $add('oversold',   '과매도 RSI ' . round($r), 'buyish',  'RSI ' . Thr::RSI_OVERSOLD . ' 이하 — 단기 과매도');
+    elseif ($r !== null && $r >= Thr::RSI_OVERBOUGHT)  $add('overbought', '과매수 RSI ' . round($r), 'sellish', 'RSI ' . Thr::RSI_OVERBOUGHT . ' 이상 — 단기 과매수');
 
     if ($ind['trend'] === 'down')    $add('downtrend', '역배열', 'risk', '5<20<60일선 — 하락추세. 역추세 매수는 위험이 크다');
     elseif ($ind['trend'] === 'up')  $add('uptrend',   '정배열', 'info', '5>20>60일선 — 상승추세');
 
     $d = $ind['disp20'];
-    if ($d !== null && abs($d) >= 0.10) {
+    if ($d !== null && abs($d) >= Thr::DISP20) {
         $add('disp', '이격 ' . sprintf('%+.0f%%', $d * 100), 'info',
              '20일선에서 ' . sprintf('%+.1f%%', $d * 100) . ' 벌어져 있다 — 평균회귀 압력');
     }
 
     $s = (int)$ind['streak'];
-    if ($s <= -3)     $add('down_streak', abs($s) . '일 연속 하락', 'buyish',  '단기 과매도 국면');
-    elseif ($s >= 3)  $add('up_streak',   $s . '일 연속 상승',     'sellish', '단기 과열 국면');
+    if ($s <= -Thr::STREAK)     $add('down_streak', abs($s) . '일 연속 하락', 'buyish',  '단기 과매도 국면');
+    elseif ($s >= Thr::STREAK)  $add('up_streak',   $s . '일 연속 상승',     'sellish', '단기 과열 국면');
 
     return array_slice($sig, 0, $max);
 }
@@ -1726,14 +1772,18 @@ function pf_signal_confidence(?string $kind, array $ind): array
     $none = ['level' => 'normal', 'label' => '', 'why' => ''];
     if ($kind === null) return $none;
 
-    $over   = ($ind['rsi14'] !== null && $ind['rsi14'] <= 30);
-    $under  = ($ind['rsi14'] !== null && $ind['rsi14'] >= 70);
-    // 급등락 판정은 배지와 <b>같은 기준</b>이어야 한다 (3σ 또는 절대 15%) — 어긋나면 배지와 신뢰도가 따로 논다
-    $plunge = (($ind['sigma'] !== null && $ind['sigma'] <= -3.0) || ($ind['chg'] !== null && $ind['chg'] <= -0.15));
-    $surge  = (($ind['sigma'] !== null && $ind['sigma'] >=  3.0) || ($ind['chg'] !== null && $ind['chg'] >=  0.15));
-    $volUp  = ($ind['vol_mult'] !== null && $ind['vol_mult'] >= 2.0);
-    $low52  = ($ind['pos52'] !== null && $ind['pos52'] <= 0.10);
-    $high52 = ($ind['pos52'] !== null && $ind['pos52'] >= 0.90);
+    /* ★ 이름이 뜻과 반대다(옛 실수): $over = 과매도(RSI 낮음) · $under = 과매수(RSI 높음).
+     *   지금 고치면 아래 분기들을 전부 뒤집어야 해서 <b>읽는 사람을 위해 여기 적어 둔다</b>. */
+    $over   = ($ind['rsi14'] !== null && $ind['rsi14'] <= Thr::RSI_OVERSOLD);
+    $under  = ($ind['rsi14'] !== null && $ind['rsi14'] >= Thr::RSI_OVERBOUGHT);
+    /* 급등락 판정은 배지와 <b>같은 상수</b>를 본다 — 예전엔 같은 숫자를 두 번 적어 두고
+     * 「어긋나면 안 된다」고 주석으로 약속했다. M5 로 그 약속이 구조가 됐다. */
+    $plunge = (($ind['sigma'] !== null && $ind['sigma'] <= -Thr::SIGMA) || ($ind['chg'] !== null && $ind['chg'] <= -Thr::CHG_ABS));
+    $surge  = (($ind['sigma'] !== null && $ind['sigma'] >=  Thr::SIGMA) || ($ind['chg'] !== null && $ind['chg'] >=  Thr::CHG_ABS));
+    $volUp  = ($ind['vol_mult'] !== null && $ind['vol_mult'] >= Thr::VOL_MULT);
+    // ★52주는 <b>신뢰도용</b> 임계(10%/90%) — 배지(5%/95%)보다 넓다. 의도된 차이다.
+    $low52  = ($ind['pos52'] !== null && $ind['pos52'] <= Thr::POS52_LOW_CONF);
+    $high52 = ($ind['pos52'] !== null && $ind['pos52'] >= Thr::POS52_HIGH_CONF);
 
     if ($kind === 'buy' || $kind === 'fill') {
         if ($ind['trend'] === 'down' && $low52) {

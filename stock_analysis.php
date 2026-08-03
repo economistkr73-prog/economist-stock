@@ -68,7 +68,8 @@ function up_dashboard($pdo) {
 #################################################################
 // 상승종목 분석 대시보드 — 목업(stock_dashboard_mockup) 이식.
 // 데이터는 전부 stock_analysis_api.php (action=top30/news/daily/minute) 에서 fetch.
-// 상단 공통 네비(env/nav.inc)를 PC 전용으로 부착. PHP 변수 주입 없음(클라이언트 전담) → NOWDOC.
+// 상단 공통 네비(env/nav.inc)를 PC 전용으로 부착. 본문은 NOWDOC —
+// PHP 가 심는 것은 화면별 기능 구성(DC_FEATS) 한 줄뿐이고 나머지는 클라이언트 전담이다.
 require_once "./env/nav.inc";
 $current_user = $_SESSION['usr_name'] ?? '';
 echo <<<'PAGE'
@@ -79,7 +80,11 @@ echo <<<'PAGE'
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>상승종목 분석 대시보드</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css"/>
-<script src="/style/dailychart.js?v=28"></script>
+PAGE;
+// 기능 구성 — 차트설정 > 「화면별 구성」에서 켜고 끈다 (원본 카탈로그 = classes/ChartFeat.class)
+echo '<script src="/style/dailychart.js?v=36"></script>';
+echo ChartFeat::boot('updash', $pdo);
+echo <<<'PAGE'
 <style>
   :root{
     --bg:#0e1320; --panel:#141b2b; --panel-2:#1b2335; --line:#26304a;
@@ -296,30 +301,47 @@ function fmtRate(r){r=Number(r)||0; return (r>=0?'+':'')+r.toFixed(2)+'%';}
  * 구 신호칩('60봉 신고가 돌파+거래량 2배' 흰칩·전고점선)은 2026-08-02 폐기 — 정적 추정
  * 승률이 실측과 어긋나는 잘못된 신호였다(상승확률 엔진 폐기의 마무리). */
 let daily=null, minute=null;   // DailyChart 핸들 (load 후 생성)
+/* 기능 구성 — 서버가 심어 준 DC_FEATS. 끈 기능은 버튼도 데이터 조회도 통째로 없다
+   (배지·버튼만 지우고 뒤에서 계속 부르면 "왜 느리지"가 된다) */
+const F = DailyChart.feats;
+const FEAT_REF = F('overlay.intraday_ref'), FEAT_MIN = F('panel.minute');
+if(!FEAT_REF){ ['toggleTodayHigh','toggleCurPrice'].forEach(id=>{ const b=$(id); if(b) b.remove(); }); }
+if(!FEAT_MIN){ const mb=document.querySelector('.chart-block.bottom'); if(mb) mb.remove(); }
 const dcReady = DailyChart.load().then(()=>{
-  daily = DailyChart.create('dailyChart', {theme:'dark', todayHigh:true, curPrice:'#d9a441',
-                                           key:'updash', legend:'dIndLeg'});
-  minute = DailyChart.create('minuteChart', {theme:'dark', kind:'minute'});
+  /* 높이 조절 — 여기는 일봉/분봉이 세로를 나눠 갖는 flex 배치라, host 가 아니라
+     그 블록(.chart-block)을 늘린다. 늘린 만큼 분봉이 줄어든다. */
+  daily = DailyChart.create('dailyChart', {theme:'dark',
+                                           todayHigh: FEAT_REF,
+                                           curPrice: FEAT_REF ? '#d9a441' : null,
+                                           key:'updash',
+                                           resizeTarget: '.chart-block',
+                                           legend: F('legend.values') ? 'dIndLeg' : null});
+  // 분봉은 위 블록이 정한 나머지를 쓴다 — 손잡이는 하나면 된다
+  if(FEAT_MIN) minute = DailyChart.create('minuteChart', {theme:'dark', kind:'minute', resize:false});
   // 기간 바 [일봉|주봉 ┃ 기간 4개] = 공용 컴포넌트 (일봉 160/240/480/전체 ↔ 주봉 24/48/96주/전체)
   DailyChart.periodBar('dPBar', daily, {
     theme: 'dark',
     defaultIndex: 0,   // 160일 (기존 기본값 유지)
+    fullscreen: F('fullscreen'),
     onChange: info => { $('dailyLbl').textContent = info.tf==='week' ? '주봉' : '일봉'; }
   });
-  DailyChart.indicatorBar('dIBar', daily, { theme: 'dark', key: 'updash' });   // 사용자 지표 + 차트틀
+  DailyChart.indicatorBar('dIBar', daily, { theme: 'dark', key: 'updash',
+                                            preset: F('preset.select') });   // 사용자 지표 + 차트틀
 });
 // '당일전고' 칩 토글 (기본 ON)
-$('toggleTodayHigh').onclick=function(){
-  const on=!this.classList.contains('on');
-  this.classList.toggle('on', on);
-  if(daily) daily.setTodayHigh(on);
-};
-// 일봉 '현재가' 칩 토글 (기본 OFF, 실선)
-$('toggleCurPrice').onclick=function(){
-  const on=!this.classList.contains('on');
-  this.classList.toggle('on', on);
-  if(daily) daily.setCurPrice(on);
-};
+if(FEAT_REF){
+  $('toggleTodayHigh').onclick=function(){
+    const on=!this.classList.contains('on');
+    this.classList.toggle('on', on);
+    if(daily) daily.setTodayHigh(on);
+  };
+  // 일봉 '현재가' 칩 토글 (기본 OFF, 실선)
+  $('toggleCurPrice').onclick=function(){
+    const on=!this.classList.contains('on');
+    this.classList.toggle('on', on);
+    if(daily) daily.setCurPrice(on);
+  };
+}
 // 기간 바(일봉/주봉·기간)는 위 periodBar 가 dcReady 이후 #dPBar 에 그린다
 
 /* ---- 목록(top30, 커서 페이징) ---- */
@@ -442,12 +464,13 @@ async function selectStock(s,row){
   const [news,d,m]=await Promise.all([
     fetch(`${API}?action=news&code=${s.code}`).then(r=>r.json()).catch(()=>[]),
     DailyChart.fetchDaily(s.code,1000).catch(()=>[]),  // 1000영업일(≈4년) 한 번 — 표시는 bindPeriod 슬라이스
-    DailyChart.fetchMinute(s.code).catch(()=>[]),
+    FEAT_MIN ? DailyChart.fetchMinute(s.code).catch(()=>[]) : Promise.resolve([]),
   ]);
 
   await dcReady;
+  daily.setCode(s.code);   // SUE 공시 마커 — 종목을 갈아 끼우면 모듈이 그 종목 것으로 바꾼다
   daily.setData(d);     // 당일전고선은 모듈이 그린다
-  minute.setData(m);
+  if(minute) minute.setData(m);
   renderNews(Array.isArray(news)?news:[]);
 }
 // 기간 토글은 bindPeriod 가 관리 — 재조회 없이 1000일 원본을 슬라이스만 한다

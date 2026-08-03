@@ -42,12 +42,17 @@ function pf_alert_new(PDO $pdo, string $kind, string $ref): bool
     return $st->rowCount() > 0;
 }
 
-/** 배지 임계 — stock/index.php pf_surge_badge 와 같은 값 (여기선 라벨만 필요해 축약판) */
+/**
+ * 배지 임계 — pf_surge_badge 와 <b>같은 상수</b>를 본다 (여기선 라벨만 필요해 축약판).
+ * ★M5 이전에는 같은 숫자를 손으로 옮겨 적고 주석으로 「같은 값」이라 약속했다.
+ *   보고서 §5.3 이 이 무리를 <b>네 벌</b>로 셌다 — 이제 정본은 classes/Thr.class 하나다.
+ */
 function pf_alert_badge(?float $avgMul, ?float $chg): string
 {
-    if ($chg !== null && $chg >= 0.20) return '불꽃형';        // 옛 추격주의
-    if ($avgMul !== null && $avgMul >= 20) return '불꽃형';    // 옛 폭발형 (2026-08-02 통합)
-    if ($avgMul !== null && $avgMul <= 5 && $chg !== null && $chg >= 0 && $chg < 0.10) return '매집형';
+    if ($chg !== null && $chg >= Thr::FLAME_CHG) return '불꽃형';           // 옛 추격주의
+    if ($avgMul !== null && $avgMul >= Thr::FLAME_AVGMUL) return '불꽃형';  // 옛 폭발형 (2026-08-02 통합)
+    if ($avgMul !== null && $avgMul <= Thr::ACC_AVGMUL_MAX
+        && $chg !== null && $chg >= Thr::ACC_CHG_MIN && $chg < Thr::ACC_CHG_MAX) return '매집형';
     return '중립';
 }
 
@@ -100,22 +105,29 @@ function pf_alert_eod(PDO $pdo): array
     $ka    = new KrxAmt($pdo);
     $lines = [];
 
-    // 감시 대상: 보유(open) + 관심종목
+    /* 감시 대상: 보유(open) + 관심종목. 이름표만 한 번에 받아 두고, 판정은 아래에서 <b>따로</b> 돈다 —
+     * ①은 관심종목의 최신 신호, ②는 보유 포지션의 편입 기준 박스로 기준 시점이 다르기 때문이다(M3). */
     $held  = $pdo->query("SELECT DISTINCT stock_code FROM pf_position WHERE status = 'open'")
                  ->fetchAll(PDO::FETCH_COLUMN);
     $watch = $pdo->query("SELECT stock_code FROM pf_watchlist")->fetchAll(PDO::FETCH_COLUMN);
-    $all   = array_values(array_unique(array_merge($held, $watch)));
-    $names = pf_alert_names($pdo, $all);
+    $names = pf_alert_names($pdo, array_values(array_unique(array_merge($held, $watch))));
     $nm    = fn(string $c): string => ($names[$c] ?? $c);
 
-    // ① / ② — 최근 신호의 박스 상태 (관심종목 관제탑·계단관통 배지와 같은 판정)
-    if ($all) {
-        $in = implode(',', array_fill(0, count($all), '?'));
+    /* ① 관심종목 트리거 — <b>최신 신호</b>가 맞다. 여기는 퀀트 섹션(발견·검증)이고
+     *   묻는 것이 「지금 이 종목이 살 자리인가」라 기준이 오늘로 미끄러져야 한다.
+     *   ★M3 로 바뀐 것은 ② 뿐이다 — 두 물음이 다르므로 기준 시점도 다르다(v0.3 §1.1 섹션 대비표).
+     *
+     * ★★<b>이미 보유 중인 종목도 뺴지 않는다</b>(2026-08-03 결정). 같은 종목을 다른 포트폴리오에
+     *   담을 수 있게 열어 둔 이상(§2.6) 그 신호는 여전히 실행 가능하다 — 빼면 진짜 기회를 놓친다.
+     *   대신 <b>「보유중」을 문구에 박아</b> 사용자가 한눈에 구별하게 한다.
+     *   중복 잡음은 pf_alert_log 가 (code|d|종류)로 막아 이벤트당 한 번만 울린다. */
+    if ($watch) {
+        $in = implode(',', array_fill(0, count($watch), '?'));
         $sg = $pdo->prepare("
             SELECT s.code, s.d, s.avg_mul, s.chg FROM krx_surge s
               JOIN (SELECT code, MAX(d) d FROM krx_surge WHERE code IN ($in) GROUP BY code) m
                 ON m.code = s.code AND m.d = s.d");
-        $sg->execute($all);
+        $sg->execute($watch);
         $sigRows = $sg->fetchAll(PDO::FETCH_ASSOC);
         $sigs    = array_map(fn($s) => ['code' => $s['code'], 'd' => $s['d']], $sigRows);
         $box     = $sigs ? $ka->boxStatusMany($sigs) : [];
@@ -126,33 +138,52 @@ function pf_alert_eod(PDO $pdo): array
             $badge = pf_alert_badge(
                 $s['avg_mul'] !== null ? (float)$s['avg_mul'] : null,
                 $s['chg'] !== null ? (float)$s['chg'] : null);
+            if ($badge !== '매집형') continue;   // 그 외 조합은 관망이라 알리지 않는다
 
-            // ① 관심종목 트리거 — 검증된 매수규칙 둘만 (그 외는 관망이라 알리지 않는다)
-            if (in_array($s['code'], $watch, true) && $badge === '매집형') {
-                if ($b['st'] === 'bx-brk' && pf_alert_new($pdo, 'trig', $s['code'] . '|' . $s['d'] . '|brk')) {
-                    $lines[] = '🟢 ' . $nm($s['code']) . ' 돌파확인 — 매집형×돌파 (실측 +2.26%·57.9%)';
-                } elseif ($b['st'] === 'bx-lad' && mb_strpos($b['txt'], '계단지지') === 0
-                          && mb_strpos($b['txt'], '⚠') === false
-                          && pf_alert_new($pdo, 'trig', $s['code'] . '|' . $s['d'] . '|lad')) {
-                    $lines[] = '🟢 ' . $nm($s['code']) . ' 계단지지 — 매집형×아래층3개↑ (실측 +2.40%·58.5%)';
-                }
-            }
-            // ② 보유종목 계단관통↓ — 지지구조 소멸 (물림 클러스터 실측 신호)
-            if (in_array($s['code'], $held, true)
-                && $b['st'] === 'bx-dn' && str_contains((string)$b['txt'], '지지이탈')
-                && pf_alert_new($pdo, 'stair', $s['code'] . '|' . $s['d'])) {
-                $lines[] = '🔻 보유 ' . $nm($s['code']) . ' 계단관통↓ — 지지구조 전부 붕괴, 재평가 소집';
+            // 이미 담은 종목이면 그 사실을 문구에 남긴다 — 「새 후보」와 「추가 편입 기회」는 다른 일이다
+            $own = in_array($s['code'], $held, true) ? ' <보유중>' : '';
+
+            if ($b['st'] === 'bx-brk' && pf_alert_new($pdo, 'trig', $s['code'] . '|' . $s['d'] . '|brk')) {
+                $lines[] = '🟢 ' . $nm($s['code']) . $own . ' 돌파확인 — 매집형×돌파 (실측 +2.26%·57.9%)';
+            } elseif ($b['st'] === 'bx-lad' && mb_strpos($b['txt'], '계단지지') === 0
+                      && mb_strpos($b['txt'], '⚠') === false
+                      && pf_alert_new($pdo, 'trig', $s['code'] . '|' . $s['d'] . '|lad')) {
+                $lines[] = '🟢 ' . $nm($s['code']) . $own . ' 계단지지 — 매집형×아래층3개↑ (실측 +2.40%·58.5%)';
             }
         }
     }
 
-    // ③ 오늘 신규 매집형 신호 (잠정 · 하한 100억 — 퀀트 목록 기본값과 동일)
+    /* ② 보유종목 계단관통↓ — 지지구조 소멸 (물림 클러스터 실측 신호).
+     * ★★M3 (v0.3 §2.2): 기준 박스를 <b>편입 시점에 못박은 `pf_position.surge_event_d`</b> 로 바꿨다.
+     *   예전엔 MAX(d) 라 「나중에 뜬 남의 박스」가 무너져도 내 포지션에 경보가 왔다.
+     *   surge_event_d 가 NULL 인 포지션은 판정하지 않는다 — 기준이 없으면 침묵이 정직하다.
+     * ★같은 종목을 여러 포트폴리오에 담을 수 있으므로 <b>포지션 단위</b>로 돈다.
+     *   중복방지 키는 (code|d) — 같은 이벤트는 한 번만 알린다(포지션마다 쏘면 같은 말이 겹친다). */
+    $pos = $pdo->query("
+        SELECT p.id, p.stock_code, p.surge_event_d
+          FROM pf_position p
+         WHERE p.status = 'open' AND p.surge_event_d IS NOT NULL")->fetchAll(PDO::FETCH_ASSOC);
+    if ($pos) {
+        $sigs = [];
+        foreach ($pos as $p) $sigs[$p['stock_code'] . '|' . $p['surge_event_d']] =
+            ['code' => $p['stock_code'], 'd' => $p['surge_event_d']];
+        $box = $ka->boxStatusMany(array_values($sigs));
+        foreach ($sigs as $key => $s) {
+            $b = $box[$key] ?? null;
+            if (!$b || $b['st'] !== 'bx-dn' || !str_contains((string)$b['txt'], '지지이탈')) continue;
+            if (!pf_alert_new($pdo, 'stair', $key)) continue;
+            $lines[] = '🔻 보유 ' . $nm($s['code']) . ' 계단관통↓ — 편입 기준 박스(' . $s['d']
+                     . ')의 지지구조 전부 붕괴, 재평가 소집';
+        }
+    }
+
+    // ③ 오늘 신규 매집형 신호 (잠정 · 하한은 Thr::SURGE_MIN_AMT — 퀀트 목록·accBoxes 와 같은 상수)
     try {
         $today = date('Y-m-d');
         $sc    = $ka->surgeCached($today);
         $acc   = [];
         foreach ($sc['rows'] ?? [] as $r) {
-            if ((float)$r['amt'] < 1e10) continue;
+            if ((float)$r['amt'] < Thr::SURGE_MIN_AMT) continue;
             $badge = pf_alert_badge(
                 $r['avg_mul'] !== null ? (float)$r['avg_mul'] : null,
                 $r['chg'] !== null ? (float)$r['chg'] : null);
@@ -194,7 +225,7 @@ function pf_alert_fresh(PDO $pdo): array
             if (!$sq) continue;
             $qk = array_key_last($sq);
             $v  = $sq[$qk];
-            if ($v <= -1 && pf_alert_new($pdo, 'shock', $c . '|' . $qk)) {
+            if ($v <= Thr::SUE_SHOCK && pf_alert_new($pdo, 'shock', $c . '|' . $qk)) {
                 $lines[] = '🔻 보유 ' . $nm($c) . ' 어닝쇼크 — SUE ' . number_format($v, 1)
                          . ' (쇼크 무리 = 두 달 하방 드리프트 실측)';
             }
@@ -208,7 +239,7 @@ function pf_alert_fresh(PDO $pdo): array
             if (!$sq) continue;
             $qk = array_key_last($sq);
             $v  = $sq[$qk];
-            if ($v >= 1 && pf_alert_new($pdo, 'sue', $c . '|' . $qk)) {
+            if ($v >= Thr::SUE_HIT && pf_alert_new($pdo, 'sue', $c . '|' . $qk)) {
                 $lines[] = '⭐ 관심 ' . $nm($c) . ' 서프라이즈 — SUE ' . number_format($v, 1) . ' (상위 20%권)';
             }
         } catch (Throwable $e) { /* 다음 종목 */ }

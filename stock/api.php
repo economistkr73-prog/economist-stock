@@ -8,6 +8,7 @@
 require_once $_SERVER['DOCUMENT_ROOT'] . '/env/cnt.inc';
 require_once $_SERVER['DOCUMENT_ROOT'] . '/env/auth_fnc.php';
 require_once __DIR__ . '/lib/calc.php';
+require_once __DIR__ . '/lib/entry.php';   // M4 — 편입 스냅샷 조립 (index.php 와 함께 쓴다)
 require_login();
 
 $pf = new Pf($pdo);
@@ -336,7 +337,8 @@ function api_ruleset(string $action, PDO $pdo, Pf $pf): void
 function api_position(string $action, PDO $pdo, Pf $pf): void
 {
     switch ($action) {
-        /* ── 박스 사다리 (2026-08-02) — 후보 조회 → 비중 계산(미리보기) → 저장/해제.
+        /* ── 퀀트 사다리 (2026-08-02 · 옛 이름 「박스 사다리」·내부 식별자는 box 그대로)
+         *    — 후보 조회 → 비중 계산(미리보기) → 저장/해제.
          * boxlv/boxsolve 는 JSON 을 그대로 돌려준다(모달의 fetch 가 소비 — positions payload 와 같은 방식). */
         case 'boxlv': {
             $code   = preg_replace('/[^0-9]/', '', (string)($_GET['code'] ?? ''));
@@ -427,7 +429,7 @@ function api_position(string $action, PDO $pdo, Pf $pf): void
                 'high_price' => $high,
             ]);
 
-            /* 박스 사다리 — 매수 방식이 box 면 <b>저장 전에</b> 가격 조합이 풀리는지 검증한다.
+            /* 퀀트 사다리 — 매수 방식이 box 면 <b>저장 전에</b> 가격 조합이 풀리는지 검증한다.
              * 안 풀리는데 포지션부터 만들면 사다리 없는 반쪽 등록이 남는다. 룰셋 종목을 박스로
              * 전환하는 흐름은 없다 — 방식은 편입 때 정해지고, 박스 포지션의 재조정만 이 길로 온다. */
             $buyMode  = (($_POST['buy_mode'] ?? 'rule') === 'box') ? 'box' : 'rule';
@@ -438,7 +440,7 @@ function api_position(string $action, PDO $pdo, Pf $pf): void
                 if ($boxBuilt === null) {
                     pf_api_done($id ? '/stock/index.php?mode=position&id=' . $id . '&edit=1'
                                     : '/stock/index.php?mode=position&id=new&pid=' . (int)($_POST['portfolio_id'] ?? 0),
-                        'err', '박스 사다리: 지지선 3~5개를 간격 있게 고르고 「비중 풀기」까지 확인한 뒤 저장하세요.');
+                        'err', '퀀트 사다리: 지지선 3~5개를 간격 있게 고르고 「비중 풀기」까지 확인한 뒤 저장하세요.');
                 }
             }
 
@@ -456,10 +458,32 @@ function api_position(string $action, PDO $pdo, Pf $pf): void
                 'status'       => $cur['status'] ?? 'watch',
                 'memo'         => trim($_POST['memo'] ?? ''),
                 'source'       => preg_replace('/[^a-z]/', '', (string)($_POST['source'] ?? '')),   // 발굴 채널(신규만 저장)
+                /* ── M2 (v0.3 §2.4) 편입 3축 — 전부 <b>신규만</b> 저장된다(positionSave 가 수정 시 안 덮는다).
+                 * ladder_method 는 위에서 이미 검증한 $buyMode 에서 곧바로 온다 —
+                 * 「레벨 행이 있느냐」로 나중에 되짚지 않고 <b>고른 그 순간</b>을 적는다.
+                 * entry_trigger·surge_event_d 는 탐색 화면의 편입 버튼이 폼에 실어 준 값이고,
+                 * 없으면 positionSave 가 각각 'none' / 상한 안의 최신 확정 신호로 메운다. */
+                'ladder_method' => ($buyMode === 'box') ? 'quant_ladder' : 'ruleset_pct',
+                'entry_trigger' => (string)($_POST['entry_trigger'] ?? ''),
+                'surge_event_d' => (string)($_POST['surge_event_d'] ?? ''),
             ]);
             if ($boxBuilt !== null) $pf->positionLevelsReplace($pid, $boxBuilt['levels']);
+
+            /* ── M4 (v0.3 §2.5) — 신규 편입이면 「그때의 판정」을 한 번 찍는다.
+             * ★신규만이다. 수정 저장에서 다시 찍으면 스냅샷이 아니라 최신값이 되어 존재 이유가 사라진다
+             *   (Pf::entrySnapshotSave 도 INSERT IGNORE 로 이중 방어).
+             * ★실패해도 저장은 성공으로 끝낸다 — 기록이 편입을 막으면 안 된다. */
+            if (!$id) {
+                try {
+                    /* ★기준 신호일은 positionGet 이 아니라 단일 테이블 조회로 읽는다 —
+                     * positionGet 은 INNER JOIN 이라 마스터가 하나라도 비면 행째 null 이 되고,
+                     * 그러면 signal_date 가 조용히 비어 잘못된 기록이 남는다(실측으로 밟았다). */
+                    $pf->entrySnapshotSave($pid, pf_entry_snapshot_build(
+                        $pdo, $code, $pf->positionSurgeEventDate($pid)));
+                } catch (Throwable $e) { /* 스냅샷 없이도 편입은 끝난다 */ }
+            }
             pf_api_done('/stock/index.php?mode=position&id=' . $pid, 'ok',
-                '종목 설정을 저장했습니다.' . ($boxBuilt !== null ? ' (박스 사다리 ' . count($boxBuilt['levels']) . '차 확정)' : ''));
+                '종목 설정을 저장했습니다.' . ($boxBuilt !== null ? ' (퀀트 사다리 ' . count($boxBuilt['levels']) . '차 확정)' : ''));
 
         case 'delete':
             $id  = (int)($_POST['id'] ?? 0);

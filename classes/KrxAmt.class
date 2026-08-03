@@ -378,6 +378,16 @@ class KrxAmt
     public const SURGE_WIN = 120;
 
     /**
+     * 신호 하나를 얼마나 추적하나 — <b>달력일</b> (krx_surge_event.tracking_until · M1).
+     *
+     * ★ 거래일이 아니라 달력일이다. 화면의 「최근 45일」(매집형 박스 추적 = accBoxes 기본값)과
+     *   같은 잣대로 맞춘 것이다. 이 레포는 창 단위가 이미 섞여 있으니(momMany 20·40 <b>거래일</b>,
+     *   boxStatusMany 경과 <b>거래일</b>) 여기만 바꾸면 오히려 잣대가 더 갈린다 —
+     *   바꾸려면 화면 문구·검증 탭 정의를 함께 고쳐야 한다.
+     */
+    public const TRACK_DAYS = 45;
+
+    /**
      * ★ 그 날짜의 「거래대금 120거래일 신고가」 목록.
      *
      * 판정(2026-07-31 백테스트 2회 — 60일판·120일판 · stock/index.php 검증 탭에 실측 근거):
@@ -515,7 +525,108 @@ class KrxAmt
             $up->execute([$d, count($res['rows']), self::SURGE_WIN]);
             $this->pdo->commit();
         } catch (Throwable $e) { $this->pdo->rollBack(); throw $e; }
+        $this->syncSurgeEvents($d);   // ★캐시가 아니라 <b>이벤트</b>로 남길 것 — 아래 주석
         return $res;
+    }
+
+    /** 이 스키마에 그 테이블이 있나 (개명 이관 판정용) */
+    private function tableHas(string $t): bool
+    {
+        $st = $this->pdo->prepare(
+            "SELECT COUNT(*) FROM information_schema.TABLES
+              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?");
+        $st->execute([$t]);
+        return (bool)$st->fetchColumn();
+    }
+
+    // ══ 신호 이벤트 (krx_surge_event · M1 · 요건정의서 v0.3 §3.1) ═══════════
+    /**
+     * ★★ <b>왜 krx_surge 에 컬럼을 붙이지 않고 테이블을 따로 두는가.</b>
+     *
+     * `krx_surge` 는 테이블처럼 보이지만 <b>파생 캐시</b>다:
+     *   · `invalidateSurge()` 가 `DELETE … WHERE d >= ?` 로 <b>범위 삭제</b>하고
+     *     `cron/dart_collect.php` 가 확정값 들어오는 날마다 그것을 부른다.
+     *   · `surgeCached()` 는 창 길이(win)가 바뀌면 그 날을 통째로 다시 만든다.
+     * ⇒ 여기에 tracking_until/tracking_state 를 두면 <b>매일 지워진다</b>.
+     *   그것도 하필 active 이벤트(정의상 최근 45일)가 정확히 위험 구간이다.
+     *
+     * 그래서 `krx_surge_event` 는 <b>append-only</b> 다:
+     *   · 삭제하지 않는다 — `invalidateSurge()` 는 이 테이블을 건드리지 않는다(★건드리지 말 것).
+     *   · 수명(tracking_until)은 <b>최초 1회</b> 확정하고 다시 계산하지 않는다.
+     *   · <b>확정분(src='k')만</b> 넣는다 — 잠정 신호(src='n')는 다음날 KRX 확정값에 밀려
+     *     사라질 수 있어서, 넣으면 지울 수 없는 유령 이벤트가 남는다.
+     *     수명은 신호일 d 기준이라 하루 늦게 들어와도 손해가 없다.
+     *
+     * ★ `pf_position.surge_event_d` 와는 <b>독립</b>이다 — 포지션은 편입 시점에 (d, code) 값만
+     *   복사하므로 이 테이블에 그 행이 아직 없어도 상관없다. 두 경로가 안 얽히는 것이 이 설계의 핵심.
+     */
+    public function ensureSurgeEvent(): void
+    {
+        /* ★이름 정리(2026-08-03): 처음 `surge_event` 로 만들었다가 <b>같은 날</b> `krx_surge_event` 로 고쳤다.
+         *   economist73 은 127 테이블을 공유하는 스키마라 접두어로 소속을 밝히는 것이 이 레포의 규칙이고
+         *   (CLAUDE.md), 이 테이블은 krx_surge·krx_surge_day 와 한 식구다. 참조가 퍼지기 전에 바꿨다. */
+        if ($this->tableHas('surge_event') && !$this->tableHas('krx_surge_event')) {
+            try { $this->pdo->exec("RENAME TABLE surge_event TO krx_surge_event"); }
+            catch (Throwable $e) { /* 이미 바뀌었거나 권한 문제 — 아래 CREATE 가 받는다 */ }
+        }
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS krx_surge_event (
+                d              DATE    NOT NULL,
+                code           CHAR(6) NOT NULL,
+                tracking_until DATE    NOT NULL COMMENT '신호일 + 추적일수(달력일)',
+                tracking_state ENUM('active','closed','superseded') NOT NULL DEFAULT 'active',
+                created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (d, code),
+                KEY idx_se_state (tracking_state, tracking_until),
+                KEY idx_se_code  (code, d)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+              COMMENT='최고 거래대금 신호의 추적 수명 — krx_surge(캐시)와 달리 지워지지 않는다'"
+        );
+    }
+
+    /**
+     * 그 날짜 이후의 <b>확정</b> 신호를 이벤트로 올리고 상태를 갱신한다.
+     *
+     * `rebuildSurge()`·`warmSurgeAll()` 끝에서만 부른다 — 이 둘이 krx_surge 의 유일한 쓰기 경로라
+     * 크론 2곳과 화면 lazy 재계산까지 여기 한 곳으로 전부 덮인다(크론 파일은 손대지 않는다).
+     *
+     * 비용: 하루치 12~31행 upsert + UPDATE 2 = 밀리초. 실패해도 신호 계산 본업을 죽이지 않는다.
+     *
+     * @return int 새로 만들어진 이벤트 수
+     */
+    public function syncSurgeEvents(string $fromDate): int
+    {
+        try {
+            $this->ensureSurgeEvent();
+
+            // ① 새 이벤트 — 이미 있으면 손대지 않는다(수명은 최초 1회 확정)
+            $st = $this->pdo->prepare("
+                INSERT INTO krx_surge_event (d, code, tracking_until, tracking_state)
+                SELECT s.d, s.code, DATE_ADD(s.d, INTERVAL ? DAY), 'active'
+                  FROM krx_surge s
+                 WHERE s.d >= ? AND s.src = 'k'
+                ON DUPLICATE KEY UPDATE krx_surge_event.d = krx_surge_event.d");
+            $st->execute([self::TRACK_DAYS, $fromDate]);
+            $made = $st->rowCount();
+
+            /* ② 만료. ★읽는 쪽도 `tracking_until >= CURDATE()` 를 함께 보라 —
+             *   크론은 평일에만 돌아서 연휴 뒤에는 이 배치가 며칠 늦는다. */
+            $this->pdo->exec("
+                UPDATE krx_surge_event SET tracking_state = 'closed'
+                 WHERE tracking_state = 'active' AND tracking_until < CURDATE()");
+
+            // ③ 교체 — 같은 종목에 더 최신 active 가 생기면 이전 것은 superseded
+            $this->pdo->exec("
+                UPDATE krx_surge_event e
+                  JOIN (SELECT code, MAX(d) AS d FROM krx_surge_event
+                         WHERE tracking_state = 'active' GROUP BY code) m ON m.code = e.code
+                   SET e.tracking_state = 'superseded'
+                 WHERE e.tracking_state = 'active' AND e.d < m.d");
+
+            return $made;
+        } catch (Throwable $e) {
+            return 0;   // 이벤트 기록이 신호 계산(본업)을 막지 않는다
+        }
     }
 
     /**
@@ -589,12 +700,17 @@ class KrxAmt
             foreach ($mark as $d => $n) $up->execute([$d, $n, $w]);
             $this->pdo->commit();
         } catch (Throwable $e) { $this->pdo->rollBack(); throw $e; }
+        $this->syncSurgeEvents($from);   // 대량 예열분도 이벤트로 남긴다 (rebuildSurge 와 같은 헬퍼)
         return [count($sig), count($mark)];
     }
 
     /**
      * 그 날짜 이후의 캐시를 지운다 — 원장이 바뀌면(잠정→확정 덮어쓰기 등) 그 날과
      * 그 날을 창에 포함하는 이후 날짜의 판정이 달라질 수 있다. 다시 볼 때 저절로 재계산된다.
+     *
+     * ★★<b>여기에 `krx_surge_event` 삭제를 넣지 말 것.</b> 그 테이블은 append-only 이고,
+     *   지우는 순간 「krx_surge 에 컬럼을 붙였을 때와 똑같이 매일 증발하는」 원래 문제로 돌아간다.
+     *   포지션이 `surge_event_d` 로 가리키는 과거 이벤트도 함께 사라진다. (ensureSurgeEvent 주석 참조)
      */
     public function invalidateSurge(string $fromDate): void
     {
@@ -657,7 +773,7 @@ class KrxAmt
         $hist = [];
         foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) $hist[$r['code']][] = $r;
 
-        $Z = 0.02;   // 레벨 허용오차 — 경로 연구와 동일
+        $Z = Thr::BOX_LEVEL_TOL;   // 레벨 허용오차 — 경로 연구와 동일 (M5: 임계 정본은 Thr)
         $out = [];
         foreach ($sigs as $s) {
             $key = $s['code'] . '|' . $s['d'];
@@ -694,7 +810,9 @@ class KrxAmt
             // 신호일 이후 봉만 골라 종가 기준 상태기계
             $bs = [];
             foreach ($bars[$s['code']] ?? [] as $b) if ($b['d'] > $s['d']) $bs[] = $b;
-            if (!$bs) { $out[$key] = ['st' => 'bx-new', 'txt' => '新박스', 'tip' => $tipHL, 'h' => $H, 'l' => $L]; continue; }
+            // ★continue 라 아래의 floors 부착을 지나친다 — 여기서 직접 싣는다(당일 편입도 스냅샷을 남긴다)
+            if (!$bs) { $out[$key] = ['st' => 'bx-new', 'txt' => '新박스', 'tip' => $tipHL,
+                                      'h' => $H, 'l' => $L, 'floors' => $floors, 'levels' => $lv]; continue; }
 
             $phase = ''; $pi = -1;
             foreach ($bs as $i => $b) {
@@ -726,7 +844,7 @@ class KrxAmt
                     if ($bi !== null) {
                         $phase = 'C'; $pi = $bi;                  // ↓ 아래 C 로직이 이어받는다
                         $afterBrk = $brkD;
-                    } elseif ($ago <= 5) {
+                    } elseif ($ago <= Thr::FAKE_BRK_DAYS) {
                         $out[$key] = ['st' => 'bx-fake', 'txt' => '가짜돌파',
                             'tip' => $tipHL . ' — 돌파 직후(5일 내) 박스 안으로 되돌아옴', 'h' => $H, 'l' => $L];
                     } else {
@@ -762,12 +880,12 @@ class KrxAmt
                             'tip' => $tipHL . sprintf(' — 지지 아래·%d단 계단(%s) 위에서 표류', $idx + 1, number_format($lv[$idx])) . $abNote, 'h' => $H, 'l' => $L];
                     } elseif ($lastC > $lv[$idx] * (1 + $Z)) {
                         /* ⚠ = 위치 연구(2026-08-01): 아래층 박스 3개 미만의 계단지지는 실측 음수 — 매수규칙 미충족 */
-                        $flNote = $floors >= 3
+                        $flNote = $floors >= Thr::FLOORS_MIN
                             ? sprintf(' · 아래층 박스 %d개 — 매수규칙 충족(매집형×아래층 3개↑ 실측 +2.40%%·승률 58.5%%)', $floors)
                             : sprintf(' · ⚠아래층 박스 %d개(3개 미만) — 실측 음수(−2.5%%·승률 45%%)라 관망', $floors);
                         /* ★ 돌파 뒤 이탈 경로에도 ⚠ — 트리거 조건이 「⚠ 없음」이라 자동으로 빠진다.
                          * 경보(지지이탈↓)만 살리고 <b>매수 규칙의 모집단은 넓히지 않는다</b>. */
-                        $badOK = ($floors >= 3 && $afterBrk === '');
+                        $badOK = ($floors >= Thr::FLOORS_MIN && $afterBrk === '');
                         $out[$key] = ['st' => 'bx-lad', 'txt' => '계단지지 ' . ($idx + 1) . '단' . ($badOK ? '' : '⚠'),
                             'tip' => $tipHL . sprintf(' — %d단(%s)이 받아 반등 중', $idx + 1, number_format($lv[$idx])) . $flNote . $abNote,
                             'h' => $H, 'l' => $L];
@@ -776,7 +894,8 @@ class KrxAmt
                             'tip' => $tipHL . sprintf(' — 지금 %d단 계단(%s) 바로 위 — 지키면 반등 후보, 깨면 %s',
                                 $idx + 1, number_format($lv[$idx]),
                                 $idx + 1 < $n ? ($idx + 2) . '단(' . number_format($lv[$idx + 1]) . ')' : '계단 없음')
-                                . ($floors < 3 ? sprintf(' · ⚠아래층 박스 %d개 — 지지 확인돼도 매수규칙(3개↑) 미충족', $floors) : '') . $abNote,
+                                . ($floors < Thr::FLOORS_MIN ? sprintf(' · ⚠아래층 박스 %d개 — 지지 확인돼도 매수규칙(%d개↑) 미충족',
+                                $floors, Thr::FLOORS_MIN) : '') . $abNote,
                             'h' => $H, 'l' => $L];
                     }
                 }
@@ -787,7 +906,7 @@ class KrxAmt
                  * 돌파율이 60%→37%로 꺾이고(유통기한), 늦은 돌파는 사도 음수(−6.68%·n=6). */
                 $toH = $lastC > 0 ? ($H / $lastC - 1) * 100 : 0;
                 $days = count($bs);   // 신호 후 경과 거래일 (전부 박스 안)
-                $stale = $days > 10;
+                $stale = $days > Thr::BOX_STALE_DAYS;
                 $out[$key] = ['st' => 'bx-in',
                     'txt' => sprintf('박스안 H%+.1f%%', $toH) . ($stale ? ' ' . $days . '일⚠' : ''),
                     'tip' => $tipHL . sprintf(' — 현재가에서 저항까지 %+.1f%% · 지지까지 %+.1f%%',
@@ -795,11 +914,19 @@ class KrxAmt
                         . ($stale ? sprintf(' · ⚠신호 후 %d거래일째 박스 체류 — 10일 넘으면 돌파율이 60%%→37%%로 꺾인다(유통기한·검증 탭 ⑦). 늦은 돌파는 추격 주의', $days) : ''),
                     'h' => $H, 'l' => $L];
             }
+
+            /* 아래층 박스 수 + <b>계단 레벨 자체</b> — 지금까지는 tip 문자열 안에만 있었다(⚠ 여부로 간접 판정).
+             * 편입 스냅샷이 이 둘을 값으로 보관해야 자기완결이 된다(개수만으로는 「어느 가격이었나」를 못 되짚는다).
+             * 판정 로직은 그대로 — 키가 늘 뿐이라 기존 소비자는 영향이 없다. */
+            if (isset($out[$key])) {
+                $out[$key]['floors'] = $floors;
+                $out[$key]['levels'] = $lv;      // 내림차순 최대 4개 (매매용 계단)
+            }
         }
         return $out;
     }
 
-    /* ── 박스 사다리 후보 (2026-08-02) — 편입 시 「그 종목의 실제 지지선」을 고르기 위한 목록 ──
+    /* ── 퀀트 사다리 후보 (2026-08-02) — 편입 시 「그 종목의 실제 지지선」을 고르기 위한 목록 ──
      * 일봉 = krx_surge(거래대금 120일 신고가) 박스의 H·L. 주봉 = krx_amt 를 주 단위로 묶어
      * 주간 거래대금이 직전 24주 최고를 넘는 주의 고·저 — 일봉 박스가 하루에 하나씩 생겨
      * 변별력이 없을 때 쓴다(24주 ≈ 120거래일로 일봉 창과 정렬). 최신순. */
@@ -954,19 +1081,77 @@ class KrxAmt
     /**
      * 매집형 박스 추적 — 최근 신호 중 매집형(20평비≤5 ∧ 등락 0~10%)만.
      * 경로 연구의 승자 규칙(돌파 매수·계단지지 매수)을 매일 화면에서 보기 위한 목록.
+     *
+     * ★M5 — 매집형 조건이 <b>WHERE 절</b>에 있어 상수 치환이 아니라 쿼리 조립이 된다.
+     *   그래도 정본은 Thr 하나다: 값을 코드 상수에서 문자열로 넣는다(사용자 입력이 아니라 안전).
+     *   pf_surge_badge·pf_alert_badge·pf_entry_snapshot_build 와 <b>같은 상수</b>를 본다.
      */
-    public function accBoxes(string $upto, int $calDays = 45, float $minAmt = 1e10, int $cap = 40): array
+    public function accBoxes(string $upto, int $calDays = self::TRACK_DAYS,
+                             float $minAmt = Thr::SURGE_MIN_AMT, int $cap = 40,
+                             ?int &$total = null): array
     {
         $from = date('Y-m-d', strtotime($upto . " -{$calDays} day"));
+        $where = "d BETWEEN ? AND ? AND amt >= ?
+                    AND avg_mul IS NOT NULL AND avg_mul <= " . (float)Thr::ACC_AVGMUL_MAX . "
+                    AND chg IS NOT NULL AND chg >= " . (float)Thr::ACC_CHG_MIN . "
+                                       AND chg <  " . (float)Thr::ACC_CHG_MAX;
+
+        /* ★M6 — <b>자른 사실을 셀 수 있게</b> 총건수를 함께 낸다(no silent caps).
+         *   v0.3 은 LIMIT 을 없애자고 했지만 그러면 boxStatusMany 가 행수에 비례해 봉을 읽는다 —
+         *   어닝 탭에서 무제한 호출이 256MB 를 넘긴 실측이 있다. 자르되 <b>잘랐다고 말한다</b>. */
+        $cnt = $this->pdo->prepare("SELECT COUNT(*) FROM krx_surge WHERE {$where}");
+        $cnt->execute([$from, $upto, $minAmt]);
+        $total = (int)$cnt->fetchColumn();
+
         $st = $this->pdo->prepare("
             SELECT code, d, amt, c, avg_mul, chg
               FROM krx_surge
-             WHERE d BETWEEN ? AND ? AND amt >= ?
-               AND avg_mul IS NOT NULL AND avg_mul <= 5
-               AND chg IS NOT NULL AND chg >= 0 AND chg < 0.10
+             WHERE {$where}
              ORDER BY d DESC LIMIT " . (int)$cap);
         $st->execute([$from, $upto, $minAmt]);
         return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * 신호 이벤트의 <b>추적 상태</b> — key "code|d" => ['until'=>DATE, 'state'=>…, 'left'=>남은 달력일].
+     *
+     * ★이 표에서만 알 수 있는 것은 <b>`superseded`</b> 다 — 「그 뒤에 같은 종목의 새 신호가 떴다」는
+     *   <b>다른 행을 봐야 아는 사실</b>이라 신호 하나만 들고는 계산할 수 없다.
+     *   (`tracking_until` 은 d + TRACK_DAYS 라 인라인으로도 나오지만, 정의를 한 자리에 두려고 함께 낸다.)
+     * ★`state` 는 배치가 찍는 값이라 <b>연휴 뒤에는 며칠 늦을 수 있다</b>. 그래서 만료 여부는
+     *   state 를 믿지 말고 <b>날짜로 다시 본다</b>(left ≤ 0 이면 만료) — 늦어도 판정이 안 틀린다.
+     */
+    public function surgeEventStates(array $sigs, ?string $asOf = null): array
+    {
+        if (!$sigs) return [];
+        $asOf = $asOf ?: date('Y-m-d');
+        try {
+            $this->ensureSurgeEvent();
+            $ph = implode(',', array_fill(0, count($sigs), '(?,?)'));
+            $arg = [];
+            foreach ($sigs as $s) { $arg[] = $s['code']; $arg[] = $s['d']; }
+            /* ★열 순서를 인자 순서와 맞춘다 — (d, code) 로 적고 (code, d) 를 넣어 <b>전부 미조회</b>였다
+             *   (실측으로 잡음). boxStatusMany 와 같은 (code, d) 순으로 통일한다. */
+            $st = $this->pdo->prepare(
+                "SELECT d, code, tracking_until, tracking_state
+                   FROM krx_surge_event WHERE (code, d) IN ({$ph})");
+            $st->execute($arg);
+            $out = [];
+            foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                /* ★경계는 배치와 <b>같아야 한다</b> — 배치 UPDATE 가 `tracking_until < CURDATE()` 로 닫으므로
+                 *   만료일 <b>당일</b>은 아직 추적 중이다(left = 0). `left <= 0` 으로 두면 화면만 하루 먼저
+                 *   닫혀 배치와 어긋난다(실측에서 3건이 그렇게 보였다). */
+                $left = (int)floor((strtotime($r['tracking_until']) - strtotime($asOf)) / 86400);
+                $out[$r['code'] . '|' . $r['d']] = [
+                    'until' => $r['tracking_until'],
+                    'state' => $left < 0 ? 'closed' : $r['tracking_state'],   // ★날짜 우선(배치 지연 방어)
+                    'left'  => $left,
+                ];
+            }
+            return $out;
+        } catch (Throwable $e) {
+            return [];   // 이벤트 표 이전 환경 — 추적 칸만 비면 된다
+        }
     }
 
     /** 종목명 — all_stock_info 우선, 없으면(상장폐지 등) krx_daily 최근 이름 */
