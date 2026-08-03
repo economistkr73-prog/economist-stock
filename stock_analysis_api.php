@@ -25,6 +25,7 @@ try {
         case 'stock': api_stock($action, $pdo); break;
         case 'ind':   api_ind($action, $pdo);   break;   // 사용자 지표 (style/dailychart.js 소비)
         case 'sue':   api_sue($action, $pdo);   break;   // SUE 공시 마커 (모든 차트 공용 레이어)
+        case 'band':  api_band($action, $pdo);  break;   // PER·PBR 밴드 (재무분석 종목상세)
         default:
             http_response_code(400);
             echo json_encode(['error' => "unknown module: {$module}"], JSON_UNESCAPED_UNICODE);
@@ -468,5 +469,30 @@ function api_sue(string $action, PDO $pdo): void
     }
     echo json_encode(['marks' => $marks, 'hit' => Thr::SUE_HIT, 'shock' => Thr::SUE_SHOCK],
                      JSON_UNESCAPED_UNICODE);
+}
+
+// ==========================================================
+// module=band — PER·PBR 밴드 차트 (재무분석 종목상세)
+// 계산은 stock/lib/band.php 단일본(pf_band_series). 여기는 창구일 뿐이다.
+// 배수 분위수·TTM·공시일 정렬을 JS 로 옮기면 같은 규칙이 두 군데 살게 된다.
+// ==========================================================
+function api_band(string $action, PDO $pdo): void
+{
+    if ($action !== 'series') {
+        http_response_code(400);
+        echo json_encode(['error' => "unknown action: {$action}"], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+    $code  = preg_replace('/[^0-9A-Za-z]/', '', (string)($_GET['code'] ?? ''));
+    $years = (int)($_GET['years'] ?? 5);
+    if (strlen($code) !== 6) { echo json_encode(['ok' => false, 'px' => []]); return; }
+
+    require_once __DIR__ . '/stock/lib/band.php';
+    try {
+        $b = pf_band_series($pdo, $code, $years);
+    } catch (Throwable $e) {
+        $b = ['ok' => false, 'px' => [], 'note' => ['밴드를 만들지 못했습니다.']];
+    }
+    echo json_encode($b, JSON_UNESCAPED_UNICODE);
 }
 ?>

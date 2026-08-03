@@ -8975,6 +8975,7 @@ function pf_page_fund_detail(PDO $pdo, Dart $dart, string $code, ?Pf $pf = null)
     pf_fund_detail_quarters($dart, $code, $fil);
     pf_fund_detail_range($pdo, $code);
     pf_fund_detail_chart($pdo, $code);
+    pf_fund_detail_band($pdo, $code);       // 재무 → 주가 → 그 «비율» 순서라 맨 아래
 
     echo <<<'JS'
 <script>
@@ -9144,6 +9145,70 @@ DailyChart.load().then(function(){
 });
 </script>
 JS;
+}
+
+/**
+ * PER·PBR 밴드 차트 — 재무와 주가의 «비율»을 시간축에 펴 놓은 그림 (2026-08-03).
+ *
+ * 위의 재무를 읽고 아래 일봉으로 주가를 봤다면, 마지막으로 보는 것이 그 둘의 비율이다.
+ * 그래서 상세화면 맨 아래에 둔다.
+ *
+ * 계산은 stock/lib/band.php 단일본, 그림은 style/bandchart.js(구성 ⑥ 「밴드형」).
+ * ★밴드가 없는 종목이 적지 않다(실측: 시총 상위 40 중 PER 24 · PBR 30). 그때는 빈 차트를
+ *   그리지 않고 «왜 없는지»를 그 자리에 적는다 — 적자·자본잠식이냐, 분기 재무 이력이 짧으냐,
+ *   DART 수집이 비었느냐에 따라 사용자가 할 일이 다르기 때문이다.
+ */
+function pf_fund_detail_band(PDO $pdo, string $code): void
+{
+    static $css = false;
+    if (!$css) {
+        $css = true;
+        echo '<style>'
+           . '.band-2{display:grid;grid-template-columns:1fr 1fr;gap:14px}'
+           . '@media(max-width:900px){.band-2{grid-template-columns:1fr}}'
+           . '.band-1 h3{margin:0 0 6px;font-size:14px;font-weight:700}'
+           . '.band-host{height:300px;position:relative}'
+           . '.band-empty{display:flex;align-items:center;justify-content:center;height:100%;'
+           . 'padding:14px;text-align:center;font-size:13px;color:#8a94a0;'
+           . 'background:#fafbfc;border:1px dashed #dde3ea;border-radius:6px}'
+           . '.band-leg{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:7px;font-size:11px;color:#5a6673}'
+           . '.band-leg .bl{display:inline-flex;align-items:center;gap:4px}'
+           . '.band-leg .bl i{width:11px;height:2px;border-radius:1px;display:inline-block}'
+           . '.band-leg .muted{color:#a0a8b2}'
+           . '</style>';
+    }
+
+    echo '<div class="card"><div class="pf-head" style="margin-bottom:10px"><div>';
+    echo '<h2 style="margin:0">밴드 차트</h2>';
+    echo '<div class="sub">최근 5년입니다. 색색 선은 <b>주가 예측선이 아니라</b> '
+       . '「그 배수로 평가받았다면 주가가 얼마였을 자리」입니다 — 지금이 <b>자기 역사 대비</b> 싼지 비싼지를 봅니다. '
+       . '배수는 그 종목 과거 분포의 10·30·50·70·90% 지점이라 <b>종목끼리 견주는 값이 아닙니다</b>.<br>'
+       . '선이 <b>분기마다 계단으로 꺾입니다</b> — 꺾이는 날은 결산기가 아니라 <b>DART 공시 다음 거래일</b>이라, '
+       . '위 표의 「공시일」·일봉 차트의 ▲▼ 마커와 같은 날입니다(그날 시장이 알 수 있었던 값만 씁니다).'
+       . '</div></div></div>';
+
+    echo '<div class="band-2">';
+    echo '<div class="band-1"><h3>PER Band</h3><div class="band-host" id="bandPer"></div>'
+       . '<div class="band-leg" id="bandPerLeg"></div></div>';
+    echo '<div class="band-1"><h3>PBR Band</h3><div class="band-host" id="bandPbr"></div>'
+       . '<div class="band-leg" id="bandPbrLeg"></div></div>';
+    echo '</div>';
+
+    echo '<p class="sub muted" style="margin:11px 0 0;font-size:12px">'
+       . '세로축은 <b>원(주당)</b>이지만 계산은 <b>시가총액</b>으로 합니다 — 그래야 주식수가 식에서 사라져 '
+       . '<b>액면분할이 저절로 보정</b>됩니다(과거 5년치 수정주가가 없어도 됩니다). '
+       . '표시할 때만 지금 상장주식수로 나눕니다.<br>'
+       . 'PER 은 <b>TTM(최근 4분기 합) 순이익</b> 기준이라 위 「연도별 재무」의 연간 기준 PER 과 다를 수 있습니다. '
+       . '선이 <b>끊긴 구간</b>은 값이 0 이하(적자·자본잠식)이거나 DART 재무가 비어 있는 때입니다 — '
+       . '묵은 값으로 이어 그리지 않습니다.<br>'
+       . '<b>배수 다섯 개의 분위수 선택에는 백테스트 근거가 없습니다</b> — 관례를 따른 값입니다. '
+       . '증권사 컨센서스가 없어 <b>미래(추정) 구간은 그리지 않습니다</b>.'
+       . '</p>';
+    echo '</div>';
+
+    echo '<script src="/style/bandchart.js?v=1"></script>';
+    echo '<script>BandChart.render(' . json_encode($code)
+       . ', {per:"bandPer", pbr:"bandPbr", perLegend:"bandPerLeg", pbrLegend:"bandPbrLeg"}, 5);</script>';
 }
 
 /**

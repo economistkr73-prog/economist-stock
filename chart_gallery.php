@@ -30,6 +30,7 @@ echo "<!DOCTYPE html><html lang='ko'><head><meta charset='utf-8'>";
 echo "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
 echo "<title>차트 스타일 갤러리</title>";
 echo "<script src='/style/dailychart.js?v=36'></script>";
+echo "<script src='/style/bandchart.js?v=1'></script>";      // 구성 ⑥ 밴드형 (dailychart 위의 얇은 층)
 if (!$embed) nav_css();
 echo <<<'HTML'
 <style>
@@ -168,8 +169,8 @@ echo ChartFeat::boot('gallery', $pdo);
 echo <<<'HTML'
 <div class="wrap">
   <h2>차트 스타일 갤러리</h2>
-  <div class="sub">사이트에 적용된 일봉차트 구성 5종을 <b>같은 종목·같은 데이터</b>로 나란히 그립니다.
-    통일하고 싶은 게 보이면 <b>style/dailychart.js 한 곳</b>만 고치면 아래 전부 + 실제 화면 5곳에 반영됩니다.
+  <div class="sub">사이트에 적용된 차트 구성 6종을 <b>같은 종목</b>으로 나란히 그립니다 (①~⑤는 같은 일봉 데이터, ⑥ 밴드형만 원천이 다릅니다).
+    통일하고 싶은 게 보이면 <b>style/dailychart.js 한 곳</b>만 고치면 아래 전부 + 실제 화면에 반영됩니다.
     (2·3번의 가격선·체결 마커는 스타일 확인용 <b>데모 값</b>입니다)</div>
 
   <div class="bar">
@@ -348,6 +349,16 @@ echo <<<'HTML'
     <div class="use">사용처: 상승종목 대시보드 (일봉 아래 보조 차트)</div>
     <div class="host sm" id="c5"></div>
   </div>
+
+  <div class="card">
+    <h3>6. 밴드형 — PER·PBR 밴드 (라이트)</h3>
+    <div class="use">사용처: <a href="/stock/index.php?mode=fund" target="_blank">재무분석 종목상세</a> 맨 아래
+      · 캔들·거래량 없음 · 계단선 5개(과거 배수 분위수) + 주가선
+      · <b>밴드선은 가격축에 참여한다</b> — 지표선을 축에서 빼는 규칙(구성 ①~⑤)과 정반대라 차트를 따로 둡니다</div>
+    <div class="host" id="c6"></div>
+    <div class="note">단위는 원(주당)이지만 계산은 <b>시가총액</b>입니다 — 주식수가 식에서 사라져 액면분할이 저절로 보정됩니다.
+      계단이 꺾이는 날은 <b>DART 공시 다음 거래일</b>(SUE 마커와 같은 날). 도구모음이 없어 「화면별 구성」에는 올리지 않습니다.</div>
+  </div>
 </div>
 
 <script>
@@ -430,6 +441,9 @@ DailyChart.load().then(function(){
         { time: rows[Math.max(0,n-95)].time, sell:false, text:'1차 과매도' },
         { time: rows[Math.max(0,n-15)].time, sell:true,  text:'매도' }
       ]);
+
+      // 6번: 밴드형 — 데이터 원천이 달라(재무+시총 원장) 일봉과 따로 받는다
+      BandChart.render(code, { per: 'c6' }, 5);
 
       stat.textContent = code + ' · ' + n + '거래일 (' + rows[0].time + ' ~ ' + rows[n-1].time + ')'
         + ' · 분봉 ' + min.length + '개';
