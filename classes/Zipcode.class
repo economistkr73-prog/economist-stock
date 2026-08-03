@@ -1,0 +1,242 @@
+<?php
+/**
+ * classes/Zipcode.class — 주소 → 우편번호(5자리) 조회
+ *
+ * 화면의 Daum 우편번호 팝업은 브라우저 전용이라 서버에서 못 쓴다.
+ * 여기서는 이미 레포에 있는 키로 REST 를 부른다 — 카카오 로컬(env/kakao.inc) · 네이버 지오코딩(env/maps.inc).
+ *
+ * ★ 실제 명단의 주소는 「서울시 관악구 봉천동 관악벽산블루밍3차아파트 604동 703호」처럼
+ *   동·호수와 건물명이 붙어 있어 한 번에 안 걸린다. 그래서 세 겹으로 찾는다:
+ *     ① 카카오 주소검색 — 원문에서 꼬리를 하나씩 떼며 재시도
+ *     ② 카카오 키워드검색 — 건물명으로 찾아 도로명주소를 얻은 뒤 다시 ①
+ *     ③ 네이버 지오코딩 — addressElements 의 POSTAL_CODE
+ *   그래도 못 찾으면 실패로 남긴다. 틀린 우편번호를 채우는 것보다 빈 칸이 낫다.
+ */
+class Zipcode
+{
+    private const KAKAO_ADDR = 'https://dapi.kakao.com/v2/local/search/address.json';
+    private const KAKAO_KWD  = 'https://dapi.kakao.com/v2/local/search/keyword.json';
+    private const NAVER_GEO  = 'https://maps.apigw.ntruss.com/map-geocode/v2/geocode';
+
+    /** 주소 후보를 몇 개까지 만들어 볼지 (API 호출 수를 묶어 둔다) */
+    private const MAX_TRY = 5;
+
+    private static function keys(): void
+    {
+        if (!defined('KAKAO_REST_API_KEY')) {
+            $f = $_SERVER['DOCUMENT_ROOT'] . '/env/kakao.inc';
+            if (is_file($f)) require_once $f;
+        }
+        if (!defined('NAVER_MAPS_KEY_ID')) {
+            $f = $_SERVER['DOCUMENT_ROOT'] . '/env/maps.inc';
+            if (is_file($f)) require_once $f;
+        }
+    }
+
+    /**
+     * @return array{ok:bool, zip:string, road:string, src:string, tried:string, msg:string}
+     */
+    public static function lookup(string $address): array
+    {
+        self::keys();
+        $address = self::clean($address);
+        if ($address === '') {
+            return self::fail('주소가 비어 있습니다.');
+        }
+
+        // ① 카카오 주소검색 — 꼬리를 떼며 재시도
+        foreach (self::candidates($address) as $q) {
+            $r = self::kakaoAddress($q);
+            if ($r['ok']) { $r['tried'] = $q; return $r; }
+        }
+
+        // ② 건물명으로 찾아 도로명주소를 얻은 뒤 다시 주소검색
+        //    「고양시 일산구 장항동 호수마을아파트 506동 1304호」처럼 지번이 아예 없는 주소가 여기서 걸린다.
+        foreach (self::keywordCandidates($address) as $q) {
+            $kw = self::kakaoKeyword($q);
+            if ($kw === '') continue;
+            $r = self::kakaoAddress($kw);
+            if ($r['ok']) {
+                $r['tried'] = $q;
+                $r['src']   = 'kakao-keyword';   // ★건물명으로 찾은 것 — 화면에서 확인하라고 표시한다
+                return $r;
+            }
+        }
+
+        // ③ 네이버 지오코딩
+        foreach (array_slice(self::candidates($address), 0, 2) as $q) {
+            $r = self::naver($q);
+            if ($r['ok']) { $r['tried'] = $q; return $r; }
+        }
+
+        return self::fail('우편번호를 찾지 못했습니다.');
+    }
+
+    private static function fail(string $msg): array
+    {
+        return ['ok' => false, 'zip' => '', 'road' => '', 'src' => '', 'tried' => '', 'msg' => $msg];
+    }
+
+    private static function clean(string $a): string
+    {
+        $a = preg_replace('/\s+/u', ' ', trim($a));
+        return (string)$a;
+    }
+
+    /**
+     * 동·호수·층 꼬리를 떼어낸다.
+     * ★ 「101동 402호」는 지워도 「484-32호」(지번)는 남겨야 한다 — 그래서 맨 끝만 본다.
+     */
+    private static function stripUnit(string $a): string
+    {
+        $a = (string)preg_replace('/\s*[가-힣A-Za-z]?\d+\s*동\s*\d+\s*호\s*$/u', ' ', $a);
+        $a = (string)preg_replace('/\s+\d+\s*호\s*$/u', ' ', $a);
+        $a = (string)preg_replace('/\s+\d+\s*층\s*$/u', ' ', $a);
+        return self::clean($a);
+    }
+
+    /** 원문 → 괄호 제거 → 동·호수 제거 → 꼬리 토큰을 하나씩 떼어낸 후보들 (성공하면 거기서 멈춘다) */
+    private static function candidates(string $addr): array
+    {
+        $out = [$addr];
+
+        $noParen = self::clean((string)preg_replace('/\([^)]*\)/u', ' ', $addr));
+        if ($noParen !== '' && $noParen !== $addr) $out[] = $noParen;
+
+        $base = $noParen !== '' ? $noParen : $addr;
+        $unit = self::stripUnit($base);
+        if ($unit !== '' && $unit !== $base) $out[] = $unit;
+
+        $tok = preg_split('/\s+/u', $unit !== '' ? $unit : $base);
+        for ($n = count($tok) - 1; $n >= 3; $n--) {
+            $out[] = implode(' ', array_slice($tok, 0, $n));
+        }
+
+        $out = array_values(array_unique(array_filter($out, fn($s) => trim($s) !== '')));
+        return array_slice($out, 0, self::MAX_TRY);
+    }
+
+    /**
+     * 건물명 검색용 후보 — 뒤쪽(동네+건물명)을 남긴다.
+     * 앞의 시·구가 틀리게 적힌 주소가 실제로 있어서(남현동을 동작구로 적음) 짧은 쪽도 시도한다.
+     */
+    private static function keywordCandidates(string $addr): array
+    {
+        $base = self::stripUnit(self::clean((string)preg_replace('/\([^)]*\)/u', ' ', $addr)));
+        if ($base === '') return [];
+
+        $tok = preg_split('/\s+/u', $base);
+        $out = [$base];
+
+        // 「신현대아파트 109-601」처럼 동·호를 숫자로만 적은 꼬리를 떼어낸다
+        //   (지번은 「남현동 602-4 명작빌딩」처럼 뒤에 건물명이 오므로 여기서 안 잘린다)
+        $t = $tok;
+        while (count($t) > 1 && preg_match('/^[\d\-]+$|^\d+[동호층]$/u', end($t))) array_pop($t);
+        if (count($t) !== count($tok)) { $out[] = implode(' ', $t); $tok = $t; }
+
+        $n = count($tok);
+        if ($n >= 3) $out[] = implode(' ', array_slice($tok, -3));
+        if ($n >= 2) $out[] = implode(' ', array_slice($tok, -2));
+
+        return array_values(array_unique(array_filter($out, fn($s) => trim($s) !== '')));
+    }
+
+    /** 카카오 주소검색 — 도로명 결과(road_address)에만 우편번호(zone_no)가 있다 */
+    private static function kakaoAddress(string $q): array
+    {
+        if (!defined('KAKAO_REST_API_KEY') || KAKAO_REST_API_KEY === '') {
+            return self::fail('카카오 REST 키가 없습니다. (env/kakao.inc)');
+        }
+        $body = self::httpGet(self::KAKAO_ADDR . '?size=5&query=' . rawurlencode($q),
+                              ['Authorization: KakaoAK ' . KAKAO_REST_API_KEY]);
+        if ($body === '') return self::fail('카카오 호출 실패');
+
+        $j = json_decode($body, true);
+        foreach (($j['documents'] ?? []) as $d) {
+            $zip = trim((string)($d['road_address']['zone_no'] ?? ''));
+            if ($zip !== '') {
+                return [
+                    'ok'    => true,
+                    'zip'   => $zip,
+                    'road'  => (string)($d['road_address']['address_name'] ?? ''),
+                    'src'   => 'kakao',
+                    'tried' => $q,
+                    'msg'   => '',
+                ];
+            }
+        }
+        return self::fail('결과 없음');
+    }
+
+    /** 카카오 키워드검색 — 건물·상호명으로 도로명주소를 얻는다 */
+    private static function kakaoKeyword(string $q): string
+    {
+        if (!defined('KAKAO_REST_API_KEY') || KAKAO_REST_API_KEY === '') return '';
+        $body = self::httpGet(self::KAKAO_KWD . '?size=3&query=' . rawurlencode($q),
+                              ['Authorization: KakaoAK ' . KAKAO_REST_API_KEY]);
+        if ($body === '') return '';
+
+        $j = json_decode($body, true);
+        foreach (($j['documents'] ?? []) as $d) {
+            $road = trim((string)($d['road_address_name'] ?? ''));
+            if ($road !== '') return $road;
+        }
+        // 도로명이 안 붙은 장소는 지번이라도 넘긴다 (주소검색이 다시 도로명으로 바꿔 준다)
+        foreach (($j['documents'] ?? []) as $d) {
+            $jibun = trim((string)($d['address_name'] ?? ''));
+            if ($jibun !== '') return $jibun;
+        }
+        return '';
+    }
+
+    /** 네이버 지오코딩 — addressElements 안의 POSTAL_CODE */
+    private static function naver(string $q): array
+    {
+        if (!defined('NAVER_MAPS_KEY_ID') || NAVER_MAPS_KEY_ID === '') {
+            return self::fail('네이버 지도 키가 없습니다. (env/maps.inc)');
+        }
+        $body = self::httpGet(self::NAVER_GEO . '?query=' . rawurlencode($q), [
+            'X-NCP-APIGW-API-KEY-ID: ' . NAVER_MAPS_KEY_ID,
+            'X-NCP-APIGW-API-KEY: '    . NAVER_MAPS_KEY_SECRET,
+            'Accept: application/json',
+        ]);
+        if ($body === '') return self::fail('네이버 호출 실패');
+
+        $j = json_decode($body, true);
+        foreach (($j['addresses'] ?? []) as $a) {
+            foreach (($a['addressElements'] ?? []) as $el) {
+                if (in_array('POSTAL_CODE', (array)($el['types'] ?? []), true)) {
+                    $zip = trim((string)($el['longName'] ?? ''));
+                    if ($zip !== '') {
+                        return [
+                            'ok'    => true,
+                            'zip'   => $zip,
+                            'road'  => (string)($a['roadAddress'] ?? ''),
+                            'src'   => 'naver',
+                            'tried' => $q,
+                            'msg'   => '',
+                        ];
+                    }
+                }
+            }
+        }
+        return self::fail('결과 없음');
+    }
+
+    private static function httpGet(string $url, array $headers): string
+    {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER     => $headers,
+            CURLOPT_TIMEOUT        => 6,
+            CURLOPT_CONNECTTIMEOUT => 4,
+            CURLOPT_FOLLOWLOCATION => true,
+        ]);
+        $body = curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        return ($body !== false && $code === 200) ? (string)$body : '';
+    }
+}
+?>

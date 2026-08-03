@@ -1,0 +1,1230 @@
+<?php
+/**
+ * classes/Gift.class — 선물 발송 관리 DB 전담 (고객명단 · 물품 · 회차 · 발송라인)
+ *
+ * 요건정의서: 선물관리시스템_요건정의서.md
+ *
+ * 표 이름은 요건서의 customers/products/batches/batch_items 대신 `gift_` 접두어를 쓴다.
+ * economist73 은 127개 표를 공유하는 스키마라 소속을 이름으로 밝혀야 한다.
+ *
+ * ★ 스냅샷 규칙 — gift_item 은 고객명/연락처/주소/물품명/단가를 값으로 복사해 둔다.
+ *   확정된 회차의 내역은 이후 고객·물품이 바뀌어도 변하면 안 된다. customer_id/product_id 는 참조용.
+ * ★ 파생값(총지급·금액)은 항상 서버에서 다시 계산한다. 화면 계산은 미리보기일 뿐이다.
+ */
+class Gift
+{
+    /** 명절 구분 */
+    public const SEASONS = ['설', '추석', '기타'];
+    /** 발송 구분 */
+    public const DELIVERY = ['택배', '일괄', '별도'];
+
+    private PDO $pdo;
+
+    public function __construct(PDO $pdo)
+    {
+        $this->pdo = $pdo;
+    }
+
+    /** 콤마 섞인 입력을 정수로 (금액·수량 칸은 천단위 콤마 text 이므로 반드시 경유) */
+    public static function num($v): int
+    {
+        return (int)preg_replace('/[^0-9\-]/', '', (string)$v);
+    }
+
+    // ==========================================================
+    // 스키마 (멱등)
+    // ==========================================================
+    public function ensureTable(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS gift_customer (
+                id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+                name          VARCHAR(100) NOT NULL COMMENT '고객명',
+                memo          VARCHAR(200) DEFAULT NULL COMMENT '추가정보(직함·관계)',
+                phone         VARCHAR(30)  DEFAULT NULL,
+                zipcode       VARCHAR(10)  DEFAULT NULL,
+                address1      VARCHAR(255) DEFAULT NULL COMMENT '기본주소',
+                address2      VARCHAR(255) DEFAULT NULL COMMENT '상세주소',
+                source_ref_id VARCHAR(64)  DEFAULT NULL COMMENT '인명록 원본 PK — 채워져 있으면 인명록에서 온 고객이다',
+                is_offline    TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '오프라인 전달(주소 있어도 택배로 안 보냄)',
+                is_active     TINYINT(1)   NOT NULL DEFAULT 1,
+                created_at    DATETIME     DEFAULT CURRENT_TIMESTAMP,
+                updated_at    DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_name (name),
+                INDEX idx_phone (phone),
+                INDEX idx_src (source_ref_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        ");
+        // 이미 만들어진 표에도 붙인다 (2026-08-03 추가)
+        $this->pdo->exec("ALTER TABLE gift_customer ADD COLUMN IF NOT EXISTS is_offline TINYINT(1) NOT NULL DEFAULT 0
+                          COMMENT '오프라인 전달(주소 있어도 택배로 안 보냄)'");
+
+        // 고객 분류 그룹 — 이름이 아니라 id 로 잇는다(그룹명을 바꿔도 연결이 안 끊긴다)
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS gift_group (
+                id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+                name       VARCHAR(60) NOT NULL,
+                sort_order INT         NOT NULL DEFAULT 0,
+                created_at DATETIME    DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uniq_name (name),
+                INDEX idx_sort (sort_order, id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        ");
+        $this->pdo->exec("ALTER TABLE gift_customer ADD COLUMN IF NOT EXISTS group_id BIGINT DEFAULT NULL COMMENT '분류 그룹'");
+        // 그룹을 지워도 고객은 남는다(미분류로 내려온다)
+        try {
+            $this->pdo->exec("ALTER TABLE gift_customer ADD CONSTRAINT fk_gcust_group
+                              FOREIGN KEY (group_id) REFERENCES gift_group(id) ON DELETE SET NULL");
+        } catch (PDOException $e) {
+            // 이미 걸려 있으면 그만이다
+        }
+
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS gift_product (
+                id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+                name        VARCHAR(150) NOT NULL COMMENT '물품명',
+                unit_price  INT          NOT NULL DEFAULT 0 COMMENT '단가(원)',
+                description VARCHAR(255) DEFAULT NULL,
+                is_active   TINYINT(1)   NOT NULL DEFAULT 1,
+                sort_order  INT          NOT NULL DEFAULT 0,
+                created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP,
+                updated_at  DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_sort (sort_order, id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        ");
+
+        // uniq_key = 연도·명절 중복 생성 방지. '기타'는 여러 번 가능해야 하므로 고유 꼬리를 붙인다.
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS gift_batch (
+                id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+                title        VARCHAR(100) NOT NULL,
+                year         SMALLINT     NOT NULL,
+                season       ENUM('설','추석','기타') NOT NULL,
+                uniq_key     VARCHAR(60)  NOT NULL,
+                send_date    DATE         DEFAULT NULL COMMENT '발송 예정일',
+                status       ENUM('draft','confirmed') NOT NULL DEFAULT 'draft',
+                memo         TEXT,
+                total_qty    INT          NOT NULL DEFAULT 0 COMMENT '확정 시 집계',
+                total_amount BIGINT       NOT NULL DEFAULT 0 COMMENT '확정 시 집계',
+                confirmed_at DATETIME     DEFAULT NULL,
+                created_at   DATETIME     DEFAULT CURRENT_TIMESTAMP,
+                updated_at   DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uniq_ys (uniq_key),
+                INDEX idx_status (status),
+                INDEX idx_year (year)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        ");
+
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS gift_item (
+                id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+                batch_id      BIGINT NOT NULL,
+                seq           INT    NOT NULL DEFAULT 0,
+                customer_id   BIGINT DEFAULT NULL,
+                customer_name VARCHAR(100) NOT NULL,
+                customer_memo VARCHAR(200) DEFAULT NULL,
+                phone         VARCHAR(30)  DEFAULT NULL,
+                zipcode       VARCHAR(10)  DEFAULT NULL,
+                address1      VARCHAR(255) DEFAULT NULL,
+                address2      VARCHAR(255) DEFAULT NULL,
+                delivery_type ENUM('택배','일괄','별도') NOT NULL DEFAULT '택배',
+                product_id    BIGINT DEFAULT NULL,
+                product_name  VARCHAR(150) NOT NULL DEFAULT '',
+                unit_price    INT    NOT NULL DEFAULT 0,
+                extra_qty     INT    NOT NULL DEFAULT 0 COMMENT '추가 수량',
+                total_qty     INT    NOT NULL DEFAULT 1 COMMENT '= 1 + extra_qty',
+                amount        INT    NOT NULL DEFAULT 0 COMMENT '= unit_price * total_qty',
+                note          VARCHAR(255) DEFAULT NULL,
+                created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_batch (batch_id, seq),
+                INDEX idx_cust (customer_id),
+                CONSTRAINT fk_gitem_batch FOREIGN KEY (batch_id) REFERENCES gift_batch(id) ON DELETE CASCADE,
+                CONSTRAINT fk_gitem_cust  FOREIGN KEY (customer_id) REFERENCES gift_customer(id) ON DELETE SET NULL,
+                CONSTRAINT fk_gitem_prod  FOREIGN KEY (product_id)  REFERENCES gift_product(id)  ON DELETE SET NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        ");
+
+        $this->seedProducts();
+    }
+
+    /** 물품 초기 데이터 — 현행 엑셀 시트 우측의 물품 후보 목록 (표가 비어 있을 때만) */
+    private function seedProducts(): void
+    {
+        $cnt = (int)$this->pdo->query("SELECT COUNT(*) FROM gift_product")->fetchColumn();
+        if ($cnt > 0) return;
+
+        // 단가는 현행 엑셀에 '우레짱아찌' 50,000원 하나만 적혀 있었다.
+        // 나머지는 0 으로 두고 화면에서 「단가0」 경고를 띄운다 — 없는 값을 지어내지 않는다.
+        $seed = [
+            ['우레짱아찌',            50000, ''],
+            ['우레짱아찌+참기름',         0, '단가 확인 필요'],
+            ['우레짱아찌(소)',           0, '단가 확인 필요'],
+            ['우레짱아찌(소)+참기름',     0, '단가 확인 필요'],
+            ['참기름',                   0, '단가 확인 필요'],
+            ['고추가루',                 0, '단가 확인 필요'],
+            ['우레짱아찌+소고기',         0, '단가 확인 필요'],
+            ['우레짱아찌(소)+소고기',     0, '단가 확인 필요'],
+        ];
+        $st = $this->pdo->prepare(
+            "INSERT INTO gift_product (name, unit_price, description, sort_order) VALUES (:n, :p, :d, :s)"
+        );
+        foreach ($seed as $i => $s) {
+            $st->execute([':n' => $s[0], ':p' => $s[1], ':d' => $s[2], ':s' => ($i + 1) * 10]);
+        }
+    }
+
+    // ==========================================================
+    // 고객 분류 그룹
+    // ==========================================================
+    /** 그룹 목록 + 그룹별 인원 (미분류는 목록에 넣지 않는다 — group_id IS NULL 로 표현한다) */
+    public function groupList(): array
+    {
+        return $this->pdo->query("
+            SELECT g.*, (SELECT COUNT(*) FROM gift_customer c
+                          WHERE c.group_id = g.id AND c.is_active = 1) AS cnt
+              FROM gift_group g
+             ORDER BY g.sort_order ASC, g.id ASC
+        ")->fetchAll();
+    }
+
+    public function groupSave(array $d): int
+    {
+        $name = trim((string)($d['name'] ?? ''));
+        if ($name === '') throw new InvalidArgumentException('그룹명은 필수입니다.');
+
+        $id = (int)($d['id'] ?? 0);
+        // 순서는 화면에서 끌어 옮겨 정한다 — 새 그룹은 맨 뒤에 붙인다
+        $sort = array_key_exists('sort_order', $d)
+            ? self::num($d['sort_order'])
+            : ($id > 0 ? (int)($this->groupGet($id)['sort_order'] ?? 0) : $this->groupNextSort());
+
+        $bind = [':n' => $name, ':s' => $sort];
+
+        try {
+            if ($id > 0) {
+                $bind[':id'] = $id;
+                $this->pdo->prepare("UPDATE gift_group SET name = :n, sort_order = :s WHERE id = :id")->execute($bind);
+                return $id;
+            }
+            $this->pdo->prepare("INSERT INTO gift_group (name, sort_order) VALUES (:n, :s)")->execute($bind);
+            return (int)$this->pdo->lastInsertId();
+        } catch (PDOException $e) {
+            if ((int)$e->errorInfo[1] === 1062) throw new RuntimeException("「{$name}」 그룹은 이미 있습니다.");
+            throw $e;
+        }
+    }
+
+    public function groupGet(int $id): ?array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM gift_group WHERE id = :id");
+        $st->execute([':id' => $id]);
+        return $st->fetch() ?: null;
+    }
+
+    private function groupNextSort(): int
+    {
+        return (int)$this->pdo->query("SELECT COALESCE(MAX(sort_order),0) FROM gift_group")->fetchColumn() + 10;
+    }
+
+    /**
+     * 끌어 옮긴 결과를 그대로 저장한다 — 화면에 보이는 순서가 곧 sort_order 다.
+     * 10 씩 띄우지 않고 1,2,3… 으로 다시 매긴다 (순서의 유일한 원본이 이 목록이므로 틈이 필요 없다).
+     * @return int 저장된 행 수
+     */
+    public function groupReorder(array $ids): int
+    {
+        $ids = array_values(array_filter(array_map('intval', $ids), fn($v) => $v > 0));
+        if (!$ids) return 0;
+
+        $st = $this->pdo->prepare("UPDATE gift_group SET sort_order = :s WHERE id = :id");
+        $n  = 0;
+        foreach ($ids as $i => $id) {
+            $st->execute([':s' => $i + 1, ':id' => $id]);
+            $n++;
+        }
+        return $n;
+    }
+
+    /** 그룹만 지운다 — 속해 있던 고객은 미분류로 남는다 (FK ON DELETE SET NULL) */
+    public function groupDelete(int $id): void
+    {
+        $this->pdo->prepare("DELETE FROM gift_group WHERE id = :id")->execute([':id' => $id]);
+    }
+
+    /** 선택한 고객들의 그룹을 한 번에 바꾼다. $groupId 가 0 이면 미분류. @return int */
+    public function customerSetGroup(array $ids, int $groupId): int
+    {
+        $ids = array_values(array_filter(array_map('intval', $ids), fn($v) => $v > 0));
+        if (!$ids) return 0;
+
+        $in  = implode(',', array_fill(0, count($ids), '?'));
+        $st  = $this->pdo->prepare("UPDATE gift_customer SET group_id = ? WHERE id IN ({$in})");
+        $st->execute(array_merge([$groupId > 0 ? $groupId : null], $ids));
+        return $st->rowCount();
+    }
+
+    // ==========================================================
+    // 고객 명단
+    // ==========================================================
+    /** @return array{rows:array,total:int} */
+    public function customerList(array $f = []): array
+    {
+        $where = ['c.is_active = 1'];
+        $p     = [];
+
+        $q = trim((string)($f['q'] ?? ''));
+        if ($q !== '') {
+            // ★ 네이티브 프리페어(EMULATE_PREPARES=false)에서는 같은 이름의 파라미터를 재사용할 수 없다
+            $where[] = "(c.name LIKE :q1 OR IFNULL(c.phone,'') LIKE :q2 OR IFNULL(c.memo,'') LIKE :q3
+                         OR CONCAT(IFNULL(c.address1,''),' ',IFNULL(c.address2,'')) LIKE :q4)";
+            $p[':q1'] = $p[':q2'] = $p[':q3'] = $p[':q4'] = '%' . $q . '%';
+        }
+        $addr = (string)($f['addr'] ?? '');
+        if ($addr === 'y') $where[] = "IFNULL(c.address1,'') <> ''";
+        if ($addr === 'n') $where[] = "IFNULL(c.address1,'') = ''";
+
+        // 전달방식 — 주소 유무와 독립이다 (주소가 있어도 직접 전달하는 고객이 있다)
+        $offFilter = (string)($f['off'] ?? '');
+        if ($offFilter === 'y') $where[] = 'c.is_offline = 1';
+        if ($offFilter === 'n') $where[] = 'c.is_offline = 0';
+
+        // 그룹 — 'none' 은 미분류(그룹이 안 정해진 사람)
+        $grp = (string)($f['grp'] ?? '');
+        if ($grp === 'none') {
+            $where[] = 'c.group_id IS NULL';
+        } elseif ($grp !== '' && (int)$grp > 0) {
+            $where[] = 'c.group_id = :grp';
+            $p[':grp'] = (int)$grp;
+        }
+
+        $sql   = " FROM gift_customer c LEFT JOIN gift_group g ON g.id = c.group_id
+                   WHERE " . implode(' AND ', $where);
+        $st    = $this->pdo->prepare('SELECT COUNT(*)' . $sql);
+        $st->execute($p);
+        $total = (int)$st->fetchColumn();
+
+        // 기본은 「택배 대상 먼저 → 고객명순」 — 판정 기준은 주소 유무가 아니라 오프라인 체크다
+        // (주소가 있어도 직접 전달하는 고객은 아래로 내려간다)
+        // 정렬은 전부 표 머리글을 눌러 고른다 (셀렉트 없음). 각 머리글은 두 상태를 오간다.
+        $sort  = (string)($f['sort'] ?? 'ship');
+        $order = 'c.is_offline ASC, c.name ASC, c.id ASC';                              // 전달 ▲ 택배 먼저
+        if ($sort === 'offline')  $order = 'c.is_offline DESC, c.name ASC, c.id ASC';   // 전달 ▼ 오프라인 먼저
+        if ($sort === 'addr')     $order = "(IFNULL(c.address1,'') = '') ASC, c.name ASC, c.id ASC";  // 주소 ▲ 있는 사람 먼저
+        if ($sort === 'noaddr')   $order = "(IFNULL(c.address1,'') = '') DESC, c.name ASC, c.id ASC"; // 주소 ▼ 없는 사람 먼저
+        if ($sort === 'name')     $order = 'c.name ASC, c.id ASC';
+        if ($sort === 'namedesc') $order = 'c.name DESC, c.id DESC';
+        // 그룹 머리글을 누르면 오가는 두 순서.
+        // 그룹끼리는 「끌어서 정한 순서 → 그룹명」 — 손대지 않은 그룹은 sort_order 가 모두 같아 자연히 그룹명순이 된다.
+        $byGroup = 'g.sort_order ASC, g.name ASC, c.name ASC, c.id ASC';
+        if ($sort === 'group')   $order = '(c.group_id IS NULL) ASC, '  . $byGroup;   // 그룹 있는 사람 위로
+        if ($sort === 'ungroup') $order = '(c.group_id IS NULL) DESC, ' . $byGroup;   // 그룹 없는 사람 위로
+
+        $size   = max(10, min(500, (int)($f['size'] ?? 50)));
+        $page   = max(1, (int)($f['page'] ?? 1));
+        $offset = ($page - 1) * $size;
+
+        $st = $this->pdo->prepare("SELECT c.*, g.name AS group_name{$sql} ORDER BY {$order} LIMIT {$size} OFFSET {$offset}");
+        $st->execute($p);
+
+        return ['rows' => $st->fetchAll(), 'total' => $total];
+    }
+
+    public function customerGet(int $id): ?array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM gift_customer WHERE id = :id");
+        $st->execute([':id' => $id]);
+        return $st->fetch() ?: null;
+    }
+
+    /** 저장(신규/수정). @return int 고객 id */
+    public function customerSave(array $d): int
+    {
+        $name = trim((string)($d['name'] ?? ''));
+        if ($name === '') throw new InvalidArgumentException('고객명은 필수입니다.');
+
+        $ad1 = trim((string)($d['address1'] ?? ''));
+
+        // ★주소가 없으면 택배로 보낼 방법이 없다 → 저장 시점에 오프라인 전달로 못박는다.
+        //   주소가 있는 고객만 사람이 켜고 끈다.
+        $offline = ($ad1 === '') ? 1 : (!empty($d['is_offline']) ? 1 : 0);
+
+        $bind = [
+            ':name'  => $name,
+            ':memo'  => trim((string)($d['memo'] ?? '')),
+            ':phone' => trim((string)($d['phone'] ?? '')),
+            ':zip'   => trim((string)($d['zipcode'] ?? '')),
+            ':ad1'   => $ad1,
+            ':ad2'   => trim((string)($d['address2'] ?? '')),
+            ':off'   => $offline,
+            ':grp'   => (int)($d['group_id'] ?? 0) > 0 ? (int)$d['group_id'] : null,
+        ];
+        $id = (int)($d['id'] ?? 0);
+
+        if ($id > 0) {
+            $bind[':id'] = $id;
+            $this->pdo->prepare(
+                "UPDATE gift_customer SET name=:name, memo=:memo, phone=:phone,
+                        zipcode=:zip, address1=:ad1, address2=:ad2, is_offline=:off, group_id=:grp
+                  WHERE id=:id"
+            )->execute($bind);
+            return $id;
+        }
+
+        $bind[':ref'] = ($d['source_ref_id'] ?? '') !== '' ? (string)$d['source_ref_id'] : null;
+
+        $this->pdo->prepare(
+            "INSERT INTO gift_customer
+                (name, memo, phone, zipcode, address1, address2, is_offline, group_id, source_ref_id)
+             VALUES (:name, :memo, :phone, :zip, :ad1, :ad2, :off, :grp, :ref)"
+        )->execute($bind);
+
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    /** 소프트 삭제 — 과거 이력은 스냅샷이라 영향 없다 */
+    public function customerDelete(int $id): void
+    {
+        $this->pdo->prepare("UPDATE gift_customer SET is_active = 0 WHERE id = :id")->execute([':id' => $id]);
+    }
+
+    /**
+     * 주소는 있는데 우편번호가 빈 고객 (택배로 보낼 수 없는 상태).
+     * ★ $skipIds 는 「이미 조회해 봤지만 못 찾은」 사람이다. 빼지 않으면 그 사람이 목록 맨 앞에
+     *   계속 남아 배치를 돌 때마다 같은 조회를 되풀이한다(외부 API 낭비 + 실패 목록 중복).
+     */
+    public function customersMissingZip(int $limit = 10, array $skipIds = []): array
+    {
+        $limit = max(1, min(100, $limit));
+        $skip  = array_values(array_filter(array_map('intval', $skipIds), fn($v) => $v > 0));
+
+        $sql = "SELECT id, name, address1, address2 FROM gift_customer
+                 WHERE is_active = 1 AND IFNULL(address1,'') <> '' AND IFNULL(zipcode,'') = ''";
+        if ($skip) $sql .= ' AND id NOT IN (' . implode(',', array_fill(0, count($skip), '?')) . ')';
+        $sql .= " ORDER BY id LIMIT {$limit}";
+
+        $st = $this->pdo->prepare($sql);
+        $st->execute($skip);
+        return $st->fetchAll();
+    }
+
+    public function countMissingZip(): int
+    {
+        return (int)$this->pdo->query("
+            SELECT COUNT(*) FROM gift_customer
+             WHERE is_active = 1 AND IFNULL(address1,'') <> '' AND IFNULL(zipcode,'') = ''
+        ")->fetchColumn();
+    }
+
+    public function customerSetZip(int $id, string $zip): void
+    {
+        $this->pdo->prepare("UPDATE gift_customer SET zipcode = :z WHERE id = :id")
+                  ->execute([':z' => trim($zip), ':id' => $id]);
+    }
+
+    // ==========================================================
+    // 인명록 연동 (★ 여기가 유일한 접근 지점 — 인명록 스키마가 바뀌면 이 구역만 고친다)
+    //   대상: tbl_contact (같은 DB · classes/Contact.class 가 소유)
+    //   인명록에는 우편번호 칸이 없다 → address1 만 채우고 우편번호는 화면에서 보강한다.
+    // ==========================================================
+    private const DIR_PREFIX = 'contact:';
+
+    public function directorySearch(string $q, int $limit = 100): array
+    {
+        $q  = trim($q);
+        $st = $this->pdo->prepare("
+            SELECT c.id, c.name, c.phone, c.tel, c.corp_phone, c.address,
+                   c.organization, c.position, c.group_name,
+                   (SELECT COUNT(*) FROM gift_customer g
+                     WHERE g.source_ref_id = CONCAT(:pfx, c.id) AND g.is_active = 1) AS already
+              FROM tbl_contact c
+             WHERE (:blank = 1
+                    OR c.name LIKE :q1 OR IFNULL(c.phone,'') LIKE :q2
+                    OR IFNULL(c.organization,'') LIKE :q3 OR IFNULL(c.address,'') LIKE :q4)
+             ORDER BY c.name ASC
+             LIMIT {$limit}
+        ");
+        $like = '%' . $q . '%';
+        $st->execute([
+            ':pfx'   => self::DIR_PREFIX,
+            ':blank' => $q === '' ? 1 : 0,
+            ':q1'    => $like,
+            ':q2'    => $like,
+            ':q3'    => $like,
+            ':q4'    => $like,
+        ]);
+        return $st->fetchAll();
+    }
+
+    /** 인명록 → 고객명단 일괄 등록. @return int 실제 등록 건수 */
+    public function directoryImport(array $srcIds): int
+    {
+        $n = 0;
+        foreach ($srcIds as $sid) {
+            $sid = (int)$sid;
+            if ($sid <= 0) continue;
+
+            $ref = self::DIR_PREFIX . $sid;
+            $st  = $this->pdo->prepare("SELECT COUNT(*) FROM gift_customer WHERE source_ref_id = :r AND is_active = 1");
+            $st->execute([':r' => $ref]);
+            if ((int)$st->fetchColumn() > 0) continue;   // 이미 등록됨
+
+            $st = $this->pdo->prepare("SELECT * FROM tbl_contact WHERE id = :id");
+            $st->execute([':id' => $sid]);
+            $c = $st->fetch();
+            if (!$c) continue;
+
+            // 추가정보 = 소속/직책 (인명록에서 사람을 알아보게 하는 값)
+            $memo = trim(implode(' ', array_filter([
+                trim((string)($c['organization'] ?? '')),
+                trim((string)($c['position'] ?? '')),
+            ])));
+
+            $this->customerSave([
+                'name'          => (string)$c['name'],
+                'memo'          => $memo,
+                'phone'         => (string)($c['phone'] ?: ($c['tel'] ?: ($c['corp_phone'] ?? ''))),
+                'zipcode'       => '',                       // 인명록에 우편번호 없음
+                'address1'      => (string)($c['address'] ?? ''),
+                'address2'      => '',
+                'source_ref_id' => $ref,   // 인명록에서 왔다는 표시 겸 중복 방지 열쇠
+            ]);
+            $n++;
+        }
+        return $n;
+    }
+
+    // ==========================================================
+    // 물품
+    // ==========================================================
+    public function productList(bool $onlyActive = false): array
+    {
+        $sql = "SELECT * FROM gift_product" . ($onlyActive ? " WHERE is_active = 1" : "")
+             . " ORDER BY sort_order ASC, id ASC";
+        return $this->pdo->query($sql)->fetchAll();
+    }
+
+    public function productGet(int $id): ?array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM gift_product WHERE id = :id");
+        $st->execute([':id' => $id]);
+        return $st->fetch() ?: null;
+    }
+
+    public function productSave(array $d): int
+    {
+        $name = trim((string)($d['name'] ?? ''));
+        if ($name === '') throw new InvalidArgumentException('물품명은 필수입니다.');
+
+        $bind = [
+            ':n' => $name,
+            ':p' => self::num($d['unit_price'] ?? 0),
+            ':d' => trim((string)($d['description'] ?? '')),
+            ':s' => self::num($d['sort_order'] ?? 0),
+        ];
+        $id = (int)($d['id'] ?? 0);
+
+        if ($id > 0) {
+            $bind[':id'] = $id;
+            $this->pdo->prepare(
+                "UPDATE gift_product SET name=:n, unit_price=:p, description=:d, sort_order=:s WHERE id=:id"
+            )->execute($bind);
+            return $id;
+        }
+        $this->pdo->prepare(
+            "INSERT INTO gift_product (name, unit_price, description, sort_order) VALUES (:n, :p, :d, :s)"
+        )->execute($bind);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    /** 삭제는 제공하지 않는다 — 비활성화만 (이력 무결성) */
+    public function productToggle(int $id, int $active): void
+    {
+        $this->pdo->prepare("UPDATE gift_product SET is_active = :a WHERE id = :id")
+                  ->execute([':a' => $active ? 1 : 0, ':id' => $id]);
+    }
+
+    /**
+     * 단가 수정을 작업중(draft) 회차에 일괄 반영.
+     * 확정된 회차는 건드리지 않는다 — 스냅샷이 곧 이력이다.
+     * @return int 갱신된 라인 수
+     */
+    public function productApplyToDraft(int $productId, int $unitPrice): int
+    {
+        $draft = $this->batchDraft();
+        if (!$draft) return 0;
+
+        $st = $this->pdo->prepare("
+            UPDATE gift_item
+               SET unit_price = :p, amount = :p2 * total_qty
+             WHERE batch_id = :b AND product_id = :pid
+        ");
+        $st->execute([':p' => $unitPrice, ':p2' => $unitPrice, ':b' => (int)$draft['id'], ':pid' => $productId]);
+        return $st->rowCount();
+    }
+
+    // ==========================================================
+    // 회차
+    // ==========================================================
+    public function batchDraft(): ?array
+    {
+        $r = $this->pdo->query("SELECT * FROM gift_batch WHERE status = 'draft' ORDER BY id DESC LIMIT 1")->fetch();
+        return $r ?: null;
+    }
+
+    public function batchGet(int $id): ?array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM gift_batch WHERE id = :id");
+        $st->execute([':id' => $id]);
+        return $st->fetch() ?: null;
+    }
+
+    /** 연도·명절로 uniq_key 생성 ('기타'는 여러 번 만들 수 있어야 하므로 고유 꼬리) */
+    private function uniqKey(int $year, string $season, string $keep = ''): string
+    {
+        if ($season !== '기타') return $year . '-' . $season;
+        // 이미 '기타' 꼬리를 가진 회차를 수정하는 중이면 그대로 유지
+        if ($keep !== '' && strpos($keep, '-기타-') !== false) return $year . '-기타-' . substr($keep, strrpos($keep, '-') + 1);
+        return $year . '-기타-' . bin2hex(random_bytes(4));
+    }
+
+    /** 작업중 회차는 동시에 1개만 존재한다 */
+    public function batchCreate(array $d): int
+    {
+        if ($this->batchDraft()) {
+            throw new RuntimeException('이미 작업중인 회차가 있습니다. 확정하거나 삭제한 뒤에 새 회차를 만드세요.');
+        }
+        $year   = (int)($d['year'] ?? date('Y'));
+        $season = in_array(($d['season'] ?? ''), self::SEASONS, true) ? (string)$d['season'] : '기타';
+        $title  = trim((string)($d['title'] ?? '')) ?: self::suggestTitle($year, $season, (string)($d['send_date'] ?? ''));
+
+        $st = $this->pdo->prepare("
+            INSERT INTO gift_batch (title, year, season, uniq_key, send_date, memo)
+            VALUES (:t, :y, :s, :k, :sd, :m)
+        ");
+        try {
+            $st->execute([
+                ':t'  => $title,
+                ':y'  => $year,
+                ':s'  => $season,
+                ':k'  => $this->uniqKey($year, $season),
+                ':sd' => ($d['send_date'] ?? '') !== '' ? (string)$d['send_date'] : null,
+                ':m'  => (string)($d['memo'] ?? ''),
+            ]);
+        } catch (PDOException $e) {
+            if ((int)$e->errorInfo[1] === 1062) {
+                throw new RuntimeException("{$year}년 {$season} 회차는 이미 있습니다.");
+            }
+            throw $e;
+        }
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public static function suggestTitle(int $year, string $season, string $sendDate = ''): string
+    {
+        $yy = substr((string)$year, 2);
+        $mm = ($sendDate !== '' && preg_match('/^\d{4}-(\d{2})/', $sendDate, $m)) ? ((int)$m[1] . '월 ') : '';
+        return "{$yy}년 {$mm}{$season}선물";
+    }
+
+    /** 작업중 회차의 머리말 수정 (확정된 회차는 수정 불가) */
+    public function batchSaveMeta(int $id, array $d): void
+    {
+        $b = $this->batchGet($id);
+        if (!$b) throw new RuntimeException('회차를 찾을 수 없습니다.');
+        if ($b['status'] === 'confirmed') throw new RuntimeException('확정된 회차는 수정할 수 없습니다.');
+
+        $year   = (int)($d['year'] ?? $b['year']);
+        $season = in_array(($d['season'] ?? ''), self::SEASONS, true) ? (string)$d['season'] : (string)$b['season'];
+
+        $st = $this->pdo->prepare("
+            UPDATE gift_batch SET title = :t, year = :y, season = :s, uniq_key = :k, send_date = :sd, memo = :m
+             WHERE id = :id
+        ");
+        try {
+            $st->execute([
+                ':t'  => trim((string)($d['title'] ?? '')) ?: (string)$b['title'],
+                ':y'  => $year,
+                ':s'  => $season,
+                ':k'  => $this->uniqKey($year, $season, (string)$b['uniq_key']),
+                ':sd' => ($d['send_date'] ?? '') !== '' ? (string)$d['send_date'] : null,
+                ':m'  => (string)($d['memo'] ?? ''),
+                ':id' => $id,
+            ]);
+        } catch (PDOException $e) {
+            if ((int)$e->errorInfo[1] === 1062) {
+                throw new RuntimeException("{$year}년 {$season} 회차는 이미 있습니다.");
+            }
+            throw $e;
+        }
+    }
+
+    /** 확정 이력 목록 */
+    public function batchList(int $year = 0): array
+    {
+        $sql = "SELECT * FROM gift_batch WHERE status = 'confirmed'";
+        $p   = [];
+        if ($year > 0) { $sql .= " AND year = :y"; $p[':y'] = $year; }
+        $sql .= " ORDER BY confirmed_at DESC, id DESC";
+        $st = $this->pdo->prepare($sql);
+        $st->execute($p);
+        return $st->fetchAll();
+    }
+
+    public function batchYears(): array
+    {
+        return array_map('intval', $this->pdo->query(
+            "SELECT DISTINCT year FROM gift_batch WHERE status='confirmed' ORDER BY year DESC"
+        )->fetchAll(PDO::FETCH_COLUMN));
+    }
+
+    /** 작업중 회차만 버릴 수 있다 (라인은 CASCADE) */
+    public function batchDelete(int $id): void
+    {
+        $b = $this->batchGet($id);
+        if (!$b) return;
+        if ($b['status'] === 'confirmed') throw new RuntimeException('확정된 회차는 삭제할 수 없습니다.');
+        $this->pdo->prepare("DELETE FROM gift_batch WHERE id = :id")->execute([':id' => $id]);
+    }
+
+    /**
+     * 회차 확정. 유효성 검사를 통과해야만 넘어간다.
+     * @return array{ok:bool, bad:array<int,string[]>, msg:string}
+     */
+    public function batchConfirm(int $id): array
+    {
+        $b = $this->batchGet($id);
+        if (!$b) return ['ok' => false, 'bad' => [], 'msg' => '회차를 찾을 수 없습니다.'];
+        if ($b['status'] === 'confirmed') return ['ok' => false, 'bad' => [], 'msg' => '이미 확정된 회차입니다.'];
+
+        $items = $this->items($id);
+        if (!$items) return ['ok' => false, 'bad' => [], 'msg' => '발송 대상이 0건입니다.'];
+
+        $bad = $this->invalidItems($id);
+        if ($bad) {
+            return ['ok' => false, 'bad' => $bad, 'msg' => count($bad) . '개 행을 먼저 채워 주세요.'];
+        }
+
+        $this->pdo->beginTransaction();
+        try {
+            $this->resequence($id);
+            $s = $this->summary($id);
+            $this->pdo->prepare("
+                UPDATE gift_batch
+                   SET status = 'confirmed', confirmed_at = NOW(), total_qty = :q, total_amount = :a
+                 WHERE id = :id
+            ")->execute([':q' => $s['total_qty'], ':a' => $s['total_amount'], ':id' => $id]);
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+        return ['ok' => true, 'bad' => [], 'msg' => '확정되었습니다.'];
+    }
+
+    /** 확정 차단 조건에 걸리는 행 @return array<int,string[]> [item_id => 사유들] */
+    public function invalidItems(int $batchId): array
+    {
+        $bad = [];
+        foreach ($this->items($batchId) as $it) {
+            $r = [];
+            if (trim((string)$it['product_name']) === '') $r[] = '물품 미지정';
+            if ($it['delivery_type'] === '택배') {
+                if (trim((string)$it['address1']) === '') $r[] = '주소 없음';
+                if (trim((string)$it['zipcode'])  === '') $r[] = '우편번호 없음';
+            }
+            if ($r) $bad[(int)$it['id']] = $r;
+        }
+        return $bad;
+    }
+
+    /** 발송구분(택배→일괄→별도) 순으로 No 를 1..N 으로 다시 매긴다 */
+    public function resequence(int $batchId): void
+    {
+        $rows = $this->pdo->prepare("
+            SELECT id FROM gift_item WHERE batch_id = :b
+             ORDER BY FIELD(delivery_type, '택배','일괄','별도'), seq ASC, id ASC
+        ");
+        $rows->execute([':b' => $batchId]);
+
+        $st = $this->pdo->prepare("UPDATE gift_item SET seq = :s WHERE id = :id");
+        $n  = 0;
+        foreach ($rows->fetchAll(PDO::FETCH_COLUMN) as $id) {
+            $st->execute([':s' => ++$n, ':id' => (int)$id]);
+        }
+    }
+
+    // ==========================================================
+    // 발송 라인
+    // ==========================================================
+    public function items(int $batchId): array
+    {
+        $st = $this->pdo->prepare("
+            SELECT * FROM gift_item WHERE batch_id = :b ORDER BY seq ASC, id ASC
+        ");
+        $st->execute([':b' => $batchId]);
+        return $st->fetchAll();
+    }
+
+    public function itemGet(int $id): ?array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM gift_item WHERE id = :id");
+        $st->execute([':id' => $id]);
+        return $st->fetch() ?: null;
+    }
+
+    private function assertDraft(int $batchId): array
+    {
+        $b = $this->batchGet($batchId);
+        if (!$b) throw new RuntimeException('회차를 찾을 수 없습니다.');
+        if ($b['status'] === 'confirmed') throw new RuntimeException('확정된 회차는 수정할 수 없습니다.');
+        return $b;
+    }
+
+    private function nextSeq(int $batchId): int
+    {
+        $st = $this->pdo->prepare("SELECT COALESCE(MAX(seq),0) FROM gift_item WHERE batch_id = :b");
+        $st->execute([':b' => $batchId]);
+        return (int)$st->fetchColumn() + 1;
+    }
+
+    /**
+     * 발송구분 기본값 — 오프라인 전달 고객이면 주소가 있어도 택배가 아니다.
+     * 그 다음에야 주소 유무를 본다 (주소 있으면 택배, 없으면 일괄).
+     */
+    public static function defaultDelivery(string $address1, bool $offline = false): string
+    {
+        if ($offline) return '일괄';
+        return trim($address1) !== '' ? '택배' : '일괄';
+    }
+
+    /** 오프라인 고객인데 택배로 잡혀 있으면 되돌린다 (사용자가 고른 다른 구분은 존중) */
+    private static function fixDelivery(string $current, string $address1, bool $offline): string
+    {
+        if ($current !== '택배') return $current;
+        if ($offline || trim($address1) === '') return '일괄';
+        return '택배';
+    }
+
+    /**
+     * 라인 저장(인라인 편집). 총지급·금액은 서버가 다시 계산한다.
+     * @return array 저장된 라인
+     */
+    public function itemSave(int $id, array $d): array
+    {
+        $it = $this->itemGet($id);
+        if (!$it) throw new RuntimeException('행을 찾을 수 없습니다.');
+        $this->assertDraft((int)$it['batch_id']);
+
+        $productId   = (int)($d['product_id'] ?? $it['product_id']);
+        $productName = (string)$it['product_name'];
+        $unitPrice   = array_key_exists('unit_price', $d) ? self::num($d['unit_price']) : (int)$it['unit_price'];
+
+        if (array_key_exists('product_id', $d)) {
+            if ($productId > 0) {
+                $p = $this->productGet($productId);
+                if ($p) {
+                    $productName = (string)$p['name'];
+                    // 물품을 바꾼 것이면 단가도 그 물품의 것으로 (같은 요청에 단가가 함께 오면 그 값 우선)
+                    if (!array_key_exists('unit_price', $d) || (int)$it['product_id'] !== $productId) {
+                        $unitPrice = (int)$p['unit_price'];
+                    }
+                } else {
+                    $productId = 0;
+                }
+            }
+            if ($productId <= 0) { $productName = ''; $unitPrice = array_key_exists('unit_price', $d) ? $unitPrice : 0; }
+        }
+
+        $extra    = max(0, array_key_exists('extra_qty', $d) ? self::num($d['extra_qty']) : (int)$it['extra_qty']);
+        $totalQty = 1 + $extra;
+        $amount   = $unitPrice * $totalQty;
+
+        $delivery = (string)($d['delivery_type'] ?? $it['delivery_type']);
+        if (!in_array($delivery, self::DELIVERY, true)) $delivery = (string)$it['delivery_type'];
+
+        $pick = fn(string $k) => array_key_exists($k, $d) ? trim((string)$d[$k]) : (string)$it[$k];
+
+        $this->pdo->prepare("
+            UPDATE gift_item SET
+                customer_name = :cn, customer_memo = :cm, phone = :ph,
+                zipcode = :zip, address1 = :ad1, address2 = :ad2,
+                delivery_type = :dt, product_id = :pid, product_name = :pn,
+                unit_price = :up, extra_qty = :ex, total_qty = :tq, amount = :am, note = :nt
+             WHERE id = :id
+        ")->execute([
+            ':cn'  => $pick('customer_name') ?: (string)$it['customer_name'],
+            ':cm'  => $pick('customer_memo'),
+            ':ph'  => $pick('phone'),
+            ':zip' => $pick('zipcode'),
+            ':ad1' => $pick('address1'),
+            ':ad2' => $pick('address2'),
+            ':dt'  => $delivery,
+            ':pid' => $productId > 0 ? $productId : null,
+            ':pn'  => $productName,
+            ':up'  => $unitPrice,
+            ':ex'  => $extra,
+            ':tq'  => $totalQty,
+            ':am'  => $amount,
+            ':nt'  => $pick('note'),
+            ':id'  => $id,
+        ]);
+
+        return $this->itemGet($id);
+    }
+
+    /**
+     * 고객명단에서 대상 추가 (이미 있는 고객은 건너뛴다).
+     * @return int 추가된 건수
+     */
+    public function itemsAdd(int $batchId, array $customerIds, int $defaultProductId = 0): int
+    {
+        $this->assertDraft($batchId);
+
+        $st = $this->pdo->prepare("SELECT customer_id FROM gift_item WHERE batch_id = :b AND customer_id IS NOT NULL");
+        $st->execute([':b' => $batchId]);
+        $have = array_flip(array_map('intval', $st->fetchAll(PDO::FETCH_COLUMN)));
+
+        $prod = $defaultProductId > 0 ? $this->productGet($defaultProductId) : null;
+        $seq  = $this->nextSeq($batchId);
+        $n    = 0;
+
+        $ins = $this->pdo->prepare("
+            INSERT INTO gift_item
+                (batch_id, seq, customer_id, customer_name, customer_memo, phone, zipcode, address1, address2,
+                 delivery_type, product_id, product_name, unit_price, extra_qty, total_qty, amount)
+            VALUES (:b, :sq, :cid, :cn, :cm, :ph, :zip, :ad1, :ad2, :dt, :pid, :pn, :up, 0, 1, :am)
+        ");
+
+        foreach ($customerIds as $cid) {
+            $cid = (int)$cid;
+            if ($cid <= 0 || isset($have[$cid])) continue;
+            $c = $this->customerGet($cid);
+            if (!$c || (int)$c['is_active'] !== 1) continue;
+
+            $up = $prod ? (int)$prod['unit_price'] : 0;
+            $ins->execute([
+                ':b'   => $batchId,
+                ':sq'  => $seq++,
+                ':cid' => $cid,
+                ':cn'  => (string)$c['name'],
+                ':cm'  => (string)($c['memo'] ?? ''),
+                ':ph'  => (string)($c['phone'] ?? ''),
+                ':zip' => (string)($c['zipcode'] ?? ''),
+                ':ad1' => (string)($c['address1'] ?? ''),
+                ':ad2' => (string)($c['address2'] ?? ''),
+                ':dt'  => self::defaultDelivery((string)($c['address1'] ?? ''), !empty($c['is_offline'])),
+                ':pid' => $prod ? (int)$prod['id'] : null,
+                ':pn'  => $prod ? (string)$prod['name'] : '',
+                ':up'  => $up,
+                ':am'  => $up,
+            ]);
+            $have[$cid] = 1;
+            $n++;
+        }
+        return $n;
+    }
+
+    /**
+     * 이전(가장 최근 확정) 회차의 대상을 그대로 불러온다.
+     * 고객·물품 정보는 지금 값으로 새로 읽는다 — 주소가 바뀌었을 수 있다.
+     * 고객이 지워졌으면 그 회차의 스냅샷을 쓴다.
+     */
+    public function itemsAddFromPrev(int $batchId): int
+    {
+        $this->assertDraft($batchId);
+
+        $prev = $this->pdo->query("
+            SELECT id FROM gift_batch WHERE status='confirmed' ORDER BY confirmed_at DESC, id DESC LIMIT 1
+        ")->fetchColumn();
+        if (!$prev) return 0;
+
+        $st = $this->pdo->prepare("SELECT customer_id FROM gift_item WHERE batch_id = :b AND customer_id IS NOT NULL");
+        $st->execute([':b' => $batchId]);
+        $have = array_flip(array_map('intval', $st->fetchAll(PDO::FETCH_COLUMN)));
+
+        $st = $this->pdo->prepare("SELECT customer_name FROM gift_item WHERE batch_id = :b");
+        $st->execute([':b' => $batchId]);
+        $haveName = array_flip($st->fetchAll(PDO::FETCH_COLUMN));
+
+        $seq = $this->nextSeq($batchId);
+        $n   = 0;
+
+        $ins = $this->pdo->prepare("
+            INSERT INTO gift_item
+                (batch_id, seq, customer_id, customer_name, customer_memo, phone, zipcode, address1, address2,
+                 delivery_type, product_id, product_name, unit_price, extra_qty, total_qty, amount, note)
+            VALUES (:b, :sq, :cid, :cn, :cm, :ph, :zip, :ad1, :ad2, :dt, :pid, :pn, :up, :ex, :tq, :am, :nt)
+        ");
+
+        foreach ($this->items((int)$prev) as $o) {
+            $cid = (int)$o['customer_id'];
+            $c   = $cid > 0 ? $this->customerGet($cid) : null;
+            if ($c && (int)$c['is_active'] !== 1) $c = null;
+
+            if ($c) {
+                if (isset($have[$cid])) continue;
+            } else {
+                if (isset($haveName[(string)$o['customer_name']])) continue;
+                $cid = 0;
+            }
+
+            // 물품·단가는 지금 값 우선 (물품이 비활성/삭제면 그 회차의 스냅샷 유지)
+            $pid = (int)$o['product_id'];
+            $p   = $pid > 0 ? $this->productGet($pid) : null;
+            $pn  = $p ? (string)$p['name']            : (string)$o['product_name'];
+            $up  = $p ? (int)$p['unit_price']         : (int)$o['unit_price'];
+
+            $ad1 = $c ? (string)($c['address1'] ?? '') : (string)$o['address1'];
+            $ex  = (int)$o['extra_qty'];
+            $tq  = 1 + $ex;
+
+            $ins->execute([
+                ':b'   => $batchId,
+                ':sq'  => $seq++,
+                ':cid' => $cid > 0 ? $cid : null,
+                ':cn'  => $c ? (string)$c['name']                 : (string)$o['customer_name'],
+                ':cm'  => $c ? (string)($c['memo'] ?? '')         : (string)$o['customer_memo'],
+                ':ph'  => $c ? (string)($c['phone'] ?? '')        : (string)$o['phone'],
+                ':zip' => $c ? (string)($c['zipcode'] ?? '')      : (string)$o['zipcode'],
+                ':ad1' => $ad1,
+                ':ad2' => $c ? (string)($c['address2'] ?? '')     : (string)$o['address2'],
+                // 주소가 사라졌거나 오프라인 고객이 된 택배 행만 되돌린다 (그 밖의 선택은 존중)
+                ':dt'  => self::fixDelivery((string)$o['delivery_type'], $ad1, $c && !empty($c['is_offline'])),
+                ':pid' => $p ? $pid : null,
+                ':pn'  => $pn,
+                ':up'  => $up,
+                ':ex'  => $ex,
+                ':tq'  => $tq,
+                ':am'  => $up * $tq,
+                ':nt'  => (string)$o['note'],
+            ]);
+            if ($cid > 0) $have[$cid] = 1;
+            $haveName[(string)$o['customer_name']] = 1;
+            $n++;
+        }
+        return $n;
+    }
+
+    /** 선택 행 일괄 작업 — op: product | delivery | delete | refresh */
+    public function itemBulk(int $batchId, array $ids, string $op, array $d = []): int
+    {
+        $this->assertDraft($batchId);
+        $ids = array_values(array_filter(array_map('intval', $ids), fn($v) => $v > 0));
+        if (!$ids) return 0;
+
+        $in  = implode(',', array_fill(0, count($ids), '?'));
+        $arg = array_merge($ids, [$batchId]);
+
+        if ($op === 'delete') {
+            $st = $this->pdo->prepare("DELETE FROM gift_item WHERE id IN ({$in}) AND batch_id = ?");
+            $st->execute($arg);
+            return $st->rowCount();
+        }
+
+        if ($op === 'delivery') {
+            $dt = (string)($d['delivery_type'] ?? '');
+            if (!in_array($dt, self::DELIVERY, true)) return 0;
+            $st = $this->pdo->prepare("UPDATE gift_item SET delivery_type = ? WHERE id IN ({$in}) AND batch_id = ?");
+            $st->execute(array_merge([$dt], $arg));
+            return $st->rowCount();
+        }
+
+        if ($op === 'product') {
+            $pid = (int)($d['product_id'] ?? 0);
+            $p   = $pid > 0 ? $this->productGet($pid) : null;
+            if (!$p) return 0;
+            $st = $this->pdo->prepare("
+                UPDATE gift_item
+                   SET product_id = ?, product_name = ?, unit_price = ?, amount = ? * total_qty
+                 WHERE id IN ({$in}) AND batch_id = ?
+            ");
+            $st->execute(array_merge([$pid, (string)$p['name'], (int)$p['unit_price'], (int)$p['unit_price']], $arg));
+            return $st->rowCount();
+        }
+
+        if ($op === 'refresh') {   // 고객명단의 지금 값으로 스냅샷 다시 읽기
+            $st = $this->pdo->prepare("
+                SELECT i.id, i.delivery_type, c.name, c.memo, c.phone, c.zipcode,
+                       c.address1, c.address2, c.is_offline
+                  FROM gift_item i
+                  JOIN gift_customer c ON c.id = i.customer_id
+                 WHERE i.id IN ({$in}) AND i.batch_id = ? AND c.is_active = 1
+            ");
+            $st->execute($arg);
+            $upd = $this->pdo->prepare("
+                UPDATE gift_item
+                   SET customer_name = :cn, customer_memo = :cm, phone = :ph,
+                       zipcode = :zip, address1 = :ad1, address2 = :ad2, delivery_type = :dt
+                 WHERE id = :id
+            ");
+            $n = 0;
+            foreach ($st->fetchAll() as $r) {
+                $ad1 = (string)($r['address1'] ?? '');
+                $upd->execute([
+                    ':cn'  => (string)$r['name'],
+                    ':cm'  => (string)($r['memo'] ?? ''),
+                    ':ph'  => (string)($r['phone'] ?? ''),
+                    ':zip' => (string)($r['zipcode'] ?? ''),
+                    ':ad1' => $ad1,
+                    ':ad2' => (string)($r['address2'] ?? ''),
+                    // 주소가 사라졌거나 오프라인이 된 택배 행만 되돌린다 (사용자가 고른 구분은 존중)
+                    ':dt'  => self::fixDelivery((string)$r['delivery_type'], $ad1, !empty($r['is_offline'])),
+                    ':id'  => (int)$r['id'],
+                ]);
+                $n++;
+            }
+            return $n;
+        }
+        return 0;
+    }
+
+    // ==========================================================
+    // 집계
+    // ==========================================================
+    /**
+     * @return array{cnt:int,total_qty:int,total_amount:int,by_delivery:array,by_product:array,incomplete:int}
+     */
+    public function summary(int $batchId): array
+    {
+        $st = $this->pdo->prepare("
+            SELECT COUNT(*) AS cnt, COALESCE(SUM(total_qty),0) AS q, COALESCE(SUM(amount),0) AS a
+              FROM gift_item WHERE batch_id = :b
+        ");
+        $st->execute([':b' => $batchId]);
+        $t = $st->fetch();
+
+        $st = $this->pdo->prepare("
+            SELECT delivery_type, COUNT(*) AS cnt, SUM(total_qty) AS q, SUM(amount) AS a
+              FROM gift_item WHERE batch_id = :b
+             GROUP BY delivery_type ORDER BY FIELD(delivery_type,'택배','일괄','별도')
+        ");
+        $st->execute([':b' => $batchId]);
+        $byDelivery = $st->fetchAll();
+
+        $st = $this->pdo->prepare("
+            SELECT product_name, COUNT(*) AS cnt, SUM(total_qty) AS q, SUM(amount) AS a
+              FROM gift_item WHERE batch_id = :b
+             GROUP BY product_name ORDER BY q DESC, product_name ASC
+        ");
+        $st->execute([':b' => $batchId]);
+        $byProduct = $st->fetchAll();
+
+        return [
+            'cnt'          => (int)$t['cnt'],
+            'total_qty'    => (int)$t['q'],
+            'total_amount' => (int)$t['a'],
+            'by_delivery'  => $byDelivery,
+            'by_product'   => $byProduct,
+            'incomplete'   => count($this->invalidItems($batchId)),
+        ];
+    }
+
+    // ==========================================================
+    // 현행 엑셀 가져오기
+    // ==========================================================
+    /**
+     * 파싱된 표(머리글 이름 → 값 배열)를 고객명단·회차로 옮긴다.
+     *
+     * ★ 현행 엑셀의 '단가' 칸에는 실제로 합계 금액이 들어 있다(50,000×2=100,000).
+     *   여기서 단가 = 합계 ÷ 총지급 으로 되돌려 시스템의 정의(단가/총지급/금액)에 맞춘다.
+     *
+     * @param array  $rows ['고객명'=>..,'추가정보'=>..,'연락처'=>..,'우편번호'=>..,'주소'=>..,
+     *                      '발송구분'=>..,'상품명'=>..,'단가'=>..,'추가'=>..,'총지급'=>..]
+     * @param array  $opt  ['customers'=>bool, 'batch_id'=>int]
+     * @return array{customers:int,skipped:int,items:int}
+     */
+    public function importRows(array $rows, array $opt = []): array
+    {
+        $wantCust = !empty($opt['customers']);
+        $batchId  = (int)($opt['batch_id'] ?? 0);
+        if ($batchId > 0) $this->assertDraft($batchId);
+
+        $prodByName = [];
+        foreach ($this->productList(false) as $p) $prodByName[trim((string)$p['name'])] = $p;
+
+        $res = ['customers' => 0, 'skipped' => 0, 'items' => 0];
+        $seq = $batchId > 0 ? $this->nextSeq($batchId) : 0;
+
+        $ins = $this->pdo->prepare("
+            INSERT INTO gift_item
+                (batch_id, seq, customer_id, customer_name, customer_memo, phone, zipcode, address1, address2,
+                 delivery_type, product_id, product_name, unit_price, extra_qty, total_qty, amount)
+            VALUES (:b, :sq, :cid, :cn, :cm, :ph, :zip, :ad1, :ad2, :dt, :pid, :pn, :up, :ex, :tq, :am)
+        ");
+
+        foreach ($rows as $r) {
+            $name = trim((string)($r['고객명'] ?? ''));
+            if ($name === '') continue;
+
+            $memo  = trim((string)($r['추가정보'] ?? ''));
+            $phone = trim((string)($r['연락처'] ?? ''));
+            $zip   = trim((string)($r['우편번호'] ?? ''));
+            $ad1   = trim((string)($r['주소'] ?? ''));
+
+            // 총지급이 비어 있으면 1개로 본다. 추가 칸은 총지급에서 되계산(둘이 어긋난 행 방지)
+            $tq = max(1, self::num($r['총지급'] ?? 0) ?: (1 + self::num($r['추가'] ?? 0)));
+            $ex = $tq - 1;
+            $am = self::num($r['단가'] ?? 0);            // ★ 엑셀의 '단가' = 합계 금액
+            $up = $tq > 0 ? (int)round($am / $tq) : 0;
+            if ($am === 0) $am = $up * $tq;
+
+            $dt = trim((string)($r['발송구분'] ?? ''));
+            if (!in_array($dt, self::DELIVERY, true)) $dt = self::defaultDelivery($ad1);
+
+            $pname = trim((string)($r['상품명'] ?? ''));
+            $pid   = null;
+            if ($pname !== '' && isset($prodByName[$pname])) $pid = (int)$prodByName[$pname]['id'];
+
+            // ── 고객명단
+            $cid = 0;
+            if ($wantCust) {
+                $st = $this->pdo->prepare("
+                    SELECT id FROM gift_customer
+                     WHERE is_active = 1 AND name = :n AND IFNULL(phone,'') = :p LIMIT 1
+                ");
+                $st->execute([':n' => $name, ':p' => $phone]);
+                $exist = (int)$st->fetchColumn();
+                if ($exist > 0) {
+                    $cid = $exist;
+                    $res['skipped']++;
+                } else {
+                    // 엑셀에 오프라인 칸은 없다 — 택배가 아닌 행은 직접 전달로 본다(주소 유무와 무관).
+                    // 화면에서 언제든 고칠 수 있다.
+                    $cid = $this->customerSave([
+                        'name' => $name, 'memo' => $memo, 'phone' => $phone,
+                        'zipcode' => $zip, 'address1' => $ad1, 'address2' => '',
+                        'is_offline' => ($dt !== '택배') ? 1 : 0,
+                    ]);
+                    $res['customers']++;
+                }
+            }
+
+            // ── 회차 라인
+            if ($batchId > 0) {
+                $ins->execute([
+                    ':b'   => $batchId,
+                    ':sq'  => $seq++,
+                    ':cid' => $cid > 0 ? $cid : null,
+                    ':cn'  => $name,
+                    ':cm'  => $memo,
+                    ':ph'  => $phone,
+                    ':zip' => $zip,
+                    ':ad1' => $ad1,
+                    ':ad2' => '',
+                    ':dt'  => $dt,
+                    ':pid' => $pid,
+                    ':pn'  => $pname,
+                    ':up'  => $up,
+                    ':ex'  => $ex,
+                    ':tq'  => $tq,
+                    ':am'  => $am,
+                ]);
+                $res['items']++;
+            }
+        }
+        return $res;
+    }
+}
+?>
