@@ -265,6 +265,20 @@ function qm_ensure_tables(PDO $pdo): void
         q_px_basis    TINYINT NOT NULL DEFAULT 0 COMMENT '분봉(수정주가)과 krx_amt 가격 기준이 어긋남',
         n_pre         TINYINT NOT NULL DEFAULT 0 COMMENT '실제로 쓴 사전 거래일 수 (D-4~D-1 이면 4)',
         n_post        TINYINT NOT NULL DEFAULT 0 COMMENT '★실제로 쓴 사후 거래일 수 — 5 미만이면 f_d5_ret 은 5일치가 아니다',
+        g_pre_hm      VARCHAR(5)   NULL COMMENT '이벤트일 «정규장» 마지막 봉 시각(대개 15:19)',
+        g_c1519       INT UNSIGNED NULL COMMENT '그 봉의 종가 — 판정을 미래 없이 재현하는 기준가',
+        g_auc_ret     DECIMAL(6,2) NULL COMMENT '종가단일가 이동 = 종가/g_c1519-1 (%) · 단일가 봉이 없으면 NULL',
+        g_cvh_1519    DECIMAL(6,2) NULL COMMENT '15:19 기준 상단마감 = g_c1519/(그때까지 고가)-1 (%)',
+        g_real_ret    DECIMAL(6,2) NULL COMMENT '★실전 왕복 = 익일시가/g_c1519-1 (%)',
+        g_nd_has_open TINYINT NOT NULL DEFAULT 0 COMMENT '익일 첫 봉이 09:00 인가 — 0 이면 시가 단일가에 체결이 없었다',
+        g_nd_open_vr  DECIMAL(6,3) NULL COMMENT '익일 첫 봉 거래량 / 익일 총거래량',
+        g_nd_o1_ret   DECIMAL(6,2) NULL COMMENT '익일 첫 봉 종가/시가-1 (%) ★아래 넷은 모두 «시가 대비»다',
+        g_nd_0905_ret DECIMAL(6,2) NULL COMMENT '익일 09:05 종가/시가-1 (%)',
+        g_nd_0930_ret DECIMAL(6,2) NULL COMMENT '익일 09:30 종가/시가-1 (%)',
+        g_nd_oh_ret   DECIMAL(6,2) NULL COMMENT '익일 고가/시가-1 (%) — 시가 매도가 최선이었나',
+        g_nd_oc_ret   DECIMAL(6,2) NULL COMMENT '익일 종가/시가-1 (%)',
+        g_ev_close_vr DECIMAL(6,3) NULL COMMENT '이벤트일 15:30 단일가 거래량 / 그 날 총거래량 — «종가에 살 수 있나»',
+        g_ev_l10_vr   DECIMAL(6,3) NULL COMMENT '이벤트일 15:10~15:19 거래량 / 그 날 총거래량',
         made_at DATETIME NOT NULL,
         PRIMARY KEY (code, d)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
@@ -274,6 +288,21 @@ function qm_ensure_tables(PDO $pdo): void
         "q_px_basis TINYINT NOT NULL DEFAULT 0 COMMENT '분봉(수정주가)과 krx_amt 가격 기준이 어긋남'",
         "n_pre      TINYINT NOT NULL DEFAULT 0 COMMENT '실제로 쓴 사전 거래일 수'",
         "n_post     TINYINT NOT NULL DEFAULT 0 COMMENT '★실제로 쓴 사후 거래일 수'",
+        // ── 갭 체결 검정(job=gap) — 전부 «분봉 안에서만» 계산한다
+        "g_pre_hm      VARCHAR(5)   NULL COMMENT '이벤트일 정규장 마지막 봉 시각'",
+        "g_c1519       INT UNSIGNED NULL COMMENT '그 봉의 종가 — 미래 없는 판정 기준가'",
+        "g_auc_ret     DECIMAL(6,2) NULL COMMENT '종가단일가 이동 = 종가/g_c1519-1'",
+        "g_cvh_1519    DECIMAL(6,2) NULL COMMENT '15:19 기준 상단마감'",
+        "g_real_ret    DECIMAL(6,2) NULL COMMENT '실전 왕복 = 익일시가/g_c1519-1'",
+        "g_nd_has_open TINYINT NOT NULL DEFAULT 0 COMMENT '익일 첫 봉이 09:00 인가'",
+        "g_nd_open_vr  DECIMAL(6,3) NULL COMMENT '익일 첫 봉 거래량/익일 총거래량'",
+        "g_nd_o1_ret   DECIMAL(6,2) NULL COMMENT '익일 첫 봉 종가/시가-1'",
+        "g_nd_0905_ret DECIMAL(6,2) NULL COMMENT '익일 09:05 종가/시가-1'",
+        "g_nd_0930_ret DECIMAL(6,2) NULL COMMENT '익일 09:30 종가/시가-1'",
+        "g_nd_oh_ret   DECIMAL(6,2) NULL COMMENT '익일 고가/시가-1'",
+        "g_nd_oc_ret   DECIMAL(6,2) NULL COMMENT '익일 종가/시가-1'",
+        "g_ev_close_vr DECIMAL(6,3) NULL COMMENT '이벤트일 종가단일가 거래량 비중'",
+        "g_ev_l10_vr   DECIMAL(6,3) NULL COMMENT '이벤트일 15:10~15:19 거래량 비중'",
     ] as $c) {
         try { $pdo->exec("ALTER TABLE qm_feat ADD COLUMN IF NOT EXISTS {$c}"); }
         catch (Throwable $e) { /* 이미 있으면 넘어간다 */ }
@@ -1241,6 +1270,14 @@ case 'feat': {
          q_px_basis=VALUES(q_px_basis), n_pre=VALUES(n_pre), n_post=VALUES(n_post),
          made_at=NOW()");
 
+    /* 갭 피처는 «따로» 쓴다 — 위 INSERT 는 자리가 23개라, 거기에 12개를 더 끼우면
+     * 자리 하나만 밀려도 조용히 다른 컬럼에 값이 들어간다. 행은 바로 위에서 이미 만들어졌다. */
+    $updG = $pdo->prepare("UPDATE qm_feat SET
+         g_pre_hm=?, g_c1519=?, g_auc_ret=?, g_cvh_1519=?, g_real_ret=?, g_nd_has_open=?,
+         g_nd_open_vr=?, g_nd_o1_ret=?, g_nd_0905_ret=?, g_nd_0930_ret=?,
+         g_nd_oh_ret=?, g_nd_oc_ret=?, g_ev_close_vr=?, g_ev_l10_vr=?
+       WHERE code=? AND d=?");
+
     $done = 0; $partial = 0; $basisBad = 0; $shortPost = 0;
     foreach ($evs as $e) {
         $code = $e['code']; $d = $e['d'];
@@ -1393,10 +1430,85 @@ case 'feat': {
         $st->execute([$code, $d, $e['win_to'], max(1, (int)$e['list_shrs']), QM_SPLIT_TOL]);
         $split = (int)$e['list_shrs'] > 0 && (int)$st->fetchColumn() > 0 ? 1 : 0;
 
+        /* ══ 갭 체결 검정용 (g_*) — job=gap 이 읽는다 ═══════════════════════════
+         *
+         * 묻는 것: 8년 일봉이 낸 「상단마감 → 익일시가 +1.78%p」를 <b>실제로 체결할 수 있나</b>.
+         * 그 우위와 체결 사이에는 틈이 셋 있고, 분봉만 각각을 잰다.
+         *   ① 판정 시점 — f_close_vs_high 는 «종가»가 있어야 나오는데 종가는 15:30 단일가로 정해진다.
+         *      15:20 에 주문할 때는 아직 모른다(look-ahead). → 15:19 종가로 다시 판정한 것이 g_cvh_1519.
+         *   ② 매수 체결 — 「익일시가 수익률」의 기준점이 이벤트일 «종가»라 종가에 사야 그 값을 얻는다.
+         *      15:19 에 시장가로 사면 종가와 얼마나 다른가 = g_auc_ret.
+         *   ③ 매도 체결 — 익일 시가 단일가에 «거래 자체가 없을» 수 있다 = g_nd_has_open.
+         *
+         * ★★여기서 §11(수정주가 ↔ 당시가격) 함정이 없다 — 15:19·15:30·익일 09:00 이 <b>다 같은
+         *   소스(분봉)</b>다. 그래서 이 검정만은 q_px_basis 와 무관하게 성립한다. */
+        $g = array_fill_keys(['prehm','c19','auc','cvh19','real','vr','o1','r0905','r0930','oh','oc',
+                              'evcvr','evl10'], null);
+        $gHasOpen = 0;
+        if ($day) {
+            /* 「종가에 살 수 있나」 — 상한가에 잠기면 막판 거래가 마른다.
+             * ★이것은 «체결된 양»이지 «호가 잔량»이 아니다. 내 주문이 소화된다는 보장이 아니라,
+             *   그 자리에서 얼마나 손이 바뀌었는지를 잰다. */
+            $vAll = array_sum(array_column($day, 'v'));
+            if ($vAll > 0) {
+                $v1530 = 0; $vL10 = 0;
+                foreach ($day as $b) {
+                    $hm = substr($b['ts'], 11, 5);
+                    if ($hm >= '15:20')                       $v1530 += (float)$b['v'];
+                    elseif ($hm >= '15:10' && $hm <= '15:19') $vL10  += (float)$b['v'];
+                }
+                $g['evcvr'] = round($v1530 / $vAll, 3);
+                $g['evl10'] = round($vL10  / $vAll, 3);
+            }
+            /* 정규장 마지막 봉 — 15:19 를 «찍지» 않는다. 거래가 일찍 끊긴 날은 그 봉이 15:19 가
+             * 아니고, 그때의 «15:19 매수»는 허구다. 그래서 실제 시각을 g_pre_hm 에 남겨
+             * 분석이 15:19 인 건만 골라 볼 수 있게 한다(§9 — 조용히 빼지 않고 갈라 본다). */
+            $hi19 = 0; $c19 = 0; $hm19 = null;
+            foreach ($day as $b) {
+                $hm = substr($b['ts'], 11, 5);
+                if ($hm >= '15:20') break;                 // 종가 단일가 봉은 제외
+                if ((float)$b['h'] > $hi19) $hi19 = (float)$b['h'];
+                $c19 = (float)$b['c']; $hm19 = $hm;
+            }
+            if ($c19 > 0) {
+                $g['prehm'] = $hm19;
+                $g['c19']   = (int)$c19;
+                $g['cvh19'] = $hi19 > 0 ? round(($c19 / $hi19 - 1) * 100, 2) : null;
+                /* 종가 단일가 봉이 «있을 때만» 그 이동을 적는다. 없으면 마지막 봉이 곧 15:19 라
+                 * 0 이 나오는데, 그건 «안 움직였다»가 아니라 «단일가가 없었다»는 뜻이다. */
+                $lastHm = substr(end($day)['ts'], 11, 5);
+                if ($lastHm >= '15:20') $g['auc'] = round(((float)end($day)['c'] / $c19 - 1) * 100, 2);
+            }
+        }
+        if ($post && ($n1 = $by[$post[0]] ?? [])) {
+            $ndOpen  = (float)$n1[0]['o'];
+            $gHasOpen = substr($n1[0]['ts'], 11, 5) === '09:00' ? 1 : 0;
+            $ndVol   = array_sum(array_column($n1, 'v'));
+            if ($ndVol > 0) $g['vr'] = round((float)$n1[0]['v'] / $ndVol, 3);
+            if ($g['c19'] > 0 && $ndOpen > 0) $g['real'] = round(($ndOpen / $g['c19'] - 1) * 100, 2);
+            if ($ndOpen > 0) {
+                /* ★아래 넷은 «시가 대비»다 — 묻는 것이 「시가에 못 팔면 얼마나 잃나」라서
+                 *   이벤트일 종가가 아니라 시가를 기준으로 삼는다. */
+                $g['o1'] = round(((float)$n1[0]['c'] / $ndOpen - 1) * 100, 2);
+                $at = function (string $hm) use ($n1, $ndOpen) {
+                    $c = null;
+                    foreach ($n1 as $b) { if (substr($b['ts'], 11, 5) > $hm) break; $c = (float)$b['c']; }
+                    return $c === null ? null : round(($c / $ndOpen - 1) * 100, 2);
+                };
+                $g['r0905'] = $at('09:05');
+                $g['r0930'] = $at('09:30');
+                $g['oh'] = round((max(array_column($n1, 'h')) / $ndOpen - 1) * 100, 2);
+                $g['oc'] = round(((float)end($n1)['c'] / $ndOpen - 1) * 100, 2);
+            }
+        }
+
         $ins->execute([$code, $d, $f['hit10'], $f['gap'], $f['vol30'], $f['cvwap'], $f['highhm'],
                        $f['cvh'], $f['mdd'], $f['rebreak'], $f['pvm'], $f['pret'], $f['ndo'],
                        $f['ndh'], $f['ndc'], $f['d5'], $f['pmdd'], $full, $halt, $split, $basisOff,
                        count($winDays) - count($post) - 1, count($post)]);
+        $updG->execute([$g['prehm'], $g['c19'], $g['auc'], $g['cvh19'], $g['real'], $gHasOpen,
+                        $g['vr'], $g['o1'], $g['r0905'], $g['r0930'], $g['oh'], $g['oc'],
+                        $g['evcvr'], $g['evl10'], $code, $d]);
         $done++;
         if (!$full)             $partial++;
         if ($basisOff)          $basisBad++;
@@ -1542,6 +1654,242 @@ case 'analyze': {
     }
     say('');
     say('  이 분석은 통계적 사실만 적는다. 투자 판단·매매 규칙은 여기서 만들지 않는다.');
+    break;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  job=gap — ★「+1.78%p 를 실제로 체결할 수 있나」
+//
+//  8년 일봉(job=danalyze)이 낸 것은 <b>통계적 사실</b>이었다:
+//    상단마감(f_close_vs_high ≥ −3%) → 익일 시가 +1.78%p · t=33.54 · 8개 연도 예외 0.
+//  그런데 그 값은 「이벤트일 «종가»에 사서 익일 «시가»에 판다」를 뜻한다. 일봉은 거기까지다.
+//  실제로 그렇게 할 수 있는지는 틈이 셋 있고, <b>분봉만</b> 각각을 잰다 — §9 의 「일봉으론 못 보는 것」.
+//
+//    ① 판정 시점 : 종가는 15:30 단일가로 «정해진다». 15:20 에 주문할 때 나는 아직 종가를 모른다.
+//    ② 매수 체결 : 그 기준점(종가)을 얻으려면 종가 단일가에 사야 한다. 15:19 에 사면 값이 다르다.
+//    ③ 매도 체결 : 익일 09:00 시가 단일가에 «거래 자체가 없을» 수 있다.
+//
+//  ⛔여기서도 규율은 같다 — 표본 수를 항상 적고, 못 잰 것을 «못 쟀다»고 적고, 매매 규칙을 만들지 않는다.
+// ══════════════════════════════════════════════════════════════════════════
+case 'gap': {
+    /* 왕복 비용 가정(%) — 세금+수수료. ★«가정»이라 화면에 값을 함께 찍는다.
+     * 이 숫자를 실측으로 바꾸려면 여기 한 줄만 고친다. */
+    $costPct = 0.20;
+
+    $rows = $pdo->query("SELECT f.*, e.name, e.chg_pct FROM qm_feat f
+                           JOIN qm_event e ON e.code=f.code AND e.d=f.d")->fetchAll(PDO::FETCH_ASSOC);
+    $col  = fn(array $rs, string $c) => array_map(fn($r) => $r[$c] === null ? null : (float)$r[$c], $rs);
+    $num  = fn($v) => number_format((int)$v);
+
+    say('갭 체결 가능성 검정  (' . date('Y-m-d H:i') . ')');
+    say('질문: 8년 일봉의 「상단마감 → 익일시가 +1.78%p」를 <b>실제로 체결할 수 있나</b>');
+    say('자료: qm_feat ' . $num(count($rows)) . '건 · ★전부 «분봉 안에서만» 계산 —');
+    say('      15:19·15:30·익일 09:00 이 다 같은 소스라 §11(수정주가↔당시가격) 함정이 여기엔 없다.');
+
+    // ── G0. 무엇이 없어서 못 재나 ─────────────────────────────────────────
+    hr('G0. 표본과 결측 — 못 잰 것을 먼저 적는다');
+    $hasND  = array_values(array_filter($rows, fn($r) => (int)$r['n_post'] >= 1 && $r['f_nd_open_ret'] !== null));
+    $has19  = array_values(array_filter($hasND, fn($r) => $r['g_c1519'] !== null));
+    /* ★실전 가능 표본 = 「이벤트일 15:19 에 값이 있었다」까지다.
+     *
+     * ⛔익일 09:00 체결 유무(g_nd_has_open)로 «빼지 않는다» — 처음엔 뺐다가 실측으로 뒤집었다.
+     *   첫 봉이 09:00 이 아닌 건은 「못 판다」가 아니라 <b>시초가가 늦게 형성된다</b>는 뜻이다
+     *   (실측: 첫 봉 09:02 가 196건 · 10:00 이 47건). 가른 자는 krx_amt 다 —
+     *   그 날 «분봉 시가/종가» 비 1.0532 와 «krx 시가/종가» 비 1.0527 이 일치했다.
+     *   즉 그 늦은 첫 체결이 곧 그 날의 <b>공식 시가</b>이고, 거기서 팔 수 있다.
+     *   ★게다가 09:00 에 체결이 없다는 것은 «매도가 없었다»는 뜻이라, 파는 쪽엔 오히려 문제가 아니다.
+     *   빼면 그 247건(평균 +11.4%)이 통째로 사라져 결론이 조용히 뒤집힌다. */
+    $real   = array_values(array_filter($has19, fn($r) => $r['g_pre_hm'] === '15:19'));
+    $noOpen = array_values(array_filter($real, fn($r) => (int)$r['g_nd_has_open'] === 0));
+    foreach ([
+        ['qm_feat 전체',                              count($rows)],
+        ['익일이 있다 (n_post≥1 · 익일 시가 계산됨)',  count($hasND)],
+        ['이벤트일 정규장 마지막 봉이 있다',           count($has19)],
+        ['  ↳ ★그 봉이 15:19 다 = 실전 가능 표본',     count($real)],
+        ['     그중 익일 첫 체결이 09:00 이 아닌 건',   count($noOpen)],
+    ] as [$lab, $n]) say(sprintf('  %-46s %7s건', $lab, $num($n)));
+    say('');
+    say('  ★「15:19 봉이 없다」만 <b>뺀다</b> — 그 날 거래가 일찍 끊겨 «15:19 매수»가 허구인 건이다.');
+    say('    익일 첫 체결이 09:00 이 아닌 건은 <b>빼지 않는다</b> — 그때 형성된 값이 곧 그 날 공식 시가고,');
+    say('    체결이 없었다는 것은 «매도가 없었다»는 뜻이라 파는 쪽엔 오히려 문제가 아니다.');
+    if ($noOpen) qm_line('  그 건의 익일 시가 수익률', qm_stat($col($noOpen, 'f_nd_open_ret')));
+    if (!$has19) { say(''); say('  ⛔g_* 피처가 비어 있다 — job=feat 를 먼저 돌린다.'); break; }
+
+    // ── G1. 판정 시점 ─────────────────────────────────────────────────────
+    hr('G1. 판정 시점 — 15:19 에 내린 판정이 15:30 판정과 같은가');
+    say('  15:30 판정 f_close_vs_high ≥ −3%  ↔  15:19 판정 g_cvh_1519 ≥ −3%');
+    say('  ★일봉 결론은 15:30 판정으로 냈다. 그런데 그 시각엔 이미 종가 단일가가 끝나 있다.');
+    $cm = [[0, 0], [0, 0]];
+    foreach ($real as $r) {
+        if ($r['f_close_vs_high'] === null || $r['g_cvh_1519'] === null) continue;
+        $a = (float)$r['g_cvh_1519']    >= -3 ? 1 : 0;   // 15:19 (실전에 쓸 수 있는 판정)
+        $b = (float)$r['f_close_vs_high'] >= -3 ? 1 : 0; // 15:30 (일봉이 쓴 판정)
+        $cm[$a][$b]++;
+    }
+    $tot = $cm[0][0] + $cm[0][1] + $cm[1][0] + $cm[1][1];
+    say('');
+    say(sprintf('  %-18s %12s %12s', '', '15:30 상단', '15:30 그밖'));
+    say(sprintf('  %-18s %12s %12s', '15:19 상단', $num($cm[1][1]), $num($cm[1][0])));
+    say(sprintf('  %-18s %12s %12s', '15:19 그밖', $num($cm[0][1]), $num($cm[0][0])));
+    if ($tot) {
+        say('');
+        say(sprintf('  일치율 %.1f%%  (n=%s)', ($cm[1][1] + $cm[0][0]) / $tot * 100, $num($tot)));
+        say(sprintf('  ★15:19 엔 «상단»인데 15:30 엔 아닌 건 %s (%.1f%%) — 사 놓고 조건이 깨진다',
+            $num($cm[1][0]), $cm[1][0] / $tot * 100));
+        say(sprintf('    15:19 엔 «그밖»인데 15:30 엔 상단인 건 %s (%.1f%%) — 놓친다',
+            $num($cm[0][1]), $cm[0][1] / $tot * 100));
+    }
+
+    // ── G2. 우위가 실전 판정으로도 남는가 ────────────────────────────────
+    hr('G2. 우위가 «실전 판정»으로도 남는가');
+    say('  결과변수는 둘이다 — 이상 왕복과 실전 왕복. 차이가 곧 <b>실행 마찰</b>이다.');
+    say('    이상 f_nd_open_ret : 이벤트일 «종가» 매수 → 익일 시가 매도   (일봉이 잰 것)');
+    say('    실전 g_real_ret    : 이벤트일 «15:19» 매수 → 익일 시가 매도  (실제로 할 수 있는 것)');
+    foreach ([
+        ['판정 15:30(일봉과 같은 판정) · 결과 이상',  'f_close_vs_high', 'f_nd_open_ret'],
+        ['판정 15:30 · 결과 실전',                    'f_close_vs_high', 'g_real_ret'],
+        ['★판정 15:19 · 결과 실전  ← 실제로 할 수 있는 것', 'g_cvh_1519', 'g_real_ret'],
+    ] as [$lab, $by2, $out]) {
+        say('');
+        say('  ' . $lab);
+        $hi = array_values(array_filter($real, fn($r) => $r[$by2] !== null && (float)$r[$by2] >= -3));
+        $lo = array_values(array_filter($real, fn($r) => $r[$by2] !== null && (float)$r[$by2] <  -3));
+        $a = qm_stat($col($hi, $out)); $b = qm_stat($col($lo, $out));
+        qm_line('상단마감(≥-3%)', $a);
+        qm_line('그밖(<-3%)',     $b);
+        $t = qm_welch($a, $b);
+        if ($t !== null) say(sprintf('      차이 %+.2f%%p · Welch t=%.2f%s',
+            ($a['mean'] ?? 0) - ($b['mean'] ?? 0), $t,
+            abs($t) > 2 ? '' : '  (|t|≤2 — 차이를 주장하지 않는다)'));
+    }
+    say('');
+    say('  종가 단일가 이동 g_auc_ret (= 종가/15:19종가−1) — 이것이 두 왕복을 가르는 자다');
+    qm_line('전체', qm_stat($col($real, 'g_auc_ret')));
+    $hiR = array_values(array_filter($real, fn($r) => $r['g_cvh_1519'] !== null && (float)$r['g_cvh_1519'] >= -3));
+    qm_line('15:19 상단마감', qm_stat($col($hiR, 'g_auc_ret')));
+
+    // ── G3. ★★「상단마감」의 정체 ────────────────────────────────────────
+    hr('G3. ★★「상단마감」은 무엇을 재고 있었나 — 상한가 분해');
+    say('  상한가로 마감하면 <b>정의상 종가=고가</b>라 f_close_vs_high=0 이다.');
+    say('  즉 그 필터는 「상단에서 마감했다」가 아니라 <b>「상한가였다」</b>를 우회로 재고 있을 수 있다.');
+    say('  ★상한가 판정은 qm_event.chg_pct ≥ 29% (제도상 상한 +30% · 호가단위 때문에 정확히 30 이 안 된다)');
+    $isLim = fn($r) => (float)$r['chg_pct'] >= 29;
+    $isHi  = fn($r) => $r['f_close_vs_high'] !== null && (float)$r['f_close_vs_high'] >= -3;
+    $g2    = array_values(array_filter($real, fn($r) => $r['f_close_vs_high'] !== null));
+    foreach ([['상단마감', true], ['그밖', false]] as [$lab, $want]) {
+        $grp = array_values(array_filter($g2, fn($r) => $isHi($r) === $want));
+        $nl  = count(array_filter($grp, $isLim));
+        say(sprintf('    %-10s n=%-6s  그중 상한가마감 %s (%.1f%%)', $lab, $num(count($grp)),
+            $num($nl), count($grp) ? $nl / count($grp) * 100 : 0));
+    }
+    say('');
+    say('  상한가 × 상단마감 으로 갈라 본 익일 시가 수익률 — <b>분봉 표본</b>');
+    foreach ([[1, true], [1, false], [0, true], [0, false]] as [$L, $H]) {
+        $grp = array_values(array_filter($g2, fn($r) => ($isLim($r) ? 1 : 0) === $L && $isHi($r) === $H));
+        qm_line(($L ? '상한가마감' : '상한가 아님') . ' · ' . ($H ? '상단' : '비상단'),
+                qm_stat($col($grp, 'f_nd_open_ret')));
+    }
+    $a = qm_stat($col(array_values(array_filter($g2, fn($r) => !$isLim($r) && $isHi($r))),  'f_nd_open_ret'));
+    $b = qm_stat($col(array_values(array_filter($g2, fn($r) => !$isLim($r) && !$isHi($r))), 'f_nd_open_ret'));
+    $t = qm_welch($a, $b);
+    if ($t !== null) say(sprintf('    ⇒ <b>상한가를 뺀 뒤</b> 상단마감 효과: %+.2f%%p · Welch t=%.2f%s',
+        ($a['mean'] ?? 0) - ($b['mean'] ?? 0), $t, abs($t) > 2 ? '' : '  (|t|≤2)'));
+
+    /* ★같은 분해를 8년 일봉(qm_dday)에도 던진다 — 분봉은 1년이라 한 국면에 갇힌다.
+     *   여기서도 같은 모양이면 「국면 탓」이라는 반론이 닫힌다. */
+    try {
+        $dd = $pdo->query("SELECT chg_pct, f_close_vs_high, f_nd_open_ret FROM qm_dday
+                            WHERE q_split=0 AND q_halt=0
+                              AND f_close_vs_high IS NOT NULL AND f_nd_open_ret IS NOT NULL")
+                  ->fetchAll(PDO::FETCH_ASSOC);
+        if ($dd) {
+            say('');
+            say('  같은 분해를 <b>8년 일봉(qm_dday)</b>에 던지면 — 국면 탓인지 아닌지가 여기서 갈린다');
+            foreach ([[1, true], [1, false], [0, true], [0, false]] as [$L, $H]) {
+                $grp = array_values(array_filter($dd, fn($r) => ((float)$r['chg_pct'] >= 29 ? 1 : 0) === $L
+                       && (((float)$r['f_close_vs_high'] >= -3) === $H)));
+                qm_line(($L ? '상한가마감' : '상한가 아님') . ' · ' . ($H ? '상단' : '비상단'),
+                        qm_stat($col($grp, 'f_nd_open_ret')));
+            }
+            $a = qm_stat($col(array_values(array_filter($dd, fn($r) => (float)$r['chg_pct'] < 29 && (float)$r['f_close_vs_high'] >= -3)), 'f_nd_open_ret'));
+            $b = qm_stat($col(array_values(array_filter($dd, fn($r) => (float)$r['chg_pct'] < 29 && (float)$r['f_close_vs_high'] <  -3)), 'f_nd_open_ret'));
+            $t = qm_welch($a, $b);
+            if ($t !== null) say(sprintf('    ⇒ <b>상한가를 뺀 뒤</b> 8년 일봉의 상단마감 효과: %+.2f%%p · Welch t=%.2f',
+                ($a['mean'] ?? 0) - ($b['mean'] ?? 0), $t));
+            say('    (일봉 원 결론은 +1.78%p · t=33.54 였다 — 이 줄과 견준다)');
+        }
+    } catch (Throwable $e) { say('  (qm_dday 없음: ' . $e->getMessage() . ')'); }
+
+    // ── G4. 그러면 상한가 마감을 «살» 수 있었나 ──────────────────────────
+    hr('G4. 그 상한가 마감을 «살» 수 있었나 — 이벤트일 막판 거래 비중');
+    say('  값이 거기 있어도 못 사면 그 수익률은 내 것이 아니다. 종가에 얼마나 손이 바뀌었나를 잰다.');
+    foreach ([['상한가마감', 1], ['상한가 아님', 0]] as [$lab, $L]) {
+        $grp = array_values(array_filter($real, fn($r) => ($isLim($r) ? 1 : 0) === $L));
+        say('    [' . $lab . ']');
+        qm_line('  종가단일가 거래량 비중(%)',  qm_stat(array_map(fn($x) => $x === null ? null : $x * 100, $col($grp, 'g_ev_close_vr'))));
+        qm_line('  15:10~15:19 거래량 비중(%)', qm_stat(array_map(fn($x) => $x === null ? null : $x * 100, $col($grp, 'g_ev_l10_vr'))));
+    }
+    /* ★★여기가 이 검정의 급소다 — 「비중이 낮다」가 아니라 «아예 0» 인 건이 얼마나 되나.
+     *   종가 단일가에 체결이 0 이면 그 날 종가에 <b>살 수 없었다</b>. 값이 있어도 내 것이 아니다. */
+    say('');
+    say('  ★종가 단일가에 «거래가 아예 없던» 비율 — 0 이면 그 날 종가에 살 수 없었다');
+    foreach ([['상한가마감', 1], ['상한가 아님', 0]] as [$lab, $L]) {
+        $grp = array_values(array_filter($real, fn($r) => ($isLim($r) ? 1 : 0) === $L
+                                             && $r['g_ev_close_vr'] !== null));
+        $z = array_values(array_filter($grp, fn($r) => (float)$r['g_ev_close_vr'] == 0));
+        say(sprintf('    %-12s n=%-6s  체결 0 인 건 %s (%.1f%%)', $lab, $num(count($grp)),
+            $num(count($z)), count($grp) ? count($z) / count($grp) * 100 : 0));
+    }
+    /* ★★★역선택 — 「못 산 쪽이 더 좋은가」. 그렇다면 체결 가능성으로 거른 순간 우위가 깎인다. */
+    $limSet = array_values(array_filter($real, fn($r) => $isLim($r) && $r['g_ev_close_vr'] !== null));
+    if (count($limSet) >= 30) {
+        say('');
+        say('  ★★상한가마감을 «살 수 있었나»로 갈라 본 익일 시가 수익률');
+        $bought = array_values(array_filter($limSet, fn($r) => (float)$r['g_ev_close_vr'] >  0));
+        $missed = array_values(array_filter($limSet, fn($r) => (float)$r['g_ev_close_vr'] == 0));
+        qm_line('종가에 체결이 있었다(살 수 있었다)', qm_stat($col($bought, 'f_nd_open_ret')));
+        qm_line('체결이 0 이었다(못 샀다)',           qm_stat($col($missed, 'f_nd_open_ret')));
+        $t = qm_welch(qm_stat($col($missed, 'f_nd_open_ret')), qm_stat($col($bought, 'f_nd_open_ret')));
+        if ($t !== null) say(sprintf('    ⇒ 못 산 쪽이 %+.2f%%p 더 좋다 · Welch t=%.2f%s',
+            (qm_stat($col($missed, 'f_nd_open_ret'))['mean'] ?? 0)
+            - (qm_stat($col($bought, 'f_nd_open_ret'))['mean'] ?? 0),
+            $t, abs($t) > 2 ? '  ← 체결 가능성으로 거르면 우위가 깎인다' : '  (|t|≤2)'));
+    }
+
+    say('');
+    say('  ⛔여기서 멈춘다 — 분봉은 «체결된 양»만 안다. <b>호가 잔량과 시간우선순위는 원장에 없다</b>.');
+    say('    상한가에서는 모든 호가가 «같은 값»이라 체결 순서를 시간우선이 정한다.');
+    say('    즉 15:20 에 낸 주문은 아침부터 줄 선 잔량 «뒤»인데, 그 줄 길이를 우리는 재지 못한다.');
+
+    // ── G5. 비용을 빼면 ───────────────────────────────────────────────────
+    hr('G5. 왕복 비용을 빼면 — ★비용률은 «가정»이다');
+    say(sprintf('  가정: 왕복 %.2f%% (세금+수수료). 이 값은 실측이 아니라 상수다 — 바꾸려면 소스 한 줄.', $costPct));
+    $sReal = qm_stat($col($hiR, 'g_real_ret'));
+    if (($sReal['n'] ?? 0) > 0) {
+        say(sprintf('  15:19 상단마감 · 실전 왕복  평균 %+.2f%% → 비용 뒤 %+.2f%%  (n=%s · 양(+) %.1f%%)',
+            $sReal['mean'], $sReal['mean'] - $costPct, $num($sReal['n']), $sReal['win']));
+        say('  ※ 「양(+) 비율」은 비용 전 기준이다 — 건별로 비용을 빼면 그 비율도 내려간다.');
+    }
+
+    // ── G4. 시가에 팔 수 있나 ─────────────────────────────────────────────
+    hr('G6. 익일 시가에 «얼마나» 팔 수 있나');
+    qm_line('익일 첫 봉 거래량 비중 (g_nd_open_vr)', qm_stat($col($real, 'g_nd_open_vr')));
+    say('  ※ 09:00 봉은 시가 단일가 물량이 통째로 실린 봉이다 — 비중이 클수록 그 자리에 팔 여지가 넓다.');
+    say('    ⛔이것은 «호가 잔량»이 아니라 «체결된 양»이다. 내 주문이 그만큼 소화된다는 보장은 아니다.');
+
+    hr('G7. 갭의 수명 — 시가에 못 팔면 얼마나 잃나 (전부 «익일 시가 대비»)');
+    say('  대상: 15:19 상단마감 · 실전 가능 표본  n=' . $num(count($hiR)));
+    foreach (['g_nd_o1_ret' => '09:00 봉 종가', 'g_nd_0905_ret' => '09:05',
+              'g_nd_0930_ret' => '09:30', 'g_nd_oc_ret' => '익일 종가',
+              'g_nd_oh_ret' => '익일 고가(참고)'] as $c => $lab) {
+        qm_line($lab, qm_stat($col($hiR, $c)));
+    }
+    say('');
+    say('  ★「익일 고가」는 사후에만 아는 값이다 — 그 자리에 팔 수 있었다는 뜻이 아니라,');
+    say('    시가 매도가 얼마나 손해였는지를 재는 «위쪽 한계»다.');
+
+    say('');
+    say('  통계적 사실만 적는다. 투자 판단·매매 규칙은 여기서 만들지 않는다.');
     break;
 }
 
