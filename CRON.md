@@ -37,11 +37,12 @@
 | 6 | **평일 9회** `5 6-9,11,13,15,17,19 * * 1-5` | get_news_keyword (제목 `7회` 는 낡음) | `cron/keyword_collector.php` `mode=stock_etf_news` | 14.3s | ✅ |
 | 7 | 매일 13:05 | krx 상장주식수 | `cron/dart_collect.php` `job=krx` | 19.8s | ✅ **오후 1회로 확정** · 2026-07-31 **거래대금 장기보관 이관 추가**(krx_daily→krx_amt · API 0회) |
 | 8 | **평일** 15:50 `50 15 * * 1-5` | 당일종가 | `cron/dart_collect.php` `job=eod` | ~3s (2026-08-02 실측 9.1s — 잠정적재·신호 추가분) | ✅ 2026-08-02 EDIT 화면 실확인 |
-| 9 | **평일** 16:20 `20 16 * * 1-5` | ETF 편입종목 가져오기 | `cron/keyword_collector.php` `mode=etf_update` | 30s+ (bg) | ✅ 2026-08-02 EDIT 화면 실확인 · bg 는 레지스트리가 붙임 |
+| 9 | **평일** 16:20 `20 16 * * 1-5` | ETF 편입종목 가져오기 | `cron/keyword_collector.php` `mode=etf_update` | **901.7s** (bg · 2026-08-04 로그 실측 · ETF 435개 × sleep 2초 → **16:35 종료**) | ✅ 2026-08-02 EDIT 화면 실확인 · bg 는 레지스트리가 붙임 |
+| 16 | **평일** 16:45 `45 16 * * 1-5` | 키움단타데이터(일1회) | `cron/dt_min.php` `job=daily&bg=1` | 종목당 ~1s (20종목 ≈ 40s · bg) | ✅ **2026-08-04 신설·등록 완료** (Save responses ON · 실패 알림 3종 ON) |
 | 11 | 매월 1일 새벽(10분 간격 반복) | 네이버 맛집 | `cron/naver_collect.php` `cat=food&bg=1` | 1.9s* | ✅ |
 | 12 | 매월 2일 새벽 03:01 | 네이버 스테이 | `cron/naver_collect.php` `cat=stay&bg=1` | 30s+ | ✅ **완료**(배포됨 · URL 이미 bg=1) |
 | 13 | 매월 3일 새벽 02:02 | 네이버 캠핑장 | `cron/naver_collect.php` `cat=camping&bg=1` | 30s+ | ✅ **완료**(배포됨 · URL 이미 bg=1) |
-| 14 | 매월 4일 03:01 | 아덴트뉴스 | `cron/ardent_crawl.php` `run_ai=1&bg=1` | – | 미실행 이력 |
+| ~~14~~ | ~~매월 4일 새벽 30회~~ | ~~아덴트뉴스~~ | `cron/ardent_crawl.php` `run_ai=1&bg=1` | 회당 180s | ⛔ **2026-08-04 등록 해제** (§3.6) |
 | 15 | 매년 01/01 | 공휴일 가져오기 | `cron/schedule_alert.php` `mode=sync_holidays` | – | ✅ |
 
 \* 맛집 1.9s = 그 회차가 이미 완료돼 **no-op** 였던 것. 실제 수집 중에는 30초를 넘긴다.
@@ -55,9 +56,9 @@
 #3  ?task=dart_fresh&k=econ-cron-j7k2        #11  …&task=naver_food
 #4  ?task=market&k=econ-cron-j7k2            #12  …&task=naver_stay
 #5  ?task=news&k=econ-cron-j7k2              #13  …&task=naver_camping
-#6  ?task=stock_news&k=econ-cron-j7k2        #14  …&task=ardent
+#6  ?task=stock_news&k=econ-cron-j7k2        #14  (해제 — 아덴트뉴스 · 수동 전용)
 #7  ?task=dart_krx&k=econ-cron-j7k2          #15  …&task=holidays
-#8  ?task=dart_eod&k=econ-cron-j7k2
+#8  ?task=dart_eod&k=econ-cron-j7k2          #16  …&task=dt_min      ← 신설(평일 16:45)
 ```
 앞에 `https://economist.kr/cron_job.php` 를 붙인다. 전체 목록은 `?task=list&k=…`.
 
@@ -69,6 +70,10 @@
   - #3 → DART 공시 접수가 영업일 기준이라 평일만으로 **무해**하다. 단 금요일 야간~일요일에 정정공시가 올라오면 월요일 08:05까지 안 들어온다(주말 스크리너 열람 시 감안).
   - **#7 `job=krx` 는 매일(`* * *`)**, **#8 `job=eod` 는 평일(`1-5`)** 이다(2026-08-02 EDIT 화면 실확인 — 옛 기록 "eod 매일"은 낡음). 휴장일·주말에는 받을 게 없어 "받을 거래일이 없습니다" / "저장할 값이 없습니다" 로 조용히 빠지므로 어느 쪽이든 무해하다.
 - **#4 는 일요일 제외(`1-6`)**. 월요일 브리핑은 금요일 거래일을 기준일로 잡는다(기준일=투자자 매매동향 최신일).
+- **★#9 와 #16 은 시각이 붙어 있다 — 겹치지 않게 벌려 뒀다.** #9(16:20)가 실측 **901.7초**로 16:35 까지 도는데,
+  #16 을 처음 계획대로 16:25 에 두면 그 한복판에서 시작해 10분을 겹친다(둘 다 bg = 별도 프로세스가 나란히 산다).
+  외부 API 도 테이블도 달라 관측된 피해는 없었지만, 늦춰서 잃는 것이 없어 **16:45** 로 물렸다.
+  ETF 수가 늘면 #9 의 종료도 뒤로 밀리므로(대상 × 2초), 언젠가 다시 벌려야 한다면 **#16 을 더 뒤로** 민다.
 - **#4 의 `bg=1` 은 사실상 무효**다(패턴 A · apache2handler). 다만 전체가 15.6초라 30초 안에 끝나 문제가 되지 않는다.
 
 ### SSH/수동 전용 (크론 미등록)
@@ -242,6 +247,7 @@ PC↔노트북은 구글 드라이브 정션으로 동기화되고, 서버는 **
 ?task=dart_slots&today=2026-08-15
 ?task=naver_stay&status=1
 ?task=ardent_status
+?task=ardent_new          (아직 안 본 아덴트 기사 목록 · 무료)
 ?task=place_geo
 ```
 bg 실행 로그 (뒤에서 돈 잡이 무엇을 했는지 — **bg 잡은 이걸로만 확인된다**)
@@ -268,8 +274,15 @@ bg 실행 로그 (뒤에서 돈 잡이 무엇을 했는지 — **bg 잡은 이�
 - 타깃이 오토로더(cnt.inc)를 로드하기 전에 죽어도 되도록 Notify 직접 로드 폴백이 있다.
 - ⚠️ 타깃이 **자체 catch 로 삼키는 예외는 중앙에서 안 보인다** — 그런 곳(keyword_collector 3개 모드·etf_update)은 catch 안에서 직접 priority 1 로 쏜다.
 
-**② 데이터 레벨 감시 — `dart_collect job=eod` 끝에서 `all_stock_info` 당일 갱신률 점검.**
-"크론은 성공했는데 데이터가 안 들어온" 케이스용. 갱신 0건=휴장일이라 무음, **0 < 갱신률 < 80% 면 `⚠️ 종가 갱신률 저조` priority 1**.
+**② 데이터 레벨 감시 — "크론은 성공했는데 데이터가 안 들어온" 케이스용. 두 곳에 있다.**
+
+| 자리 | 재는 것 | 무음 조건 | 경고 |
+|------|---------|-----------|------|
+| `dart_collect job=eod` 끝 | `all_stock_info` 당일 갱신률 | 갱신 0건 = 휴장일 | 0 < 갱신률 < 80% → `⚠️ 종가 갱신률 저조` priority 1 |
+| `dt_min job=daily` 끝(⑤) | **수집 대상**(풀 ∪ 보유 · `Dt::targetCodes`) 중 당일 봉이 남은 종목 수(`Dt::collectedCount` · 치유 뒤 기준) | 거래일 아님 · 대상 0종목 | 적재 < 절반 → `cron_fail_notify('dt_min', …)` priority 1 |
+
+★둘 다 **자체 catch 로 예외를 삼키는 크론**이라 중앙 알림이 못 본다(규칙 3). 삼키는 이유가 있는 코드는
+(eod=부분 실패 허용 · dt_min=네이버 폴백) 반드시 이렇게 «결과를 세어» 스스로 쏴야 한다.
 
 **③ 정기(성공) 알림 — 남긴 것만:**
 
@@ -331,6 +344,7 @@ if (class_exists('Notify')) {
 | `range&full=1` | **SSH 1회** | 일별 고·저 **씨 뿌리기**(종목마다 일봉 1회) | `api.finance.naver.com/siseJson.naver` × 2,766 | `stock_daily_range` | **340초** |
 | `quarter` | SSH 최초 | 분기 재무제표 전량 적재 (2016~) | DART | `stock_financial` | ~8분 |
 | `shares` | SSH 최초 | 연도별 주식수 (종목마다 1콜) | DART | `stock_fundamental` | ~54분 |
+| `nifix` | SSH 1회 | **순이익 결측 보수** — 매출은 있는데 `net_income` 만 빈 행을 전체재무제표로 메움 (행마다 1콜 · `&y= &rc= &budget=`) | DART `fnlttSinglAcntAll` | `stock_financial.net_income` | 90행 ≈ 24초 |
 | `slots` | 드라이런 | `fresh` 가 어떤 슬롯을 고를지 미리보기 (DART 호출 없음) | – | – | 즉시 |
 | `log` / `status` | 확인 | 지난 bg 로그 / 적재 현황 | – | – | 즉시 |
 
@@ -346,6 +360,12 @@ if (class_exists('Notify')) {
 6. **KRX 크론은 새벽 금지.** T+1인데다 **다음 날 오전에야** 올라온다(01:19엔 없고 11:58엔 있음). → **13:05 오후 1회로 확정**(11:58에 이미 있으므로 단발로 충분). 코드 주석의 "오전·오후 2회"는 올라오는 시각이 불확실할 때의 안전장치였다. `collectLatest()` 가 "그 시점의 최신 거래일"을 찾아오므로 여러 번 돌려도 안전하긴 하다.
 7. **상장주식수는 매일 필요하다.** 1거래일에 11종목·1개월 203종목이 변한다(액면병합·감자·무상증자). 1개월 묵히면 **PER이 10배 틀어진다.**
 8. `job=range` 는 마감 후에 돌려야 한다. 개장 전 `PREOPEN` 에는 o/h/l/v가 **전부 0** 으로 온다.
+9. **주요계정 API 는 순이익을 빠뜨린다** (2026-08-04 규명). `fnlttMultiAcnt` 는 회사가 **표준계정으로 태깅한 것만** 준다 —
+   현대차는 「연결당기순이익」(표준계정코드 미사용)이라 그 행이 응답에 **아예 없다**. 계정명 매핑을 늘려도 소용없다.
+   → `fnlttSinglAcntAll`(전체 재무제표)로 메운다. 실측 897행·233종목 → **137행·59종목**(거래종목분 완료).
+   매일 몫은 **`fresh` 안에 들어 있다**(슬롯당 15행 상한 = 최대 75콜). 옛 연도는 `job=nifix` 로 한 번.
+   ★★ **별도(OFS) 값으로 연결(CFS) 행을 메우지 않는다** — 연결 매출에 별도 순이익을 붙이면 순이익률·ROE 가
+   조용히 틀린다. 빈칸이 틀린 값보다 낫다.
 
 **CLI 실행**: `php cron/dart_collect.php job=quarter from=2016 to=2026 budget=1200`
 (CLI는 `DOCUMENT_ROOT` 가 비어 오토로더가 죽으므로 파일 상단에서 `__DIR__` 로 세팅한다.)
@@ -492,15 +512,57 @@ ORDER BY (MAX(h.uDate) IS NULL) DESC, MAX(h.uDate) ASC, i.etf_code ASC
 
 ### 3.6 `cron/ardent_crawl.php` — 아덴트뉴스 국내여행 → 여행지 DB (AI 추출)
 
-호출(크론): `/cron/ardent_crawl.php?key=econ-ardent&run_ai=1&bg=1&budget=180`
+⛔ **2026-08-04 크론 등록 해제 — 지금은 수동 전용이다** (사용자 지시: 여행지 DB 가 이미 3만 곳이라 상시 수집 중단).
+레지스트리에는 `ardent` 로 남아 있으나 `cron` 이 비어 있다. 호출: `?task=ardent&k=…`
 
-**모드가 9개다** — 대부분 검증/진단용이다.
+★ **다시 크론에 올리려면 콜 상한을 먼저 넣는다.** 2026-08-04 실측 사고 기록:
+
+| 사실 | 값 |
+|------|-----|
+| 옛 스케줄 | `1,11,21,31,41,52 3-7 4 * *` = 매월 4일 새벽 **30회** (30초 타임아웃 우회용 조각내기 — 중복 처리는 없다) |
+| 1회 실행 | 시간예산 180초 → 기사 ~17건 |
+| 그날 총계 | 기사 **491건** 처리 · Claude 콜 **411회** · 신규 place **192곳** / 보강 133곳 |
+| 비용 | **≈$6** (기사 1건 = 콜 1회 ≈$0.015 · 본문 전문 전송 · 프롬프트 캐싱 없음) |
+| 피해 | `ANTHROPIC_API_KEY` **잔액 소진**. 그 키를 **모닝브리핑·명함스캔·음성일정등록·계약서판독·여행지추천이 공유**한다 → 07:22 소진 → 08:10 브리핑이 폴백으로 나감 |
+| 왜 그날 491건이었나 | 옛 크롤이 `last_run=2026-06-11` 에 멈춰 **54일치 백로그**를 한 번에 태웠다. 평상시 한 달치는 ~270건 |
+
+- **횟수를 줄이는 건 해법이 아니다** — 매 발사가 `tbl_ardent_crawl` 를 보고 *안 본 기사만* 집으므로 30회는 한 작업의 30조각이다. 줄이면 비용이 아니라 수집량이 준다(백로그가 쌓인다).
+- 필요한 건 **① 1회 실행 콜 상한 + 일일 누적 상한**(지금은 시간예산 180초뿐) **② 잔액 소진 시 즉시 중단 + Pushover**(그날 80건을 계속 때리며 조용히 실패했다) **③ 크론 사이트 실패 알림 ON**(당시 OFF).
+- ⚠️ **일시적 API 실패도 `skip` 으로 영구 기록된다**([ardent_crawl.php:541](cron/ardent_crawl.php#L541)) → 충전해도 재시도되지 않는다.
+  되살리기는 이제 모드가 있다: **`revive=1&kind=all&dry=1`** 로 세어 보고 `&dry` 를 빼면 그 행만 지운다(정당한 skip `AI:0곳` 은 보존).
+  **2026-08-04 실측 232건**(사용한도 도달 143 · 잔액소진 80 · JSON 파싱실패 9) — CRON.md 가 적어 뒀던 「82건」은 잔액소진분만 센 값이었다.
+- 손으로 돌릴 때는 `&budget=` 을 작게 줘서 조금씩 돈다.
+
+### ★유료 API 를 안 쓰는 길 — 사람(Claude Code)이 읽어서 담는다 (2026-08-04 신설)
+
+기사 1건이 곧 콜 1회라 API 로 돌리면 한 달치가 $4~6 이다. 그래서 **월 1회 세션에서 사람이 기사를 읽어 담고,
+서버는 「목록을 주고 · 판정을 해 주고 · 결과를 기록」만 하는** 경로를 뚫었다. 셋 다 **Claude 콜 0회**다.
+
+| 모드 | 저장 | 하는 일 |
+|------|------|---------|
+| `new_list=1[&pages=30&limit=200&fmt=json]` | ✗ | 목록 AJAX 만 훑어 **아직 안 본 기사**(idxno·제목·발행일·URL). `?task=ardent_new` 으로도 부른다 |
+| `match_check=1` (POST) | ✗ | `[{name,region}]` → **run_ai 과 같은** 지오코딩(지역검증)+엄격매칭(250m·이름 완전일치) 결과. 기존 장소면 `has_summary` 까지 |
+| `log_run=1` (POST) | ✅ | 처리 결과를 **① `tbl_ardent_crawl` 처리이력**(reason `CC:N곳`) **② `tbl_ardent_run(_item)` 회차 기록** 둘 다에 남긴다 |
+
+- 적재 자체는 `place_summary_tool.php?add=1`(신규는 `name`, 기존 보강은 `to_id`)을 쓴다 — 여행지 요약 배치에서 쓰던 그 통로다.
+- **왜 `match_check` 이 따로 필요한가**: `add` 의 중복판정은 `dedup_key(name+region_lv2)` 뿐이라 이름이 조금만 달라도 옆에 새 마커를 만든다.
+  `run_ai` 가 쓰던 좌표 250m + 정규화 이름 완전일치를 **같은 함수로** 부르려고 뚫었다(판정 단일본).
+- **회차 기록은 화면이 있다 → [`/ardent_log.php`](../ardent_log.php)** (상단 네비 「아덴트수집」). 날짜별로 기사·등록장소·요약 전문을 본다.
+  ★요약을 `tbl_ardent_run_item` 에 **복사**해 둔다: `place.attributes.summary` 는 다음 기사가 덮을 수 있어 「그날의 기록」이 못 된다.
+- 기존 장소 보강 때 **요약은 최초 1회만 고정**(run_ai 과 같은 규칙) — `match_check` 의 `has_summary` 가 참이면 `add` 에 summary 를 안 보낸다.
+  특성(features)은 그때도 병합된다(예전엔 `place_summary_tool` 의 `to_id` 분기에서 features 가 summary 조건 안에 갇혀 함께 누락됐다 · 2026-08-04 수정).
+
+**모드가 12개다** — 대부분 검증/진단용이다.
 
 | 모드 | 저장 | 용도 |
 |------|------|------|
 | `status=1` | – | 진행 상태(다음 시작 페이지 / done·skip / place 좌표 현황) |
-| `run_ai=1` | ✅ | **크론용.** 기사 본문 → Claude 추출 → 카카오 지오코딩 → 엄격 매칭 → 적재 |
-| `dry_ai=8` | ✗ | 위 파이프라인 리포트만 + **토큰·비용 추정** 출력 |
+| `new_list=1` | ✗ | **미처리 기사 목록**(무료) — 위 절 |
+| `match_check=1` | ✗ | **지오코딩+기존장소 매칭**(무료·POST) — 위 절 |
+| `log_run=1` | ✅ | **회차 기록**(무료·POST) — 위 절 |
+| `revive=1[&kind=api\|body\|all][&dry=1]` | ✅ | 일시적 API 실패로 굳은 `skip` 삭제 → 미처리로 되돌림 |
+| `run_ai=1` | ✅ | **(유료)** 기사 본문 → Claude 추출 → 카카오 지오코딩 → 엄격 매칭 → 적재 |
+| `dry_ai=8` | ✗ | **(유료)** 위 파이프라인 리포트만 + **토큰·비용 추정** 출력 |
 | `run=1` | ✅ | 구(regex) 파서 적재. AI 없이 meta/본문 정규식 |
 | `dry=1&pages=1` | ✗ | 구 파서 덤프 |
 | `test=15288` | ✗ | 단일 기사 파싱 검증(본문·주소·전화·시간·입장료 개별 확인) |
@@ -520,7 +582,8 @@ ORDER BY (MAX(h.uDate) IS NULL) DESC, MAX(h.uDate) ASC, i.etf_code ASC
 - `place` enum 에 `cafe` 가 없어 `cafe → restaurant` 매핑.
 - 예산 미도달 완주 + 실적 있으면 Pushover 1회.
 - **현재 4종(travel·restaurant·stay·camping) 전부 소진(0곳)** 상태 → 매월 fire는 신규 기사만 훑는다.
-- 상태: `tbl_ardent_state`(`last_page`, `last_run`, `ai_last_run`), `tbl_ardent_crawl`(idxno PK)
+- 상태: `tbl_ardent_state`(`last_page`, `last_run`, `ai_last_run`, `cc_last_run`), `tbl_ardent_crawl`(idxno PK),
+  회차 기록 `tbl_ardent_run` / `tbl_ardent_run_item`(`classes/ArdentLog.class` 전담 · 화면 `ardent_log.php`)
 - HTML 캐시: `sys_get_temp_dir()/ardent_cache`
 - 외부: `ardentnews.co.kr`(목록 AJAX `ajaxArticlePaging.php`), `api.anthropic.com`, `dapi.kakao.com`
 - 필요 키: `env/anthropic.inc` 또는 `ANTHROPIC_API_KEY`, `env/kakao.inc`
@@ -592,6 +655,75 @@ https://economist.kr/market/crawl.php?key=econ-mkt-7x3k&report=1&notify=1&bg=1
 
 ---
 
+### 3.9 `cron/dt_min.php` — 단타 1분봉 원장 (2026-08-04 신설)
+
+`?task=dt_min&k=…` (레지스트리가 `key=econ-dt-min&job=daily&bg=1` 주입) · **평일 16:45** · 예산 900초
+
+**왜 있나** — 네이버 분봉은 **최근 7거래일**만 준다(실측). 그 뒤로는 어떤 파라미터로도 못 받는다.
+단타 화면의 보관 창이 10거래일이라, 오늘부터 **우리가 쌓아야만** 성립한다. 저장처는 `dt_min`(1분봉 원장).
+
+**★수집 대상은 「단타 풀」이 아니라 「풀 ∪ 보유」다** (2026-08-05).
+단일본은 **`Dt::targetCodes()`** = `dt_pool`(active=1) **∪** 살아있는 포지션(`pf_position.status <> 'closed'`).
+아래 ①③④⑤ 가 **전부 그 하나**를 본다 — 한 곳만 넓히면 「어떤 단계는 보유를 받고 어떤 단계는 안 받는」 어긋남이 난다.
+★**보유 종목을 `dt_pool` 에 «담지» 않는다** — 그 표는 상한 20 을 FIFO 로 지우는 표라
+(`poolEvictLast` → `poolRemove` → `DELETE dt_min`) 담아 두면 탐색하다 「＋」 한 번 누른 것이
+**내가 산 종목의 봉을 통째로 지운다**. 원본은 `pf_position` 이고 여기엔 **참조만** 한다.
+★**`prune()` 의 해지잔여 삭제에서 보유는 뺀다** — 옛날 해지한 종목을 나중에 사면 `dt_pool` 에
+`active=0` 으로 남아 **수집 대상이면서 매일 지워지는** 밑 빠진 독이 된다(로그엔 성공으로 보인다).
+★**보유의 초기 10거래일은 단타 화면이 열릴 때 화면이 당겨 온다**(api `held_init` · 한 번에 하나씩).
+크론의 ③ 구멍 치유는 **못 받은 것을 받아 주는 뒷받침**이다 — 편입한 날 분봉을 보려면 화면 쪽이 필요했다.
+실측 2026-08-05: **11종목 → 22종목**(풀 11 + 보유 14 − 겹침 3). 11종목이 66.5초였으니 예산 900초에 여유가 크다.
+
+**한 태스크 안의 4단계** — 요건 초안은 크론 3개였지만, 같은 시점에 매달린 순서 있는 일이라 `dart_eod` 처럼 묶었다.
+
+| 단계 | 하는 일 | 함정 |
+|---|---|---|
+| ① 수집 | **대상 종목**(풀 ∪ 보유)의 **당일분** (키움 ka10080 → 실패 시 네이버) | 종목당 1초 간격 = 20종목 40초 → **bg 필수** |
+| ② 만료 삭제 | 보관 창(최근 10거래일) 밖의 봉 · 60일 지난 로그 | ★**반드시 수집 다음** — 순서가 뒤집히면 수집 실패한 날 보관 일수만 줄어든다 |
+| ③ 구멍 치유 | `dt_min_log` 가 `partial/none/fail` 인 (종목,날짜) 재수집 (`tries<5`) | 키움이 1년을 보관하므로 며칠 놓쳐도 복구된다. 네이버 폴백은 7거래일까지만 |
+| ④ 분할 감지 | `krx_amt.list_shrs` 가 전일 대비 ±20% → **전량 삭제 후 재수집** | 계수를 곱하지 않는다 — 10거래일이면 5콜이라 다시 받는 편이 싸고 확실하다 |
+| ⑤ 적재율 감시 | 치유까지 끝난 뒤 **실제로 남은** 종목 수(`Dt::collectedCount`)가 절반 미만이면 `cron_fail_notify` priority 1 | ★이 파일은 실패를 **전부 자체 catch 로 삼킨다**(네이버 폴백을 위해) → 중앙 실패 알림이 못 본다. §2.5 규칙 3 대로 스스로 쏜다 |
+
+**★마감 뒤여야 하는 이유 (타이밍 의존)** — 「오늘이 거래일인가」를 `krx_amt` 의 오늘 행으로 판정하는데,
+그 행은 **15:50 `dart_eod`** 가 `all_stock_info` 스냅샷에서 넣는다(`src='n'`). 앞에 두면 매일 「휴장일」로
+오판해 그날 분봉을 조용히 건너뛴다. 폴백으로 `all_stock_info.uDate` 도 보지만, 순서를 지키는 편이 낫다.
+(15:30 종가 단일가 체결 반영도 16:00 이후여야 안전하다)
+**★16:25 가 아니라 16:45 인 이유** — 바로 앞 `etf_update`(16:20)가 실측 901.7초라 16:35 까지 돈다(§1).
+데이터 조건은 15:50 이후면 똑같이 만족하므로, 겹치지 않게 뒤로 물린 것이다.
+
+**진단·수동 job**
+```
+php cron/dt_min.php job=diag code=005930    ★키움 시각 기준(V-1)·거래량 기준(V-4)을 네이버와 대조
+php cron/dt_min.php job=status              보관 창·종목별 적재 현황
+php cron/dt_min.php job=init code=005930    한 종목 10거래일 초기 적재
+php cron/dt_min.php job=heal                구멍만 치유
+```
+
+**✅ `job=diag` 실측 완료 (2026-08-04 · 005930)**
+```
+대조 381분 · 같은 분 일치 381 · 1분 당겨 일치 94 · 거래량 일치 379
+★ TS_BASE='start' 가 맞습니다   ★ 거래량 기준 일치
+```
+- **봉 시각은 「시작」** — `Kiwoom::TS_BASE='start'` 확정. 구조로도 같다(09:00 있고 08:59 없음 · 15:19 있고 15:20 없음 · 15:30 단일가 · 시간외 마지막 19:59).
+- **`_AL`(SOR)은 쓰지 않는다** — 거래량 기준이 네이버와 달라(KRX 29,246,067 · NXT 14,315,959 · _AL 43,555,914)
+  폴백·장중 실시간과 **한 종목의 하루 봉에 두 기준이 섞인다**. `env/kiwoom.inc` 의 `KIWOOM_NO_SOR=true`(KRX 단독).
+
+**★키움은 IP 화이트리스트다.** `[8050:지정단말기 인증에 실패했습니다]` 는 키 문제가 아니라 **등록 IP 제한**이다
+(키움 「계좌 API KEY 관리 > IP 등록 및 현황」 · 최대 10개). 서버 IP `220.73.160.47` 이 등록돼 있어야 한다
+— 웹 서비스 IP 와 나가는 IP 가 같다(실측). 작업 PC 의 IP 도 함께 두면 서버가 막혔을 때 같은 요청을 PC 에서 재현해
+진단할 수 있다(V-1·V-4 를 그렇게 답했다). **키 만료 2027-08-04**(1년) · App Key/Secret 은 1회만 다운로드된다.
+
+**★잡 이력(Save responses)에는 `queued …` 한 줄만 남는다** — bg 라 0.07초에 응답하기 때문이다.
+「아무것도 안 했네」로 읽지 말 것. **실제로 무엇을 했는지는 `?task=dt_min&k=…&log=1`** 에 있다.
+같은 이유로 cron-job.org 의 실패 알림은 HTTP 레벨(500·DNS·인증서)만 잡는다 — 수집 실패는 ⑤가 Pushover 로 쏜다.
+
+**쓰는 표** — `dt_pool`(종목 풀) · `dt_min`(1분봉) · `dt_min_log`(일자별 상태) · `dt_token`(접근토큰 캐시)
+**읽는 표** — `pf_position`·`pf_portfolio`(보유 종목 · **읽기만** 한다) · `krx_amt`(거래일·창·분할 감지) · `all_stock_info`
+**필요 키** — `env/kiwoom.inc` (`KIWOOM_APP_KEY`·`KIWOOM_SECRET_KEY`). 없으면 네이버 폴백으로 **당일만** 쌓인다.
+**소비 화면** — `/stock/index.php?mode=short` (단타 · 다크 3분할)
+
+---
+
 ## 4. 외부 의존성 총람 — 어디가 끊기면 무엇이 멈추나
 
 | 소스 | 쓰는 크론 | 한도/차단 특성 | 끊기면 |
@@ -600,6 +732,7 @@ https://economist.kr/market/crawl.php?key=econ-mkt-7x3k&report=1&notify=1&bg=1
 | **네이버 지도** (`pcmap.place.naver.com`) | `naver_collect` | **429 = IP당 누적 예산형**. 3초 간격 OK | 맛집/스테이/캠핑 수집만 |
 | **DART OpenAPI** (`opendart.fss.or.kr`) | `dart_collect`(fresh·quarter·shares) | **하루 20,000회**. `fresh` 는 200회(1%) | 재무 스크리너 갱신 |
 | **KRX 오픈API** (`data-dbg.krx.co.kr`) | `dart_collect`(krx) | 인증키≠서비스권한(서비스별 신청). **PER/PBR 서비스 없음**. T+1·**보관 11년 이상**(2026-07-31 실측 — 옛 「730일」은 2년까지만 찍어 본 오기) | **상장주식수 → PER 분모** |
+| **키움 REST** (`api.kiwoom.com`) | `dt_min`(단타 분봉) | 접근토큰(만료 10분 전 재발급) · TR별 **1 req/s**·429 백오프 · 분봉 **1년 보관** · ★코드는 `_AL`(SOR) | 단타 분봉이 **네이버 폴백(7거래일·당일 위주)** 으로 떨어진다 |
 | **카카오 로컬** (`dapi.kakao.com`) | `place_geocode`, `waste_geocode`, `ardent_crawl` | 일 한도 있음 | 좌표화 |
 | **네이버 지오코딩** (`maps.apigw.ntruss.com`) | `place_geocode`, `waste_geocode` | 유료 쿼터 | 주소 좌표화(카카오 폴백 있음) |
 | **data.go.kr** (공휴일 `SpcdeInfoService` / 음양력 `LrsrCldInfoService`) | `schedule_alert`(sync_holidays), `lunar_seed` | **일 1만** · 서비스별 승인 필요 | 공휴일·음력 |
@@ -627,6 +760,7 @@ https://economist.kr/market/crawl.php?key=econ-mkt-7x3k&report=1&notify=1&bg=1
 | `market_trend_snapshots` / `_keywords` | `keyword_collector`(stock_etf_news) | 종목 급등 키워드 |
 | `news_trend_snapshots` / `_keywords` | `keyword_collector`(news) | 섹션 뉴스 키워드. `news_stopwords` 읽기 |
 | `market_snapshot` | `market/crawl` | `snap_date` PK, JSON + HTML 캐시 |
+| `dt_min` / `dt_min_log` / `dt_pool` / `dt_token` | `dt_min`(단타) | ★**보관 창 = 최근 10거래일**. 매일 그 밖을 지운다 — 옛 분봉을 여기서 찾지 말 것. 거래일 판정·창 계산은 `krx_amt` 를 읽는다(별도 휴장일 표 금지) |
 | `place` / `place_ref` / `place_tag` | `naver_collect`, `ardent_crawl`, `place_geocode`, `place_tag_backfill` | **4개 크론이 공유.** 삭제는 FK CASCADE |
 | `place_naver_stat` | `naver_collect` | 회차 추이 스냅샷 |
 | `naver_collect_region` / `_log` | `naver_collect` | 진행 큐 |
@@ -646,7 +780,7 @@ https://economist.kr/market/crawl.php?key=econ-mkt-7x3k&report=1&notify=1&bg=1
 | `stock/index.php?mode=fund` (재무 스크리너) | `stock_financial`, `stock_fundamental`, `krx_daily`, `all_stock_info`, `stock_price_range` | `dart_collect` **전 job** |
 | `stock/index.php` (포트폴리오·시뮬레이터) | `all_stock_info`, 네이버 일봉 | `keyword_collector`(stock_etf_news), `dart_collect`(quotes) |
 | `etf_stock.php` | `all_etf_*` | `keyword_collector`(etf_update) |
-| `stock_analysis.php?mode=updash` | `all_stock_info`, 네이버 일봉 | `keyword_collector`(stock_etf_news) |
+| `stock/index.php?mode=short` (단타) | `dt_min`(1분봉 · 10거래일), `dt_pool`, `all_stock_info`(목록 시세), 기존 `action=daily`(일봉 패널) | **`dt_min`** · `keyword_collector`(stock_etf_news) · `dart_eod`(거래일 판정용 `krx_amt` 오늘 행) |
 | `analysis_model.php?mode=daily` | `news_trend_*` | `keyword_collector`(news) |
 | `market/report.php` | `market_snapshot` | `market/crawl` |
 | `places.php` | `place*` | `naver_collect`, `ardent_crawl`, `place_geocode`, `place_tag_backfill` |

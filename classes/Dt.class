@@ -1,0 +1,939 @@
+<?php
+/**
+ * Dt.class — 단타(단기매매) 전용 DB 전담
+ *
+ * ══ 이 표들이 왜 따로 있나 ══════════════════════════════════════════════
+ * 이 스키마(economist73 · 127표)에 <b>분 단위 시세 표가 없었다</b>. 분봉은 지금까지
+ * 「사용자가 종목을 누르는 순간 네이버에서 받아 그대로 화면에 보내고 버리는」 것이었고,
+ * 네이버는 <b>최근 7거래일</b>까지만 준다 — 그 뒤로는 영원히 사라진다(분봉차트_현황.md §7-1).
+ * 그래서 단타 화면이 쓸 만큼(최근 10거래일)만 <b>우리가 직접 쌓는다</b>.
+ *
+ * ══ 접두어 dt_ ═════════════════════════════════════════════════════════
+ * 포트폴리오 pf_ · KRX 원장 krx_ · 선물 gift_ 와 같은 규칙(CLAUDE.md 6).
+ * ★ st_ 를 쓰지 않은 이유 — 이미 stock_financial · stock_daily_range · stock_price_range ·
+ *   all_stock_info 가 있어서 st_ 는 그것들의 축약처럼 읽힌다(계열 구분이 흐려진다).
+ *
+ * ══ 다른 계열과의 경계 ═════════════════════════════════════════════════
+ *   · 어떤 기존 표와도 <b>조인하지 않는다</b>. 종목코드 문자열만 공유한다.
+ *   · 읽기 전용 재사용은 적극 — 거래일 판정·보관 창은 krx_amt, 이름·현재가는 all_stock_info.
+ *   · 포트폴리오/관심종목과 <b>상호 제약이 없다</b>. 같은 종목이 양쪽에 있어도 된다.
+ *
+ * ★★ 종목코드는 <b>언제나 6자리 순수 코드</b>로 저장한다. 키움의 `005930_AL`(SOR) 같은
+ *    접미사는 <b>요청할 때만</b> 붙인다 — 저장하면 krx_amt(CHAR(6))·all_stock_info 와의
+ *    조회가 전부 어긋난다.
+ */
+class Dt
+{
+    /** 종목 풀 상한 (2026-08-04 실측으로 20 확정 · 서버에서 검증).
+     *  크론이 정한 수가 아니다 — 30종목이어도 매일 60초 · 최악(전 종목 치유) 150초로 예산 900초의 1/4 이다.
+     *  정하는 것은 <b>화면</b>이다: 좌측 목록 262px 에 종목당 2줄이라 스크롤 없이 들어오는 것이 15~18개고,
+     *  단타는 눈으로 좇는 자리라 그보다 많으면 목록이 「보는 것」이 아니라 「뒤지는 것」이 된다.
+     *  넘치면 거부하지 않고 poolAdd() 가 «맨 아래»를 빼고 담는다. */
+    public const POOL_MAX = 20;
+
+    /** 보관 창 = 최근 N <b>거래일</b>. 달력 10일이 아니다 (연휴가 끼면 2주가 넘어간다) */
+    public const WINDOW_DAYS = 10;
+
+    /** 정규 1일 = 381봉 (09:00~15:19 380봉 + 15:30 종가 단일가 1봉) */
+    public const BARS_FULL = 381;
+
+    /** 이만큼 받았으면 'ok' 로 본다 (거래 없는 분이 빠질 수 있어 여유를 둔다) */
+    public const BARS_OK = 375;
+
+    /** 화면·API 가 허용하는 봉 단위(분). 그 외는 빈 배열 */
+    public const UNITS = [1, 3];
+
+    /** 수집 재시도 상한 — 이걸 넘으면 치유 대상에서 뺀다(영구 실패를 매일 두드리지 않는다) */
+    public const MAX_TRIES = 5;
+
+    /** 로그 보관 (수집 품질 추이용) */
+    public const LOG_KEEP_DAYS = 60;
+
+    /** 소스 코드값 */
+    public const SRC_KIWOOM = 1;
+    public const SRC_NAVER  = 2;
+
+    private PDO $pdo;
+
+    public function __construct(PDO $pdo)
+    {
+        $this->pdo = $pdo;
+    }
+
+    // ══ 스키마 ══════════════════════════════════════════════════════════
+    /**
+     * 표 생성. 이 레포 방식대로 화면 진입 때마다 돌린다(Pf::ensureTables 와 같은 결) —
+     * DB 는 서버 localhost 라 손으로 DDL 을 칠 길이 없다.
+     */
+    public function ensureTables(): void
+    {
+        // ── 단타 종목 풀 ─────────────────────────────────────────────
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS dt_pool (
+              code        VARCHAR(10)  NOT NULL COMMENT '6자리 순수 코드 (_AL 접미사 저장 금지)',
+              name        VARCHAR(64)  NOT NULL DEFAULT '',
+              mkt         VARCHAR(8)   NULL,
+              active      TINYINT(1)   NOT NULL DEFAULT 1,
+              sort_no     INT          NOT NULL DEFAULT 0,
+              memo        VARCHAR(255) NULL,
+              init_status TINYINT      NOT NULL DEFAULT 0 COMMENT '0대기 1진행 2완료 9실패',
+              init_at     DATETIME     NULL,
+              added_at    DATETIME     NOT NULL,
+              removed_at  DATETIME     NULL,
+              PRIMARY KEY (code),
+              KEY ix_active (active, sort_no)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        /* ── 1분봉 원장 ──
+         * ts = 그 봉의 «시작» 시각(KST). 소스가 종료 기준이면 넣기 전에 1분 당긴다(Kiwoom::TS_BASE).
+         * ★ ix_ts — 만료분 삭제가 `WHERE ts < ?` 라 PK(code,ts) 선두를 못 타서 매일 전 표를 훑는다. */
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS dt_min (
+              code   VARCHAR(10)   NOT NULL,
+              ts     DATETIME      NOT NULL COMMENT 'KST · 봉 시작 시각',
+              o      INT UNSIGNED  NOT NULL,
+              h      INT UNSIGNED  NOT NULL,
+              l      INT UNSIGNED  NOT NULL,
+              c      INT UNSIGNED  NOT NULL,
+              v      BIGINT UNSIGNED NOT NULL DEFAULT 0,
+              src    TINYINT       NOT NULL DEFAULT 1 COMMENT '1=키움 2=네이버',
+              upd_at TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+              PRIMARY KEY (code, ts),
+              KEY ix_ts (ts)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        // ── 일자별 수집 상태 ─────────────────────────────────────────
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS dt_min_log (
+              code   VARCHAR(10) NOT NULL,
+              d      DATE        NOT NULL,
+              bars   SMALLINT    NOT NULL DEFAULT 0,
+              status ENUM('ok','partial','none','holiday','fail') NOT NULL DEFAULT 'none',
+              src    TINYINT     NULL,
+              tries  TINYINT     NOT NULL DEFAULT 0,
+              first_ts VARCHAR(5) NULL COMMENT '그날 첫 봉 HH:MM — 시각 기준 검증용',
+              last_ts  VARCHAR(5) NULL COMMENT '그날 마지막 봉 HH:MM',
+              err    VARCHAR(255) NULL,
+              upd_at DATETIME    NOT NULL,
+              PRIMARY KEY (code, d),
+              KEY ix_status (status, d)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        /* ── 키움 접근토큰 캐시 ──
+         * ★ appkey/secretkey 는 여기 넣지 않는다 — env/kiwoom.inc(웹 루트 밖·gitignore). */
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS dt_token (
+              id         TINYINT       NOT NULL DEFAULT 1,
+              token      VARCHAR(1024) NOT NULL,
+              expires_at DATETIME      NOT NULL,
+              upd_at     DATETIME      NOT NULL,
+              PRIMARY KEY (id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        // 이미 만들어진 표를 넓힐 때 (반복 실행 안전 — MariaDB 10.6 의 IF NOT EXISTS)
+        foreach ([
+            "first_ts VARCHAR(5) NULL COMMENT '그날 첫 봉 HH:MM'",
+            "last_ts  VARCHAR(5) NULL COMMENT '그날 마지막 봉 HH:MM'",
+        ] as $col) {
+            try { $this->pdo->exec("ALTER TABLE dt_min_log ADD COLUMN IF NOT EXISTS $col"); }
+            catch (Throwable $e) { /* 이미 있음 */ }
+        }
+    }
+
+    // ══ 거래일·보관 창 ══════════════════════════════════════════════════
+    /**
+     * 최근 N 거래일 (오름차순).
+     *
+     * ★ 거래일의 정의를 <b>별도 휴장일 표로 만들지 않는다</b> — krx_amt 에 행이 있는 날이
+     *   곧 거래일이다(퀀트·포트폴리오가 이미 그 규칙으로 산다).
+     */
+    public function tradingDays(int $n = self::WINDOW_DAYS): array
+    {
+        $n = max(1, min(60, $n));
+        $rows = $this->pdo->query(
+            "SELECT d FROM (SELECT DISTINCT d FROM krx_amt ORDER BY d DESC LIMIT {$n}) t ORDER BY d ASC"
+        )->fetchAll(PDO::FETCH_COLUMN);
+        return array_map('strval', $rows);
+    }
+
+    /**
+     * 보관 창의 첫날 (이보다 옛 봉은 매일 지운다).
+     * ★`krx_amt` 가 비면 «오늘»이 되고, 그러면 prune() 이 <b>어제까지를 전부</b> 지운다.
+     *   8년치가 들어 있는 표라 실제로 빌 일은 없지만, 그 상태로 크론을 돌리면 보관 창이 하루로 줄어든다.
+     *   (옛 주석은 「아무것도 지우지 않는다」고 적혀 있었다 — 사실이 아니다)
+     */
+    public function windowFrom(): string
+    {
+        $days = $this->tradingDays();
+        return $days ? $days[0] : date('Y-m-d');
+    }
+
+    /**
+     * 오늘이 «수집할 만한 날»인가.
+     *
+     * ★ krx_amt 의 오늘 행은 마감 묶음 크론 dart_eod(15:50)가 all_stock_info 스냅샷에서
+     *   넣는다(src='n'). 즉 이 판정은 그 크론에 매달려 있다 — 그게 실패하면 단타 수집이
+     *   「휴장일」로 오판해 <b>그날 분봉을 조용히 건너뛴다</b>. 그래서 폴백을 둔다:
+     *   all_stock_info 가 오늘 갱신됐으면 장이 섰던 것이다.
+     */
+    public function isTradingDay(?string $d = null): bool
+    {
+        $d = $d ?: date('Y-m-d');
+        $dow = (int)date('N', strtotime($d));
+        if ($dow >= 6) return false;                     // 주말은 물어볼 것도 없다
+
+        $st = $this->pdo->prepare("SELECT 1 FROM krx_amt WHERE d=? LIMIT 1");
+        $st->execute([$d]);
+        if ($st->fetchColumn()) return true;
+
+        if ($d === date('Y-m-d')) {                      // 폴백은 «오늘» 에만 의미가 있다
+            $n = (int)$this->pdo->query(
+                "SELECT COUNT(*) FROM all_stock_info WHERE DATE(uDate) = CURDATE()"
+            )->fetchColumn();
+            return $n > 100;                             // 일부 갱신도 장이 선 것
+        }
+        return false;
+    }
+
+    // ══ 종목 풀 ═════════════════════════════════════════════════════════
+    /** 화면 목록 — 풀 + 현재가·등락률(all_stock_info) + 오늘 수집 상태 */
+    public function poolList(bool $activeOnly = true): array
+    {
+        $where = $activeOnly ? 'WHERE p.active = 1' : '';
+        /* 시세 곁다리 셋(시총·거래대금·상위 편입 ETF 수)은 <b>목록 배지</b>에 쓴다 —
+         * 단타 목록(내 목록·둘러보기)이 어디서나 같은 열·같은 배지를 보이기로 했다(2026-08-05).
+         * ★여기서 판정을 세우지 않는다 — 퀀트 배지는 stock/lib/quant.php 단일본이 내린다.
+         *   회전율도 저장하지 않는다(거래대금÷시총 — 파생값 무저장). */
+        $rows = $this->pdo->query("
+            SELECT p.code, p.active, p.sort_no, p.init_status, p.init_at, p.memo,
+                   COALESCE(NULLIF(a.stock_name,''), p.name) AS name,
+                   a.stock_price AS price, a.stock_rate AS rate, a.uDate AS priced_at,
+                   a.stock_cap AS cap, a.stock_vol_cap AS amt_eok,
+                   COALESCE(h.top_rank_count, 0) AS etf_top
+              FROM dt_pool p
+              LEFT JOIN all_stock_info a ON a.stock_code = p.code
+              LEFT JOIN all_stock_holdings_info h ON h.stock_code = p.code
+              {$where}
+             ORDER BY p.sort_no, p.code
+        ")->fetchAll(PDO::FETCH_ASSOC);
+        if (!$rows) return [];
+        $rows = $this->finishRows($rows);
+        foreach ($rows as &$r) $r['init_status'] = (int)$r['init_status'];
+        unset($r);
+        return $rows;
+    }
+
+    /**
+     * 목록 행 마무리 — 보관 창 안의 수집 상태 붙이기 + 숫자 캐스팅.
+     *
+     * 「내 목록」(poolList)과 「보유」(heldList)가 <b>함께 쓰는 단일본</b>이다 —
+     * 두 탭이 같은 열·같은 배지를 보이기로 한 이상, 값을 만드는 자리도 하나여야 한다.
+     * (사이트 공통 규칙 「관찰 화면의 종목 목록은 같은 배지를 같은 어휘·색으로」와 같은 자리)
+     */
+    private function finishRows(array $rows): array
+    {
+        if (!$rows) return [];
+
+        // 보관 창 안의 수집 상태를 한 번에 (종목별 N+1 쿼리를 만들지 않는다)
+        $st = $this->pdo->prepare("
+            SELECT code,
+                   SUM(status IN ('ok','partial')) AS days,
+                   SUM(bars) AS bars,
+                   SUM(status IN ('none','fail'))  AS holes
+              FROM dt_min_log WHERE d >= ? GROUP BY code
+        ");
+        $st->execute([$this->windowFrom()]);
+        $stat = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) $stat[(string)$r['code']] = $r;
+
+        foreach ($rows as &$r) {
+            $s = $stat[(string)$r['code']] ?? null;
+            $r['days']  = (int)($s['days']  ?? 0);
+            $r['bars']  = (int)($s['bars']  ?? 0);
+            $r['holes'] = (int)($s['holes'] ?? 0);
+            $r['price'] = isset($r['price']) && $r['price'] !== null ? (float)$r['price'] : null;
+            $r['rate']  = isset($r['rate'])  && $r['rate']  !== null ? (float)$r['rate']  : null;
+            // 시총·거래대금은 all_stock_info 와 같은 <b>억원</b> 단위다 (krx_amt.amt 의 원 단위가 아니다)
+            $r['cap']     = isset($r['cap'])     && $r['cap']     !== null ? (float)$r['cap']     : null;
+            $r['amt_eok'] = isset($r['amt_eok']) && $r['amt_eok'] !== null ? (float)$r['amt_eok'] : null;
+            $r['etf_top'] = (int)($r['etf_top'] ?? 0);
+        }
+        unset($r);
+        return $rows;
+    }
+
+    public function poolCount(): int
+    {
+        return (int)$this->pdo->query("SELECT COUNT(*) FROM dt_pool WHERE active=1")->fetchColumn();
+    }
+
+    public function poolGet(string $code): ?array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM dt_pool WHERE code=?");
+        $st->execute([$code]);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    /**
+     * 풀에 담는다. 이미 있으면 되살린다(해지했던 종목의 재등록).
+     * @return array ['ok'=>bool, 'msg'=>string, 'again'=>bool 재등록인가]
+     */
+    public function poolAdd(string $code, string $name = '', string $mkt = ''): array
+    {
+        $code = self::cleanCode($code);
+        if ($code === '') return ['ok' => false, 'msg' => '종목코드가 올바르지 않습니다.'];
+
+        $cur = $this->poolGet($code);
+        if ($cur && (int)$cur['active'] === 1) {
+            return ['ok' => false, 'msg' => '이미 단타 종목입니다.'];
+        }
+        /* 상한을 넘으면 «막지 않고 바꿔 주고 말한다» — 화면의 10일×1분 자동 강등과 같은 태도.
+         * ★빼는 순서는 poolEvictLast() 가 정한다 — <b>보유 종목이 먼저</b>(슬롯만 비고 수집은 그대로),
+         *   보유가 없으면 <b>정렬 맨 아래</b>(끌어서 정한 순서가 곧 우선순위 · 안 옮겼으면 FIFO).
+         * ★무엇을 뺐는지는 반드시 msg 로 돌려준다 — 조용히 지우면 「내 종목이 사라졌다」가 된다. */
+        $evicted = [];
+        if (!$cur || (int)$cur['active'] === 0) {
+            while ($this->poolCount() >= self::POOL_MAX) {
+                $e = $this->poolEvictLast();
+                if ($e === null) break;              // 뺄 것이 없으면 무한루프 대신 멈춘다
+                $evicted[] = ($e['name'] !== '' ? $e['name'] : $e['code'])
+                           . (!empty($e['held']) ? '(보유라 계속 수집됩니다)' : '');
+            }
+            if ($this->poolCount() >= self::POOL_MAX) {
+                return ['ok' => false, 'msg' => '단타 종목은 최대 ' . self::POOL_MAX . '개입니다. 먼저 정리하세요.'];
+            }
+        }
+
+        if ($name === '') {
+            $st = $this->pdo->prepare("SELECT stock_name FROM all_stock_info WHERE stock_code=?");
+            $st->execute([$code]);
+            $name = (string)($st->fetchColumn() ?: $code);
+        }
+        $next = (int)$this->pdo->query("SELECT COALESCE(MAX(sort_no),0)+1 FROM dt_pool")->fetchColumn();
+
+        $st = $this->pdo->prepare("
+            INSERT INTO dt_pool (code, name, mkt, active, sort_no, init_status, added_at)
+            VALUES (?, ?, ?, 1, ?, 1, NOW())
+            ON DUPLICATE KEY UPDATE name=VALUES(name), active=1, removed_at=NULL,
+                                    init_status=1, added_at=NOW()
+        ");
+        $st->execute([$code, $name, $mkt !== '' ? $mkt : null, $next]);
+
+        $msg = $name . ' 을(를) 담았습니다. 10거래일 분봉을 받아 옵니다…';
+        if ($evicted) {
+            $msg = '상한 ' . self::POOL_MAX . '개라 ' . implode(' · ', $evicted) . ' 을(를) 뺐습니다. ' . $msg;
+        }
+        return ['ok' => true, 'msg' => $msg, 'evicted' => $evicted,
+                'again' => (bool)$cur, 'name' => $name];
+    }
+
+    /**
+     * 상한이 찼을 때 뺄 한 종목.
+     *
+     * ★★<b>보유 종목을 «먼저» 뺀다</b>(2026-08-05 사용자 선택). 그것들은 `dt_pool` 에서 빠져도
+     *   `targetCodes()` 에 남아 매일 수집되므로 <b>슬롯만 비고 잃는 것이 없다</b>.
+     *   (그리고 `poolRemove()` 가 보유의 봉은 안 지운다 — 아래 참조.)
+     *   반대로 보유가 아닌 종목을 빼면 봉이 사라지고 다시 받아야 한다. 그러니 «값이 싼 쪽»부터 뺀다.
+     * 보유가 없으면 옛 규칙 그대로 <b>정렬 맨 아래</b> — 순서는 사용자가 끌어서 정하므로
+     * 그 자체가 우선순위이고, 한 번도 안 옮겼다면 `sort_no` 가 담은 순서라 자연히 FIFO 가 된다.
+     * ★무엇을 왜 뺐는지는 `poolAdd()` 가 반드시 말한다(조용히 지우면 「내 종목이 사라졌다」가 된다).
+     *
+     * @return array|null ['code','name','held'] · 활성 종목이 없으면 null
+     */
+    public function poolEvictLast(): ?array
+    {
+        $held = $this->heldCodes();
+        $r = null;
+        if ($held) {
+            $in = implode(',', array_fill(0, count($held), '?'));
+            $st = $this->pdo->prepare("SELECT code, name FROM dt_pool
+                                        WHERE active=1 AND code IN ({$in})
+                                        ORDER BY sort_no DESC, code DESC LIMIT 1");
+            $st->execute($held);
+            $r = $st->fetch(PDO::FETCH_ASSOC) ?: null;
+        }
+        if (!$r) {
+            $r = $this->pdo->query("SELECT code, name FROM dt_pool WHERE active=1
+                                     ORDER BY sort_no DESC, code DESC LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+        }
+        if (!$r) return null;
+        $wasHeld = in_array((string)$r['code'], $held, true);
+        $this->poolRemove($r['code']);
+        return ['code' => $r['code'], 'name' => (string)$r['name'], 'held' => $wasHeld];
+    }
+
+    /**
+     * 해지 — 소프트 삭제 + <b>시세 즉시 삭제</b>.
+     * 시세를 남기지 않는 이유: 10거래일이면 재등록 시 5초면 다시 받는다. 죽은 종목의
+     * 봉을 이고 있으면 만료 삭제·치유 쿼리가 매일 그걸 훑는다.
+     *
+     * ★★<b>보유 종목이면 봉을 지우지 않는다</b>(2026-08-05). 단타에서 빠져도
+     *   `targetCodes()` 에 남아 <b>여전히 수집 대상</b>이다 — 지우면 매일 받아서 매일 지우는
+     *   밑 빠진 독이 되고(`prune()` 의 해지잔여 규칙과 같은 이유), 「보유」 탭이 방금
+     *   눈앞에서 비어 버린다. 빠지는 것은 <b>슬롯 하나</b>여야지 데이터가 아니다.
+     *
+     * @return int dt_pool 에서 내린 행 수
+     */
+    public function poolRemove(string $code): int
+    {
+        $code = self::cleanCode($code);
+        $st = $this->pdo->prepare("UPDATE dt_pool SET active=0, removed_at=NOW() WHERE code=?");
+        $st->execute([$code]);
+        $n = $st->rowCount();
+        if (in_array($code, $this->heldCodes(), true)) return $n;   // 보유 = 봉을 남긴다
+        $this->pdo->prepare("DELETE FROM dt_min WHERE code=?")->execute([$code]);
+        $this->pdo->prepare("DELETE FROM dt_min_log WHERE code=?")->execute([$code]);
+        return $n;
+    }
+
+    /** 드래그로 바뀐 순서 그대로 (0,1,2…) */
+    public function poolSort(array $codes): int
+    {
+        $st = $this->pdo->prepare("UPDATE dt_pool SET sort_no=? WHERE code=?");
+        $n = 0;
+        foreach (array_values($codes) as $i => $c) {
+            $st->execute([$i, self::cleanCode((string)$c)]);
+            $n++;
+        }
+        return $n;
+    }
+
+    public function poolInitStatus(string $code, int $status): void
+    {
+        $st = $this->pdo->prepare("UPDATE dt_pool SET init_status=?, init_at=NOW() WHERE code=?");
+        $st->execute([$status, self::cleanCode($code)]);
+    }
+
+    /** 단타 풀의 활성 종목 코드 (화면 순서 = 사용자가 끌어서 정한 순서) */
+    public function activeCodes(): array
+    {
+        return $this->pdo->query(
+            "SELECT code FROM dt_pool WHERE active=1 ORDER BY sort_no, code"
+        )->fetchAll(PDO::FETCH_COLUMN);
+    }
+
+    // ══ 보유 종목 ═══════════════════════════════════════════════════════
+    /**
+     * 살아있는 포지션의 종목코드 (2026-08-05).
+     *
+     * 판정 기준은 사이트 공통 `pf_held_map()` 과 <b>같은 것</b>을 쓴다 — `status <> 'closed'`.
+     * (「자리는 만들었는데 아직 안 산」 watch 도 담는다: 곧 살 자리라 분봉이 먼저 있어야 쓸모가 있다.)
+     * ★여기서 판정을 새로 세우지 않는다 — 원본은 pf_position 이다.
+     * ★포트폴리오 표가 없거나 비어도 단타는 돌아야 한다 → 예외는 삼키고 빈 배열.
+     */
+    public function heldCodes(): array
+    {
+        try {
+            $rows = $this->pdo->query(
+                "SELECT DISTINCT stock_code FROM pf_position
+                  WHERE status <> 'closed' AND CHAR_LENGTH(stock_code) = 6
+                  ORDER BY stock_code"
+            )->fetchAll(PDO::FETCH_COLUMN);
+        } catch (Throwable $e) {
+            return [];
+        }
+        $out = [];
+        foreach ($rows as $c) {
+            $c = self::cleanCode((string)$c);
+            if ($c !== '') $out[$c] = 1;
+        }
+        return array_keys($out);
+    }
+
+    /**
+     * ★★<b>수집 대상 단일본</b> = 단타 풀(dt_pool active=1) ∪ 살아있는 포지션 (2026-08-05).
+     *
+     * 크론의 네 단계(수집 · 구멍 치유 · 분할 감지 · 적재율 감시)가 전부 이것 하나를 본다.
+     * 한 곳만 보면 「어떤 단계는 보유를 받고 어떤 단계는 안 받는」 어긋남이 생길 자리가 없다.
+     *
+     * ★★<b>보유 종목을 dt_pool 에 «담지» 않는 이유 둘</b>
+     *   ① dt_pool 은 상한 20 을 <b>FIFO 로 지우는</b> 표다
+     *      (poolAdd → poolEvictLast → poolRemove → `DELETE FROM dt_min`).
+     *      보유가 그 20칸에 섞이면, 탐색하다 「＋」를 한 번 누른 것이
+     *      <b>내가 산 종목의 봉을 통째로 지운다</b>.
+     *   ② 보유는 이미 pf_position 이 정한 사실이다. 여기 복사하면 청산했는데 단타엔 남는
+     *      「따로 노는」 상태가 생긴다 — <b>참조</b>로 두면 그럴 자리가 없다.
+     *
+     * 순서는 <b>단타 풀이 먼저</b>다(끌어서 정한 순서가 곧 우선순위라는 기존 규칙 그대로).
+     * 시간 예산이 모자라 뒤가 잘려도 다음 단계인 «구멍 치유»가 이어받는다.
+     */
+    public function targetCodes(): array
+    {
+        $out  = $this->activeCodes();
+        $have = array_flip($out);
+        foreach ($this->heldCodes() as $c) {
+            if (!isset($have[$c])) { $out[] = $c; $have[$c] = 1; }
+        }
+        return $out;
+    }
+
+    /**
+     * 「보유」 탭 목록 (2026-08-05) — 살아있는 포지션을 <b>종목 단위로 접어</b> 돌려준다.
+     *
+     * ★행이 아니라 <b>종목</b>이 하나다 — 한 종목이 여러 포트폴리오에 있을 수 있다
+     *   (실측 2026-08-05: 한국주철관 3곳 · 현대차 2곳). 접지 않으면 같은 종목이 목록에 여러 번 뜬다.
+     * ★열 모양은 poolList() 와 <b>같게</b> 맞춘다(finishRows 공용) — 두 탭이 같은 배지를 쓴다.
+     * ★all_stock_info 를 SQL 조인으로 붙이지 않는다 — 그 표는 char(6) utf8mb3 라
+     *   콜레이션이 어긋난다(사이트 공통 함정). 따로 읽어 PHP 에서 붙인다.
+     *
+     * @return array 행마다 + ['pos_id','pf_n','pf_names','open'] (open = 실제로 돈이 들어갔나)
+     */
+    public function heldList(): array
+    {
+        try {
+            $rows = $this->pdo->query("
+                SELECT p.id, p.stock_code AS code, p.status, f.name AS pf_name
+                  FROM pf_position p
+                  JOIN pf_portfolio f ON f.id = p.portfolio_id
+                 WHERE p.status <> 'closed'
+                 ORDER BY p.id
+            ")->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Throwable $e) {
+            return [];
+        }
+        if (!$rows) return [];
+
+        /* 종목 단위로 접는다. 「보유」와 「편입됨」을 가르는 것은 status='open'
+         * (실제로 돈이 들어갔나)이다 — 사이트 공통 pf_held_map() 과 같은 말. */
+        $map = [];
+        foreach ($rows as $r) {
+            $c = self::cleanCode((string)$r['code']);
+            if ($c === '') continue;
+            if (!isset($map[$c])) {
+                $map[$c] = ['code' => $c, 'pos_id' => (int)$r['id'],
+                            'pf_n' => 0, 'pf_names' => '', 'open' => false,
+                            'name' => $c, 'price' => null, 'rate' => null,
+                            'cap' => null, 'amt_eok' => null, 'etf_top' => 0];
+            }
+            $map[$c]['pf_n']++;
+            $nm = (string)$r['pf_name'];
+            if ($nm !== '' && strpos(' ' . $map[$c]['pf_names'], $nm) === false) {
+                $map[$c]['pf_names'] .= ($map[$c]['pf_names'] === '' ? '' : ' · ') . $nm;
+            }
+            if ((string)$r['status'] === 'open') $map[$c]['open'] = true;
+        }
+        if (!$map) return [];
+
+        $codes = array_keys($map);
+        $in    = implode(',', array_fill(0, count($codes), '?'));
+
+        $st = $this->pdo->prepare("
+            SELECT stock_code AS code, stock_name AS name, stock_price AS price,
+                   stock_rate AS rate, uDate AS priced_at,
+                   stock_cap AS cap, stock_vol_cap AS amt_eok
+              FROM all_stock_info WHERE stock_code IN ({$in})
+        ");
+        $st->execute($codes);
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $c = (string)$r['code'];
+            if (!isset($map[$c])) continue;
+            if ((string)$r['name'] === '') unset($r['name']);   // 이름이 비면 코드를 남긴다
+            $map[$c] = array_merge($map[$c], $r);
+        }
+
+        $st = $this->pdo->prepare(
+            "SELECT stock_code, top_rank_count FROM all_stock_holdings_info WHERE stock_code IN ({$in})"
+        );
+        $st->execute($codes);
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $c = (string)$r['stock_code'];
+            if (isset($map[$c])) $map[$c]['etf_top'] = (int)$r['top_rank_count'];
+        }
+
+        /* 정렬 = 시가총액 큰 순 → 코드. 「내 목록」처럼 끌어서 정하는 순서가 없으니
+         * 매번 같은 자리에 있기만 하면 된다(목록이 흔들리면 눈이 종목을 잃는다). */
+        $out = array_values($map);
+        usort($out, function ($a, $b) {
+            $x = (float)($b['cap'] ?? 0) <=> (float)($a['cap'] ?? 0);
+            return $x !== 0 ? $x : strcmp((string)$a['code'], (string)$b['code']);
+        });
+        return $this->finishRows($out);
+    }
+
+    // ══ 시세 적재 ═══════════════════════════════════════════════════════
+    /**
+     * 봉 UPSERT. $rows = [['t'=>'Y-m-d H:i','o','h','l','c','v'], …] (정규화 끝난 것)
+     * @return int 실제로 건드린 행 수
+     */
+    public function barsUpsert(string $code, array $rows, int $src): int
+    {
+        if (!$rows) return 0;
+        $code = self::cleanCode($code);
+
+        $sql = "INSERT INTO dt_min (code, ts, o, h, l, c, v, src) VALUES ";
+        $vals = [];
+        $args = [];
+        foreach ($rows as $r) {
+            $vals[] = '(?,?,?,?,?,?,?,?)';
+            $args[] = $code;
+            $args[] = $r['t'];
+            $args[] = (int)round($r['o']);
+            $args[] = (int)round($r['h']);
+            $args[] = (int)round($r['l']);
+            $args[] = (int)round($r['c']);
+            $args[] = (int)$r['v'];
+            $args[] = $src;
+        }
+        $sql .= implode(',', $vals)
+              . " ON DUPLICATE KEY UPDATE o=VALUES(o), h=VALUES(h), l=VALUES(l),
+                                          c=VALUES(c), v=VALUES(v), src=VALUES(src)";
+        $st = $this->pdo->prepare($sql);
+        $st->execute($args);
+        return $st->rowCount();
+    }
+
+    /** 그날 수집 결과 기록 */
+    public function logSave(string $code, string $d, int $bars, string $status,
+                            ?int $src = null, ?string $err = null,
+                            ?string $firstTs = null, ?string $lastTs = null, bool $bumpTry = false): void
+    {
+        $st = $this->pdo->prepare("
+            INSERT INTO dt_min_log (code, d, bars, status, src, tries, first_ts, last_ts, err, upd_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+            ON DUPLICATE KEY UPDATE bars=VALUES(bars), status=VALUES(status), src=VALUES(src),
+                                    tries=tries+" . ($bumpTry ? '1' : '0') . ",
+                                    first_ts=VALUES(first_ts), last_ts=VALUES(last_ts),
+                                    err=VALUES(err), upd_at=NOW()
+        ");
+        $st->execute([self::cleanCode($code), $d, $bars, $status, $src, $bumpTry ? 1 : 0,
+                      $firstTs, $lastTs, $err !== null ? mb_substr($err, 0, 250) : null]);
+    }
+
+    /**
+     * 보관 창 안의 «구멍» — 치유 대상 [[code, d], …]
+     * ★대상은 dt_pool 이 아니라 <b>targetCodes()</b>(풀 ∪ 보유)다 — 보유 종목의 10거래일
+     *   초기 적재도 이 단계가 메운다(담기와 달리 «＋를 누르는 순간»이 없기 때문이다).
+     */
+    public function holes(int $limit = 60): array
+    {
+        $days = $this->tradingDays();
+        if (!$days) return [];
+        $codes = $this->targetCodes();
+        if (!$codes) return [];
+        $in = implode(',', array_fill(0, count($days), '?'));
+        $limit = max(1, min(200, $limit));
+
+        /* 대상 코드를 파생 표로 세운다(dt_pool JOIN 을 대신한다).
+         * pri = 목록 순서 — 예산이 모자라 잘릴 때 무엇을 먼저 메울지가 여기서 정해진다. */
+        $parts = [];
+        $cargs = [];
+        foreach (array_values($codes) as $i => $c) {
+            $parts[] = 'SELECT ? AS code, ' . (int)$i . ' AS pri';
+            $cargs[] = $c;
+        }
+        $tgt = implode(' UNION ALL ', $parts);
+
+        $sql = "
+            SELECT p.code, k.d
+              FROM ({$tgt}) p
+              JOIN (SELECT d FROM krx_amt WHERE d IN ({$in}) GROUP BY d) k
+              LEFT JOIN dt_min_log l ON l.code = p.code AND l.d = k.d
+             WHERE (l.status IS NULL
+                    OR (l.status IN ('partial','none','fail') AND l.tries < " . self::MAX_TRIES . "))
+             ORDER BY k.d DESC, p.pri
+             LIMIT {$limit}
+        ";
+        $st = $this->pdo->prepare($sql);
+        $st->execute(array_merge($cargs, $days));
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * 만료분 삭제.
+     * ★ <b>반드시 수집 다음</b>에 부른다 — 수집이 실패한 날 삭제만 돌면 보관 일수가 조용히 줄어든다.
+     */
+    public function prune(): array
+    {
+        $from = $this->windowFrom();
+        $st = $this->pdo->prepare("DELETE FROM dt_min WHERE ts < ?");
+        $st->execute([$from . ' 00:00:00']);
+        $bars = $st->rowCount();
+
+        $st = $this->pdo->prepare("DELETE FROM dt_min_log WHERE d < DATE_SUB(CURDATE(), INTERVAL ? DAY)");
+        $st->execute([self::LOG_KEEP_DAYS]);
+        $logs = $st->rowCount();
+
+        /* 해지된 종목이 남긴 봉 (poolRemove 가 지우지만, 옛 데이터·수동 UPDATE 대비)
+         * ★★<b>보유 종목은 건드리지 않는다</b>(2026-08-05) — 예전에 단타에서 «해지»한 종목을
+         *   나중에 사면 dt_pool 에 active=0 인 채로 남는데, 그대로 두면 <b>수집 대상이면서
+         *   매일 봉이 지워지는</b> 밑 빠진 독이 된다(로그엔 성공으로 남아 티도 안 난다). */
+        $held = $this->heldCodes();
+        if ($held) {
+            $in = implode(',', array_fill(0, count($held), '?'));
+            $st = $this->pdo->prepare(
+                "DELETE FROM dt_min WHERE code IN (SELECT code FROM dt_pool WHERE active=0)
+                                      AND code NOT IN ({$in})"
+            );
+            $st->execute($held);
+            $dead = $st->rowCount();
+        } else {
+            $dead = $this->pdo->exec(
+                "DELETE FROM dt_min WHERE code IN (SELECT code FROM dt_pool WHERE active=0)"
+            );
+        }
+
+        return ['from' => $from, 'bars' => $bars, 'logs' => $logs, 'dead' => (int)$dead];
+    }
+
+    /**
+     * 그 날 «실제로 받아진» 종목 수 (활성 풀 기준 · ok/partial).
+     * 크론 끝의 <b>데이터 레벨 감시</b>용 — 이 파일은 수집 실패를 전부 자체 catch 로 삼키므로
+     * (네이버 폴백을 위해) 예외가 안 올라가 중앙 실패 알림이 못 본다. 「크론은 성공했는데
+     * 봉이 안 들어온」 경우를 세는 자리다. `dart_eod` 의 종가 갱신률 점검과 같은 성격.
+     */
+    public function collectedCount(string $d): int
+    {
+        /* ★분모(크론의 $want)와 <b>같은 목록</b>을 봐야 한다 — 한쪽만 넓히면
+         *   「11/22」 같은 거짓 실패율이 나와 오경보가 뜬다. */
+        $codes = $this->targetCodes();
+        if (!$codes) return 0;
+        $in = implode(',', array_fill(0, count($codes), '?'));
+        $st = $this->pdo->prepare("
+            SELECT COUNT(*) FROM dt_min_log
+             WHERE d = ? AND status IN ('ok','partial') AND code IN ({$in})
+        ");
+        $st->execute(array_merge([$d], $codes));
+        return (int)$st->fetchColumn();
+    }
+
+    /** 한 종목 전체 삭제 (액면분할 감지 → 전량 재수집) */
+    public function wipe(string $code): void
+    {
+        $code = self::cleanCode($code);
+        $this->pdo->prepare("DELETE FROM dt_min WHERE code=?")->execute([$code]);
+        $this->pdo->prepare("DELETE FROM dt_min_log WHERE code=?")->execute([$code]);
+    }
+
+    /**
+     * 상장주식수 급변(액면분할·병합) 감지 — krx_amt.list_shrs 가 ±20% 넘게 움직인 종목.
+     * 분봉엔 수정계수를 곱하지 않고 <b>지우고 다시 받는다</b>(10거래일이면 5초다).
+     */
+    public function splitSuspects(float $tol = 0.20): array
+    {
+        $days = $this->tradingDays(3);
+        if (count($days) < 2) return [];
+        $prev = $days[count($days) - 2];
+        $last = $days[count($days) - 1];
+
+        $codes = $this->targetCodes();
+        if (!$codes) return [];
+        $in = implode(',', array_fill(0, count($codes), '?'));
+        $st = $this->pdo->prepare("
+            SELECT a.code, b.list_shrs AS prev_shrs, a.list_shrs AS cur_shrs
+              FROM krx_amt a
+              JOIN krx_amt b ON b.code = a.code AND b.d = ?
+             WHERE a.d = ? AND a.list_shrs > 0 AND b.list_shrs > 0
+               AND ABS(a.list_shrs - b.list_shrs) / b.list_shrs > ?
+               AND a.code IN ({$in})
+        ");
+        $st->execute(array_merge([$prev, $last, $tol], $codes));
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    // ══ 조회 ════════════════════════════════════════════════════════════
+    /**
+     * 봉 조회 + 리샘플.
+     *
+     * @param string     $code
+     * @param int        $unit  1|5|15
+     * @param string     $from  Y-m-d (보관 창보다 옛날이면 창으로 접는다 — 에러가 아니다)
+     * @param string     $to    Y-m-d
+     * @param array      $extra 장중 실시간 병합분(네이버 당일) — 같은 ts 는 <b>DB 가 이긴다</b>
+     * @return array [['t'=>'Y-m-d H:i','o','h','l','c','v'], …]
+     */
+    public function series(string $code, int $unit = 1, string $from = '', string $to = '',
+                           int $limit = 4000, array $extra = []): array
+    {
+        $code = self::cleanCode($code);
+        if ($code === '' || !in_array($unit, self::UNITS, true)) return [];
+
+        $win  = $this->windowFrom();
+        $to   = self::cleanDate($to)   ?: date('Y-m-d');
+        $from = self::cleanDate($from) ?: $to;
+        if ($from < $win) $from = $win;              // 창을 넘는 요청은 «접는다»
+        if ($from > $to)  $from = $to;
+        $limit = max(1, min(6000, $limit));
+
+        $st = $this->pdo->prepare("
+            SELECT ts, o, h, l, c, v FROM dt_min
+             WHERE code = ? AND ts >= ? AND ts < DATE_ADD(?, INTERVAL 1 DAY)
+             ORDER BY ts LIMIT {$limit}
+        ");
+        $st->execute([$code, $from . ' 00:00:00', $to]);
+
+        $bars = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $bars[substr($r['ts'], 0, 16)] = [
+                't' => substr($r['ts'], 0, 16), 'o' => (int)$r['o'], 'h' => (int)$r['h'],
+                'l' => (int)$r['l'], 'c' => (int)$r['c'], 'v' => (int)$r['v'],
+            ];
+        }
+        // 장중 실시간 — DB 에 아직 없는 분만 얹는다
+        foreach ($extra as $r) {
+            $t = substr((string)$r['t'], 0, 16);
+            if ($t < $from . ' 00:00' || $t > $to . ' 23:59') continue;
+            if (isset($bars[$t])) continue;
+            $bars[$t] = ['t' => $t, 'o' => (int)round($r['o']), 'h' => (int)round($r['h']),
+                         'l' => (int)round($r['l']), 'c' => (int)round($r['c']), 'v' => (int)$r['v']];
+        }
+        ksort($bars);
+        $bars = array_values($bars);
+
+        return $unit === 1 ? $bars : self::resample($bars, $unit);
+    }
+
+    /**
+     * 1분봉 → N분봉.
+     *
+     * 라벨은 그 구간의 <b>시작</b>이다(09:00, 09:05, …). 규칙 둘만 특별하다:
+     *   · <b>마지막 그룹</b>(단위마다 다르다 — 3분이면 15:18, 5·15분이면 15:15)이
+     *     그 뒤 정규장 봉 + <b>15:30 종가 단일가</b>를 함께 삼킨다
+     *   · 결측 그룹은 <b>만들지 않는다</b> (0 으로 채우면 없던 봉이 생긴다)
+     */
+    public static function resample(array $bars, int $unit): array
+    {
+        if ($unit <= 1) return $bars;
+        $out = [];
+        foreach ($bars as $b) {
+            $date = substr($b['t'], 0, 10);
+            $hh   = (int)substr($b['t'], 11, 2);
+            $mi   = (int)substr($b['t'], 14, 2);
+            $mins = $hh * 60 + $mi;
+
+            // 09:00 기준 경과분으로 그룹을 만든다 (장 시작이 09:00 이라 자연스럽다)
+            $off = $mins - 540;
+            if ($off < 0) $off = 0;
+            $g = intdiv($off, $unit) * $unit;
+            $gm = 540 + $g;
+            /* ★마지막 그룹은 «단위마다 다르다» — 915 는 5·15분에서만 맞는 값이었다.
+             *   정규장 마지막 1분봉이 15:19(=09:00+379분)이므로 그 봉이 속한 그룹이 마지막이다.
+             *   1→919(15:19) · 3→918(15:18) · 5→915(15:15) · 15→915(15:15).
+             *   여기에 15:20~15:30(동시호가·종가 단일가)을 얹는다.
+             *   3분에서 이 줄이 없으면 15:30 봉만 15:15 로 떨어져 <b>라벨이 역행</b>한다. */
+            $lastGm = 540 + intdiv(379, $unit) * $unit;
+            if ($gm > $lastGm) $gm = $lastGm;
+            $key = $date . ' ' . sprintf('%02d:%02d', intdiv($gm, 60), $gm % 60);
+
+            if (!isset($out[$key])) {
+                $out[$key] = ['t' => $key, 'o' => $b['o'], 'h' => $b['h'],
+                              'l' => $b['l'], 'c' => $b['c'], 'v' => $b['v']];
+            } else {
+                $o = &$out[$key];
+                if ($b['h'] > $o['h']) $o['h'] = $b['h'];
+                if ($b['l'] < $o['l']) $o['l'] = $b['l'];
+                $o['c']  = $b['c'];
+                $o['v'] += $b['v'];
+                unset($o);
+            }
+        }
+        ksort($out);
+        return array_values($out);
+    }
+
+    /** 그 종목의 보관 창 수집 현황 (화면 배지·상태 패널) */
+    public function statusOf(string $code): array
+    {
+        $code = self::cleanCode($code);
+        $days = $this->tradingDays();
+        if (!$days) return [];
+
+        $in = implode(',', array_fill(0, count($days), '?'));
+        $st = $this->pdo->prepare("
+            SELECT d, bars, status, src, tries, first_ts, last_ts, err
+              FROM dt_min_log WHERE code = ? AND d IN ({$in}) ORDER BY d
+        ");
+        $st->execute(array_merge([$code], $days));
+        $log = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) $log[$r['d']] = $r;
+
+        $out = [];
+        foreach ($days as $d) {
+            $out[] = $log[$d] ?? ['d' => $d, 'bars' => 0, 'status' => 'none',
+                                  'src' => null, 'tries' => 0, 'first_ts' => null,
+                                  'last_ts' => null, 'err' => null];
+        }
+        return $out;
+    }
+
+    // ══ 정규화 (전 소스 공통) ═══════════════════════════════════════════
+    /**
+     * 봉 정규화 — 소스가 무엇이든 여기를 통과한 것만 저장한다.
+     *
+     * R2 09:00~15:19  그대로 (380봉)
+     * R3 15:20~15:29  <b>15:30 으로 병합</b> (OHLC 재계산 · v 합산)
+     * R4 15:30        종가 단일가 1봉
+     * R5 08:00~08:59 · 15:31~20:00 (NXT 프리/애프터·시간외) → <b>버린다</b>
+     *
+     * @param array $rows [['t'=>'Y-m-d H:i', o,h,l,c,v], …] 시각은 이미 «봉 시작» 기준
+     */
+    public static function normalize(array $rows): array
+    {
+        $keep = [];
+        foreach ($rows as $r) {
+            $t = (string)$r['t'];
+            if (strlen($t) < 16) continue;
+            $hh = (int)substr($t, 11, 2);
+            $mi = (int)substr($t, 14, 2);
+            $m  = $hh * 60 + $mi;
+            if ($m < 540 || $m > 930) continue;                  // 09:00~15:30 밖은 버린다
+            if ($m > 919 && $m < 930) {                          // 15:20~15:29 → 15:30 으로
+                $t = substr($t, 0, 11) . '15:30';
+            }
+            $o = (float)$r['o']; $h = (float)$r['h'];
+            $l = (float)$r['l']; $c = (float)$r['c']; $v = (float)$r['v'];
+            if ($c <= 0) continue;                               // 값이 없는 봉은 버린다
+            if ($o <= 0) $o = $c;
+            if ($h <= 0) $h = max($o, $c);
+            if ($l <= 0) $l = min($o, $c);
+
+            if (!isset($keep[$t])) {
+                $keep[$t] = ['t' => $t, 'o' => $o, 'h' => $h, 'l' => $l, 'c' => $c, 'v' => $v];
+            } else {                                             // 병합된 15:30
+                $k = &$keep[$t];
+                if ($h > $k['h']) $k['h'] = $h;
+                if ($l < $k['l']) $k['l'] = $l;
+                $k['c']  = $c;
+                $k['v'] += $v;
+                unset($k);
+            }
+        }
+        ksort($keep);
+        return array_values($keep);
+    }
+
+    /** 그 봉 묶음을 날짜별로 가른다 → ['Y-m-d' => [봉…]] */
+    public static function byDay(array $rows): array
+    {
+        $out = [];
+        foreach ($rows as $r) $out[substr($r['t'], 0, 10)][] = $r;
+        ksort($out);
+        return $out;
+    }
+
+    /** 봉 수 → 상태값 */
+    public static function statusOfBars(int $bars): string
+    {
+        if ($bars >= self::BARS_OK) return 'ok';
+        if ($bars > 0)              return 'partial';
+        return 'none';
+    }
+
+    // ══ 잡동사니 ════════════════════════════════════════════════════════
+    /** ★ 저장·조회에 쓰는 코드는 언제나 이걸 통과한 6자리다 (`_AL` 접미사가 새 나가지 않게) */
+    public static function cleanCode(string $code): string
+    {
+        $c = preg_replace('/[^0-9A-Za-z]/', '', $code);
+        $c = preg_replace('/(_?(AL|NX))$/i', '', (string)$c);
+        return substr((string)$c, 0, 10);
+    }
+
+    public static function cleanDate(string $d): string
+    {
+        return preg_match('/^\d{4}-\d{2}-\d{2}$/', $d) ? $d : '';
+    }
+}
+?>

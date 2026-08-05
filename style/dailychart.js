@@ -1,8 +1,7 @@
 /* ============================================================================
  * dailychart.js — 사이트 공용 일봉(캔들) 차트 모듈  (lightweight-charts 래퍼)
  *
- * 쓰는 곳: stock_analysis.php(updash) · chart_gallery.php ·
- *          stock/index.php (position / sim / fund)
+ * 쓰는 곳: chart_gallery.php · stock/index.php (short / position / sim / fund)
  *
  * 왜 하나로 모았나 — 같은 차트 코드가 5벌 복사되어 있어서
  * 신호 조건 하나를 고치면 다섯 군데를 고쳐야 했다. 이제 여기 한 곳만 고친다.
@@ -20,7 +19,20 @@
  *   volAlpha   거래량 색 투명도 hex 2자리 (테마 기본값 있음)
  *   markers    { chips:true }  — 체결 마커. chips=true 면 HTML 칩(충돌회피), false 면 라이브러리 text
  *   todayHigh  true            — 당일전고선: 최신봉 제외 직전 60봉 최고가 수평선 (관찰용 기준선)
- *   curPrice   현재가선 색 (없으면 기능 자체 꺼짐. updash='#d9a441')
+ *              'session'       — 분봉용: «오늘 고가»(마지막 봉과 같은 날짜의 직전 봉까지). 1분봉에서
+ *                                60봉 규칙을 쓰면 「직전 60분 최고가」가 되어 이름이 거짓이 된다
+ *   curPrice   현재가선 색 (없으면 기능 자체 꺼짐. 다크 화면='#d9a441')
+ *   prevHigh   직전고가선 색 (true 면 기본 빨강 '#ff3b30'. 없으면 기능 자체 꺼짐)
+ *              — «오늘을 뺀» 실린 봉 전부의 최고가. <b>굵은 실선</b>(3px)이다 —
+ *                이 화면에서 가장 자주 보는 선이라 캔들 사이에서 한눈에 잡혀야 한다.
+ *                dc.setPrevHigh(on) 으로 토글.
+ *              「오늘」은 마지막 봉의 날짜다(분봉 time 은 KST 벽시계를 UTC 로 취급한 초라
+ *              Math.floor(t/86400) 이 그대로 KST 날짜 — todayHigh:'session' 과 같은 셈).
+ *              ★창(보이는 구간)이 아니라 실린 전부를 본다 — 휠로 줌할 때마다 「최고가」가
+ *                달라지면 그건 기준선이 아니다. 대신 <b>켜져 있으면 가격축에 포함</b>해서
+ *                화면 밖으로 사라지지 않게 한다(당일 창에서 캔들이 눌리는 건 감수한다 —
+ *                사용자가 켠 기준선은 보여야 한다. 지표선과 반대 규칙).
+ *              ★실린 봉이 오늘치뿐이면(미리보기) 직전이 없다 — 선을 그리지 않는다.
  *   code       종목코드 6자리 — 주면 SUE 공시 마커(▲어닝서프라이즈·▼어닝쇼크)를 모듈이 스스로 얹는다.
  *              종목이 바뀌는 화면은 dc.setCode(code). 차트설정의 overlay.sue_markers 로 켜고 끈다.
  *
@@ -72,6 +84,20 @@
     };
   }
 
+  /* 거래대금(원) → 사람이 읽는 한국식 단위.
+   * 자릿수를 나누는 이유: 일봉은 몇천억이 흔하고 1분봉은 몇천만이 흔하다 —
+   * 「0.01억」이나 「1234567890억」처럼 읽을 수 없는 숫자가 나오지 않게 한다. */
+  function eokText(v) {
+    v = +v || 0;
+    var e = v / 1e8;
+    if (e >= 1000) return Math.round(e).toLocaleString() + '억';
+    if (e >= 100)  return e.toFixed(0) + '억';
+    if (e >= 10)   return e.toFixed(1) + '억';
+    if (e >= 1)    return e.toFixed(2) + '억';
+    if (v >= 1e4)  return Math.round(v / 1e4).toLocaleString() + '만';
+    return Math.round(v).toLocaleString() + '원';
+  }
+
   /* ── 시간 포맷 (한국식) ── */
   function ymd(t) {
     if (typeof t === 'string') { var p = t.split('-'); return [+p[0], +p[1], +p[2]]; }
@@ -95,6 +121,20 @@
   function fmtHM(t) {
     var d = new Date((Number(t) || 0) * 1000);
     return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0');
+  }
+  /* 여러 날이 이어진 분봉 — 날이 바뀌는 자리(09:00 봉)에 «날짜»를 찍는다.
+   * 이게 없으면 09:00 이 며칠이고 반복되어 어디가 어제고 오늘인지 구분이 안 된다.
+   * (opts.multiDay 를 준 차트에서만 쓴다 — 당일치만 싣는 분봉은 옛 모습 그대로) */
+  function fmtHMD(t) {
+    var d = new Date((Number(t) || 0) * 1000);
+    if (d.getUTCHours() === 9 && d.getUTCMinutes() === 0) {
+      return (d.getUTCMonth() + 1) + '/' + d.getUTCDate();
+    }
+    return fmtHM(t);
+  }
+  function fmtDHM(t) {                    // 툴팁·범례용 — 날짜까지
+    var d = new Date((Number(t) || 0) * 1000);
+    return (d.getUTCMonth() + 1) + '/' + d.getUTCDate() + ' ' + fmtHM(t);
   }
 
   /* ── 데이터 유틸 ── */
@@ -179,6 +219,14 @@
         'font-size:11px;font-weight:800;line-height:1.35;color:#fff;padding:2px 6px;border-radius:5px;' +
         'font-variant-numeric:tabular-nums;box-shadow:0 1px 3px rgba(10,25,45,.28);' +
         'font-family:Pretendard,-apple-system,sans-serif}' +
+      /* 거래대금 표시 — 거래량 막대 위에 마우스를 올렸을 때만 뜬다(스칠 때 자리를 안 먹게 떠다닌다) */
+      '.dc-amt{position:absolute;z-index:4;pointer-events:none;white-space:nowrap;transform:translate(-50%,-100%);' +
+        'font-size:11px;font-weight:800;line-height:1.35;padding:3px 7px;border-radius:6px;' +
+        'font-variant-numeric:tabular-nums;font-family:Pretendard,-apple-system,sans-serif;' +
+        'background:rgba(20,28,44,.94);color:#e8eefc;box-shadow:0 2px 8px rgba(6,12,26,.45)}' +
+      '.dc-amt.light{background:rgba(255,255,255,.97);color:#22303f;box-shadow:0 2px 8px rgba(20,40,70,.18);' +
+        'border:1px solid #d7e0ea}' +
+      '.dc-amt small{display:block;font-size:10px;font-weight:700;opacity:.72;margin-top:1px}' +
       '.dc-mk.buy{background:#d32f2f}.dc-mk.sell{background:#1565c0}' +
       '.dc-mk .mk-l1{display:block}' +
       '.dc-mk .mk-l2{display:block;font-size:10px;font-weight:700;opacity:.82;margin-top:1px;' +
@@ -275,6 +323,13 @@
       '.dc-modal .dc-mrow b{font-weight:700}' +
       '.dc-modal .dc-mrow em{margin-left:auto;font-style:normal;font-size:10.5px;color:#8496a6;' +
         'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:50%}' +
+      /* 차트 관리 줄 — 고르는 줄이 아니라 「이름 + 삭제」다 */
+      '.dc-modal .dc-mrow.plain{cursor:default}' +
+      '.dc-modal .dc-mrow.plain b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.dc-modal .dc-mdel{flex:none;margin-left:8px;border:0;cursor:pointer;font-family:inherit;' +
+        'font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;background:#fdecea;color:#c0241a}' +
+      '.dc-modal .dc-mdel:disabled{opacity:.5;cursor:default}' +
+      '.dc-modal.dark .dc-mdel{background:#3a1d1d;color:#f0928a}' +
       '.dc-modal .dc-mvar{display:flex;align-items:center;gap:8px;padding:3px 6px;font-size:12px}' +
       '.dc-modal .dc-mvar label{flex:1;min-width:0;font-weight:700;color:#3c4d5e;' +
         'white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
@@ -310,8 +365,10 @@
    *
    * 심볼(한글 가능·대소문자 무관):
    *   C/종가 O/시가 H/고가 L/저가 V/거래량 AMT/거래대금(종가×거래량)
+   *   HM/시각(0900→900) FIRSTBAR/첫봉 LASTBAR/막봉 — ★분봉에서만 값이 생긴다(일·주·월은 0)
    * 함수:
    *   MA(x,n) 이동평균 · SUM(x,n) n봉 합 · SUM(x) 누적합 · HIGHEST/LOWEST(x,n)
+   *   HIGHEST(x)/LOWEST(x) 처음부터 지금까지의 최고/최저 (SUM(x) 와 같은 「인자 1개=누적」 규칙)
    *   STD(x,n) 표준편차 · REF(x,n) n봉 전 값 · ABS · MIN · MAX · ROUND
    *   CROSS(a,b) 상향돌파=1 · VALUEWHEN(n,조건,값) 최근 n번째 조건 참 시점의 값
    * 키움 문법: 이름(1) = 그 값의 1봉 전 (REF 와 동일) · and or not 도 됨
@@ -321,6 +378,7 @@
    * 값이 null(워밍업 구간·정지봉)인 봉은 선이 끊기고 점이 찍히지 않는다.
    * ════════════════════════════════════════════════════════════════════ */
   var _exprCache = {};
+  var _indErrSeen = {};      // 그리기 실패 알림 중복 방지 (지표 이름|메시지)
 
   function exprTokenize(src) {
     var re = /([A-Za-z_가-힣][A-Za-z0-9_가-힣]*)|(\d+(?:\.\d+)?)|(>=|<=|==|!=|&&|\|\||=)|([-+*\/%(),<>!;])|(\s+)/g;
@@ -526,8 +584,29 @@
             return rolling(args[0], needN(args[1], 'SUM'), function (b) {
               var s = 0; b.forEach(function (x) { s += x; }); return s; });
           }
-          case 'HIGHEST': return rolling(args[0], needN(args[1], 'HIGHEST'), function (b) { return Math.max.apply(null, b); });
-          case 'LOWEST':  return rolling(args[0], needN(args[1], 'LOWEST'),  function (b) { return Math.min.apply(null, b); });
+          /* HIGHEST/LOWEST — 인자 2개는 n봉 창, 인자 1개는 «처음부터 지금까지»의 누적이다.
+           * (SUM(x) 가 이미 누적합인 것과 같은 규칙. 창 길이는 상수라 「지금까지」를 못 적는데,
+           *  「직전 최고를 넘은 봉」 같은 신고 판정이 그 값을 필요로 한다.)
+           * ★null(정지봉·워밍업)은 «건너뛴다» — 창 함수처럼 결과를 null 로 만들지 않는다.
+           *   한 봉이 비었다고 지금까지의 최고가 사라지면 그 뒤가 통째로 끊긴다. */
+          case 'HIGHEST':
+          case 'LOWEST': {
+            if (node.a.length === 1) {
+              var ra = toArr(args[0]), ro = new Array(n), run = null;
+              var up = (fn === 'HIGHEST');
+              for (var rk = 0; rk < n; rk++) {
+                var rv = ra[rk];
+                if (rv !== null && rv !== undefined) {
+                  if (run === null || (up ? rv > run : rv < run)) run = rv;
+                }
+                ro[rk] = run;
+              }
+              return ro;
+            }
+            return (fn === 'HIGHEST')
+              ? rolling(args[0], needN(args[1], 'HIGHEST'), function (b) { return Math.max.apply(null, b); })
+              : rolling(args[0], needN(args[1], 'LOWEST'),  function (b) { return Math.min.apply(null, b); });
+          }
           case 'STD':     return rolling(args[0], needN(args[1], 'STD'), function (b) {
                             var m = 0; b.forEach(function (x) { m += x; }); m /= b.length;
                             var s = 0; b.forEach(function (x) { s += (x - m) * (x - m); });
@@ -581,33 +660,42 @@
   }
 
   /* 변수 기본값의 시간축별 해석.
-   * 신형: {day:{N:20}, week:{N:52}, month:{N:12}} — 일 값이 기본, 주/월은 그 축에서 덮어씀.
-   * 구형(평평한 {N:20})은 모든 축 공통. */
+   * 신형: {day:{N:20}, week:{N:52}, month:{N:12}, min:{N:120}} — 일 값이 기본, 나머지 축은 덮어씀.
+   * 구형(평평한 {N:20})은 모든 축 공통.
+   * ★분(min)도 «비면 일 값»을 쓴다 — 주·월과 같은 규칙이다. 분봉만 다르게 쓰고 싶을 때만 채운다. */
+  var TFS = ['day', 'week', 'month', 'min'];
   function tfVars(vars, tf) {
     if (!vars) return {};
-    var per = (vars.day && typeof vars.day === 'object')
-           || (vars.week && typeof vars.week === 'object')
-           || (vars.month && typeof vars.month === 'object');
+    var per = false;
+    TFS.forEach(function (k) { if (vars[k] && typeof vars[k] === 'object') per = true; });
     if (!per) return vars;
     var out = {};
     var base = (vars.day && typeof vars.day === 'object') ? vars.day : {};
     Object.keys(base).forEach(function (k) { out[k] = base[k]; });
-    var ov = (tf === 'week') ? vars.week : (tf === 'month') ? vars.month : null;
-    if (ov && typeof ov === 'object') Object.keys(ov).forEach(function (k) { out[k] = ov[k]; });
+    var ov = (tf && tf !== 'day' && vars[tf] && typeof vars[tf] === 'object') ? vars[tf] : null;
+    if (ov) Object.keys(ov).forEach(function (k) { out[k] = ov[k]; });
     return out;
   }
 
   /* 이 지표가 쓰는 변수 이름 — 정의 순서 그대로 (신형 {day,week,month} / 구형 평평 둘 다) */
   function indVarNames(def) {
     var vs = (def && def.vars) || {};
-    var per = (vs.day && typeof vs.day === 'object') || (vs.week && typeof vs.week === 'object')
-           || (vs.month && typeof vs.month === 'object');
-    var maps = per ? [vs.day || {}, vs.week || {}, vs.month || {}] : [vs];
+    var per = false;
+    TFS.forEach(function (k) { if (vs[k] && typeof vs[k] === 'object') per = true; });
+    var maps = per ? TFS.map(function (k) { return vs[k] || {}; }) : [vs];
     var seen = {}, out = [];
     maps.forEach(function (m) {
       Object.keys(m).forEach(function (k) { if (!seen[k]) { seen[k] = 1; out.push(k); } });
     });
     return out;
+  }
+  /* 이 지표를 이 시간축에서 «보여 줄» 것인가 (지표 관리의 일/주/월/분 체크칸).
+   * ★비어 있으면 전 축이다 — 체크칸이 생기기 전에 만든 지표가 조용히 사라지면 안 된다.
+   * 판정은 이 한 함수뿐이다: 그리기(renderIndicators) · 칩 · 지표 선택 모달이 전부 여기를 본다. */
+  function indTfOk(def, tf) {
+    var a = def && def.tfs;
+    if (!a || !a.length) return true;
+    return a.indexOf(tf || 'day') >= 0;
   }
   /* 지금 이 축에서 실제로 쓰이는 변수 값 — 축별 기본값에 화면 override 를 얹은 것 */
   function indVarValues(def, override, tf) {
@@ -664,6 +752,34 @@
        *   (실측 2026-07-31 · 7,949표본). 그래서 cron/krx_amt.php 로 실제값을 받아 둔다. */
       AMT.push(b.amt !== undefined && b.amt !== null ? b.amt : (v === null ? null : c * v));
     });
+
+    /* ── 하루 안에서의 자리 — 분봉에서만 뜻이 있다 ──
+     *   시각 HM  09:00 → 900 · 15:30 → 1530
+     *   첫봉/막봉  그 날의 첫/마지막 봉이면 1
+     * 쓰는 이유: 대형주는 시가·종가 단일가 물량이 그 한 봉에 통째로 실려 「그 날 최고 거래량 봉」이
+     * 09:00·15:30 으로 쏠린다. 그건 장중 매집이 아니라 주문 접수 결과라 지지·저항으로 읽으면 어긋난다.
+     * ★일·주·월 봉은 time 이 'YYYY-MM-DD' 문자열이라 하루 안의 자리가 없다 → 셋 다 0 이다.
+     *   (봉 하나가 곧 하루라 「첫봉」이 1 이 되면 `1-첫봉` 류 수식이 전 구간을 지워 버린다 —
+     *    0 = 「뺄 것이 없다」가 안전하고 뜻도 맞다.) */
+    var HM = new Array(bars.length), FIRST = new Array(bars.length), LAST = new Array(bars.length);
+    var dayKey = new Array(bars.length);
+    for (var bi = 0; bi < bars.length; bi++) {
+      var t = bars[bi].time;
+      if (typeof t === 'number' && isFinite(t)) {
+        var d = new Date(t * 1000);                       // KST 벽시계를 UTC 로 담아 둔 값
+        HM[bi] = d.getUTCHours() * 100 + d.getUTCMinutes();
+        dayKey[bi] = Math.floor(t / 86400);
+      } else {
+        HM[bi] = 0; dayKey[bi] = null;
+      }
+      FIRST[bi] = 0; LAST[bi] = 0;
+    }
+    for (var fi = 0; fi < bars.length; fi++) {
+      if (dayKey[fi] === null) continue;
+      if (fi === 0 || dayKey[fi - 1] !== dayKey[fi]) FIRST[fi] = 1;
+      if (fi === bars.length - 1 || dayKey[fi + 1] !== dayKey[fi]) LAST[fi] = 1;
+    }
+
     var vars = {};
     var base = tfVars(def && def.vars, tf || 'day');
     Object.keys(base).forEach(function (k) { vars[k.toUpperCase()] = +base[k]; });
@@ -674,7 +790,9 @@
       len: bars.length, vars: vars, locals: locals || {},
       series: { C: C, O: O, H: H, L: L, V: V, AMT: AMT,
                 CLOSE: C, OPEN: O, HIGH: H, LOW: L, VOL: V,
-                '종가': C, '시가': O, '고가': H, '저가': L, '거래량': V, '거래대금': AMT }
+                '종가': C, '시가': O, '고가': H, '저가': L, '거래량': V, '거래대금': AMT,
+                HM: HM, FIRSTBAR: FIRST, LASTBAR: LAST,
+                '시각': HM, '첫봉': FIRST, '막봉': LAST }
     };
   }
 
@@ -718,7 +836,7 @@
   }
 
   // 문법 검사 — 파싱 + 함수 이름·인자 수 (변수·대입 이름은 실행 시점에 값이 오므로 여기선 못 본다)
-  var EXPR_ARITY = { MA: [2,2], SUM: [1,2], HIGHEST: [2,2], LOWEST: [2,2], STD: [2,2], REF: [2,2],
+  var EXPR_ARITY = { MA: [2,2], SUM: [1,2], HIGHEST: [1,2], LOWEST: [1,2], STD: [2,2], REF: [2,2],
                      ABS: [1,1], ROUND: [1,1], MIN: [2,2], MAX: [2,2], CROSS: [2,2], VALUEWHEN: [3,3] };
   function astCheck(node) {
     if (!node) return;
@@ -816,7 +934,7 @@
     /* ── 차트 높이 — 화면마다 «사용자가 끌어서» 정하고, 그 화면이 기억한다 ──
      * hkey  = 높이를 기억하는 단위 = 화면(ChartFeat 의 screen). 차트틀 키(opts.key)와 다르다 —
      *         보유종목 상세와 종목추가 사다리는 차트틀은 공유하지만(position) 화면은 다르니까.
-     * hTarget = 실제로 늘어나는 요소. 기본은 host 지만, updash 처럼 flex 형제와 자리를 나눠 갖는
+     * hTarget = 실제로 늘어나는 요소. 기본은 host 지만, 단타처럼 flex 형제와 자리를 나눠 갖는
      *         배치에서는 페이지가 부모 블록을 지정한다(opts.resizeTarget) — host 에 높이를 박으면
      *         flex 가 무시해서 「끌리지 않는 손잡이」가 된다.
      * 저장값은 서버가 페이지에 심어 준다(DC_VIEW) — 비동기로 받으면 화면이 한 번 튄다. */
@@ -847,7 +965,7 @@
       rightPriceScale: { borderColor: TH.border },
       crosshair: { mode: LWC.CrosshairMode.Normal },
       localization: {
-        timeFormatter: kind === 'minute' ? fmtHM : fmtKDate,
+        timeFormatter: kind === 'minute' ? (opts.multiDay ? fmtDHM : fmtHM) : fmtKDate,
         priceFormatter: function (v) { return Math.round(v).toLocaleString(); }
       },
       /* ★시간축을 «데이터 안»에 가둔다 (2026-08-03).
@@ -856,7 +974,8 @@
        *   fixLeftEdge  — 첫 봉보다 더 왼쪽으로는 못 간다. 전부 보이면 줌아웃이 거기서 멎는다.
        *   HTS 와 같은 감각 — 데이터가 있는 만큼만 움직이고 빈 여백은 만들지 않는다. */
       timeScale: kind === 'minute'
-        ? { borderColor: TH.border, timeVisible: true,  secondsVisible: false, tickMarkFormatter: fmtHM,
+        ? { borderColor: TH.border, timeVisible: true,  secondsVisible: false,
+            tickMarkFormatter: opts.multiDay ? fmtHMD : fmtHM,
             fixLeftEdge: true, fixRightEdge: true, rightOffset: 0 }
         : { borderColor: TH.border, timeVisible: false, secondsVisible: false, tickMarkFormatter: fmtTick,
             fixLeftEdge: true, fixRightEdge: true, rightOffset: 0 }
@@ -867,7 +986,10 @@
     var self = {
       chart: chart, host: host,
       _bars: [],            // 일봉 원본 (전체 — 화면 슬라이스와 무관)
-      _tf: 'day',
+      /* 시간축 = «변수 세트·차트틀을 고르는 키»이기도 하다.
+       * 분봉은 처음부터 'min' 으로 산다 — 주기가 달라 240봉·120봉 같은 값을 일봉과 나눠 써야 하고,
+       * 저장한 차트틀도 섞이면 안 된다(일봉 목록에 분봉 틀이 뜨는 일). setTf 는 여기에 안 온다. */
+      _tf: (opts.kind === 'minute') ? 'min' : 'day',
       _viewDays: null,      // n 이면 마지막 n 봉만 표시 (신호 계산은 전체 기준)
       _pinnedRange: null,   // zoomRange 로 잡은 과거 구간 — go() 재적용 때도 이 값으로 되돌아온다
       _main: null,          // 캔들 or 라인(폴백) 시리즈
@@ -925,12 +1047,23 @@
         if (v < B) B = v * (1 - PAD / 2);
         if (v > T) T = v * (1 + PAD / 2);
       });
+      /* 직전고가선은 «켜져 있을 때만» 축에 포함한다 — 사용자가 켠 기준선이 화면 밖에 있으면
+       * 「켰는데 아무 일도 안 일어나는」 스위치가 된다. (지표선은 반대로 제외한다 —
+       *  멀리 있는 레벨 하나가 캔들을 납작하게 눌러선 안 되기 때문. 저건 안 켰는데 생기는 선이다.) */
+      if (self._pv && self._pv.show && isFinite(self._pv.val)) {
+        if (self._pv.val > T) T = self._pv.val * (1 + PAD / 2);
+        if (self._pv.val < B) B = self._pv.val * (1 - PAD / 2);
+      }
       /* 라이브러리는 여기서 돌려준 범위에 scaleMargins(비율 여백)를 «또» 더해서 그린다.
        * 그대로 두면 +10% 가 +12%,+15% 로 불어난다 — 여백만큼 미리 빼서 돌려준다.
        * 그러면 화면 위·아래 끝이 정확히 최고가+10% · 최저가−10% 가 된다. */
       var V = T - B;
       return { priceRange: { minValue: B + MB * V, maxValue: T - MT * V } };
     }
+
+    /* ⊗ 거래량 축에서 단일가 봉(09:00·15:30)을 빼는 시도가 여기 있었다 — 2026-08-05 원복.
+     *   대형주는 단일가 한 봉이 축을 다 먹어 나머지가 바닥에 붙는데, 그 처리를 «차트»가 아니라
+     *   «사용자 지표(수식)»에서 하기로 했다(사용자 판단). 차트는 원장을 있는 그대로 그린다. */
     /* 라이브러리 비율 여백 — 아래를 조금 남기는 이유는 거래량 막대(별도 축)가 바닥을 쓰기 때문.
      * 이 값은 barScale 이 되빼므로 «가격축 눈금»에는 영향이 없다(위 +10%·아래 −10% 그대로). */
     var MT = 0.02, MB = (opts.volume === false) ? 0.02 : 0.06;
@@ -961,6 +1094,7 @@
       self._mainIsCandle = wantCandle;
       self._plineObjs = [];          // 시리즈가 바뀌면 가격선도 다시 그려야 한다
       if (self._th) self._th.obj = null;   // 시리즈가 바뀌면 당일전고선도 다시 그린다
+      if (self._pv) self._pv.obj = null;   // 직전고가선도 마찬가지
     }
 
     if (opts.volume !== false) {
@@ -969,12 +1103,69 @@
         priceLineVisible: false, lastValueVisible: false
       });
       chart.priceScale('vol').applyOptions({ scaleMargins: { top: TH.volTop, bottom: 0 } });
+
+      /* ── 거래량 칸 위에서만 뜨는 «거래대금» 표시 ──
+       * 막대 높이는 거래량인데 정작 궁금한 건 «얼마어치»인 경우가 많다(단타에서 특히).
+       * 상시 범례로 두지 않은 이유: 차트가 낮은 3분할 화면에서 한 줄이 아깝고, 이 값은
+       * 「이 봉 얼마였지」를 물을 때만 필요하다 — 물을 때만 답한다.
+       * ★실제 거래대금(krx_amt)이 없는 봉은 종가×거래량 근사라 «≈»를 붙여 구분한다.
+       *   분봉은 원장에 거래대금이 없어 언제나 근사다(중앙 0.99% 오차 · 실측 2026-07-31). */
+      var amtEl = null;
+      function hideAmt() { if (amtEl) amtEl.style.display = 'none'; }
+      function showAmt(p) {
+        if (!feats('overlay.amt_hover')) return hideAmt();
+        if (!p || !p.point || p.time === undefined || p.time === null) return hideAmt();
+        /* 거래량 칸(아래 band) 밖이면 안 띄운다 — 캔들 위에서는 조용하다.
+         * ★기준은 host 높이가 아니라 «거래량 축의 바닥»이다. host 에는 시간축(약 28px)이
+         *   포함돼 있어 그걸로 재면 막대 윗부분이 판정에서 빠진다. */
+        var vb = self._vol.priceToCoordinate(0);
+        if (vb === null || vb === undefined) vb = host.clientHeight;
+        if (p.point.y < vb * TH.volTop) return hideAmt();
+        var b = barByTime(p.time);
+        if (!b) return hideAmt();
+        var v = +b.vol || 0;
+        var real = (b.amt !== undefined && b.amt !== null);
+        var amt = real ? +b.amt : (+b.close || 0) * v;
+        if (!isFinite(amt) || amt <= 0) return hideAmt();
+        if (!amtEl) {
+          anchorHost();
+          amtEl = document.createElement('div');
+          amtEl.className = 'dc-amt' + (opts.theme === 'dark' ? '' : ' light');
+          host.appendChild(amtEl);
+        }
+        amtEl.innerHTML = '';
+        amtEl.appendChild(document.createTextNode((real ? '' : '≈') + eokText(amt)));
+        var sm = document.createElement('small');
+        sm.textContent = v.toLocaleString() + '주';
+        amtEl.appendChild(sm);
+        amtEl.style.display = 'block';
+        var w = amtEl.offsetWidth, W = host.clientWidth;
+        amtEl.style.left = Math.max(w / 2 + 2, Math.min(W - w / 2 - 2, p.point.x)) + 'px';
+        amtEl.style.top  = Math.max(amtEl.offsetHeight + 2, p.point.y - 6) + 'px';
+      }
+      chart.subscribeCrosshairMove(showAmt);
+      host.addEventListener('mouseleave', hideAmt);
     }
 
     /* ── 현재 표시용 봉 (주봉 접기 → 기간 슬라이스) ──
      * viewDays 는 <b>현재 시간축의 봉 수</b>다 — 일봉이면 160일, 주봉이면 24주.
      * 그래서 접기를 먼저 하고 나서 자른다. */
     function fullBars()  { return self._tf === 'week' ? resampleWeek(self._bars) : self._bars; }
+    /* 십자선이 가리키는 봉 — 시간 표현이 축마다 다르다(분봉=초 단위 숫자 · 일봉=날짜).
+     * 그래서 키로 바꿔 맞춘다. 색인은 그릴 때마다 버린다(종목이 바뀌면 같은 길이여도 다른 봉이다). */
+    function timeKey(t) {
+      if (typeof t === 'number') return 'n' + t;
+      var d = ymd(t);
+      return d ? ('d' + d[0] + '-' + d[1] + '-' + d[2]) : ('s' + String(t));
+    }
+    function barByTime(t) {
+      if (!self._barIdx) {
+        var m = {}, fb = fullBars();
+        for (var i = 0; i < fb.length; i++) m[timeKey(fb[i].time)] = fb[i];
+        self._barIdx = m;
+      }
+      return self._barIdx[timeKey(t)] || null;
+    }
     function viewBars()  {
       var b = fullBars();
       return self._viewDays ? b.slice(-self._viewDays) : b;
@@ -1003,6 +1194,16 @@
           axisLabelVisible: L.axisLabel !== false
         });
       });
+    }
+
+    /* host 를 «위치 기준»으로 못박는다.
+     * 이 아래 층들(마커 칩·박스·높이 손잡이)은 전부 position:absolute + inset:0 이라, host 가
+     * static 이면 기준이 «더 바깥의 positioned 조상»으로 새 나간다 — 그러면 층의 overflow:hidden 도
+     * 그 바깥 상자에서 잘리므로 칩이 «남의 패널 위»에 그려진다.
+     * ★실제로 그랬다(2026-08-04, 단타 3분할): 높이 손잡이 분기 안에만 이 한 줄이 있어서
+     *   resize:false 인 차트는 못 박히지 않았고, 일봉의 SUE 칩이 위쪽 분봉 패널에 떠올랐다. */
+    function anchorHost() {
+      if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
     }
 
     /* ── 체결 마커 (화살표 = 라이브러리 / 글자 = HTML 칩 + 충돌회피) ── */
@@ -1108,6 +1309,7 @@
       if (chipData.length && !self._mkLayer) {
         self._mkLayer = document.createElement('div');
         self._mkLayer.className = 'dc-mk-layer';
+        anchorHost();
         host.appendChild(self._mkLayer);
       }
       drawMarkChips();
@@ -1174,12 +1376,23 @@
       var fb = fullBars();
       if (!fb.length) { updateIndLegend(); return; }
       self._inds.forEach(function (ap) {
+        // 이 축에서 안 보이기로 한 지표 — 계산도 하지 않는다 (범례·점 마커에도 안 남는다)
+        if (!indTfOk(ap.def, self._tf)) return;
         var parts;
         try {
           // 전체 봉 기준 계산(워밍업 정확) + 현재 시간축의 변수 세트(일/주/월 다르게 설정 가능)
           parts = evalIndicatorMulti(fb, ap.def, ap.vars, self._tf);
         } catch (e) {
+          /* ★조용히 넘기지 않는다 — 「선이 하나도 안 그려짐」으로만 보여 원인을 못 찾는다
+           * (실제로 변수 하나가 빠진 채 한참 헤맸다). 렌더는 휠·창 이동마다 도니
+           * 같은 오류는 한 번만 알린다 — 지표 이름+메시지로 묶는다. */
           console.error('[지표 ' + ap.def.name + ']', e);
+          var ek = (ap.def.name || '') + '|' + (e && e.message);
+          if (!_indErrSeen[ek]) {
+            _indErrSeen[ek] = 1;
+            alert('지표 「' + (ap.def.name || '이름 없음') + '」 를 그리지 못했습니다.\n\n'
+                + (e && e.message) + '\n\n(차트설정 > 지표 관리에서 변수·수식을 확인하세요)');
+          }
           return;
         }
         parts.forEach(function (pt) {
@@ -1242,8 +1455,18 @@
       if (!S.show) return;
       var fb = fullBars(), n = fb.length;
       if (n < 2) return;
-      var ph = -Infinity;
-      for (var k = Math.max(0, n - 1 - 60); k < n - 1; k++) if (fb[k].high > ph) ph = fb[k].high;
+      var ph = -Infinity, k;
+      if (opts.todayHigh === 'session' && typeof fb[n - 1].time === 'number') {
+        /* 분봉용 — 「당일전고」를 글자 그대로 «오늘 고가»(직전 봉까지)로 잡는다.
+         * 일봉의 60봉 전고를 1분봉에 그대로 쓰면 「직전 60분 최고가」가 되어 이름이 거짓이 된다.
+         * 분봉 time 은 KST 벽시계를 UTC 로 취급한 초 단위라, 86400 으로 나누면 그대로 KST 날짜다. */
+        var day0 = Math.floor(fb[n - 1].time / 86400);
+        for (k = n - 2; k >= 0 && Math.floor(fb[k].time / 86400) === day0; k--) {
+          if (fb[k].high > ph) ph = fb[k].high;
+        }
+      } else {
+        for (k = Math.max(0, n - 1 - 60); k < n - 1; k++) if (fb[k].high > ph) ph = fb[k].high;
+      }
       if (ph <= -Infinity) return;
       S.obj = self._main.createPriceLine({
         price: ph, color: '#22d3ee', lineWidth: 1,
@@ -1256,6 +1479,69 @@
       drawTodayHigh();
     }
 
+    /* ── 직전고가선 — «오늘을 뺀» 실린 봉 전부의 최고가. 관찰용 저항 기준선 ──
+     * 「오늘 이 선을 뚫었나」가 이 선을 보는 이유다. 그래서 오늘 봉은 계산에서 뺀다 —
+     * 넣으면 장중 신고가를 낼 때마다 선이 스스로 따라 올라가 영영 안 뚫린다.
+     * ★보이는 창이 아니라 실린 전부를 본다. 창을 따라가면 휠을 굴릴 때마다 「최고가」가 달라져
+     *   기준선 구실을 못 한다(그건 그냥 축 눈금이다).
+     * ★색으로 소유자를 가른다 — 현재가(#d9a441 얇은 실선)·지표와 겹치지 않는 <b>빨간 굵은 실선</b>.
+     *   캔들의 양봉색(#e8493f)보다 채도가 높은 순빨강이라 3px 실선이면 헷갈리지 않는다.
+     * ★가격축 눈금에 값을 띄운다(axisLabelVisible) — 얼마인지 따로 적을 자리를 만들지 않는다. */
+    function pvState() {
+      if (!self._pv) self._pv = { obj: null, show: false, val: NaN };
+      return self._pv;
+    }
+    /* 축을 «다시 재게» 만든다 — 이 한 줄을 찾는 데 탐침을 세 번 돌렸다(2026-08-05 실측).
+     * 라이브러리(LWC 4.1.3)는 autoscale 결과를 «데이터+보이는 범위»에 걸어 캐시한다. 그래서
+     *   ⊗ 시리즈 applyOptions (같은 참조든 새 껍데기든)   ⊗ priceScale autoScale false→true
+     *   ⊗ createPriceLine / removePriceLine              — 넷 다 축을 안 움직인다.
+     *   ○ setData 는 되지만 <b>마커를 지운다</b>(체결·SUE·지표 점이 통째로 날아간다).
+     *   ◎ update(마지막 봉) 은 캐시를 깨면서 마커를 지키지 않는다 — 실측으로 마커 1개 생존 확인.
+     * 그래서 «있는 그대로의 마지막 봉»을 한 번 다시 넣는다. 값이 같으니 그림은 안 바뀌고
+     * 축만 다시 계산된다. */
+    function pvRescale() {
+      if (!self._main) return;
+      var fb = fullBars();
+      if (!fb.length) return;
+      try { self._main.update(mainPoint(fb[fb.length - 1])); } catch (e) {}
+    }
+    /* 「같은 날인가」 — 분봉은 초 단위(하루 86400), 일봉은 'YYYY-MM-DD' 문자열이다.
+       일봉은 봉 하나가 곧 하루라 마지막 봉만 빼면 된다. */
+    function sameDay(b, last) {
+      if (typeof last.time === 'number') return Math.floor(b.time / 86400) === Math.floor(last.time / 86400);
+      return b.time === last.time;
+    }
+    function drawPrevHigh() {
+      var S = self._pv;
+      if (!S || !self._main) return;
+      if (S.obj) { self._main.removePriceLine(S.obj); S.obj = null; }
+      var fb = fullBars(), hi = -Infinity;
+      if (fb.length) {
+        var last = fb[fb.length - 1];
+        for (var i = 0; i < fb.length; i++) {
+          if (sameDay(fb[i], last)) continue;          // ★오늘은 뺀다
+          var h = fb[i].high;
+          if (h !== null && h !== undefined && h > hi) hi = h;
+        }
+      }
+      // 실린 봉이 오늘치뿐이면(미리보기) 직전이 없다 — 값도 선도 없다
+      S.val = isFinite(hi) ? hi : NaN;
+      if (S.show && isFinite(S.val)) {
+        // 굵은 실선 — 이 화면에서 가장 자주 보는 선이라 캔들 사이에서 한눈에 잡혀야 한다
+        S.obj = self._main.createPriceLine({
+          price: S.val, color: (opts.prevHigh === true ? '#ff3b30' : opts.prevHigh),
+          lineWidth: 3, lineStyle: LWC.LineStyle.Solid, axisLabelVisible: true, title: ''
+        });
+      }
+      // ★끌 때도 다시 잰다 — 안 그러면 켜면서 넓어진 축이 «끈 뒤에도» 그대로 남는다(실측).
+      pvRescale();
+    }
+    function applyPrevHigh() {
+      if (!opts.prevHigh) return;
+      pvState();
+      drawPrevHigh();
+    }
+
     /* ── 박스 오버레이 (신호일 H~L 사각형 — 패턴분석의 지지·저항 박스) ──
      * LWC 4.1.3 엔 사각형 프리미티브가 없다 → 칩과 같은 HTML 오버레이로 그린다.
      * 시리즈가 아니라서 가격축 autoscale 에 안 잡힌다(깊은 옛 박스가 축을 안 누른다). */
@@ -1264,6 +1550,7 @@
       if (!self._bxLayer) {
         self._bxLayer = document.createElement('div');
         self._bxLayer.className = 'dc-bx-layer';
+        anchorHost();
         host.appendChild(self._bxLayer);
       }
       self._bxLayer.textContent = '';
@@ -1365,7 +1652,7 @@
      * 손잡이가 없는 곳 = 화면 식별자가 없는 미니 차트(사례분석·패턴) — 거기선 페이지가 정한 높이 그대로. */
     var baseH = opts.baseHeight || pageH;      // 되돌리기 목표 = 페이지가 정한 높이
     if (opts.resize !== false && (hkey || opts.resize === true)) {
-      if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+      anchorHost();
       var grip = document.createElement('div');
       grip.className = 'dc-rsz';
       grip.title = '끌어서 차트 높이 조절 · 두 번 누르면 기본 높이';
@@ -1448,26 +1735,29 @@
       setTimeout(go, 80);   // ★그 보정은 rAF 뒤에 와서 0ms 재적용도 질 때가 있다(실측) — 한 번 더
     }
 
+    /* 봉 하나 → 메인 시리즈의 점. render(전체 적재)와 pvRescale(마지막 봉 재적용)이 나눠 쓴다 —
+     * 두 곳이 다른 모양을 만들면 「재적용했더니 마지막 봉만 달라지는」 버그가 난다.
+     * 거래정지봉(시·고·저가 null 또는 0)은 종가 도지로 — 봉이 0 까지 늘어나지 않게. */
+    function mainPoint(b) {
+      var c = b.close;
+      if (!self._mainIsCandle) return { time: b.time, value: c };
+      return {
+        time: b.time,
+        open:  (b.open  === null || b.open  === undefined || b.open  === 0) ? c : b.open,
+        high:  (b.high  === null || b.high  === undefined || b.high  === 0) ? c : b.high,
+        low:   (b.low   === null || b.low   === undefined || b.low   === 0) ? c : b.low,
+        close: c
+      };
+    }
+
     function render(fit) {
+      self._barIdx = null;   // 봉이 바뀌면 시간→봉 색인을 버린다 (거래대금 표시가 옛 봉을 가리키지 않게)
       var fb = fullBars();   // ★전체를 싣는다 — 기간은 applyWindow 가 «창»으로만 자른다 (HTS 방식)
       var hasOhlc = fb.some(function (b) {
         return b.open !== null && b.open !== undefined && b.open !== 0;
       });
       ensureMain(hasOhlc);
-      if (hasOhlc) {
-        self._main.setData(fb.map(function (b) {
-          var c = b.close;   // 거래정지봉(시·고·저 null·0)은 종가 도지 — 봉이 0 까지 늘어나지 않게
-          return {
-            time: b.time,
-            open:  (b.open  === null || b.open  === undefined || b.open  === 0) ? c : b.open,
-            high:  (b.high  === null || b.high  === undefined || b.high  === 0) ? c : b.high,
-            low:   (b.low   === null || b.low   === undefined || b.low   === 0) ? c : b.low,
-            close: c
-          };
-        }));
-      } else {
-        self._main.setData(fb.map(function (b) { return { time: b.time, value: b.close }; }));
-      }
+      self._main.setData(fb.map(mainPoint));   // 캔들/선 구분은 mainPoint 가 한다
       if (self._vol) {
         self._vol.setData(fb.filter(function (b) { return b.vol !== null && b.vol !== undefined; })
           .map(function (b) {
@@ -1481,6 +1771,7 @@
       renderIndicators();   // applyMarkers 전에 — 지표 점을 마커 목록에 넣는다
       applyMarkers();
       applyTodayHigh();
+      applyPrevHigh();
       if (fit !== false) applyWindow();
       overlaysSoon();
     }
@@ -1664,6 +1955,12 @@
     self.setTodayHigh = function (on) {
       var S = thState(); S.show = !!on; drawTodayHigh(); return self;
     };
+    self.setPrevHigh = function (on) {
+      var S = pvState(); S.show = !!on; drawPrevHigh(); return self;
+    };
+    self.prevHigh = function () {                // 지금 잰 직전고가 값 (오늘치뿐이면 null)
+      return (self._pv && isFinite(self._pv.val)) ? self._pv.val : null;
+    };
     self.setCurPrice = function (on) {
       self._curPriceOn = !!on;
       if (self._main && self._mainIsCandle) self._main.applyOptions({ priceLineVisible: self._curPriceOn });
@@ -1795,7 +2092,44 @@
     // opts.code — 이 차트가 보는 종목. 주면 SUE 공시 마커를 모듈이 알아서 얹는다
     if (opts.code) self.setCode(opts.code);
 
+    /* 라이브러리 객체를 꺼내 쓰는 통로 — 모듈이 감싸지 못한 일(차트 간 crosshair 연동 등)에만.
+     * ★일반 화면은 쓰지 말 것. 여기로 옵션을 직접 만지면 모듈이 세운 규칙(축 가두기·가격축 여백)이 깨진다. */
+    self.lwc  = function () { return chart; };
+    self.main = function () { return self._main; };
+
     return self;
+  }
+
+  /* ── 차트 둘의 십자선을 잇는다 (같은 시각을 두 창에서 함께 짚는다) ──
+   * 단타 화면의 메인 분봉 ↔ 보조 분봉처럼 <b>축 단위가 같은</b> 차트끼리만 쓴다.
+   * ★일봉과 분봉은 잇지 않는다 — 축 단위가 날짜 vs 분이라 무의미하고,
+   *   액면분할 종목에서 가격대가 어긋나 보여 오독을 부른다.
+   */
+  function linkCrosshair(dcs) {
+    var list = (dcs || []).filter(Boolean);
+    if (list.length < 2) return;
+    var busy = false;
+    list.forEach(function (dc) {
+      var chart = dc.lwc && dc.lwc();
+      if (!chart) return;
+      chart.subscribeCrosshairMove(function (p) {
+        if (busy) return;
+        busy = true;
+        list.forEach(function (o) {
+          if (o === dc) return;
+          var oc = o.lwc && o.lwc(), os = o.main && o.main();
+          if (!oc || !os) return;
+          try {
+            if (!p || !p.time) oc.clearCrosshairPosition();
+            else {
+              var v = p.seriesData && p.seriesData.get ? p.seriesData.get(dc.main()) : null;
+              oc.setCrosshairPosition(v ? (v.close !== undefined ? v.close : v.value) : 0, p.time, os);
+            }
+          } catch (e) { /* 라이브러리 버전 차이는 조용히 넘긴다 — 십자선 하나로 화면이 죽지 않는다 */ }
+        });
+        busy = false;
+      });
+    });
   }
 
   /* ── 기간 바 — 화면들이 같은 기간 UI·정책을 공유한다 ──
@@ -2189,7 +2523,7 @@
     return _indFetchP;
   }
 
-  /* ── SUE 공시 마커 — 종목당 한 번만 받아 캐시 (updash 처럼 종목을 갈아 끼우는 화면 대비) ── */
+  /* ── SUE 공시 마커 — 종목당 한 번만 받아 캐시 (단타처럼 종목을 갈아 끼우는 화면 대비) ── */
   var _sueCache = {};
   function sueLoad(code) {
     if (_sueCache[code]) return _sueCache[code];
@@ -2283,7 +2617,9 @@
     function defColor(d) {
       return (d.lines && d.lines.length && d.lines[0].color) ? d.lines[0].color : d.color;
     }
-    function tfName(tf) { return tf === 'week' ? '주봉' : tf === 'month' ? '월봉' : '일봉'; }
+    function tfName(tf) {
+      return tf === 'week' ? '주봉' : tf === 'month' ? '월봉' : tf === 'min' ? '분봉' : '일봉';
+    }
     // 이 화면의 기간 바 (있으면 기간·시간축까지 저장/복원한다)
     function pbar() {
       for (var i = 0; i < list.length; i++) if (list[i]._pbar) return list[i]._pbar;
@@ -2297,8 +2633,13 @@
     }
     function renderChips() {
       chips.innerHTML = '';
+      var tf = curTf();
       Object.keys(applied).forEach(function (id) {
         var ap = applied[id];
+        /* ★이 축에서 안 보이기로 한 지표는 칩도 «안 그린다» — 화면에서 완전히 사라진다.
+         *   다만 applied 에서는 «빼지 않는다»: 축을 되돌리면 그대로 살아나야 하고,
+         *   차트저장이 그 축의 세트를 통째로 덮어쓰므로 여기서 지우면 저장이 지표를 잃는다. */
+        if (!indTfOk(ap.def, tf)) return;
         var c = document.createElement('span');
         c.className = 'dc-ichip';
         c.title = '클릭 — 변수 수정';
@@ -2329,7 +2670,12 @@
             modalNote(bd, '등록된 지표가 없습니다. 차트 갤러리(chart_gallery.php)에서 먼저 지표를 만드세요.');
             return;
           }
+          var tf = curTf(), hid = 0;
           defs.forEach(function (d) {
+            /* 이 축에서 안 그리는 지표는 목록에서도 뺀다 — 고를 수 없는 것을 늘어놓지 않는다.
+             * ★골라 둔 상태(chosen)는 건드리지 않는다: 「적용」이 chosen 을 그대로 옮기므로
+             *   목록에 없어도 안 빠지고, 축을 되돌리면 다시 나온다. */
+            if (!indTfOk(d, tf)) { hid++; return; }
             var row = document.createElement('label');
             row.className = 'dc-mrow';
             var cb = document.createElement('input');
@@ -2338,13 +2684,18 @@
             var dot = document.createElement('i');
             dot.style.background = defColor(d);
             var nm = document.createElement('b');
-            nm.textContent = indLabel(d.name, d, null, curTf());
+            nm.textContent = indLabel(d.name, d, null, tf);
             var em = document.createElement('em');
             var vn = varNames(d);
             em.textContent = (d.draw === 'point' ? '점' : '선') + (vn.length ? ' · ' + vn.join(', ') : '');
             row.appendChild(cb); row.appendChild(dot); row.appendChild(nm); row.appendChild(em);
             bd.appendChild(row);
           });
+          // 왜 목록이 짧은지 말해 준다 — 조용히 줄어들면 「지표가 사라졌다」가 된다
+          if (hid) {
+            modalNote(bd, tfName(tf) + '에서 쓰지 않는 지표 ' + hid + '개는 숨겼습니다 '
+                        + '(지표 관리에서 축을 켜면 나옵니다).');
+          }
         },
         buttons: [
           { label: '취소' },
@@ -2496,8 +2847,14 @@
       var oN = document.createElement('option');
       oN.value = 'new'; oN.textContent = '＋ 새 차트로 저장…';
       pSel.appendChild(oN);
+      // 관리(삭제)는 지울 것이 있을 때만 — 늘 띄우면 빈 목록을 여는 헛걸음이 생긴다
+      if (presets.length) {
+        var oM = document.createElement('option');
+        oM.value = 'manage'; oM.textContent = '⚙ 차트 관리(삭제)…';
+        pSel.appendChild(oM);
+      }
       pSel.value = String(curPreset || 0);
-      pSel.title = (tf === 'week' ? '주봉' : tf === 'month' ? '월봉' : '일봉') + ' 차트 — 축을 바꾸면 그 축 목록으로 바뀐다';
+      pSel.title = tfName(tf) + ' 차트 — 축을 바꾸면 그 축 목록으로 바뀐다';
     }
     // 지금 화면 상태 → 저장할 값
     function curView() {
@@ -2555,8 +2912,63 @@
         });
       }).catch(function (e) { alert('차트 저장 실패: ' + e); });
     }
+    /* ── 차트 관리 = 지우기 ──
+     * 목록(pSel)은 «지금 축»의 차트만 보여 주지만 여기는 전부 보여 준다 —
+     * 지우려고 그 축으로 옮겨 갈 이유가 없고, 옮기면 그 차트가 «적용»되는 부작용까지 딸린다.
+     * ★차트 하나는 일·주·월·분 세트를 «함께» 들고 있다. 분봉 자리에서 지워도 그 차트의
+     *   일봉 구성까지 사라지므로, 줄에 축을 적고 확인 문구에도 밝힌다. */
+    function openChartManager() {
+      openModal({
+        theme: cfg.theme,
+        title: '차트 관리',
+        sub: '저장된 차트 ' + presets.length + '개',
+        build: fillManager,
+        buttons: [{ label: '닫기' }]
+      });
+    }
+    function fillManager(bd) {
+      bd.textContent = '';
+      if (!presets.length) {
+        modalNote(bd, '저장된 차트가 없습니다. 「차트저장」으로 지금 화면을 담아 두세요.');
+        return;
+      }
+      presets.forEach(function (p) {
+        var tf = presetTf(p);
+        var row = document.createElement('div');
+        row.className = 'dc-mrow plain';
+        var nm = document.createElement('b');
+        nm.textContent = p.name + (p.id === curPreset ? ' (지금)' : '');
+        var em = document.createElement('em');
+        em.textContent = tfName(tf) + ' · 지표 ' + (((p.sets || {})[tf]) || []).length;
+        var del = document.createElement('button');
+        del.type = 'button'; del.className = 'dc-mdel'; del.textContent = '삭제';
+        del.title = '이 차트를 지웁니다 — 지표 정의는 그대로 남습니다';
+        del.onclick = function () {
+          if (!confirm('차트 「' + p.name + '」 를 지울까요?\n'
+                     + '이 차트에 담긴 일·주·월·분 구성이 함께 사라집니다.\n'
+                     + '(지표 자체는 지워지지 않습니다)')) return;
+          del.disabled = true;
+          apiPost('preset_del', { id: String(p.id) }).then(function (r) {
+            if (!r || !r.ok) { alert('삭제 실패'); del.disabled = false; return; }
+            return loadPresets(true).then(function (d) {
+              presets = d.presets; prefs = d.prefs || {};
+              // ★지금 쓰던 차트를 지웠으면 «선택만» 푼다 — 그려져 있는 지표는 그대로 둔다
+              //   (그 축에 차트가 없을 때와 같은 규칙. 손으로 고른 것이 날아가면 안 된다)
+              if (curPreset === p.id) curPreset = 0;
+              renderPSel();
+              fillManager(bd);
+            });
+          }).catch(function (e) { alert('삭제 실패: ' + e); del.disabled = false; });
+        };
+        row.appendChild(nm); row.appendChild(em); row.appendChild(del);
+        bd.appendChild(row);
+      });
+    }
+
     pSel.onchange = function () {
       if (pSel.value === 'new') { saveAsNew(); return; }
+      // 관리는 «고르는» 행위가 아니다 — 선택을 되돌려 놓고 모달만 연다
+      if (pSel.value === 'manage') { pSel.value = String(curPreset || 0); openChartManager(); return; }
       applyPreset(+pSel.value, true);
     };
     /* 차트저장 — 고른 차트가 없으면 이름을 물어 새로 만든다.
@@ -2653,6 +3065,27 @@
       .then(function (r) { return r.json(); })
       .then(normalize);
   }
+  /* 단타 분봉 — 우리가 쌓아 둔 원장(dt_min)에서 기간·봉단위로 받는다.
+   * ★ 기존 fetchMinute() 는 <b>손대지 않는다</b> — 갤러리·미리보기가 쓰는 정본이라
+   *   여기에 파라미터를 늘리면 그 동작이 조용히 바뀐다. 새 길을 하나 더 낸다.
+   *   주소가 다른 이유: 이 데이터의 주인은 단타(stock/api.php)지 시세 공용 API 가 아니다.
+   *   live=1 이면 장중에만 네이버 당일분을 서버가 덧대 준다(같은 분은 DB 가 이긴다).
+   */
+  function fetchMinuteRange(code, unit, from, to, live) {
+    var q = '/stock/api.php?module=dt&action=series&code=' + encodeURIComponent(code)
+          + '&unit=' + (unit || 1) + '&from=' + (from || '') + '&to=' + (to || '')
+          + (live ? '&live=1' : '');
+    return fetch(q, { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (raw) {
+        return (Array.isArray(raw) ? raw : []).map(function (x) {
+          return {   // KST 벽시계를 UTC 로 취급 — fetchMinute 과 같은 'Z' 트릭
+            time: Math.floor(Date.parse(x.t.replace(' ', 'T') + 'Z') / 1000),
+            open: x.o, high: x.h, low: x.l, close: x.c, vol: x.v
+          };
+        });
+      });
+  }
   function fetchMinute(code) {
     return fetch(API + '?module=stock&action=minute&code=' + encodeURIComponent(code),
                  { credentials: 'same-origin' })
@@ -2672,6 +3105,8 @@
     create: create,
     fetchDaily: fetchDaily,
     fetchMinute: fetchMinute,
+    fetchMinuteRange: fetchMinuteRange,   // 단타 — 쌓아 둔 분봉 원장(기간·단위는 Dt::UNITS)
+    linkCrosshair: linkCrosshair,         // 같은 축 단위 차트끼리 십자선 잇기
     resampleWeek: resampleWeek,
     periodBar: periodBar,
     PERIODS: PERIODS,
@@ -2684,6 +3119,7 @@
     checkExpr: checkExpr,
     checkDef: checkDef,
     indLabel: indLabel,         // 이름의 #토큰 → 변수 값
+    indTfOk: indTfOk,           // 이 지표를 이 시간축에서 보여 주나 (빈 tfs = 전 축)
     indVarNames: indVarNames,
     stepLevels: stepLevels,     // 계단선의 단계 목록 (연장 기능·검사용)
     compileExpr: exprCompile

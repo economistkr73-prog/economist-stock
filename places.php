@@ -1093,6 +1093,7 @@ var PL_SHARE        = <?= json_encode($isGuest && empty($tripToken) ? $shareToke
 var PL_TRIP         = <?= json_encode($tripToken ?? '') ?>; // 트립 공유 토큰(?trip=) — 있으면 그 여행지도만 게스트 열람
 var PL_GUEST        = !!(PL_SHARE || PL_TRIP);   // 게스트(공유)면 보기 전용 — 찜·경로추가·길찾기 버튼 숨김
 var PL_GUIDES       = <?= json_encode(FoodGuide::clientDefs(), JSON_UNESCAPED_UNICODE) ?>; // 맛집 가이드 정의(색·prio·등급라벨)
+var PL_FOCUS        = <?= (int)($_GET['place'] ?? 0) ?>;   // ?place=<id> 로 들어오면 그 장소를 지도에 바로 띄운다(아덴트 수집기록 등 외부 링크용)
 
 // ── 맛집 가이드 헬퍼 (마커색·배지) ──
 // 대표 가이드 = 한 장소의 여러 guide 중 prio 최댓값(미쉐린 > 블루리본 > 기타)
@@ -1512,6 +1513,9 @@ function plInit() {
             // #map 박스 크기가 바뀔 때마다(툴바 줄바꿈·폴더블 등) 자동 repaint
             new ResizeObserver(plBumpResize).observe(document.getElementById('map'));
         }
+        // ?place=<id> — 외부(아덴트 수집기록 등)에서 특정 장소로 들어온 경우 그 마커+상세패널을 연다.
+        // 분류 칩이 기본 미선택이라 일반 검색 결과엔 안 잡히므로 강제 표시 경로를 쓴다.
+        if (PL_FOCUS > 0) setTimeout(function () { plForceShowPlace(PL_FOCUS); }, 350);
     }).catch(function (e) {
         document.getElementById('hint').textContent =
             (e === 'no-key') ? '네이버 지도 키가 설정되지 않았습니다 (env/maps.inc)' : '지도 로딩 실패';

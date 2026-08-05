@@ -100,7 +100,8 @@ function pf_band_filings(PDO $pdo, string $code): array
  * @return array{
  *   ok:bool, code:string, from:string, to:string, shrs:float,
  *   px:array,            // [['t'=>'YYYY-MM-DD','v'=>시총(원)], …] 주 단위
- *   per:array, pbr:array,// ['ok'=>, 'mult'=>[5], 'step'=>[['t'=>,'v'=>], …], 'n'=>, 'cover'=>]
+ *   per:array, pbr:array,// ['ok'=>, 'mult'=>[5], 'step'=>[['t'=>,'v'=>], …], 'n'=>, 'cover'=>,
+ *                        //  'stat'=>['min'=>,'minAt'=>,'max'=>,'maxAt'=>,'cur'=>,'curAt'=>]]
  *   note:string[]
  * }
  */
@@ -239,13 +240,18 @@ function pf_band_series(PDO $pdo, string $code, int $years = 5): array
     foreach ($daily as $r) $dailyPts[] = ['t' => (string)$r['d'], 'v' => (float)$r['mktcap']];
 
     $band = function (array $step, string $label) use ($walk, $dailyPts, $out) {
-        $empty = ['ok' => false, 'why' => '', 'mult' => [], 'step' => [], 'n' => 0, 'cover' => 0.0];
+        $empty = ['ok' => false, 'why' => '', 'mult' => [], 'step' => [], 'n' => 0, 'cover' => 0.0,
+                  'stat' => null];
         if (!$step) return ['why' => $label . ' 계단을 만들 수 없습니다 (공시 접수일 없음)'] + $empty;
 
-        // 배수 표본 = 일별
+        // 배수 표본 = 일별. 날짜를 나란히 들고 간다 — 최저·최고가 «언제였나»까지 말해야 뜻이 산다.
         [$vd, $why] = $walk($step, $dailyPts);
-        $mult = [];
-        foreach ($dailyPts as $i => $p) if ($vd[$i] !== null) $mult[] = $p['v'] / $vd[$i];
+        $mult = []; $mAt = [];
+        foreach ($dailyPts as $i => $p) {
+            if ($vd[$i] === null) continue;
+            $mult[] = $p['v'] / $vd[$i];
+            $mAt[]  = $p['t'];
+        }
         $cover = count($dailyPts) > 0 ? count($mult) / count($dailyPts) : 0.0;
 
         // 빈 구간이 왜 비었는지 — 가장 많은 사유 하나로 말한다
@@ -257,6 +263,19 @@ function pf_band_series(PDO $pdo, string $code, int $years = 5): array
                  'neg'   => $label . ' 이 0 이하입니다 (적자·자본잠식)'][$top] ?? '';
 
         if (!$mult) return ['why' => '밴드를 만들 수 없습니다 — ' . $txt] + $empty;
+
+        /* 기간 중 최저·최고·현재 — <b>정렬 전에</b> 뽑는다(sort 가 날짜 짝을 흩뜨린다).
+         * 분위수만으로는 「밴드 밖이 얼마나 먼가」를 알 수 없어서 양 끝을 따로 말해 준다.
+         * ★ 밴드선으로는 쓰지 않는다 — 적자 직전 하루의 이상치가 밴드를 밖으로 밀어내기 때문에
+         *   선은 분위수로 그린다(pf_band_quantile 주석). 여기 min/max 는 «읽는 수치»일 뿐이다. */
+        $lo = 0; $hi = 0; $last = count($mult) - 1;
+        foreach ($mult as $i => $m) {
+            if ($m < $mult[$lo]) $lo = $i;
+            if ($m > $mult[$hi]) $hi = $i;
+        }
+        $stat = ['min' => round($mult[$lo], 2),   'minAt' => $mAt[$lo],
+                 'max' => round($mult[$hi], 2),   'maxAt' => $mAt[$hi],
+                 'cur' => round($mult[$last], 2), 'curAt' => $mAt[$last]];
 
         sort($mult);
         $ms = [];
@@ -277,6 +296,7 @@ function pf_band_series(PDO $pdo, string $code, int $years = 5): array
             'n'     => count($mult),
             'cover' => round($cover, 3),
             'gap'   => $why,
+            'stat'  => $stat,
         ];
     };
 

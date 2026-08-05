@@ -320,6 +320,9 @@ function fresh_slots(int $n = 5, ?string $today = null): array
  * <b>조용히 빠지는</b> 종목이 생기는데, 통째로 받으면 그런 구멍이 아예 없다.
  * 같은 값을 덮어쓰는 것은 해가 없고, 정정공시도 이 방식이라야 따라온다.
  */
+/** fresh 한 번에 메울 순이익 결측 행수 — 슬롯당. 5슬롯이면 최대 75콜(한도의 0.4%) */
+const FRESH_NIFIX_CAP = 15;
+
 function job_fresh(Dart $dart, int $n, int $budget, float $start, int $secs): void
 {
     $slots = fresh_slots($n);
@@ -345,7 +348,53 @@ function job_fresh(Dart $dart, int $n, int $budget, float $start, int $secs): vo
             $lab, number_format($r['companies']), number_format($r['saved']),
             microtime(true) - $t0, $s['end']->format('Y-m-d')));
     }
+
+    /* ★ 순이익 결측 보수 (2026-08-04) — 방금 받은 슬롯만.
+     *
+     * 주요계정 API 는 「연결당기순이익」처럼 <b>표준계정을 안 쓴 회사</b>의 순이익 행을 아예 안 준다
+     * (현대차·호텔신라·SK이노 …). 그래서 매출은 있는데 순이익만 NULL 인 행이 매 슬롯 20~30 개씩 생긴다.
+     * 여기서 지금 슬롯만 메우고, 옛 연도는 `job=nifix` 로 따로 돌린다 — 호출이 한 번에 몰리지 않게.
+     * 자세한 원리는 Dart::repairNetIncome() 주석. */
+    $fx = ['done' => 0, 'filled' => 0, 'remain' => 0];
+    foreach ($slots as $s) {
+        if (over($start, $secs)) break;
+        $r = $dart->repairNetIncome(FRESH_NIFIX_CAP, $s['year'], $s['reprt'], true, null,
+                                    fn() => over($start, $secs));
+        $fx['done']   += $r['done'];
+        $fx['filled'] += $r['filled'];
+        $fx['remain'] += $r['remain'];
+    }
+    if ($fx['done']) say(sprintf('순이익 보수 — 시도 %d · 채움 %d · 이 슬롯들에 남음 %d',
+                                 $fx['done'], $fx['filled'], $fx['remain']));
+
     say('갱신 완료.');
+}
+
+// ── 순이익 결측 보수 (job=nifix) ───────────────────────────────────────
+/**
+ * 매출은 있는데 순이익만 빈 행을 전체 재무제표 API 로 메운다.
+ *
+ * 옛 연도까지 한 번에 채우는 <b>일회성 배치</b>다. 매일 도는 몫은 job=fresh 안에 들어 있다.
+ * 실측(2026-08-04) 대상 897행 · 233종목 — 1행 = 1콜이라 하루 한도(20,000)의 4.5% 다.
+ *
+ * ★ 이어받기 설계라 budget= 로 조각내 반복 실행해도 잃는 게 없다
+ *   (남은 것만 고르므로 두 번 부르지 않는다).
+ */
+function job_nifix(Dart $dart, int $limit, int $year, string $reprt, float $start, int $secs): void
+{
+    $t0 = microtime(true);
+    $r  = $dart->repairNetIncome(
+        $limit, $year ?: null, $reprt !== '' ? $reprt : null, true,
+        function ($done, $tot, $filled) { say(sprintf('  … %d/%d · 채움 %d', $done, $tot, $filled)); },
+        fn() => over($start, $secs)
+    );
+    say(sprintf('순이익 보수 — 시도 %s · 채움 %s · 못 찾음 %s · 남음 %s (%.1f초)',
+        number_format($r['done']), number_format($r['filled']),
+        number_format($r['empty']), number_format($r['remain']), microtime(true) - $t0));
+
+    $g = $dart->netIncomeGap();
+    say(sprintf('전체 결측 현황 — %s행 · %s종목',
+        number_format((int)$g['rows_missing']), number_format((int)$g['codes_missing'])));
 }
 
 // ── KRX 시세·상장주식수 (job=krx) ──────────────────────────────────────
@@ -771,6 +820,13 @@ switch ($job) {
             say('알림 실패(무시하고 계속): ' . $e->getMessage());
             if (function_exists('pf_alert_fail')) pf_alert_fail('fresh', $e);   // §2.5 규칙 3 — 삼킨 예외는 직접 알림
         }
+        break;
+
+    /* ── 순이익 결측 보수 (일회성 배치 · 매일 몫은 fresh 안에 있다)
+     *   budget= 로 조각내 반복 실행. y=·rc= 로 특정 연도·보고서만도 가능 */
+    case 'nifix':
+        job_nifix($dart, (int)($_GET['budget'] ?? 0), (int)($_GET['y'] ?? 0),
+                  (string)($_GET['rc'] ?? ''), $start, $secs);
         break;
 
     // ── 매일 오전·오후: KRX 최근 거래일 시세·상장주식수

@@ -108,7 +108,10 @@ function ai_match(Place $place, string $name, float $lat, float $lng): ?array {
 
 // bg 모드(run=1&bg=1)는 즉시 헤더(Connection:close)를 보내야 하므로 <pre> 출력 안 함.
 $IS_BG = (!empty($_GET['run']) || !empty($_GET['run_ai'])) && !empty($_GET['bg']);
-if (!$IS_BG) echo "<pre style='font-family:monospace;font-size:13px;line-height:1.55;white-space:pre-wrap'>";
+// ★JSON 을 돌려주는 모드도 <pre> 를 앞에 붙이면 파싱이 깨진다(log_run · new_list&fmt=json).
+$IS_JSON = !empty($_GET['log_run']) || !empty($_GET['match_check'])
+        || (!empty($_GET['new_list']) && ($_GET['fmt'] ?? '') === 'json');
+if (!$IS_BG && !$IS_JSON) echo "<pre style='font-family:monospace;font-size:13px;line-height:1.55;white-space:pre-wrap'>";
 
 // ── 모드 0: 처리이력 리셋 (개선 후 재크롤용) ──────────────
 // 처리이력만 비움. place/place_ref 는 그대로 두고, 재크롤 시 dedup_key 로 upsert(이름·주소 갱신)
@@ -152,6 +155,193 @@ if (!empty($_GET['status'])) {
     echo "처리이력 — done {$tdone} / skip {$tskip}\n";
     echo "place — 총 {$places}  (좌표 ok {$okc} / pending {$pend} / failed {$fail})\n";
     echo "</pre>";
+    exit;
+}
+
+// ── 모드: 미처리 기사 목록 (무료 — Claude 콜 0회) ──────────
+//   ?key=…&new_list=1[&pages=30][&limit=200][&fmt=json]
+//   목록 AJAX 만 훑어 tbl_ardent_crawl 에 없는 기사(=아직 안 본 것)의 idxno·제목·발행일을 뽑는다.
+//   ★AI 파이프라인(dry_ai/run_ai)은 "고르는 동시에 추출까지" 해서 돈이 든다. 사람이 직접 읽어
+//     처리할 때는 「무엇이 남았는지」만 알면 되므로 이 모드로 목록만 받는다.
+if (!empty($_GET['new_list'])) {
+    $pdo->exec("CREATE TABLE IF NOT EXISTS tbl_ardent_crawl (idxno BIGINT UNSIGNED PRIMARY KEY, status ENUM('done','skip') NOT NULL, place_id BIGINT UNSIGNED NULL, reason VARCHAR(255) NULL, crawled_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    $pages = max(1, min(40, (int)($_GET['pages'] ?? 30)));
+    $limit = max(1, min(500, (int)($_GET['limit'] ?? 200)));
+    $done  = array_flip($pdo->query("SELECT idxno FROM tbl_ardent_crawl")->fetchAll(PDO::FETCH_COLUMN));
+
+    $rows = []; $seen = []; $scanned = 0;
+    for ($p = 1; $p <= $pages && count($rows) < $limit; $p++) {
+        // fetchListIdxnos 와 같은 요청이되 제목·발행일까지 쓰려고 원본 JSON 을 직접 읽는다.
+        $json = $crawler->httpGet(sprintf(ArdentNews::LIST_AJAX, $p), null, 3, [
+            'X-Requested-With: XMLHttpRequest',
+            'Accept: application/json, text/javascript, */*; q=0.01',
+        ]);
+        $d = $json ? json_decode($json, true) : null;
+        $list = is_array($d['data'] ?? null) ? $d['data'] : [];
+        if (!$list) break;
+        foreach ($list as $row) {
+            $idxno = (int)($row['idxno'] ?? 0);
+            if ($idxno <= 0 || isset($seen[$idxno])) continue;
+            $seen[$idxno] = true; $scanned++;
+            if (isset($done[$idxno])) continue;
+            $t = trim((string)($row['title'] ?? $row['article_title'] ?? ''));
+            $pubRaw = (string)($row['pub_date'] ?? $row['article_date'] ?? $row['regdate'] ?? '');
+            $pub = preg_match('/(\d{4})[-.\/](\d{2})[-.\/](\d{2})/', $pubRaw, $mm) ? "{$mm[1]}-{$mm[2]}-{$mm[3]}" : '';
+            $rows[] = ['idxno' => $idxno, 'title' => html_entity_decode($t, ENT_QUOTES, 'UTF-8'),
+                       'pub_date' => $pub, 'url' => sprintf(ArdentNews::VIEW_URL, $idxno)];
+            if (count($rows) >= $limit) break;
+        }
+        usleep(300000);   // 페이지 간 간격(매너)
+    }
+
+    if (($_GET['fmt'] ?? 'text') === 'json') {
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo json_encode(['ok' => true, 'scanned' => $scanned, 'pages' => $pages,
+                          'count' => count($rows), 'items' => $rows], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    echo "🆕 미처리 기사 — " . count($rows) . "건 (목록 {$scanned}건 훑음 · page 1~{$pages} · Claude 콜 0회)\n";
+    echo str_repeat('─', 64) . "\n";
+    foreach ($rows as $r) echo "#{$r['idxno']}\t" . ($r['pub_date'] ?: '        ') . "\t{$r['title']}\n";
+    if (!$rows) echo "(없음 — 다 처리했습니다)\n";
+    echo "</pre>";
+    exit;
+}
+
+// ── 모드: 일시적 실패로 굳은 skip 되살리기 ─────────────────
+//   ?key=…&revive=1[&kind=api|body|all][&dry=1]
+//   ★배경(2026-08-04): 잔액 소진·JSON 파싱 실패 같은 «일시적» 실패도 tbl_ardent_crawl 에
+//     status='skip' 으로 «영구» 기록된다(아래 run_ai 분기). 그러면 충전해도 그 기사는 다시 안 잡힌다.
+//     그 행만 지워 미처리 상태로 되돌린다. 정당한 skip('AI:0곳' = 담을 장소가 없던 기사)은 건드리지 않는다.
+if (!empty($_GET['revive'])) {
+    $pdo->exec("CREATE TABLE IF NOT EXISTS tbl_ardent_crawl (idxno BIGINT UNSIGNED PRIMARY KEY, status ENUM('done','skip') NOT NULL, place_id BIGINT UNSIGNED NULL, reason VARCHAR(255) NULL, crawled_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    $kind = (string)($_GET['kind'] ?? 'api');
+    $where = match ($kind) {
+        'body' => "status='skip' AND reason = '본문 실패'",
+        'all'  => "status='skip' AND (reason LIKE '추출:%' OR reason = '본문 실패')",
+        default=> "status='skip' AND reason LIKE '추출:%'",     // api = 추출 호출 자체가 실패한 것
+    };
+    $rows = $pdo->query("SELECT idxno, reason, crawled_at FROM tbl_ardent_crawl WHERE {$where} ORDER BY idxno")
+                ->fetchAll(PDO::FETCH_ASSOC);
+    echo "♻️  되살리기 대상 (kind={$kind}) — " . count($rows) . "건\n" . str_repeat('─', 64) . "\n";
+    $by = [];
+    foreach ($rows as $r) { $by[(string)$r['reason']] = ($by[(string)$r['reason']] ?? 0) + 1; }
+    foreach ($by as $reason => $n) echo sprintf("%5d건  %s\n", $n, mb_strimwidth($reason, 0, 70, '…'));
+    $keep = (int)$pdo->query("SELECT COUNT(*) FROM tbl_ardent_crawl WHERE status='skip' AND reason LIKE 'AI:%'")->fetchColumn();
+    echo str_repeat('─', 64) . "\n보존(정당한 skip 'AI:0곳' 류): {$keep}건\n";
+
+    if (!empty($_GET['dry'])) {
+        echo "\n(dry — 지우지 않았습니다. &dry 를 빼면 실제 삭제)\n</pre>";
+        exit;
+    }
+    $n = $pdo->exec("DELETE FROM tbl_ardent_crawl WHERE {$where}");
+    echo "\n🗑️  {$n}건 삭제 — 이제 new_list/dry_ai/run_ai 에 다시 미처리로 잡힙니다.\n</pre>";
+    exit;
+}
+
+// ── 모드: 지오코딩 + 기존장소 매칭만 조회 (무료 · 저장 없음) ─
+//   POST ?key=…&match_check=1   본문 [{"name":"갑사","region":"충남 공주"}, …]
+//   run_ai 이 쓰는 ai_geocode(지역검증)·ai_match(250m + 정규화 이름 완전일치)를 그대로 부른다.
+//   ★사람이 기사를 읽어 처리할 때도 판정을 «같은 단일본»으로 하려고 뚫은 창구다.
+//     이걸 안 쓰고 이름만으로 넣으면 dedup_key(name+region_lv2)만 걸려 근처 같은 곳을 새로 만든다.
+if (!empty($_GET['match_check'])) {
+    $raw  = file_get_contents('php://input');
+    $data = json_decode($raw, true);
+    if (isset($data['items']) && is_array($data['items'])) $data = $data['items'];
+    if (!is_array($data) || !$data) { echo json_encode(['ok' => false, 'msg' => 'JSON 배열이 아닙니다.']); exit; }
+
+    $place = new Place($pdo); $place->ensureTable();
+    $out = [];
+    foreach ($data as $it) {
+        $name = trim((string)($it['name'] ?? ''));
+        $region = trim((string)($it['region'] ?? ''));
+        if ($name === '') { $out[] = ['name' => '', 'ok' => false, 'msg' => 'name 없음']; continue; }
+        $g = ai_geocode($name, $region);
+        if (empty($g['ok'])) { $out[] = ['name' => $name, 'region' => $region, 'ok' => false, 'msg' => $g['msg'] ?? '지오코딩 실패']; continue; }
+        [$lv1, $lv2] = ai_addrRegion($g['address']);
+        $m = ai_match($place, $name, $g['lat'], $g['lng']);
+        $row = ['name' => $name, 'region' => $region, 'ok' => true,
+                'lat' => $g['lat'], 'lng' => $g['lng'], 'address' => $g['address'],
+                'kakao_name' => $g['kakao_name'], 'region_lv1' => $lv1, 'region_lv2' => $lv2,
+                'match' => $m];
+        if ($m) {   // 기존 장소면 요약이 이미 있는지도 알려 준다 — 「요약은 최초 1회만 고정」 규칙을 지키려고
+            $sel = $pdo->prepare("SELECT attributes FROM place WHERE id=?"); $sel->execute([$m['id']]);
+            $at = json_decode((string)$sel->fetchColumn() ?: '{}', true) ?: [];
+            $row['match']['has_summary'] = !empty($at['summary']);
+        }
+        $out[] = $row;
+    }
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => true, 'items' => $out], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// ── 모드: 회차 기록 (사람이 처리한 결과를 남긴다 · 무료) ────
+//   POST ?key=…&log_run=1   본문 JSON:
+//   { "run_key":"2026-08-04", "note":"…", "source":"claude",
+//     "items":[ { "idxno":17588, "title":"…", "url":"…", "pub_date":"2026-08-04",
+//                 "places":[ {"place_id":48440,"name":"갑사","category":"travel","region":"충남 공주",
+//                             "action":"new|enrich","summary":"…","features":[…],"months":[7,8]} ],
+//                 "note":"장소 없음 사유 등" } ] }
+//   하는 일 둘 — ① tbl_ardent_crawl 에 처리이력(재처리 방지) ② tbl_ardent_run(_item) 에 회차 기록.
+//   ★요약을 run_item 에 복사해 둔다: place.attributes.summary 는 다음 기사가 덮을 수 있어 「그날의 기록」이 못 된다.
+if (!empty($_GET['log_run'])) {
+    header('Content-Type: application/json; charset=utf-8');
+    $raw  = file_get_contents('php://input');
+    $data = json_decode($raw, true);
+    if (!is_array($data)) { echo json_encode(['ok' => false, 'msg' => 'JSON 본문이 아닙니다.']); exit; }
+    $items = is_array($data['items'] ?? null) ? $data['items'] : (isset($data[0]) ? $data : []);
+    if (!$items) { echo json_encode(['ok' => false, 'msg' => 'items 가 비었습니다.']); exit; }
+
+    $pdo->exec("CREATE TABLE IF NOT EXISTS tbl_ardent_crawl (idxno BIGINT UNSIGNED PRIMARY KEY, status ENUM('done','skip') NOT NULL, place_id BIGINT UNSIGNED NULL, reason VARCHAR(255) NULL, crawled_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    $log = new ArdentLog($pdo);
+    $log->ensureTables();
+    $runId = $log->runOpen((string)($data['run_key'] ?? date('Y-m-d')),
+                           (string)($data['source'] ?? 'claude'),
+                           isset($data['note']) ? (string)$data['note'] : null);
+
+    $rec = $pdo->prepare("INSERT INTO tbl_ardent_crawl (idxno,status,place_id,reason) VALUES (?,?,?,?)
+                          ON DUPLICATE KEY UPDATE status=VALUES(status), place_id=VALUES(place_id), reason=VALUES(reason)");
+    $logged = 0; $arts = 0; $bad = [];
+    foreach ($items as $it) {
+        $idxno = (int)($it['idxno'] ?? 0);
+        if ($idxno <= 0) { $bad[] = 'idxno 없음'; continue; }
+        $arts++;
+        $base = ['idxno' => $idxno, 'title' => $it['title'] ?? null, 'url' => $it['url'] ?? sprintf(ArdentNews::VIEW_URL, $idxno),
+                 'pub_date' => $it['pub_date'] ?? null];
+        $places = is_array($it['places'] ?? null) ? $it['places'] : [];
+        $firstPid = null; $n = 0;
+        foreach ($places as $pl) {
+            $pid = (int)($pl['place_id'] ?? 0);
+            $log->itemAdd($runId, $base + [
+                'place_id'   => $pid ?: null,
+                'place_name' => $pl['name'] ?? null,
+                'category'   => $pl['category'] ?? null,
+                'region'     => $pl['region'] ?? null,
+                'action'     => $pl['action'] ?? 'new',
+                'summary'    => $pl['summary'] ?? null,
+                'features'   => $pl['features'] ?? null,
+                'months'     => $pl['months'] ?? null,
+                'note'       => $pl['note'] ?? null,
+            ]);
+            $logged++; $n++;
+            if ($firstPid === null && $pid > 0) $firstPid = $pid;
+        }
+        if ($n === 0) {   // 담을 장소가 없던 기사도 한 줄 남긴다(왜 안 담겼는지가 정보다)
+            $log->itemAdd($runId, $base + ['action' => 'skip', 'note' => $it['note'] ?? '채택 장소 없음']);
+            $logged++;
+        }
+        $rec->execute([$idxno, $n > 0 ? 'done' : 'skip', $firstPid, 'CC:' . $n . '곳']);
+    }
+    $sum = $log->runRecount($runId);
+    $pdo->exec("CREATE TABLE IF NOT EXISTS tbl_ardent_state (k VARCHAR(40) PRIMARY KEY, v VARCHAR(255) NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    $pdo->prepare("INSERT INTO tbl_ardent_state (k,v) VALUES ('cc_last_run',?) ON DUPLICATE KEY UPDATE v=VALUES(v)")
+        ->execute([date('Y-m-d H:i') . " 기사{$sum['articles']}/신규{$sum['new_cnt']}/보강{$sum['enr_cnt']}"]);
+
+    echo json_encode(['ok' => true, 'run_id' => $runId, 'articles_in' => $arts, 'rows_logged' => $logged,
+                      'run' => $sum, 'bad' => $bad, 'view' => "https://economist.kr/ardent_log.php?run={$runId}"],
+                     JSON_UNESCAPED_UNICODE);
     exit;
 }
 

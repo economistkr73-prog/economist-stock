@@ -8,9 +8,14 @@
  * draw: line  = 수식 값을 선으로 긋는다
  *       point = 수식(조건)이 참인 봉에 점을 찍는다
  * vars_json: {"N":20,"K":2} — 수식 속 변수의 기본값. 적용 시 화면에서 바꿀 수 있다.
+ * tfs_json:  ["day","week"] — 이 지표를 보여 줄 시간축. NULL·빈 값 = 전 축(기본).
  */
 class ChartIndicator
 {
+    /** 시간축 — 지표 변수 세트·차트틀·축 행이 공유하는 목록. 'day' 가 기본값이자 폴백이다.
+     *  ★'min'(분봉)은 2026-08-04 신설 — 단타 화면이 생기면서 분봉에도 독립 변수가 필요해졌다. */
+    public const TFS = ['day', 'week', 'month', 'min'];
+
     private PDO $pdo;
 
     public function __construct(PDO $pdo)
@@ -37,6 +42,10 @@ class ChartIndicator
         );
         // 수식칸 1~4 (키움 수식관리자 방식) — [{name,body,on,color}] JSON. 반복 실행 안전
         $this->pdo->exec("ALTER TABLE chart_indicator ADD COLUMN IF NOT EXISTS lines_json TEXT NULL AFTER expr");
+        /* 이 지표를 «보여 줄» 시간축 — ["day","week"] 처럼 담는다 (2026-08-05).
+         * ★NULL(빈 값) = 전 축. 그래서 옛 지표는 손대지 않아도 지금까지처럼 모든 축에 나온다.
+         *   네 축을 다 켜도 NULL 로 되돌린다 — 같은 뜻을 두 모양으로 저장하면 축이 늘 때 갈린다. */
+        $this->pdo->exec("ALTER TABLE chart_indicator ADD COLUMN IF NOT EXISTS tfs_json VARCHAR(60) NULL AFTER vars_json");
 
         /* 차트틀 = 이름 붙인 지표 세트 (키움 「차트틀 적용/관리」).
          * 틀 하나가 일/주/월 세트를 각각 들고 있어 축을 바꿔도 그 축의 구성으로 따라간다. */
@@ -50,9 +59,9 @@ class ChartIndicator
         );
         /* 화면별 「마지막 적용 틀」 — 열 때 그대로 되살린다.
          * 이 표는 두 종류의 행을 담는다 (부딪히지 않는다 — 키 모양이 다르다):
-         *   축 행    `fund_day` `fund_week`  = 그 화면×축에서 마지막에 쓴 차트틀
+         *   축 행    `fund_day` `fund_week` `shortmin_min` = 그 화면×축에서 마지막에 쓴 차트틀
          *   화면 행  `fund` `position` …     = 그 화면의 기능 구성(features_json). preset_id=0
-         * 축 행은 늘 `_day`/`_week`/`_month` 로 끝나므로 화면키 단독 행과 겹칠 수 없다. */
+         * 축 행은 늘 `_day`/`_week`/`_month`/`_min` 으로 끝나므로 화면키 단독 행과 겹칠 수 없다. */
         $this->pdo->exec(
             "CREATE TABLE IF NOT EXISTS chart_pref (
                 chart_key VARCHAR(40) NOT NULL PRIMARY KEY,
@@ -115,7 +124,7 @@ class ChartIndicator
             // view = 저장 당시의 그래프 포맷(기간 인덱스) + 시간축 — sets 와 같은 칸에 산다
             $view = (isset($sets['view']) && is_array($sets['view'])) ? $sets['view'] : null;
             unset($sets['view']);
-            foreach (['day', 'week', 'month'] as $tf) {
+            foreach (self::TFS as $tf) {
                 if (!isset($sets[$tf]) || !is_array($sets[$tf])) $sets[$tf] = [];
             }
             $out[] = ['id' => (int)$r['id'], 'name' => $r['name'], 'sets' => $sets, 'view' => $view];
@@ -129,7 +138,7 @@ class ChartIndicator
         if (is_string($view)) $view = json_decode($view, true);
         if (!is_array($view)) return null;
         $tf = (string)($view['tf'] ?? 'day');
-        if (!in_array($tf, ['day', 'week', 'month'], true)) $tf = 'day';
+        if (!in_array($tf, self::TFS, true)) $tf = 'day';
         $i  = $view['index'] ?? null;
         $b  = $view['bars'] ?? null;
         return [
@@ -145,7 +154,7 @@ class ChartIndicator
     {
         $name  = trim((string)($d['name'] ?? ''));
         $tf    = (string)($d['tf'] ?? 'day');
-        if (!in_array($tf, ['day', 'week', 'month'], true)) $tf = 'day';
+        if (!in_array($tf, self::TFS, true)) $tf = 'day';
         $items = self::cleanItems($d['items'] ?? null);
         $view  = self::cleanView($d['view'] ?? null);
         $id    = (int)($d['id'] ?? 0);
@@ -335,18 +344,32 @@ class ChartIndicator
         return $out;
     }
 
-    /** 전체 목록 (이름순) — vars·lines 는 디코드해서 넘긴다 */
+    /** 표시할 시간축 정규화 — TFS 순서로 추린다.
+     *  ★빈 배열(하나도 안 골랐거나 전부 골랐거나)은 「전 축」이라 [] 로 돌려준다.
+     *    저장은 그때 NULL — 소비자(dailychart.js)는 «비면 전 축»만 알면 된다. */
+    private static function cleanTfs($tfs): array
+    {
+        if (is_string($tfs)) $tfs = json_decode($tfs, true);
+        if (!is_array($tfs)) return [];
+        $out = [];
+        foreach (self::TFS as $tf) if (in_array($tf, $tfs, true)) $out[] = $tf;
+        return count($out) === count(self::TFS) ? [] : $out;
+    }
+
+    /** 전체 목록 (이름순) — vars·lines·tfs 는 디코드해서 넘긴다 */
     public function list(): array
     {
         $rows = $this->pdo->query(
-            "SELECT id, name, draw, expr, lines_json, vars_json, color, note FROM chart_indicator ORDER BY name"
+            "SELECT id, name, draw, expr, lines_json, vars_json, tfs_json, color, note FROM chart_indicator ORDER BY name"
         )->fetchAll(PDO::FETCH_ASSOC);
         foreach ($rows as &$r) {
             $r['id']    = (int)$r['id'];
             $r['vars']  = json_decode($r['vars_json'], true) ?: new stdClass();
             $lines      = $r['lines_json'] ? json_decode($r['lines_json'], true) : null;
             $r['lines'] = is_array($lines) ? $lines : [];   // 빈 배열이면 프론트가 expr(구형)로 폴백
-            unset($r['vars_json'], $r['lines_json']);
+            // 빈 배열 = 전 축(옛 지표 포함). 화면·모듈은 이 규칙 하나만 본다
+            $r['tfs']   = self::cleanTfs($r['tfs_json']);
+            unset($r['vars_json'], $r['lines_json'], $r['tfs_json']);
         }
         return $rows;
     }
@@ -367,6 +390,9 @@ class ChartIndicator
 
         // vars 정규화 (숫자만·한글 변수명 허용).
         // 신형 = {day:{},week:{},month:{}} 시간축별 세트(일=기본, 주/월=덮어쓰기) / 구형 = 평평한 맵(전 축 공통)
+        /* 시간축 = 변수 세트를 고르는 키. 「분」은 2026-08-04 에 더했다 —
+         * 분봉의 봉 주기가 일봉과 달라 120봉·240봉 같은 값을 그대로 쓰면 뜻이 어긋난다.
+         * 비어 있으면 일 값을 쓰는 규칙은 주·월과 같다(tfVars). */
         $vars = $d['vars'] ?? '{}';
         if (is_string($vars)) $vars = json_decode($vars, true);
         $cleanMap = function ($m): array {
@@ -382,8 +408,8 @@ class ChartIndicator
         };
         $clean = [];
         if (is_array($vars)) {
-            if (isset($vars['day']) || isset($vars['week']) || isset($vars['month'])) {
-                foreach (['day', 'week', 'month'] as $tf) {
+            if (isset($vars['day']) || isset($vars['week']) || isset($vars['month']) || isset($vars['min'])) {
+                foreach (self::TFS as $tf) {
                     $sub = $cleanMap($vars[$tf] ?? null);
                     if ($sub) $clean[$tf] = $sub;
                 }
@@ -393,18 +419,22 @@ class ChartIndicator
         }
         $varsJson = json_encode($clean, JSON_UNESCAPED_UNICODE);
 
+        // 보여 줄 시간축 — 칸을 안 보내면(구형 화면·API) 손대지 않은 것이므로 「전 축」이다
+        $tfs     = self::cleanTfs($d['tfs'] ?? null);
+        $tfsJson = $tfs ? json_encode($tfs) : null;
+
         $id = (int)($d['id'] ?? 0);
         if ($id > 0) {
             $st = $this->pdo->prepare(
-                "UPDATE chart_indicator SET name=?, draw=?, expr=?, lines_json=?, vars_json=?, color=?, note=? WHERE id=?"
+                "UPDATE chart_indicator SET name=?, draw=?, expr=?, lines_json=?, vars_json=?, tfs_json=?, color=?, note=? WHERE id=?"
             );
-            $st->execute([$name, $draw, $expr, $linesJson, $varsJson, $color, $note, $id]);
+            $st->execute([$name, $draw, $expr, $linesJson, $varsJson, $tfsJson, $color, $note, $id]);
             return $id;
         }
         $st = $this->pdo->prepare(
-            "INSERT INTO chart_indicator (name, draw, expr, lines_json, vars_json, color, note) VALUES (?,?,?,?,?,?,?)"
+            "INSERT INTO chart_indicator (name, draw, expr, lines_json, vars_json, tfs_json, color, note) VALUES (?,?,?,?,?,?,?,?)"
         );
-        $st->execute([$name, $draw, $expr, $linesJson, $varsJson, $color, $note]);
+        $st->execute([$name, $draw, $expr, $linesJson, $varsJson, $tfsJson, $color, $note]);
         return (int)$this->pdo->lastInsertId();
     }
 

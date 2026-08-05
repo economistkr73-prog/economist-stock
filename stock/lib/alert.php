@@ -7,8 +7,16 @@
  *
  *   pf_alert_eod($pdo)   — 15:50 dart_eod 끝: ①관심종목 트리거 발동(돌파확인·계단지지)
  *                          ②보유종목 계단관통↓ 신규 ③오늘 신규 매집형 신호(잠정)
- *   pf_alert_fresh($pdo) — 08:05 dart_fresh 끝: ④보유종목 어닝쇼크(SUE≤−1) 신규
- *                          ⑤관심종목 새 SUE ≥ 1
+ *   pf_alert_fresh($pdo) — 08:05 dart_fresh 끝: ④보유·관심종목 어닝쇼크(SUE≤−1) 신규
+ *                          ⑤관심종목 새 SUE ≥ 1  ⑥전종목 규칙 충족 신규(발굴)
+ *
+ * ★④⑤ 와 ⑥ 은 <b>묻는 것이 다르다</b>(2026-08-05) — ④⑤ 는 「내가 보고 있는 종목의 실적이
+ *   새로 튀었나」이고, ⑥ 은 「내가 아직 모르는 종목이 규칙을 충족했나」다. 그래서 ⑥ 은
+ *   보유·관심을 <b>제외</b>하고 돈다(겹치면 같은 종목이 아침에 두 줄로 온다).
+ *
+ * ★★실적(④⑤)의 「신규」는 <b>공시 접수일</b>로 잰다 — 분기 키만으로는 어제 공시와 석 달 묵은
+ *   공시가 구별되지 않는다. 문지기는 pf_alert_sue_fresh() 하나뿐이니 조건을 여기저기 다시 적지 않는다.
+ *   (2026-08-04 사고: 접수일 조건이 없어, 관심종목에 새로 담기만 해도 과거 실적이 다음 날 울렸다.)
  *
  * 원칙:
  *   - 조건 없으면 발송하지 않는다 (빈 알림은 무시 습관을 만든다).
@@ -83,6 +91,42 @@ function pf_alert_fail(string $which, Throwable $e): void
             'https://economist.kr/cron_job.php?task=dart_' . $which . '&k=econ-cron-j7k2&log=1',
             ['title' => '⚠️ 신호 알림 실패', 'priority' => 1]);
     }
+}
+
+/**
+ * 실적 알림의 <b>신선도 문지기</b> (2026-08-04 신설) — 「담은 뒤에 나온, 최근 공시」의 분기만 돌려준다.
+ *
+ * ★왜 생겼나: 옛 판정은 「최신 분기 SUE 가 문턱을 넘었나 + 아직 안 쐈나」뿐이라
+ *   <b>공시 접수일이 조건에 없었다</b>. 중복방지 키가 (종목|분기)라, 종목을 관심목록에 새로 담으면
+ *   그 종목의 과거 실적이 전부 「아직 안 쏜 것」이 되어 다음 아침 한꺼번에 울렸다.
+ *   실측 2026-08-04: 8월 3일에 담은 세 종목이 8월 4일 08:06 에 울렸는데 공시는 5/12·5/15·7/31 —
+ *   셋 다 담을 때 재무분석 화면에서 이미 본 값이었다.
+ *
+ * 통과 조건 둘 — <b>둘 다</b> 만족해야 알린다.
+ *   ① <b>담은 뒤에 나온 공시</b>여야 한다. 담기 전 것은 담을 때 화면에서 이미 본 정보다.
+ *   ② 접수일이 Thr::SUE_ALERT_FRESH_DAYS 이내여야 한다 (창 밖은 pf_sue_receipts 가 아예 안 준다).
+ *
+ * ★기준 시각($since)이 없으면 ②만 본다 — ①을 <b>못 재는 것</b>이지 「오래됐다」는 뜻이 아니라서,
+ *   침묵보다 최근성 검사만이라도 거는 편이 정직하다(기준 없으면 침묵하는 ②계단관통과 다른 점 —
+ *   거기선 기준 박스가 판정 <b>전부</b>였지만 여기선 남은 검사가 여전히 의미를 갖는다).
+ *
+ * @param ?string $since 이 종목을 처음 담은 시각 (관심=added_at · 보유=wl_added_at 또는 started_at)
+ * @return array [qk => ['d'=>접수일, 'sue'=>float]] — 문턱 판정은 부르는 쪽 몫(④는 쇼크·⑤는 서프라이즈)
+ */
+function pf_alert_sue_fresh(PDO $pdo, string $code, ?string $since): array
+{
+    $recv = pf_sue_receipts($pdo, $code, Thr::SUE_ALERT_FRESH_DAYS);   // ② 창 밖은 여기서 걸린다
+    if (!$recv) return [];
+    $sq = pf_sue_stock($pdo, $code);
+    if (!$sq) return [];
+
+    $out = [];
+    foreach ($recv as $qk => $dt) {
+        if ($since !== null && $dt < substr($since, 0, 10)) continue;  // ① 담기 전 공시
+        if (!isset($sq[$qk])) continue;                                // 이력 부족 등으로 SUE 없음
+        $out[$qk] = ['d' => $dt, 'sue' => (float)$sq[$qk]];
+    }
+    return $out;
 }
 
 /** 모아서 한 건으로 발송 — 모닝브리핑과 같은 「헤드라인 + 링크」 패턴 */
@@ -212,38 +256,108 @@ function pf_alert_fresh(PDO $pdo): array
     pf_alert_ensure($pdo);
     $lines = [];
 
-    $held  = $pdo->query("SELECT DISTINCT stock_code FROM pf_position WHERE status = 'open'")
-                 ->fetchAll(PDO::FETCH_COLUMN);
-    $watch = $pdo->query("SELECT stock_code FROM pf_watchlist")->fetchAll(PDO::FETCH_COLUMN);
+    /* 종목만이 아니라 <b>기준 시각</b>도 같이 읽는다 — 「내가 담은 뒤에 나온 공시인가」를 묻기
+     * 위해서다(pf_alert_sue_fresh 참조). 보유는 관심에서 승계한 wl_added_at 이 있으면 그것을 쓴다:
+     * 편입일(started_at)보다 이르고, 실제로 <b>내가 이 종목을 처음 본 날</b>이라 기준으로 정확하다.
+     * 같은 종목이 여러 포트폴리오에 있으면 가장 이른 접촉을 쓴다(늦은 쪽을 쓰면 그 사이 공시를 놓친다). */
+    $heldAt = [];
+    foreach ($pdo->query("
+        SELECT stock_code, MIN(COALESCE(wl_added_at, started_at)) t
+          FROM pf_position WHERE status = 'open' GROUP BY stock_code") as $r)
+        $heldAt[$r['stock_code']] = $r['t'];
+
+    $watchAt = [];
+    foreach ($pdo->query("SELECT stock_code, added_at FROM pf_watchlist") as $r)
+        $watchAt[$r['stock_code']] = $r['added_at'];
+
+    $held  = array_keys($heldAt);
+    $watch = array_keys($watchAt);
     $names = pf_alert_names($pdo, array_values(array_unique(array_merge($held, $watch))));
     $nm    = fn(string $c): string => ($names[$c] ?? $c);
 
-    // ④ 보유 어닝쇼크 (SUE ≤ −1) — 손절 플레이북의 실적 신호. 분기(qk)당 한 번만 알린다.
-    foreach ($held as $c) {
+    /* ④ 어닝쇼크 (SUE ≤ −1) 신규 — <b>보유 + 관심종목</b>. 분기(qk)당 한 번만 알린다.
+     * ★2026-08-04: 「최신 분기」가 아니라 <b>최근 접수된 공시의 분기</b>를 돈다. 옛 판정은
+     *   새로 편입한 보유종목의 몇 달 전 쇼크를 편입 다음 날 아침에 울렸다(⑤와 같은 결함).
+     * ★2026-08-05 <b>관심종목까지 넓혔다</b>(사용자 지시). 담아 둔 후보의 실적 전제가 무너진 것은
+     *   「뺄까」를 판단할 자리인데, 전에는 보유만 울려 관심은 조용히 지나갔다.
+     * ★쇼크의 조건은 <b>SUE ≤ −1 하나뿐</b>이다 — 서프라이즈 쪽의 품질·매출동반·거래대금을
+     *   여기에 얹지 않는다. 그쪽은 「사는 규칙」이라 좁힐수록 정확해지지만 쇼크는 「피하는 목록」이라
+     *   좁히면 피해야 할 것을 놓친다(백테스트도 하위 20%를 단일 기준으로 재서 얻은 결과다).
+     *   어닝 화면 하단 「어닝 쇼크」 목록과 같은 기준이다. */
+    $shockAt = $heldAt;
+    foreach ($watchAt as $c => $t) {
+        // 보유·관심 둘 다면 <b>이른 쪽</b>을 기준으로 — 늦은 쪽을 쓰면 그 사이 공시를 놓친다(위 heldAt 과 같은 규칙)
+        $shockAt[$c] = isset($shockAt[$c]) ? min($shockAt[$c], $t) : $t;
+    }
+    foreach ($shockAt as $c => $since) {
         try {
-            $sq = pf_sue_stock($pdo, $c);
-            if (!$sq) continue;
-            $qk = array_key_last($sq);
-            $v  = $sq[$qk];
-            if ($v <= Thr::SUE_SHOCK && pf_alert_new($pdo, 'shock', $c . '|' . $qk)) {
-                $lines[] = '🔻 보유 ' . $nm($c) . ' 어닝쇼크 — SUE ' . number_format($v, 1)
-                         . ' (쇼크 무리 = 두 달 하방 드리프트 실측)';
+            foreach (pf_alert_sue_fresh($pdo, $c, $since) as $qk => $f) {
+                if ($f['sue'] > Thr::SUE_SHOCK) continue;
+                // 중복방지 키는 (shock|종목|분기) 하나 — 관심에서 보유로 옮겨도 같은 쇼크를 다시 쏘지 않는다
+                if (!pf_alert_new($pdo, 'shock', $c . '|' . $qk)) continue;
+                $lines[] = '🔻 ' . (isset($heldAt[$c]) ? '보유 ' : '관심 ') . $nm($c)
+                         . ' 어닝쇼크 — SUE ' . number_format($f['sue'], 1)
+                         . ' (' . substr($f['d'], 5) . ' 공시 · 쇼크 무리 = 두 달 하방 드리프트 실측)';
             }
         } catch (Throwable $e) { /* 재무 없음 — 다음 종목 */ }
     }
 
-    // ⑤ 관심종목 새 서프라이즈 (SUE ≥ 1) — 담아 둔 후보의 실적 전제가 강해졌다는 신호
+    /* ⑤ 관심종목 새 서프라이즈 (SUE ≥ 1) — 담아 둔 후보의 실적 전제가 <b>새로</b> 강해졌다는 신호.
+     * ★「새로」가 핵심이다. 담을 때 이미 보고 담은 값을 다시 알리면 사용자는 알림을 못 믿게 된다. */
     foreach ($watch as $c) {
         try {
-            $sq = pf_sue_stock($pdo, $c);
-            if (!$sq) continue;
-            $qk = array_key_last($sq);
-            $v  = $sq[$qk];
-            if ($v >= Thr::SUE_HIT && pf_alert_new($pdo, 'sue', $c . '|' . $qk)) {
-                $lines[] = '⭐ 관심 ' . $nm($c) . ' 서프라이즈 — SUE ' . number_format($v, 1) . ' (상위 20%권)';
+            foreach (pf_alert_sue_fresh($pdo, $c, $watchAt[$c] ?? null) as $qk => $f) {
+                if ($f['sue'] < Thr::SUE_HIT) continue;
+                if (!pf_alert_new($pdo, 'sue', $c . '|' . $qk)) continue;
+                $lines[] = '⭐ 관심 ' . $nm($c) . ' 서프라이즈 — SUE ' . number_format($f['sue'], 1)
+                         . ' (' . substr($f['d'], 5) . ' 공시 · 상위 20%권)';
             }
         } catch (Throwable $e) { /* 다음 종목 */ }
     }
+
+    /* ⑥ 전종목 규칙 충족 신규 (2026-08-05 신설) — ④⑤ 와 달리 <b>내가 아직 모르는 종목</b>을 알린다.
+     *
+     * ★왜 생겼나: ④⑤ 는 보유·관심에만 붙어 있어, 아무 관계 없는 종목이 백테스트 규칙을 충족해도
+     *   화면에 들어가야만 존재했다. 발굴이 이 화면의 본업인데 그 자리가 비어 있었다.
+     *
+     * ★조건은 어닝 화면의 「규칙 충족」과 <b>같은 함수</b>에서 온다(pf_earn_rows) —
+     *   SUE ≥ 1 ∧ 품질 ∧ 매출동반 ∧ 거래대금 10억↑ <b>∧ 고변동 아님</b>.
+     *   마지막 항이 목록 안의 <b>상대</b> 상위 ⅓ 이라 조건을 여기 다시 적으면 재현이 안 되고,
+     *   「알림은 규칙 충족이라는데 화면에선 고변동⚠」로 두 곳이 딴소리를 하게 된다.
+     *
+     * ★보유·관심은 뺀다 — 그쪽은 ④⑤ 가 「담은 뒤에 나온 공시」라는 더 엄한 문지기로 이미 본다.
+     *   여기서 또 쏘면 같은 종목이 아침에 두 줄로 온다.
+     *
+     * ★첫 실행은 <b>기록만 하고 쏘지 않는다</b>. 창(30일) 안의 충족 종목이 전부 「아직 안 쏜 것」이라
+     *   한꺼번에 울린다 — 2026-08-04 의 그 사고와 같은 모양이라 같은 실수를 되풀이하지 않는다. */
+    try {
+        $E    = pf_earn_rows($pdo, Thr::SUE_ALERT_FRESH_DAYS);
+        $seen = array_flip(array_merge($held, $watch));
+        $hit  = array_values(array_filter($E['rows'],
+            fn($r) => $r['ok'] && !$r['high_vol'] && !isset($seen[$r['code']])));
+
+        $seed = !$pdo->query("SELECT 1 FROM pf_alert_log WHERE kind = 'earn' LIMIT 1")->fetchColumn();
+        /* ★첫 실행 표시는 <b>충족 0건이어도</b> 남긴다. 「earn 행이 하나라도 있나」로만 재면
+         *   비시즌(충족 0건)에 깔았을 때 로그가 계속 비어 seed 상태에 머물고, 그러다
+         *   <b>첫 진짜 배치(시즌 마감일 다음 아침 수십~수백 건)를 통째로 삼킨다</b>.
+         *   깔린 날을 못 박아 두면 그 뒤로는 언제나 정상 발송이다. */
+        if ($seed) pf_alert_new($pdo, 'earn', '__installed__');
+        $new  = [];
+        foreach ($hit as $r) {
+            if (!pf_alert_new($pdo, 'earn', $r['code'] . '|' . $r['qk'])) continue;
+            $new[] = $r;
+        }
+        /* 시즌(5·8·11월 마감일)엔 하루 수십 건이 한꺼번에 충족된다 — 다 적으면 알림이 목록이 되어
+         * 아무도 안 읽는다. 상위 몇 건만 적고 나머지는 수만 밝힌 뒤 화면으로 넘긴다(rows 는 SUE 큰 순). */
+        if (!$seed && $new) {
+            $cap = 8;
+            foreach (array_slice($new, 0, $cap) as $r) {
+                $lines[] = '🟢 ' . $r['name'] . ' 규칙 충족 — SUE ' . number_format($r['sue'], 1)
+                         . ' (' . substr($r['dt'], 5) . ' 공시 · 8년 중 7년 양수)';
+            }
+            if (count($new) > $cap) $lines[] = '… 외 ' . (count($new) - $cap) . '건 (화면에서 전부 보기)';
+        }
+    } catch (Throwable $e) { /* 어닝 목록 실패 — ④⑤ 는 그대로 나간다 */ }
 
     pf_alert_send('📊 실적 신호', $lines, 'https://economist.kr/stock/index.php?mode=earn');
     return $lines;

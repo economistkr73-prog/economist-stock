@@ -29,12 +29,12 @@ $embed = !empty($_GET['embed']);
 echo "<!DOCTYPE html><html lang='ko'><head><meta charset='utf-8'>";
 echo "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
 echo "<title>차트 스타일 갤러리</title>";
-echo "<script src='/style/dailychart.js?v=36'></script>";
-echo "<script src='/style/bandchart.js?v=1'></script>";      // 구성 ⑥ 밴드형 (dailychart 위의 얇은 층)
+echo "<script src='/style/dailychart.js?v=50'></script>";
+echo "<script src='/style/bandchart.js?v=3'></script>";      // 구성 ⑥ 밴드형 (dailychart 위의 얇은 층)
 if (!$embed) nav_css();
 echo <<<'HTML'
 <style>
-  /* 다크 계열(updash·rise)이 읽는 CSS 변수 — 모듈 dark 테마의 원천과 같은 값 */
+  /* 다크 계열(단타) 차트가 읽는 CSS 변수 — 모듈 dark 테마의 원천과 같은 값 */
   :root{--up:#e8493f;--down:#2f7bd6;--ink-dim:#8893ab;--ink-mute:#5b6884;--line:#26304a;--accent:#d9a441}
   body{margin:0;background:#f4f7fa;color:#22303f;
     font-family:Pretendard,-apple-system,BlinkMacSystemFont,'Malgun Gothic',sans-serif;font-size:14px}
@@ -71,15 +71,21 @@ echo <<<'HTML'
   .ind-slot textarea{flex:1;min-width:210px;resize:vertical;line-height:1.5;
     font-family:Consolas,'Malgun Gothic',monospace;font-size:12.5px}
   .ind-row .ext-lbl{color:#6b7c8e;font-weight:600;font-size:12px}
+  /* 본문이 빈 수식칸 — 켜고 끌 것이 없다(체크 상태를 저장하지도 않는다) */
+  .ind-row label.slot-na{opacity:.42}
   .ind-row .sl-w{width:64px}
   .ind-row .sl-st,.ind-row .sl-exs{width:104px;font-family:Consolas,'Malgun Gothic',monospace}
   .ind-row .sl-ext{width:34px;padding-left:5px;padding-right:2px;text-align:center}   /* 한 자리면 충분 */
   /* 변수 표 — 이름 1번 + 일/주/월 값 열 */
-  .var-grid{display:grid;grid-template-columns:120px 84px 84px 84px;gap:4px 8px;
+  .var-grid{display:grid;grid-template-columns:120px 84px 84px 84px 84px;gap:4px 8px;
     align-items:center;margin:6px 0 8px;width:max-content}
   .var-grid input{padding:6px 9px;border:1px solid #c9d4de;border-radius:7px;font-size:13px;font-family:inherit;width:100%;box-sizing:border-box}
   .vg-head{font-size:12px;font-weight:800;color:#fff;background:#22303f;border-radius:6px;
     text-align:center;padding:4px 0}
+  /* 축 머리글 = 「그 축에서 이 지표를 보여 줄까」 체크칸 (끄면 그 시간축 차트에서 안 그린다) */
+  .vg-head.tf{display:flex;align-items:center;justify-content:center;gap:5px;cursor:pointer;user-select:none}
+  .vg-head.tf input{width:13px;height:13px;margin:0;accent-color:#d9a441;cursor:pointer}
+  .vg-head.tf.off{background:#8496a6}
   /* 지표 관리 머리 — 제목 + 신규등록 */
   .ind-head{display:flex;align-items:center;gap:10px}
   .ind-head h3{margin:0}
@@ -107,6 +113,7 @@ echo <<<'HTML'
   .tag.draw{background:#eaf1f8;color:#1d5c93}
   .tag.draw.point{background:#f3eefa;color:#6b3fa0}
   .tag.ext{background:#fdf2e4;color:#a2690f}
+  .tag.tf{background:#e9f5ee;color:#1d6b46}   /* 일부 축에서만 그리는 지표 */
   .tag.off{opacity:.45;text-decoration:line-through}
   .tag.var{background:#fff;border:1px solid #e3eaf0;color:#6b7c8e;font-weight:600}
   .tag.var b{color:#3c4d5e;font-weight:800}
@@ -122,6 +129,27 @@ echo <<<'HTML'
   .ind-menu button:hover{background:#eef3f7}
   .ind-menu button.del{color:#c0241a}
   .ind-menu button.del:hover{background:#fdecea}
+  /* ── 알림·확인 모달 (alert 대신) ──
+   * 저장이 검증까지 하므로 「무엇이 왜 안 됐는지」를 말하는 자리가 하나뿐이다. */
+  .dlg-bd{position:fixed;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;
+    padding:20px;background:rgba(12,22,36,.44);animation:dlgFade .12s ease-out}
+  .dlg{width:100%;max-width:470px;background:#fff;border-radius:14px;overflow:hidden;
+    box-shadow:0 18px 48px rgba(10,25,45,.3);animation:dlgUp .15s cubic-bezier(.2,.9,.3,1)}
+  .dlg-h{display:flex;align-items:center;gap:10px;padding:17px 19px 0;font-size:15px;
+    font-weight:800;color:#22303f;letter-spacing:-.01em}
+  .dlg-ico{flex:none;width:25px;height:25px;border-radius:50%;color:#fff;font-size:14px;font-weight:900;
+    display:flex;align-items:center;justify-content:center;line-height:1}
+  .dlg-ico.err{background:#e8493f}
+  .dlg-ico.warn{background:#d9a441}
+  .dlg-ico.ok{background:#2f9e6f}
+  .dlg-b{padding:11px 19px 2px;font-size:13px;line-height:1.65;color:#3c4d5e;
+    white-space:pre-wrap;word-break:break-word;max-height:52vh;overflow:auto}
+  .dlg-b .em{display:block;margin:8px 0 2px;padding:9px 11px;border-radius:8px;background:#f5f8fb;
+    border:1px solid #e3eaf0;font-family:Consolas,'Malgun Gothic',monospace;font-size:12.5px;color:#22303f}
+  .dlg-b .hint{display:block;margin-top:9px;color:#8496a6;font-size:12.5px}
+  .dlg-f{display:flex;justify-content:flex-end;gap:8px;padding:15px 19px 17px}
+  @keyframes dlgFade{from{opacity:0}to{opacity:1}}
+  @keyframes dlgUp{from{opacity:0;transform:translateY(10px) scale(.985)}to{opacity:1;transform:none}}
   .syntax{font-size:12.5px;line-height:1.8;color:#3c4d5e}
   .syntax code{background:#eef3f7;border-radius:4px;padding:1px 5px;font-family:Consolas,monospace}
   /* ── 화면별 구성 (기능 = 도구모음·레이어) ── */
@@ -208,14 +236,18 @@ echo <<<'HTML'
     </div>
     <div class="ind-row" title="수식에서 쓰는 변수의 기본값 — 적용할 때 차트 옆에서 바꿀 수 있습니다">
       <label>변수</label>
-      <span class="muted" style="font-size:12px">이름은 일/주/월 공통 — 값만 시간축별로. 주·월 칸이 비면 일 값을 씁니다 (월봉은 추후)</span>
+      <span class="muted" style="font-size:12px">이름은 일/주/월/<b>분</b> 공통 — 값만 시간축별로.
+        <b>비어 있는 칸은 일 값을 씁니다</b> (월봉은 추후 · 분은 단타 1분봉 화면에서 쓰입니다).
+        ★<b>거래대금은 원 단위</b>입니다 — 100억 = <code>10000000000</code><br>
+        머리글의 <b>체크칸</b>은 「그 축의 차트에서 이 지표를 그릴지」입니다 — 끄면 그 시간축에서는
+        <b>선도 칩도 「＋지표」 목록에도 안 나옵니다</b>(축을 되돌리면 그대로 살아납니다). 넷 다 켜면 전 축입니다.</span>
     </div>
     <div class="var-grid">
-      <span class="vg-head">이름</span><span class="vg-head">일</span><span class="vg-head">주</span><span class="vg-head">월</span>
-      <input id="varN0" placeholder="이름"><input id="varD0" type="number" step="any"><input id="varW0" type="number" step="any"><input id="varM0" type="number" step="any">
-      <input id="varN1" placeholder="이름"><input id="varD1" type="number" step="any"><input id="varW1" type="number" step="any"><input id="varM1" type="number" step="any">
-      <input id="varN2" placeholder="이름"><input id="varD2" type="number" step="any"><input id="varW2" type="number" step="any"><input id="varM2" type="number" step="any">
-      <input id="varN3" placeholder="이름"><input id="varD3" type="number" step="any"><input id="varW3" type="number" step="any"><input id="varM3" type="number" step="any">
+      <span class="vg-head">이름</span><label class="vg-head tf" id="tfLD" title="일봉 차트에서 이 지표를 그립니다"><input type="checkbox" id="tfD" checked>일</label><label class="vg-head tf" id="tfLW" title="주봉 차트에서 이 지표를 그립니다"><input type="checkbox" id="tfW" checked>주</label><label class="vg-head tf" id="tfLM" title="월봉 차트에서 이 지표를 그립니다"><input type="checkbox" id="tfM" checked>월</label><label class="vg-head tf" id="tfLX" title="분봉 차트에서 이 지표를 그립니다"><input type="checkbox" id="tfX" checked>분</label>
+      <input id="varN0" placeholder="이름"><input id="varD0" type="number" step="any"><input id="varW0" type="number" step="any"><input id="varM0" type="number" step="any"><input id="varX0" type="number" step="any">
+      <input id="varN1" placeholder="이름"><input id="varD1" type="number" step="any"><input id="varW1" type="number" step="any"><input id="varM1" type="number" step="any"><input id="varX1" type="number" step="any">
+      <input id="varN2" placeholder="이름"><input id="varD2" type="number" step="any"><input id="varW2" type="number" step="any"><input id="varM2" type="number" step="any"><input id="varX2" type="number" step="any">
+      <input id="varN3" placeholder="이름"><input id="varD3" type="number" step="any"><input id="varW3" type="number" step="any"><input id="varM3" type="number" step="any"><input id="varX3" type="number" step="any">
     </div>
     <!-- 수식 정의 = 변수 계산 전용(그리지 않음) → 수식1~3 = 정의된 변수를 선/점으로 출력 -->
     <div class="ind-row ind-slot">
@@ -248,7 +280,7 @@ echo <<<'HTML'
         <input id="slExt1" type="number" min="0" max="10" step="1" placeholder="0" class="sl-ext">
         <select id="slExw1" class="sl-w" title="연장선 두께"></select>
         <select id="slEx1" class="sl-exs" title="연장선 종류"></select></label>
-      <textarea id="slBody1" rows="2"></textarea>
+      <textarea id="slBody1" rows="2" placeholder="정의된 변수 또는 수식 — 예: 최고거래량_L"></textarea>
     </div>
     <div class="ind-row ind-slot">
       <label><input type="checkbox" id="slOn2" checked>수식3</label>
@@ -260,18 +292,23 @@ echo <<<'HTML'
         <input id="slExt2" type="number" min="0" max="10" step="1" placeholder="0" class="sl-ext">
         <select id="slExw2" class="sl-w" title="연장선 두께"></select>
         <select id="slEx2" class="sl-exs" title="연장선 종류"></select></label>
-      <textarea id="slBody2" rows="2"></textarea>
+      <textarea id="slBody2" rows="2" placeholder="정의된 변수 또는 수식"></textarea>
     </div>
     <div class="ind-row">
       <label style="flex:1">메모 <input id="inNote" maxlength="200" style="flex:1"></label>
-      <button type="button" class="btn btn-outline" onclick="indTest()">검사</button>
+      <!-- ★「검사」 버튼은 없앴다(2026-08-05 사용자 지시) — 저장이 검증까지 한다.
+           따로 두면 «검사를 안 누르고 저장»이 되어, 안 그려지는 지표가 조용히 저장된다. -->
       <button type="button" class="btn btn-outline" onclick="indClose()">취소</button>
       <button type="button" class="btn" style="background:#22303f;color:#fff" onclick="indSave()">저장</button>
     </div>
     <details class="note"><summary>수식 문법 (클릭해서 열기)</summary>
       <div class="syntax">
         <b>심볼</b> — <code>C</code> 종가 · <code>O</code> 시가 · <code>H</code> 고가 · <code>L</code> 저가 ·
-        <code>V</code> 거래량 · <code>AMT</code>(=<code>거래대금</code>)<br>
+        <code>V</code> 거래량 · <code>AMT</code>(=<code>거래대금</code>) ·
+        <code>시각</code>(=<code>HM</code>, 09:00→900) · <code>첫봉</code> · <code>막봉</code>(그 날 첫/마지막 봉이면 1)<br>
+        <span style="color:#8893ab">※ <b>시각·첫봉·막봉은 분봉에서만</b> 값이 생깁니다(일·주·월 봉은 하루 안의 자리가 없어 전부 0).
+        시가·종가 단일가 물량이 통째로 실리는 09:00·15:30 봉을 계산에서 뺄 때 씁니다 —
+        예: <code>쓸봉 = 1 - 첫봉 - 막봉;</code></span><br>
         <span style="color:#8893ab">※ 거래대금은 <b>KRX 실제값</b>을 씁니다(포트폴리오·관심·시뮬레이터 종목, 2022년~).
         실제값이 없는 종목·기간은 <b>종가×거래량</b>으로 근사하며, 이 근사는 실측 중앙오차 0.99%라
         「전고 거래대금 돌파」 판정이 드물게 갈릴 수 있습니다.</span><br>
@@ -289,6 +326,8 @@ echo <<<'HTML'
         <b>n봉 전 값</b> — <code>이름(1)</code> = 그 값의 1봉 전 (예: <code>최고량(1)</code>, <code>C(1)</code>).
         <code>REF(x,n)</code> 과 같습니다.<br>
         <b>추가 함수</b> — <code>SUM(x)</code> 인자 1개 = 누적합 ·
+        <code>HIGHEST(x)</code>/<code>LOWEST(x)</code> 인자 1개 = <b>처음부터 지금까지</b>의 최고/최저
+        (창 길이 없이 「신고가·신고 거래대금」을 판정할 때) ·
         <code>VALUEWHEN(n,조건,값)</code> = 최근 n번째로 조건이 참이었던 시점의 값 ·
         <code>and or not</code> 도 <code>&amp;&amp; || !</code> 대신 됩니다.<br>
         <b>예시</b> — 수식 정의: <code>최고량 = HIGHEST(V, 기준봉수); 조건 = V &gt; 최고량(1);
@@ -338,7 +377,7 @@ echo <<<'HTML'
 
   <div class="card dark">
     <h3>4. 분석형 — 당일전고 + 현재가 (다크)</h3>
-    <div class="use">사용처: <a href="/stock_analysis.php?mode=updash" target="_blank">상승종목 대시보드</a>
+    <div class="use">사용처: <a href="/stock/index.php?mode=short" target="_blank">단타</a>의 일봉 패널
       · 하늘색 실선 = 당일 기준 직전 60봉 최고가 (관찰용 기준선)</div>
     <div class="host" id="c4"></div>
     <div class="note">구 신호칩(신고가+거래량 흰칩·추정 승률)은 2026-08-02 폐기 — 정적 추정 승률이 실측과 어긋나는 잘못된 신호였습니다.</div>
@@ -346,7 +385,7 @@ echo <<<'HTML'
 
   <div class="card dark">
     <h3>5. 분봉 — 당일 09:00~15:30 · 1분 (다크)</h3>
-    <div class="use">사용처: 상승종목 대시보드 (일봉 아래 보조 차트)</div>
+    <div class="use">사용처: <a href="/stock/index.php?mode=short" target="_blank">단타</a>의 분봉 2종 (메인·보조)</div>
     <div class="host sm" id="c5"></div>
   </div>
 
@@ -460,19 +499,36 @@ DailyChart.load().then(function(){
   function esc(s){ var d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML; }
   function G(id){ return document.getElementById(id); }
 
-  /* 변수 요약 뱃지 — 「봉수 240·24·6」(일·주·월). 축별 값이 하나뿐이면 그것만 */
+  /* 변수 요약 뱃지 — 「봉수 240·24·6·120」(일·주·월·분). 축별 값이 하나뿐이면 그것만.
+   * 어느 축인지 모호해지지 않게 «채워진 축만» 접두 없이 순서대로 잇는다(툴팁에 축 이름을 적는다). */
+  var VT_AXES = [['day','일'], ['week','주'], ['month','월'], ['min','분']];
   function varTags(d){
     var vs = d.vars || {};
-    var per = (vs.day && typeof vs.day === 'object') || (vs.week && typeof vs.week === 'object')
-           || (vs.month && typeof vs.month === 'object');
-    var vd = per ? (vs.day || {}) : vs, vw = per ? (vs.week || {}) : {}, vm = per ? (vs.month || {}) : {};
+    var per = false;
+    VT_AXES.forEach(function(a){ if (vs[a[0]] && typeof vs[a[0]] === 'object') per = true; });
+    var maps = VT_AXES.map(function(a){ return per ? (vs[a[0]] || {}) : {}; });
+    if (!per) maps[0] = vs;
     var names = {};
-    [vd, vw, vm].forEach(function(m){ Object.keys(m).forEach(function(k){ names[k] = 1; }); });
+    maps.forEach(function(m){ Object.keys(m).forEach(function(k){ names[k] = 1; }); });
     return Object.keys(names).map(function(k){
-      var p = [];
-      [vd, vw, vm].forEach(function(m){ if (m[k] !== undefined) p.push(m[k]); });
-      return '<span class="tag var">' + esc(k) + ' <b>' + esc(p.join('·')) + '</b></span>';
+      var p = [], t = [];
+      maps.forEach(function(m, i){
+        if (m[k] !== undefined) { p.push(m[k]); t.push(VT_AXES[i][1] + ' ' + m[k]); }
+      });
+      return '<span class="tag var" title="' + esc(t.join(' · ')) + '">'
+           + esc(k) + ' <b>' + esc(p.join('·')) + '</b></span>';
     }).join('');
+  }
+  /* 표시 축 뱃지 — 전 축이면 안 붙인다(대부분이 그래서 붙이면 소음이 된다) */
+  function tfTag(d){
+    var a = d.tfs || [];
+    if (!a.length || a.length === VT_AXES.length) return '';
+    var lb = a.map(function(k){
+      for (var i = 0; i < VT_AXES.length; i++) if (VT_AXES[i][0] === k) return VT_AXES[i][1];
+      return k;
+    });
+    return '<span class="tag tf" title="이 시간축의 차트에서만 그립니다">'
+         + esc(lb.join('·')) + '봉만</span>';
   }
   /* 뱃지 속 선 견본 — 두께·종류가 그대로 보이게 (점 지표는 동그라미) */
   function lineSwatch(s, col, isPoint){
@@ -525,7 +581,7 @@ DailyChart.load().then(function(){
         + '<span class="tags">'
         +   '<span class="tag draw' + (d.draw === 'point' ? ' point' : '') + '">'
         +     (d.draw === 'point' ? '점 ●' : '선 ─') + '</span>'
-        +   lineTags(d) + varTags(d)
+        +   tfTag(d) + lineTags(d) + varTags(d)
         + '</span>'
         + '<button type="button" class="ind-more" data-act="menu" title="수정 · 삭제">⋯</button>';
       box.appendChild(card);
@@ -545,41 +601,108 @@ DailyChart.load().then(function(){
     return DailyChart.loadIndicators(force).then(function(a){ IND_CACHE = a; indRender(); });
   }
 
-  // 변수 표 — 이름은 일/주/월 공통, 값만 축별 ↔ {day:{}, week:{}, month:{}} (한글 이름 허용)
+  /* 변수 표 — 이름은 축 공통, 값만 축별 ↔ {day:{}, week:{}, month:{}, min:{}} (한글 이름 허용).
+   * 열 ↔ 축 키: D=day · W=week · M=month · X=min(분). 「분」은 2026-08-04 신설 —
+   * 분봉은 봉 주기가 달라 120봉·240봉 같은 값을 일봉과 나눠 써야 한다. 비면 일 값을 쓴다. */
   var VAR_ROWS = 4;
+  /* ── 알림·확인 모달 (alert 대신) ────────────────────────────────
+   * o = {tone:'err'|'warn'|'ok', title, msg, em(강조 블록), hint(회색 꼬리말),
+   *      ok:'확인', cancel:'취소'} — cancel 을 주면 확인창이 된다.
+   * 돌려주는 Promise: 확인 true · 취소 false. Esc·바깥 클릭 = 취소 · Enter = 확인. */
+  function dlgEsc(s){
+    return String(s === undefined || s === null ? '' : s)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+  function dlg(o){
+    o = o || {};
+    return new Promise(function(resolve){
+      var tone = o.tone || 'err';
+      var bd = document.createElement('div');
+      bd.className = 'dlg-bd';
+      bd.innerHTML =
+          '<div class="dlg" role="alertdialog" aria-modal="true">'
+        +   '<div class="dlg-h"><span class="dlg-ico ' + tone + '">' + (tone === 'ok' ? '✓' : '!') + '</span>'
+        +     '<span>' + dlgEsc(o.title || '알림') + '</span></div>'
+        +   '<div class="dlg-b">' + dlgEsc(o.msg || '')
+        +     (o.em   ? '<span class="em">'   + dlgEsc(o.em)   + '</span>' : '')
+        +     (o.hint ? '<span class="hint">' + dlgEsc(o.hint) + '</span>' : '')
+        +   '</div><div class="dlg-f"></div></div>';
+      var foot = bd.querySelector('.dlg-f');
+      function close(v){ document.removeEventListener('keydown', key, true); bd.remove(); resolve(v); }
+      function key(e){
+        if (e.key === 'Escape')    { e.preventDefault(); close(false); }
+        else if (e.key === 'Enter'){ e.preventDefault(); close(true); }
+      }
+      if (o.cancel) {
+        var bc = document.createElement('button');
+        bc.type = 'button'; bc.className = 'btn btn-outline'; bc.textContent = o.cancel;
+        bc.onclick = function(){ close(false); };
+        foot.appendChild(bc);
+      }
+      var bo = document.createElement('button');
+      bo.type = 'button'; bo.className = 'btn btn-outline btn-primary'; bo.textContent = o.ok || '확인';
+      bo.onclick = function(){ close(true); };
+      foot.appendChild(bo);
+      document.addEventListener('keydown', key, true);
+      bd.addEventListener('mousedown', function(e){ if (e.target === bd) close(false); });
+      document.body.appendChild(bd);
+      bo.focus();
+    });
+  }
+
+  var VAR_COLS = [['D','day'], ['W','week'], ['M','month'], ['X','min']];
   function formVars(){
-    var day = {}, week = {}, month = {};
+    var maps = { day:{}, week:{}, month:{}, min:{} };
     for (var i = 0; i < VAR_ROWS; i++) {
       var k = G('varN' + i).value.trim();
       if (!k) continue;
       var K = k.toUpperCase();
-      var d = G('varD' + i).value.trim(), w = G('varW' + i).value.trim(), m = G('varM' + i).value.trim();
-      if (d !== '' && isFinite(+d)) day[K]   = +d;
-      if (w !== '' && isFinite(+w)) week[K]  = +w;
-      if (m !== '' && isFinite(+m)) month[K] = +m;
+      VAR_COLS.forEach(function(c){
+        var v = G('var' + c[0] + i).value.trim();
+        if (v !== '' && isFinite(+v)) maps[c[1]][K] = +v;
+      });
     }
     var out = {};
-    if (Object.keys(day).length)   out.day = day;
-    if (Object.keys(week).length)  out.week = week;
-    if (Object.keys(month).length) out.month = month;
+    Object.keys(maps).forEach(function(tf){ if (Object.keys(maps[tf]).length) out[tf] = maps[tf]; });
     return out;
   }
+  /* 표시 축 체크칸 (변수 표 머리글) — 「그 축의 차트에서 이 지표를 그릴지」.
+   * ★넷 다 켜면 서버가 「전 축」(빈 값)으로 접어 저장한다 — 같은 뜻을 두 모양으로 담지 않는다.
+   *   그래서 체크칸이 생기기 전에 만든 옛 지표(tfs 없음)는 전부 켜진 모습으로 열린다. */
+  function formTfs(){
+    return VAR_COLS.filter(function(c){ return G('tf' + c[0]).checked; })
+                   .map(function(c){ return c[1]; });
+  }
+  function fillTfs(tfs){
+    var has = (tfs && tfs.length) ? tfs : null;
+    VAR_COLS.forEach(function(c){ G('tf' + c[0]).checked = has ? has.indexOf(c[1]) >= 0 : true; });
+    tfHead();
+  }
+  // 꺼진 축 머리글은 회색으로 — 값 칸은 그대로 두므로 표시가 없으면 꺼진 줄 모른다
+  function tfHead(){
+    VAR_COLS.forEach(function(c){
+      G('tfL' + c[0]).classList.toggle('off', !G('tf' + c[0]).checked);
+    });
+  }
+  VAR_COLS.forEach(function(c){ G('tf' + c[0]).addEventListener('change', tfHead); });
+
   function fillVars(vars){
     vars = vars || {};
-    var per = (vars.day && typeof vars.day === 'object') || (vars.week && typeof vars.week === 'object')
-           || (vars.month && typeof vars.month === 'object');
-    var day = per ? (vars.day || {}) : vars;          // 구형(평평)은 일 열로
-    var week = per ? (vars.week || {}) : {};
-    var month = per ? (vars.month || {}) : {};
+    var per = false;
+    VAR_COLS.forEach(function(c){ if (vars[c[1]] && typeof vars[c[1]] === 'object') per = true; });
+    var maps = {};
+    VAR_COLS.forEach(function(c){ maps[c[1]] = per ? (vars[c[1]] || {}) : {}; });
+    if (!per) maps.day = vars;                        // 구형(평평)은 일 열로
     var names = {};
-    [day, week, month].forEach(function(m){ Object.keys(m).forEach(function(k){ names[k] = 1; }); });
+    VAR_COLS.forEach(function(c){ Object.keys(maps[c[1]]).forEach(function(k){ names[k] = 1; }); });
     var keys = Object.keys(names);
     for (var i = 0; i < VAR_ROWS; i++) {
       var k = keys[i];
       G('varN' + i).value = k || '';
-      G('varD' + i).value = (k !== undefined && day[k]   !== undefined) ? day[k]   : '';
-      G('varW' + i).value = (k !== undefined && week[k]  !== undefined) ? week[k]  : '';
-      G('varM' + i).value = (k !== undefined && month[k] !== undefined) ? month[k] : '';
+      VAR_COLS.forEach(function(c){
+        var m = maps[c[1]];
+        G('var' + c[0] + i).value = (k !== undefined && m[k] !== undefined) ? m[k] : '';
+      });
     }
     return keys;                     // 이름 바꿈 감지용 (행 위치로 대조)
   }
@@ -660,6 +783,45 @@ DailyChart.load().then(function(){
     }
     return lines;
   }
+  /* 본문이 빈 수식칸의 체크칸은 «뜻이 없다» — 빈 칸은 저장 대상이 아니라(formLines 가 건너뛴다)
+   * 꺼 두고 저장해도 다음에 열면 기본값(켜짐)으로 돌아온다. 그 유령 상태를 없애려고
+   * 본문이 비면 체크칸을 잠그고 흐리게 둔다. 본문을 적는 순간 풀린다(그리고 켜진 채로 시작한다). */
+  function slotOnSync(){
+    for (var i = 0; i < 3; i++) {
+      var has = !!G('slBody' + i).value.trim();
+      var cb  = G('slOn' + i);
+      cb.disabled = !has;
+      if (!has) cb.checked = true;
+      var lb = cb.parentNode;
+      if (lb && lb.classList) lb.classList.toggle('slot-na', !has);
+      if (lb) lb.title = has ? '해제하면 이 선만 숨깁니다'
+                             : '수식 본문이 비어 있어 켜고 끌 것이 없습니다';
+    }
+  }
+  for (var _si = 0; _si < 3; _si++) {
+    G('slBody' + _si).addEventListener('input', slotOnSync);
+  }
+
+  /* 「이름만 적고 본문은 비운」 칸 찾기 — 본문이 비면 그 칸은 통째로 버려진다(formLines).
+   * 조용히 사라지면 「저장이 안 된다」로 보인다(실제로 그렇게 헤맸다) → 저장·검사에서 막는다. */
+  function slotMiss(){
+    var out = [];
+    for (var i = 0; i < 3; i++) {
+      if (G('slBody' + i).value.trim()) continue;
+      var ext = parseInt(G('slExt' + i).value, 10);
+      if (G('slName' + i).value.trim() || (isFinite(ext) && ext > 0)) out.push(i + 1);
+    }
+    return out;
+  }
+  function slotMissAlert(){
+    var m = slotMiss();
+    if (!m.length) return false;
+    dlg({ tone:'warn', title:'수식 본문이 비어 있습니다',
+          msg:'수식' + m.join('·수식') + ' 은 이름·연장만 채워져 있고 «수식 본문»(맨 오른쪽 넓은 칸)이 비었습니다.\n'
+            + '본문이 비면 그 칸은 저장되지 않고 이름도 함께 버려집니다.',
+          hint:'「수식 정의」에서 만든 변수 이름(예: 상단)을 본문 칸에 넣어 주세요.' });
+    return true;
+  }
   // 정의 칸 판별 — def 표시가 있거나, 마지막 문장이 대입(=출력 없음)인 첫 칸
   function isDefSlot(s){
     if (!s) return false;
@@ -685,6 +847,7 @@ DailyChart.load().then(function(){
       G('slSt' + i).value = (s && s.st) ? s.st : 'solid';
       G('slBody' + i).value = s ? (s.body || '') : '';
     }
+    slotOnSync();          // 빈 칸의 체크칸은 잠근다 (뜻 없는 상태를 남기지 않는다)
   }
 
   window.indNew = function(){
@@ -692,6 +855,7 @@ DailyChart.load().then(function(){
     G('inNote').value = '';
     G('inTitle').textContent = '새 지표';
     EDIT_VARS = fillVars({});
+    fillTfs(null);                    // 새 지표는 전 축 — 만들자마자 어디선가 안 보이면 헷갈린다
     fillSlots(null);
   };
   /* 편집 폼은 평소에 감춰 둔다 — 「신규등록」·「수정」에서만 연다 */
@@ -706,51 +870,67 @@ DailyChart.load().then(function(){
     indNew();
   };
 
-  // 검사 — 문법 + 현재 조회된 실데이터로 계산해 수식칸별 요약을 보여 준다
-  window.indTest = function(){
-    var lines = formLines();
-    if (!lines.length) { alert('수식을 입력하세요.'); return; }
-    var def = { name: G('inName').value || '검사', draw: G('inDraw').value,
-                lines: lines, vars: formVars(), color: '#7b1fa2' };
+  var TF_LABEL = { day:'일', week:'주', month:'월', min:'분' };
+
+  /* 수식 검증 — 문법 + 조회된 실데이터로 실제 계산까지.
+   * ★「이 지표가 켜 둔 축」의 변수 세트로 돌린다 — 늘 일 세트로 돌리면 분(또는 주·월) 칸에만
+   *   값을 넣은 지표가 「알 수 없는 이름」으로 헛되이 걸린다(실제로 그렇게 막혔다).
+   * 돌려주는 값: {ok:true, outs:출력 선 개수} | {ok:false, title, msg, hint} */
+  function validateDef(def){
+    var tfSel = formTfs();
+    var tf = (!tfSel.length || tfSel.indexOf('day') >= 0) ? 'day' : tfSel[0];
+    var hint = (tf === 'day') ? ''
+      : TF_LABEL[tf] + ' 변수 세트로 검사했습니다 (갤러리 데이터는 일봉이라 시각·첫봉·막봉은 0 입니다).';
     try {
       DailyChart.checkDef(def);
-      if (!G_ROWS.length) { alert('문법 OK (종목을 조회하면 실데이터 계산까지 확인합니다)'); return; }
-      var parts = DailyChart.evalIndicatorMulti(G_ROWS, def, {});
-      var msg = parts.map(function(pt, pi){
-        var vals = pt.vals;
-        var valid = vals.filter(function(v){ return v !== null && v !== undefined && isFinite(v); });
-        var head = (pt.name ? pt.name : (pi + 1) + '번') + ': ';
-        if (def.draw === 'point') {
-          var hits = valid.filter(function(v){ return v !== 0; }).length;
-          return head + G_ROWS.length + '봉 중 조건 만족 ' + hits + '개';
-        }
-        var last = null;
-        for (var i = vals.length - 1; i >= 0; i--) if (vals[i] !== null && isFinite(vals[i])) { last = vals[i]; break; }
-        // 계단선이면 단계 수를 알려 준다 — 「연장」을 몇 개로 둘지 여기 보고 정한다
-        var steps = DailyChart.stepLevels(vals).length;
-        return head + '값 있는 봉 ' + valid.length + '/' + G_ROWS.length
-          + (last === null ? '' : ' · 마지막 값 ' + (Math.round(last * 100) / 100).toLocaleString())
-          + (steps > 1 && steps <= valid.length / 3 ? ' · 계단 ' + steps + '단계' : '');
-      }).join('\n');
-      alert('문법 OK · 출력 ' + parts.length + '개'
-        + (parts.length ? '\n' + msg
-           : '\n※ 그릴 선이 없습니다 — 수식1~3 에 「수식 정의」에서 만든 변수 이름을 넣으세요'));
-    } catch (e) { alert('수식 오류:\n' + e.message); }
-  };
+      if (!G_ROWS.length) return { ok:true, outs:null };     // 조회 전 — 문법만 본 것
+      var parts = DailyChart.evalIndicatorMulti(G_ROWS, def, {}, tf);
+      return { ok:true, outs:parts.length };
+    } catch (e) {
+      return { ok:false, title:'수식에 문제가 있습니다', msg:e.message,
+               hint:hint || '「수식 정의」의 변수 이름과 변수 표를 확인하세요.' };
+    }
+  }
 
   window.indSave = function(){
     var name = G('inName').value.trim();
     var lines = formLines();
-    if (!name || !lines.length) { alert('지표 이름과 수식은 필수입니다.'); return; }
+    if (!name || !lines.length) {
+      dlg({ title:'저장할 수 없습니다', msg:'지표 이름과 수식은 필수입니다.' });
+      return;
+    }
+    if (slotMissAlert()) return;
+    var tfs = formTfs();
+    // 하나도 안 고르면 「어디에도 안 보이는 지표」가 된다 — 빈 값은 서버에서 「전 축」이라 조용히 뜻이 뒤집힌다
+    if (!tfs.length) {
+      dlg({ tone:'warn', title:'보여 줄 시간축이 없습니다',
+            msg:'이 지표를 그릴 시간축을 하나 이상 고르세요.',
+            hint:'변수 표 머리글의 일·주·월·분 체크칸입니다.' });
+      return;
+    }
     var ren = varRenames();          // 변수 이름을 바꿨으면 이름 속 #토큰도 함께 고친다
     if (ren.length) {
       name = renameTokens(name, ren);
       lines.forEach(function(s){ s.name = renameTokens(s.name, ren); });
       G('inName').value = name;
     }
-    try {
-      DailyChart.checkDef({ lines: lines });
-    } catch (e) { alert('수식 오류:\n' + e.message); return; }
+    /* ★저장이 곧 검사다(2026-08-05) — 따로 「검사」 버튼을 두면 안 누르고 저장하게 되고,
+     *   그리지도 못할 지표가 조용히 저장된다. 맞으면 아무 말 없이 넘어간다. */
+    var v = validateDef({ name:name, draw:G('inDraw').value, lines:lines,
+                          vars:formVars(), color:'#7b1fa2' });
+    if (!v.ok) { dlg({ title:v.title, msg:v.msg, hint:v.hint }); return; }
+    if (v.outs === 0) {
+      dlg({ tone:'warn', title:'그릴 선이 없습니다',
+            msg:'수식이 변수만 만들고 끝나서, 저장해도 차트에 아무것도 안 그려집니다.',
+            hint:'수식1~3 의 본문 칸(맨 오른쪽)에 「수식 정의」에서 만든 이름을 넣으세요.',
+            ok:'그래도 저장', cancel:'돌아가기' })
+        .then(function(go){ if (go) indSavePost(name, lines, tfs); });
+      return;
+    }
+    indSavePost(name, lines, tfs);
+  };
+
+  function indSavePost(name, lines, tfs){
     var body = new URLSearchParams();
     body.set('module', 'ind'); body.set('action', 'save');
     if (G('inId').value) body.set('id', G('inId').value);
@@ -759,21 +939,23 @@ DailyChart.load().then(function(){
     body.set('lines', JSON.stringify(lines));
     body.set('note', G('inNote').value);
     body.set('vars', JSON.stringify(formVars()));
+    body.set('tfs', JSON.stringify(tfs));       // 넷 다면 서버가 「전 축」으로 접는다
     fetch('/stock_analysis_api.php', { method: 'POST', body: body, credentials: 'same-origin' })
       .then(function(r){ return r.json(); })
       .then(function(r){
-        if (!r.ok) { alert('저장 실패: ' + (r.error || '알 수 없음')); return; }
+        if (!r.ok) { dlg({ title:'저장 실패', msg:r.error || '알 수 없는 오류입니다.' }); return; }
         indClose();                     // 저장하면 폼을 접는다 — 목록만 보이는 게 기본 화면
         indLoad(true).then(function(){ if (ibar) ibar.reload(); });
       })
-      .catch(function(e){ alert('저장 실패: ' + e); });
-  };
+      .catch(function(e){ dlg({ title:'저장 실패', msg:String(e) }); });
+  }
 
   function indEdit(d){
     G('inId').value = d.id; G('inName').value = d.name; G('inDraw').value = d.draw;
     G('inNote').value = d.note || '';
     G('inTitle').textContent = '수정';
     EDIT_VARS = fillVars(d.vars || {});
+    fillTfs(d.tfs);
     // 신형 lines / 구형 expr 폴백
     fillSlots((d.lines && d.lines.length) ? d.lines
       : (d.expr ? [{ name: '', body: d.expr, on: 1, color: d.color }] : null));

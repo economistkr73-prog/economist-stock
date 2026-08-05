@@ -1,0 +1,208 @@
+<?php
+/**
+ * ArdentLog.class — 아덴트뉴스 수집 「회차 기록」 전담 (DB 전용)
+ *
+ * 왜 있나
+ *   아덴트 수집은 한 달에 한 번, 사람(Claude Code 세션)이 기사를 읽어 장소를 등록하는 식으로 돈다.
+ *   그때 "어떤 기사를 가져왔고 / 어느 장소에 붙였고 / 요약은 뭐였는지"가 어디에도 안 남아 있었다
+ *   (`tbl_ardent_crawl` 은 idxno·status 뿐이고, 요약은 place.attributes 안에 흩어진다).
+ *   이 클래스가 그 한 회차를 통째로 보관하고, `ardent_log.php` 가 날짜별로 펼쳐 보여 준다.
+ *
+ * 표 둘
+ *   tbl_ardent_run       회차(=세션을 돌린 날). run_key 로 하루 한 회차가 원칙이나, 꼬리를 붙이면 여러 번도 된다.
+ *   tbl_ardent_run_item  회차 안의 한 줄 = (기사 × 장소). 한 기사에서 두 곳이 나오면 두 줄이다.
+ *                        장소가 하나도 안 나온 기사도 action='skip' 으로 한 줄 남긴다(왜 안 담겼는지가 정보다).
+ *
+ * ★요약을 여기에도 복사해 둔다. place.attributes.summary 는 나중에 다른 기사가 덮어쓸 수 있어서
+ *   "그날 그 기사로 뭐라고 썼는지"의 기록이 되지 못한다. 이 표는 스냅샷이다(gift_item 과 같은 이유).
+ */
+class ArdentLog
+{
+    private PDO $pdo;
+
+    public function __construct(PDO $pdo) { $this->pdo = $pdo; }
+
+    public function ensureTables(): void
+    {
+        $this->pdo->exec("CREATE TABLE IF NOT EXISTS tbl_ardent_run (
+            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            run_key   VARCHAR(40)  NOT NULL,
+            run_date  DATE         NOT NULL,
+            source    VARCHAR(20)  NOT NULL DEFAULT 'claude',
+            note      VARCHAR(255) NULL,
+            articles  INT UNSIGNED NOT NULL DEFAULT 0,
+            new_cnt   INT UNSIGNED NOT NULL DEFAULT 0,
+            enr_cnt   INT UNSIGNED NOT NULL DEFAULT 0,
+            skip_cnt  INT UNSIGNED NOT NULL DEFAULT 0,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uk_run_key (run_key),
+            KEY idx_run_date (run_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+        $this->pdo->exec("CREATE TABLE IF NOT EXISTS tbl_ardent_run_item (
+            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            run_id     INT UNSIGNED NOT NULL,
+            idxno      BIGINT UNSIGNED NOT NULL,
+            title      VARCHAR(300) NULL,
+            url        VARCHAR(500) NULL,
+            pub_date   DATE NULL,
+            place_id   BIGINT UNSIGNED NULL,
+            place_name VARCHAR(200) NULL,
+            category   VARCHAR(20)  NULL,
+            region     VARCHAR(100) NULL,
+            action     ENUM('new','enrich','skip') NOT NULL DEFAULT 'new',
+            summary    TEXT NULL,
+            features   VARCHAR(500) NULL,
+            months     VARCHAR(60)  NULL,
+            note       VARCHAR(255) NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            KEY idx_run (run_id),
+            KEY idx_idxno (idxno),
+            KEY idx_place (place_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    }
+
+    // ── 쓰기 ────────────────────────────────────────────────
+
+    /** 회차를 잡는다(같은 run_key 면 기존 회차를 그대로 쓴다 — 한 날에 나눠 돌려도 한 회차). */
+    public function runOpen(string $runKey, string $source = 'claude', ?string $note = null): int
+    {
+        $runKey = trim($runKey) !== '' ? trim($runKey) : date('Y-m-d');
+        $date   = preg_match('/^(\d{4}-\d{2}-\d{2})/', $runKey, $m) ? $m[1] : date('Y-m-d');
+        $st = $this->pdo->prepare("INSERT INTO tbl_ardent_run (run_key, run_date, source, note)
+                                   VALUES (?,?,?,?)
+                                   ON DUPLICATE KEY UPDATE note = COALESCE(VALUES(note), note), id = LAST_INSERT_ID(id)");
+        $st->execute([$runKey, $date, $source, $note]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    /**
+     * 한 줄 기록. 같은 (회차, 기사, 장소)를 두 번 넣지 않는다 — 배치를 다시 돌려도 줄이 불어나지 않게.
+     * @param array $r idxno,title,url,pub_date,place_id,place_name,category,region,action,summary,features[],months[],note
+     */
+    public function itemAdd(int $runId, array $r): int
+    {
+        $idxno = (int)($r['idxno'] ?? 0);
+        if ($idxno <= 0) return 0;
+        $pid = isset($r['place_id']) && (int)$r['place_id'] > 0 ? (int)$r['place_id'] : null;
+
+        $dup = $this->pdo->prepare("SELECT id FROM tbl_ardent_run_item
+                                    WHERE run_id=? AND idxno=? AND (place_id <=> ?) LIMIT 1");
+        $dup->execute([$runId, $idxno, $pid]);
+        $exist = (int)($dup->fetchColumn() ?: 0);
+
+        $act = in_array(($r['action'] ?? ''), ['new','enrich','skip'], true) ? $r['action'] : ($pid ? 'new' : 'skip');
+        $feat = is_array($r['features'] ?? null) ? implode('·', array_map('strval', $r['features'])) : trim((string)($r['features'] ?? ''));
+        $mon  = is_array($r['months'] ?? null)
+              ? implode(',', array_filter(array_map('intval', $r['months']), fn($m) => $m >= 1 && $m <= 12))
+              : trim((string)($r['months'] ?? ''));
+        $pub  = trim((string)($r['pub_date'] ?? ''));
+        $pub  = preg_match('/^\d{4}-\d{2}-\d{2}$/', $pub) ? $pub : null;
+
+        $cols = [
+            $this->cut($r['title'] ?? null, 300),
+            $this->cut($r['url'] ?? null, 500),
+            $pub,
+            $pid,
+            $this->cut($r['place_name'] ?? null, 200),
+            $this->cut($r['category'] ?? null, 20),
+            $this->cut($r['region'] ?? null, 100),
+            $act,
+            (($s = trim((string)($r['summary'] ?? ''))) !== '' ? $s : null),
+            ($feat !== '' ? mb_substr($feat, 0, 500) : null),
+            ($mon !== '' ? mb_substr($mon, 0, 60) : null),
+            $this->cut($r['note'] ?? null, 255),
+        ];
+
+        if ($exist > 0) {
+            $st = $this->pdo->prepare("UPDATE tbl_ardent_run_item SET title=?, url=?, pub_date=?, place_id=?,
+                                       place_name=?, category=?, region=?, action=?, summary=?, features=?, months=?, note=?
+                                       WHERE id=?");
+            $st->execute(array_merge($cols, [$exist]));
+            return $exist;
+        }
+        $st = $this->pdo->prepare("INSERT INTO tbl_ardent_run_item
+            (run_id, idxno, title, url, pub_date, place_id, place_name, category, region, action, summary, features, months, note)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+        $st->execute(array_merge([$runId, $idxno], $cols));
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    /** 회차 집계를 줄에서 다시 센다(파생값은 저장하지 않고 항상 재계산 — 나눠 돌려도 맞는다). */
+    public function runRecount(int $runId): array
+    {
+        $st = $this->pdo->prepare("SELECT
+                COUNT(DISTINCT idxno) AS articles,
+                SUM(action='new')     AS new_cnt,
+                SUM(action='enrich')  AS enr_cnt,
+                SUM(action='skip')    AS skip_cnt
+            FROM tbl_ardent_run_item WHERE run_id=?");
+        $st->execute([$runId]);
+        $g = $st->fetch(PDO::FETCH_ASSOC) ?: [];
+        $vals = [
+            'articles' => (int)($g['articles'] ?? 0),
+            'new_cnt'  => (int)($g['new_cnt'] ?? 0),
+            'enr_cnt'  => (int)($g['enr_cnt'] ?? 0),
+            'skip_cnt' => (int)($g['skip_cnt'] ?? 0),
+        ];
+        $this->pdo->prepare("UPDATE tbl_ardent_run SET articles=?, new_cnt=?, enr_cnt=?, skip_cnt=? WHERE id=?")
+             ->execute([$vals['articles'], $vals['new_cnt'], $vals['enr_cnt'], $vals['skip_cnt'], $runId]);
+        return $vals;
+    }
+
+    // ── 읽기 ────────────────────────────────────────────────
+
+    /** 회차 목록(최신 먼저). */
+    public function runList(int $limit = 36): array
+    {
+        $limit = max(1, min(200, $limit));
+        return $this->pdo->query("SELECT * FROM tbl_ardent_run ORDER BY run_date DESC, id DESC LIMIT {$limit}")
+                    ->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    public function runGet(int $id): ?array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM tbl_ardent_run WHERE id=?");
+        $st->execute([$id]);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    public function runLatest(): ?array
+    {
+        $r = $this->pdo->query("SELECT * FROM tbl_ardent_run ORDER BY run_date DESC, id DESC LIMIT 1")
+                  ->fetch(PDO::FETCH_ASSOC);
+        return $r ?: null;
+    }
+
+    /**
+     * 회차의 줄을 「기사 단위」로 묶어 돌려준다 — 화면이 기사 카드 안에 장소를 나열하므로.
+     * @return array [ ['idxno','title','url','pub_date','places'=>[…]], … ]  최신 기사 먼저
+     */
+    public function itemsByRun(int $runId): array
+    {
+        $st = $this->pdo->prepare("SELECT i.*, p.name AS live_name, p.category AS live_cat,
+                                          p.region_lv1, p.region_lv2, p.lat, p.lng
+                                   FROM tbl_ardent_run_item i
+                                   LEFT JOIN place p ON p.id = i.place_id
+                                   WHERE i.run_id=? ORDER BY i.idxno DESC, i.id ASC");
+        $st->execute([$runId]);
+        $arts = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $k = (string)$r['idxno'];
+            if (!isset($arts[$k])) {
+                $arts[$k] = ['idxno' => (int)$r['idxno'], 'title' => (string)($r['title'] ?? ''),
+                             'url' => (string)($r['url'] ?? ''), 'pub_date' => $r['pub_date'], 'places' => []];
+            }
+            $arts[$k]['places'][] = $r;
+        }
+        return array_values($arts);
+    }
+
+    private function cut($v, int $n): ?string
+    {
+        $s = trim((string)($v ?? ''));
+        return $s === '' ? null : mb_substr($s, 0, $n);
+    }
+}
+?>

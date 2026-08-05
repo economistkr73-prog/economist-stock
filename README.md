@@ -6,7 +6,7 @@
 
 - 월별 달력 기반 일정 관리 (`index.php`)
 - 일간 뉴스 수집 및 정리 (`daily_news.php`)
-- ETF/주식 분석 (`etf_stock.php`, `stock_analysis.php`)
+- ETF/주식 분석 (`etf_stock.php`) · 주식 포트폴리오·단타 (`stock/index.php`)
 - 종목 테마 뉴스 (`stock_thema_news.php`)
 - 분석 모델 / 증권 뉴스 리포트 (`analysis_model.php`)
 - RSS 피드 제공 (`rss_feed.php`)

@@ -29,8 +29,15 @@ class ChartFeat
     public const DATA = [
         'position' => '보유 포지션(누적단가·자동매도가)',
         'fills'    => '체결 이력',
+        'realfills' => '실계좌 체결(pf_trade)',
         'intraday' => '당일 시세',
         'minute'   => '분봉',
+        'daily'    => '일봉',
+        /* ★단타 전용 의존성. 「분봉이 있느냐」(minute)와 다르다 — 다른 화면의 분봉은
+         *   «클릭할 때 받아 버리는 당일치»고, 여기 있는 것은 «쌓아 둔 10거래일 원장»이다.
+         *   이 이름이 없으면 단타 기능(보조 패널·swap·자동갱신)이 다른 화면의 설정에
+         *   «켜도 아무 일 없는 스위치»로 새 나간다. */
+        'dtmin'    => '단타 분봉 원장(dt_min · 10거래일)',
         'surge'    => '최고 거래대금 박스(krx_surge)',
     ];
 
@@ -85,20 +92,58 @@ class ChartFeat
             'g' => 'module', 'label' => '체결 마커', 'dep' => 'fills', 'def' => 0, 'ui' => 'layer',
             'desc' => '매수/매도 화살표 + 차수·그날 시장상태',
         ],
+        /* ★2026-08-04 — 시뮬레이터의 «계획» 체결 위에 «내가 실제로 낸 주문»을 겹친다.
+         * 성과가 갈릴 때 「룰셋이 나쁜 건가, 내가 계획을 안 지킨 건가」를 가르는 유일한 그림이다.
+         * ★★두 체결은 «같은 조건이 아니다» — 시뮬은 종목 단위·한도 통일·재진입 O·장중체결 O 이고,
+         *   실계좌는 포트폴리오별 한도·차수 지연·박스 사다리·수동 개입이 섞여 있다.
+         *   그래서 «겹쳐 보기까지»만 한다 — 「사다리 대비 −N%」 같은 수치는 이탈이 아니라
+         *   조건 차이를 재게 되므로 화면에 두지 않는다. */
+        'overlay.real_trades' => [
+            'g' => 'module', 'label' => '실계좌 체결 겹쳐보기', 'dep' => 'realfills', 'def' => 0, 'ui' => 'layer',
+            'desc' => '시뮬 체결 마커 위에 실제 매매(pf_trade)를 「실 N차」로 함께 — 계획과 실행의 차이를 본다',
+        ],
         /* ★2026-08-03 — 재무분석 전용에서 «모든 차트»로 풀었다(사용자 요청).
          * 의존성이 없는 이유: 종목코드만 있으면 모듈이 stock_analysis_api.php?module=sue 로
          * 직접 받아 온다(계산 단일본 = stock/lib/sue.php). 화면이 미리 들고 있을 필요가 없다. */
+        /* ★2026-08-05 — 거래량 막대 위에 마우스를 올렸을 때만 그 봉의 «거래대금»을 띄운다.
+         * 상시 범례로 두지 않은 이유: 차트가 낮은 화면에서 한 줄이 아깝고, 이 값은
+         * 「이 봉 얼마어치였지」를 물을 때만 필요하다 — 물을 때만 답한다.
+         * 의존성이 없다: 실제 거래대금(krx_amt)이 없는 봉은 종가×거래량으로 근사하고 «≈»를 붙인다. */
+        'overlay.amt_hover' => [
+            'g' => 'common', 'label' => '거래대금 표시(거래량 hover)', 'dep' => null, 'def' => 1, 'ui' => 'layer',
+            'desc' => '거래량 칸에 마우스를 올리면 그 봉의 거래대금을 억 단위로 — 근사값은 ≈ 표시',
+        ],
         'overlay.sue_markers' => [
             'g' => 'module', 'label' => 'SUE 공시 마커', 'dep' => null, 'def' => 1, 'ui' => 'btn',
             'desc' => '▲어닝서프라이즈 · ▼어닝쇼크 (공시 다음 거래일) + 기간 바의 「SUE 공시 N」 토글',
         ],
+        /* ★기준선 셋을 «한 스위치»로 묶는다(2026-08-05 에 기간고가 추가). 따로 내지 않은 이유 —
+         *   기능 하나에 화면 하나가 딸린다. 이 셋을 그리는 화면은 단타뿐이라, 새 키를 내면
+         *   나머지 화면의 설정에 「켜도 아무 일 없는 스위치」가 늘어난다(dtmin 때 겪은 함정). */
         'overlay.intraday_ref' => [
-            'g' => 'module', 'label' => '당일전고 · 현재가', 'dep' => 'intraday', 'def' => 0, 'ui' => 'chip',
-            'desc' => '직전 60봉 최고가 기준선과 현재가선 (관찰용)',
+            'g' => 'module', 'label' => '기준선 (직전고가 · 당일전고 · 현재가)', 'dep' => 'intraday',
+            'def' => 0, 'ui' => 'chip',
+            'desc' => '관찰용 수평선 묶음 — 직전고가(★분봉: «오늘을 뺀» 실린 구간의 최고가 · '
+                    . '켜면 가격축이 그 값까지 넓어진다) · 당일전고(일봉: 직전 60봉 최고가) · 현재가',
         ],
         'panel.minute' => [
             'g' => 'module', 'label' => '분봉 보조 차트', 'dep' => 'minute', 'def' => 0, 'ui' => 'panel',
             'desc' => '일봉 아래 당일 09:00~15:30 · 1분',
+        ],
+        /* ── 단타 화면(2026-08-04) ──
+         * ★ 기능을 끄면 «네트워크 호출까지» 사라져야 한다(설계 원칙). 단타 화면은 종목 하나를
+         *   누를 때 fetch 가 셋이라, 안 보는 패널을 끄는 것이 곧 체감 속도다. */
+        'panel.short_daily' => [
+            'g' => 'module', 'label' => '일봉 보조 패널', 'dep' => 'daily', 'def' => 1, 'ui' => 'panel',
+            'desc' => '우하단 좌측 · 기존 일봉 경로를 그대로 읽는다(새 수집 없음)',
+        ],
+        'panel.short_sub' => [
+            'g' => 'module', 'label' => '보조 분봉 패널', 'dep' => 'dtmin', 'def' => 1, 'ui' => 'panel',
+            'desc' => '우하단 우측 · 5분 10거래일 고정 — 메인(1분·5거래일)이 세부를 볼 때 맥락을 준다',
+        ],
+        'chart.live' => [
+            'g' => 'module', 'label' => '장중 30초 자동 갱신', 'dep' => 'dtmin', 'def' => 1, 'ui' => 'chip',
+            'desc' => '09:00~15:30 에만 메인 분봉을 네이버 당일분으로 덧댄다(토큰 불필요)',
         ],
         'overlay.box_ladder' => [
             'g' => 'module', 'label' => '박스 사다리 후보', 'dep' => 'surge', 'def' => 0, 'ui' => 'layer',
@@ -137,16 +182,22 @@ class ChartFeat
         'sim' => [
             'label' => '시뮬레이터', 'pref' => 'sim', 'style' => 3,
             'url' => '/stock/index.php?mode=sim',
-            'data' => ['fills'], 'lock' => [],
-            'on' => ['overlay.trade_markers', 'period.full_range'], 'off' => [],
-            'note' => '10년 구간이라 마커는 라이브러리 글자(칩은 겹쳐 못 읽는다)',
+            'data' => ['fills', 'realfills'], 'lock' => [],
+            'on' => ['overlay.trade_markers', 'period.full_range', 'overlay.real_trades'], 'off' => [],
+            'note' => '10년 구간이라 마커는 라이브러리 글자(칩은 겹쳐 못 읽는다) · 실계좌 체결을 겹쳐 볼 수 있는 유일한 화면',
         ],
-        'updash' => [
-            'label' => '상승종목 대시보드', 'pref' => 'updash', 'style' => 4,
-            'url' => '/stock_analysis.php?mode=updash',
-            'data' => ['intraday', 'minute'], 'lock' => [],
-            'on' => ['overlay.intraday_ref', 'panel.minute'], 'off' => [],
-            'note' => '관찰 화면 — 판정(승률·신호칩)은 2026-08-02 폐기됐다',
+        /* 단타 — 한 종목을 세 시선으로 동시에 본다(메인 분봉 · 일봉 · 보조 분봉).
+         * ★도구모음이 붙는 것은 <b>일봉 패널 하나뿐</b>이다. 분봉 둘은 화면 자체의 기간 바
+         *   (1·5·15분 · 1·3·5·10일)가 조종한다 — 지표 바가 없으니 차트틀도 쓰지 않는다.
+         * ★일봉의 차트틀 키는 'short' 다(2026-08-05, 옛 'updash' 에서 옮겨 왔다 —
+         *   상승종목분석 화면이 삭제되면서 그 이름을 쓸 이유가 없어졌다). 분봉 메인은 'shortmin'. */
+        'short' => [
+            'label' => '단타 (3분할)', 'pref' => 'short', 'style' => 5,
+            'url' => '/stock/index.php?mode=short',
+            'data' => ['intraday', 'minute', 'daily', 'dtmin'], 'lock' => [],
+            'on' => ['panel.short_daily', 'panel.short_sub', 'chart.live', 'overlay.intraday_ref'],
+            'off' => [],
+            'note' => '메인=1분 고정([당일]300봉/[전체]5거래일·휠) · 보조=5분 10거래일 · 일봉은 다크 관찰용 한 벌',
         ],
         'gallery' => [
             'label' => '차트설정 (이 화면)', 'pref' => 'gallery', 'style' => 0,
@@ -161,7 +212,7 @@ class ChartFeat
         ['갤러리 2~5번 미리보기', 'chart_gallery.php', '상단 바 하나가 4개를 함께 조종'],
         ['어닝 사례분석 (mode=earncase)', 'stock/index.php', '사례마다 작은 차트 — 박스+공시 마커 고정'],
         ['퀀트 패턴분석 (mode=pattern)', 'stock/index.php', '사례마다 작은 차트 — 신호박스 고정'],
-        ['분봉 보조 차트', 'stock_analysis.php', '일봉 도구모음이 함께 조종'],
+        ['단타 분봉 2종 (mode=short)', 'stock/index.php', '화면 자체의 기간 바(1·3·5·10일)가 조종'],
     ];
 
     public static function screen(string $key): ?array

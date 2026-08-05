@@ -1953,6 +1953,71 @@ function pf_trade_score(array $rows): array
     return $out;
 }
 
+/**
+ * <b>차수별</b> 매매 품질 — "어느 차수에서 돈이 새는가".
+ *
+ * pf_trade_score 는 매수 전체를 한 덩이로 센다(실측 적중률 31.0% · 13/42). 그런데 분할매수에서
+ * 1차와 5차는 <b>서로 다른 판단</b>이다 — 1차는 "이 종목을 시작할까", 5차는 "여기서 더 담을까".
+ * 둘을 평균 하나로 뭉개면 고칠 자리를 못 찾는다(매수·매도를 나눠 세는 것과 같은 이유).
+ *
+ * ★★ <b>새로운 정보는 적중률이 아니라 「금액영향」이다.</b> 적중률은 MFE/MAE(pf_step_excursion)가
+ *   이미 "앞 차수가 얕다"로 답한 질문을 이진값으로 다시 세는 것에 가깝다. 반면 금액영향은
+ *   <b>차수마다 실린 돈이 다르다</b>는 사실을 담는다 — 1차 비중 5% 에서 −30% 인 것과
+ *   6차 비중 23% 에서 −10% 인 것은 적중률로는 똑같이 「1패」지만 잃은 돈은 전혀 다르다.
+ *   그래서 이 표의 정렬 기준·강조는 금액영향이다.
+ *
+ * ★ 무승부(edge 정확히 0)는 분모에서 뺀다 — pf_trade_score 와 같은 규칙(같은 날 체결이 적중률을 끌어내린다).
+ * ★ 값이 없으면(시세 미수집) <b>0 이 아니라 제외</b>. 0 은 "완벽한 판단"으로 읽혀 집계를 오염시킨다.
+ * ★★ 표본 PF_EXC_MIN_N 건 미만은 <b>판정하지 않는다</b>(thin) — 차수가 높을수록 표본이 적은데
+ *   하필 그쪽이 좋아 보이는 편향이 있다(6·7차는 실전 체결 0 이라 아예 행이 없다).
+ * ★ 매도는 섞지 않는다 — 차수는 매수 계획의 단위이고, 매도는 안분이라 차수의 뜻이 흐려진다.
+ *
+ * @param array $rows ['side','step_no','edge','impact','price','qty'] 를 실은 체결 행
+ * @return array step_no => ['n','hit','rate','edge_avg','edge_med','impact','amount','qty','no_edge','thin']
+ */
+function pf_step_score(array $rows): array
+{
+    $acc = [];
+    foreach ($rows as $r) {
+        if ((($r['side'] ?? 'buy')) !== 'buy') continue;
+        $n = (int)($r['step_no'] ?? 0);
+        if ($n <= 0) continue;
+        if (!isset($acc[$n])) {
+            $acc[$n] = ['edge' => [], 'hit' => 0, 'n' => 0, 'impact' => 0.0,
+                        'amount' => 0.0, 'qty' => 0, 'no_edge' => 0];
+        }
+        $acc[$n]['amount'] += (float)($r['price'] ?? 0) * (int)($r['qty'] ?? 0);
+        $acc[$n]['qty']    += (int)($r['qty'] ?? 0);
+
+        $edge = $r['edge'] ?? null;
+        if ($edge === null) { $acc[$n]['no_edge']++; continue; }   // 시세가 없어 되짚을 수 없는 건
+        $acc[$n]['impact'] += (float)($r['impact'] ?? 0);
+        $acc[$n]['edge'][]  = (float)$edge;
+        if (abs((float)$edge) < 1e-12) continue;                   // 무승부는 분모에서 제외
+        $acc[$n]['n']++;
+        if ($edge > 0) $acc[$n]['hit']++;
+    }
+
+    $out = [];
+    ksort($acc);
+    foreach ($acc as $n => $a) {
+        $out[$n] = [
+            'n'        => $a['n'],
+            'hit'      => $a['hit'],
+            'rate'     => $a['n'] > 0 ? $a['hit'] / $a['n'] : null,
+            'edge_avg' => $a['edge'] ? array_sum($a['edge']) / count($a['edge']) : null,
+            'edge_med' => pf_median($a['edge']),
+            'impact'   => $a['impact'],
+            'amount'   => $a['amount'],
+            'qty'      => $a['qty'],
+            'no_edge'  => $a['no_edge'],
+            // 판정 보류 — 초록으로 칠하지 않는다. "괜찮다"가 아니라 "아직 모른다"
+            'thin'     => ($a['n'] < PF_EXC_MIN_N),
+        ];
+    }
+    return $out;
+}
+
 // ── 룰셋의 「변동율」 vs 종목의 실측 변동성 ────────────────────────────────
 //
 //  `pf_rule_set.volatility` 는 옛 엑셀에서 넘어온 라벨이었고 <b>계산에 쓰이지 않았다</b>
@@ -2208,20 +2273,38 @@ function pf_exc_verdict(?float $mae, ?float $nextDrop, ?int $n = null, float $ma
  *
  * ★ 경과일은 <b>달력일</b>이다. 시뮬레이터의 wait 는 거래일이라 며칠 어긋난다 — 화면에 그대로 밝힌다.
  *
- * @return array ['state' => 'wait'|'ready'|'expensive', 'days'=>, 'left'=>, 'gap'=>]
- *   wait      아직 대기 중
- *   ready     대기 끝 + 값도 충분히 내려왔다 → 후보
- *   expensive 대기는 끝났지만 아직 청산가 근처거나 그보다 위다
+ * ★★ <b>두 요건을 따로 돌려준다</b>(2026-08-04). state 만으로는 「대기 중」일 때 값 요건이 충족인지
+ *   아닌지 알 수 없다 — 대기에서 곧바로 돌아 나오기 때문이다. 실제로 화면에 「대기 6일 남음」만 떠서
+ *   <b>값도 한참 모자란다는 사실이 숨었다</b>(삼성전자 −2.23% vs 요건 −9.0%). 무엇이 얼마나 남았는지
+ *   보여 주려면 두 관문을 다 알아야 하므로 판정 안에서 함께 낸다 — 화면이 조건을 다시 적으면 안 된다.
+ *
+ * @return array [
+ *   'state'      'wait'|'ready'|'expensive'   wait=아직 대기 / ready=둘 다 충족 / expensive=대기는 끝났으나 값이 비쌈
+ *   'days','left','gap'                       경과일 · 남은 대기일 · 청산가 대비(음수=싸다)
+ *   'days_ok','price_ok'                      관문별 충족 여부 (state 와 무관하게 늘 판정한다)
+ *   'need_price'                              값 요건을 만족하는 가격 = 청산가 × (1 − 하락요건)
+ *   'need_gap'                                거기까지 현재가가 더 내려야 하는 비율(충족이면 0)
+ * ]
  */
 function pf_reentry_check(?float $sellPrice, ?float $last, int $days, int $waitDays, float $dropReq = 0.0): array
 {
-    $out = ['state' => 'wait', 'days' => $days, 'left' => max(0, $waitDays - $days), 'gap' => null];
-    if ($sellPrice !== null && $sellPrice > 0 && $last !== null && $last > 0) {
-        $out['gap'] = $last / $sellPrice - 1;      // 음수 = 팔았던 값보다 그만큼 싸다
+    $out = ['state' => 'wait', 'days' => $days, 'left' => max(0, $waitDays - $days), 'gap' => null,
+            'days_ok' => ($days >= $waitDays), 'price_ok' => false,
+            'need_price' => null, 'need_gap' => null];
+
+    if ($sellPrice !== null && $sellPrice > 0) {
+        $out['need_price'] = $sellPrice * (1 - $dropReq);
     }
+    if ($sellPrice !== null && $sellPrice > 0 && $last !== null && $last > 0) {
+        $out['gap']      = $last / $sellPrice - 1;      // 음수 = 팔았던 값보다 그만큼 싸다
+        $out['price_ok'] = ($out['gap'] <= -$dropReq);
+        // 아직 비싸면 「여기서 얼마나 더 내려야 하나」 — 화면이 다시 계산하지 않게 여기서 낸다
+        $out['need_gap'] = $out['price_ok'] ? 0.0 : ($out['need_price'] / $last - 1);
+    }
+
     if ($days < $waitDays) return $out;
     if ($out['gap'] === null)          { $out['state'] = 'expensive'; return $out; }
-    $out['state'] = ($out['gap'] <= -$dropReq) ? 'ready' : 'expensive';
+    $out['state'] = $out['price_ok'] ? 'ready' : 'expensive';
     return $out;
 }
 

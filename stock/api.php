@@ -9,6 +9,7 @@ require_once $_SERVER['DOCUMENT_ROOT'] . '/env/cnt.inc';
 require_once $_SERVER['DOCUMENT_ROOT'] . '/env/auth_fnc.php';
 require_once __DIR__ . '/lib/calc.php';
 require_once __DIR__ . '/lib/entry.php';   // M4 — 편입 스냅샷 조립 (index.php 와 함께 쓴다)
+require_once __DIR__ . '/lib/quant.php';   // 목록 퀀트 배지 판정 (상위 종목 목록과 같은 단일본)
 require_login();
 
 $pf = new Pf($pdo);
@@ -31,6 +32,7 @@ try {
         case 'krx':      api_krx($action, $pdo, $pf);      break;
         case 'watch':    api_watch($action, $pdo, $pf);    break;
         case 'preset':   api_preset($action, $pdo, $pf);   break;
+        case 'dt':       api_dt($action, $pdo);            break;
         default:         pf_api_fail('알 수 없는 module 입니다.');
     }
 } catch (Throwable $e) {
@@ -441,6 +443,24 @@ function api_position(string $action, PDO $pdo, Pf $pf): void
                     pf_api_done($id ? '/stock/index.php?mode=position&id=' . $id . '&edit=1'
                                     : '/stock/index.php?mode=position&id=new&pid=' . (int)($_POST['portfolio_id'] ?? 0),
                         'err', '퀀트 사다리: 지지선 3~5개를 간격 있게 고르고 「비중 풀기」까지 확인한 뒤 저장하세요.');
+                }
+            }
+
+            /* ── 중복 편입 가드 (2026-08-04).
+             * uk_pf_pos(portfolio_id, stock_code) 유니크라 같은 포트폴리오에 같은 종목을 두 번 담을 수 없다.
+             * 가드가 없으면 여기서 PDOException 이 그대로 터져 사용자는 원인 모를 오류를 본다.
+             * ★청산한 종목은 「막는 것」이 답이 아니다 — 재진입은 <b>그 포지션에 매수를 기록</b>하는 것이므로
+             *   그 포지션으로 보내 주고, 무엇을 하면 되는지 문장으로 알려 준다. */
+            if (!$id) {
+                $dup = $pf->pdo()->prepare(
+                    "SELECT id, status FROM pf_position WHERE portfolio_id = ? AND stock_code = ?");
+                $dup->execute([(int)($_POST['portfolio_id'] ?? 0), $code]);
+                if ($d = $dup->fetch(PDO::FETCH_ASSOC)) {
+                    pf_api_done('/stock/index.php?mode=position&id=' . (int)$d['id'], 'err',
+                        ((string)$d['status'] === 'closed')
+                            ? '이 포트폴리오에서 이미 청산한 종목입니다 — 재진입은 새로 추가하지 않고 '
+                              . '이 포지션에 매수를 기록하면 종료 상태가 자동으로 풀립니다.'
+                            : '이 포트폴리오에 이미 담겨 있는 종목입니다.');
                 }
             }
 
@@ -1053,6 +1073,199 @@ function api_preset(string $action, PDO $pdo, Pf $pf): void
 
         default:
             pf_api_done($back, 'err', '알 수 없는 action 입니다.');
+    }
+}
+
+// ══ 단타 (분봉 원장) ════════════════════════════════════════════════════
+/**
+ * module=dt — 단타 화면 전용. <b>전부 JSON</b> 이다(폼 POST → 리다이렉트가 없다).
+ *
+ * 규칙(stock_analysis_api.php 와 같은 결):
+ *   · 빈/없음 은 빈 배열 `[]` + HTTP 200. 진짜 예외만 `{"error":…}`
+ *   · 종목코드는 Dt::cleanCode() 를 지난 6자리만 쓴다 (`_AL` 은 키움에 보낼 때만 붙는다)
+ *
+ * ★ 일봉용 action 을 여기 만들지 않는다 — 화면이 기존 `stock_analysis_api.php?module=stock&action=daily`
+ *   를 그대로 부른다. 그래야 네이버 일봉 + krx_amt 실제 거래대금 병합이 저절로 따라온다.
+ */
+function api_dt(string $action, PDO $pdo): void
+{
+    header('Content-Type: application/json; charset=utf-8');
+
+    $out = function ($v, int $code = 200) {
+        http_response_code($code);
+        echo json_encode($v, JSON_UNESCAPED_UNICODE);
+        exit;
+    };
+
+    try {
+        $dt = new Dt($pdo);
+        $dt->ensureTables();
+        $code = Dt::cleanCode((string)($_REQUEST['code'] ?? ''));
+
+        /* 목록 배지(퀀트) — 「상위 종목」 목록과 <b>같은 판정·같은 어휘</b>를 쓴다.
+         * ★단타 규칙 「판정을 세우지 않는다」는 <b>새 판정을 만들지 말라</b>는 뜻이다.
+         *   이미 있는 관찰 배지를 가져다 다는 것은 두 화면이 같은 말을 하게 하는 쪽이다.
+         * 원장(krx_amt/krx_surge)이 없어도 목록은 떠야 하므로 실패는 삼킨다(배지는 부가정보).
+         * ★탭 둘(내 목록·보유)이 <b>같은 함수</b>를 지난다 — 따로 적으면 한쪽만 조용히 옛말을 한다. */
+        $badge = function (array $rows) use ($pdo): array {
+            $items = [];
+            foreach ($rows as $r) $items[$r['code']] = [
+                'price'  => (float)($r['price']   ?? 0),
+                'rate'   => (float)($r['rate']    ?? 0),
+                'amtEok' => (float)($r['amt_eok'] ?? 0),
+            ];
+            try { $qm = quant_badge_many($pdo, $items); } catch (Throwable $e) { $qm = []; }
+            foreach ($rows as &$r) $r['q'] = $qm[$r['code']] ?? null;
+            unset($r);
+            return $rows;
+        };
+
+        /* 초기 10거래일 적재 — 담기(`pool_init`)와 보유(`held_init`)가 <b>같은 함수</b>를 지난다.
+         * 갈리는 것은 「`dt_pool` 의 init_status 를 적을 자리가 있나」뿐이다(보유엔 그 행이 없다).
+         * 따로 적으면 한쪽만 고쳐져 두 경로가 다른 봉을 쌓는다.
+         * ★switch «앞»에 둔다 — case 사이에 적은 문장은 PHP 가 매칭된 case 로 바로 뛰므로
+         *   영영 실행되지 않는다(undefined 로 죽는다). */
+        $initLoad = function (string $code, bool $track) use ($dt, $pdo): array {
+            $kw = new Kiwoom($pdo);
+            if (!$kw->hasKey()) {
+                if ($track) $dt->poolInitStatus($code, 9);
+                return ['ok' => 0, 'msg' => '키움 인증키가 없습니다 (env/kiwoom.inc). 장중에는 네이버로 당일만 보입니다.'];
+            }
+            $from = $dt->windowFrom();
+            try {
+                $r = $kw->minute($code, 1, $from);
+            } catch (Throwable $e) {
+                if ($track) $dt->poolInitStatus($code, 9);
+                $dt->logSave($code, date('Y-m-d'), 0, 'fail', Dt::SRC_KIWOOM, $e->getMessage(),
+                             null, null, true);
+                return ['ok' => 0, 'msg' => '키움 조회 실패: ' . $e->getMessage()];
+            }
+            $saved = 0;
+            foreach (Dt::byDay($r['rows']) as $d => $rows) {
+                $dt->barsUpsert($code, $rows, Dt::SRC_KIWOOM);
+                $saved += count($rows);
+                $dt->logSave($code, $d, count($rows), Dt::statusOfBars(count($rows)),
+                             Dt::SRC_KIWOOM, null,
+                             substr($rows[0]['t'], 11, 5),
+                             substr($rows[count($rows) - 1]['t'], 11, 5));
+            }
+            if ($track) $dt->poolInitStatus($code, $saved > 0 ? 2 : 9);
+            return ['ok' => $saved > 0 ? 1 : 0, 'bars' => $saved, 'calls' => $r['calls'],
+                    'msg' => $saved > 0 ? number_format($saved) . '봉을 받았습니다.'
+                                        : '받아 온 봉이 없습니다 (다음 수집 때 다시 시도합니다).'];
+        };
+
+        switch ($action) {
+            // ── 목록 ────────────────────────────────────────────────
+            case 'pool_list': {
+                $rows = $badge($dt->poolList());
+                /* 「내 목록」에도 보유 여부를 실어 보낸다 — 담아 놓고 나중에 산 종목이
+                 * 두 탭에서 다른 말을 하면 안 된다(배지는 화면이 그린다). */
+                $held = array_flip($dt->heldCodes());
+                foreach ($rows as &$r) $r['held'] = isset($held[$r['code']]) ? 1 : 0;
+                unset($r);
+                $out([
+                    'rows'   => $rows,
+                    'max'    => Dt::POOL_MAX,
+                    'window' => $dt->windowFrom(),
+                    'days'   => $dt->tradingDays(),
+                    'haskey' => (new Kiwoom($pdo))->hasKey(),
+                ]);
+            }
+
+            /* ── 「보유」 탭 목록 ───────────────────────────────────
+             * 원본은 pf_position 이다 — dt_pool 에 복사하지 않는다(Dt::targetCodes 주석).
+             * 그래서 여기엔 담기·해지·순서바꾸기가 없다: 이 목록은 <b>포트폴리오가 정한다</b>. */
+            case 'held_list': {
+                $rows = $badge($dt->heldList());
+                $out([
+                    'rows'   => $rows,
+                    'window' => $dt->windowFrom(),
+                    'days'   => $dt->tradingDays(),
+                ]);
+            }
+
+            // ── 담기 (즉시 응답 · 적재는 pool_init 이 이어받는다) ──
+            case 'pool_add': {
+                if ($code === '') $out(['error' => '종목을 고르세요.'], 200);
+                /* ★보유 종목은 담지 않는다 — 이미 targetCodes() 에 들어 있어 매일 수집된다.
+                 *   담아 봐야 20칸 하나를 먹고 남의 종목을 FIFO 로 밀어낼 뿐이다. */
+                if (in_array($code, $dt->heldCodes(), true)) {
+                    $out(['ok' => false, 'code' => $code,
+                          'msg' => '보유 종목이라 이미 자동으로 수집됩니다 — 「보유」 탭에서 보세요.']);
+                }
+                $r = $dt->poolAdd($code, trim((string)($_REQUEST['name'] ?? '')));
+                $out($r + ['code' => $code]);
+            }
+
+            // ── 초기 적재 (10거래일) ────────────────────────────────
+            case 'pool_init': {
+                if ($code === '') $out(['error' => '종목을 고르세요.'], 200);
+                $out($initLoad($code, true));
+            }
+
+            /* ── 보유 종목의 초기 적재 (2026-08-05) ─────────────────
+             * 보유엔 「＋를 누르는 순간」이 없어 `pool_init` 에 해당하는 자리가 없다.
+             * 크론의 ③ 구멍 치유가 결국 메우지만 그건 «다음 16:45» 라, 단타 화면이 열릴 때
+             * 아직 빈 종목을 하나씩 당겨 온다(사용자 선택 2026-08-05).
+             * ★<b>살아있는 포지션인지 반드시 확인한다</b> — 아니면 이 문이 「아무 종목이나
+             *   원장에 쌓는 문」이 되어 보관 창·용량 규칙을 우회하게 된다. */
+            case 'held_init': {
+                if ($code === '') $out(['error' => '종목을 고르세요.'], 200);
+                if (!in_array($code, $dt->heldCodes(), true)) {
+                    $out(['ok' => 0, 'msg' => '보유 중인 종목이 아닙니다.']);
+                }
+                $out($initLoad($code, false));
+            }
+
+            case 'pool_remove':
+                if ($code === '') $out(['error' => '대상을 찾지 못했습니다.'], 200);
+                $dt->poolRemove($code);
+                $out(['ok' => 1, 'msg' => '단타 종목에서 뺐습니다 (쌓아 둔 분봉도 함께 지웠습니다).']);
+
+            case 'pool_sort':
+                $codes = $_POST['codes'] ?? $_GET['codes'] ?? [];
+                if (!is_array($codes)) $codes = explode(',', (string)$codes);
+                $out(['ok' => 1, 'n' => $dt->poolSort($codes)]);
+
+            // ── 시세 ────────────────────────────────────────────────
+            case 'series': {
+                $unit = (int)($_GET['unit'] ?? 1);
+                if ($code === '' || !in_array($unit, Dt::UNITS, true)) $out([]);
+                $to   = Dt::cleanDate((string)($_GET['to'] ?? '')) ?: date('Y-m-d');
+                $from = Dt::cleanDate((string)($_GET['from'] ?? '')) ?: $to;
+
+                /* 장중 실시간 — 네이버 당일분을 얹는다(토큰 불필요·빠름).
+                 * 같은 분이 양쪽에 있으면 <b>DB(키움)가 이긴다</b> — 소스 섞임을 최소로. */
+                $extra = [];
+                $live  = !empty($_GET['live']) && $to === date('Y-m-d');
+                if ($live) {
+                    $hm = (int)date('Hi');
+                    if ($hm >= 900 && $hm <= 1600) {
+                        $nv = (new NaverFinanceAPI())->getMinuteOhlc($code);
+                        $extra = Dt::normalize($nv['success'] ?? []);
+                    }
+                }
+                $out($dt->series($code, $unit, $from, $to,
+                                 (int)($_GET['limit'] ?? 4000), $extra));
+            }
+
+            case 'status':
+                if ($code === '') $out([]);
+                $out(['rows' => $dt->statusOf($code), 'window' => $dt->windowFrom()]);
+
+            // ── 진단 [V-1][V-4] — 키움 시각 기준·거래량 기준을 네이버와 대조 ──
+            case 'diag':
+                if ($code === '') $out(['error' => '종목을 고르세요.'], 200);
+                $out((new Kiwoom($pdo))->diag($code));
+
+            default:
+                $out(['error' => '알 수 없는 action 입니다.'], 200);
+        }
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+        exit;
     }
 }
 ?>

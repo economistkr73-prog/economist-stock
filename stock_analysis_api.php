@@ -1,17 +1,22 @@
 <?php
-// stock_analysis_api.php — 상승종목 분석 대시보드 데이터 API (module=stock)
-//   action=top30   상승률 상위 30  → [{code,name,price,rate,tradeEok,q:퀀트배지|null}, ...]
+// stock_analysis_api.php — 시세·차트 공용 데이터 API (module=stock)
+//   action=top30   상승률/시총 상위 30 → [{code,name,price,rate,tradeEok,q:퀀트배지|null}, ...]
 //   action=news    종목 뉴스       → [{title,url,date}, ...]   (?code=005930)
-//   action=daily   100일 일봉      → [{t:"YYYY-MM-DD",o,h,l,c,v}, ...]  (?code=)  ※다음 단계
-//   action=minute  당일 1분봉      → [{t:"YYYY-MM-DD HH:MM",o,h,l,c,v}, ...] (?code=) ※다음 단계
+//   action=daily   일봉            → [{t:"YYYY-MM-DD",o,h,l,c,v}, ...]  (?code=&days=)
+//   action=minute  당일 1분봉      → [{t:"YYYY-MM-DD HH:MM",o,h,l,c,v}, ...] (?code=)
 //
-// 규칙(STOCK_DASHBOARD_BRIEF):
+// ★소비자는 단타(/stock?mode=short — 목록·뉴스·일봉)와 차트 공용모듈(style/dailychart.js —
+//   daily·minute)이다. 원래 상승종목분석 대시보드용으로 낸 파일인데, 그 화면은 2026-08-05 에
+//   삭제됐고 남은 액션은 전부 다른 화면이 쓰고 있다(그래서 파일은 남는다).
+//
+// 규칙:
 //   - 모든 응답 Content-Type: application/json; charset=utf-8
 //   - 빈/실패는 빈 배열 [] + HTTP 200, 진짜 에러만 {error:"..."}
 // 부트스트랩은 place_api.php / schedule_api.php 패턴과 동일 (ob_start → 인증 → ob_clean → JSON).
 ob_start(); // included 파일의 stray output 방지
 require_once "./env/cnt.inc";
 require_once "./env/auth_fnc.php";
+require_once __DIR__ . "/stock/lib/quant.php";   // 목록 퀀트 배지 판정 단일본 (단타 목록과 공유)
 require_login();
 
 ob_clean();
@@ -178,69 +183,10 @@ function api_stock(string $action, PDO $pdo): void
             return;
         }
 
-        // ── 종목 검색 (주식+ETF 통합, 코드/이름) → 차트·뉴스 열기용 행 그대로 반환 ──
-        case 'search': {
-            $kw = trim((string)($_GET['keyword'] ?? ''));
-            if ($kw === '') { echo json_encode([]); return; }
-            $like = '%'.$kw.'%';
-            $sql = "SELECT * FROM (
-                        SELECT stock_code AS code, stock_name AS name, stock_price AS price,
-                               stock_rate AS rate, stock_cap AS cap, stock_vol_cap AS tradeEok, 'stock' AS kind
-                        FROM all_stock_info
-                        WHERE stock_code LIKE :k1 OR stock_name LIKE :k2
-                        UNION ALL
-                        SELECT ep.etf_code, ei.etf_name, ep.etf_price,
-                               ep.etf_rate, ep.market_cap, ep.trading_value, 'etf' AS kind
-                        FROM all_etf_price ep
-                        JOIN all_etf_info ei ON ei.etf_code = ep.etf_code
-                        WHERE ep.etf_code LIKE :k3 OR ei.etf_name LIKE :k4
-                    ) u
-                    ORDER BY CASE WHEN u.name = :ke THEN 1 ELSE 2 END, u.name ASC
-                    LIMIT 12";
-            $st = $pdo->prepare($sql);
-            $st->execute([':k1'=>$like, ':k2'=>$like, ':k3'=>$like, ':k4'=>$like, ':ke'=>$kw]);
-            $out = array_map(static fn($r) => [
-                'code'     => (string) $r['code'],
-                'name'     => (string) $r['name'],
-                'price'    => (float)  $r['price'],
-                'rate'     => (float)  $r['rate'],
-                'cap'      => (float)  $r['cap'],
-                'tradeEok' => (float)  $r['tradeEok'],
-                'kind'     => (string) $r['kind'],
-            ], $st->fetchAll(PDO::FETCH_ASSOC));
-            echo json_encode($out, JSON_UNESCAPED_UNICODE);
-            return;
-        }
-
-        // ── 최근조회 목록 (etf_stock.php와 공유: etf_recent_view_stocks) ──
-        case 'recent': {
-            $repo = new StockRepository($pdo);
-            echo json_encode($repo->getRecentStocks(8), JSON_UNESCAPED_UNICODE);
-            return;
-        }
-
-        // ── 최근조회 기록 저장 (검색/칩으로 종목 열 때 호출) ──
-        case 'saverecent': {
-            $code = preg_replace('/[^0-9A-Za-z]/', '', (string)($_GET['code'] ?? ''));
-            $name = trim((string)($_GET['name'] ?? ''));
-            if ($code !== '' && $name !== '') {
-                (new StockRepository($pdo))->saveRecentStock($code, $name);
-            }
-            echo json_encode(['ok' => true]);
-            return;
-        }
-
-        // ── 시세 갱신 시각 (data_update_status 테이블에서 직접 조회) ──
-        case 'meta': {
-            $updated = '';
-            try {
-                $st = $pdo->prepare("SELECT update_time FROM data_update_status WHERE data_key = :k");
-                $st->execute([':k' => 'all_data_from_naver']);
-                $updated = (string) ($st->fetchColumn() ?: '');
-            } catch (Throwable $e) { $updated = ''; }
-            echo json_encode(['updated' => $updated], JSON_UNESCAPED_UNICODE);
-            return;
-        }
+        /* ★종목 검색·최근조회·시세시각(search/recent/saverecent/meta)은 2026-08-05 에 지웠다 —
+         *   상승종목분석 대시보드 전용이었고, 그 화면과 함께 소비자가 사라졌다.
+         *   단타는 검색을 /stock/api.php?module=stock&action=search 로, 최근조회를
+         *   StockRepository 로 직접 읽는다(같은 표 etf_recent_view_stocks). */
 
         default:
             http_response_code(400);
@@ -251,107 +197,26 @@ function api_stock(string $action, PDO $pdo): void
 // ==========================================================
 // 퀀트 배지 — top30 목록에 "이 종목을 퀀트 잣대로 읽으면" 을 얹는다 (관찰 화면용, 2026-08-02)
 //
-//   q = null(ETF·이력부족) 또는 {
-//     t/cls/tip : 오늘 거래대금이 직전 120거래일 최고를 넘었을 때만 — 유형 판정
-//                 (임계·어휘 = stock/index.php pf_surge_badge 와 동일:
-//                  불꽃형 등락≥20% 또는 20평비≥20 → 매집형 20평비≤5∧등락0~10% → 중립.
-//                  나쁜 쪽 우선. 장중 거래대금은 하한이라 매집형→불꽃형으로 마감에 바뀔 수 있어 '잠정' 명시)
-//     hot       : 신호 전 20일 +80% 또는 40일 +100% 급등 (KrxAmt::MOM_HOT20/40)
-//     bx        : 최근 최고 거래대금 신호(krx_surge)의 박스 상태 (boxStatusMany — 어닝 탭과 동일 재사용)
-//   }
-//   ★역사: 이 자리에 있던 흰칩('60봉 신고가+거래량 2배'·정적 승률 78/82/90%)은 2026-08-02 폐기.
-//     정적 추정이 실측(칼리브레이션)과 어긋났고, 전략 자체가 퀀트 백테스트에서 기각된 계열이다.
+//   ★판정 본체는 2026-08-05 에 `stock/lib/quant.php` 의 quant_badge_many() 로 옮겼다.
+//     화면이 여럿이라 두 곳에 두면 임계를 고칠 때 한 화면만 조용히 옛말을 하게 되기
+//     때문이다. 여기 남은 것은 <b>top30 의 행 모양(kind/price/rate/tradeEok)을
+//     그 함수의 입력으로 옮기는 어댑터</b>뿐이다.
+//     그리는 쪽(어휘·색)의 단일본은 `style/quantbadge.js`.
 // ==========================================================
 function quant_augment(PDO $pdo, array &$rows): void
 {
-    $codes = [];
-    foreach ($rows as $r) if ($r['kind'] === 'stock') $codes[] = $r['code'];
-    if (!$codes) return;
-    $in = implode(',', array_fill(0, count($codes), '?'));
-
-    // ① 과거 원장(오늘 제외 — 오늘 잠정행 src='n' 이 15:50 이후 있을 수 있다) 최근 120거래일
-    $st = $pdo->prepare("SELECT code, d, c, amt FROM krx_amt
-                          WHERE code IN ($in) AND d < CURDATE()
-                            AND d >= DATE_SUB(CURDATE(), INTERVAL 200 DAY)
-                            AND amt > 0 AND c > 0
-                          ORDER BY code, d");
-    $st->execute($codes);
-    $hist = [];
-    foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) $hist[$r['code']][] = $r;
-
-    // ② 최근 최고 거래대금 신호의 박스 상태 (krx_surge 미구축이면 조용히 생략)
-    $bx = [];
-    try {
-        $sg = $pdo->prepare("SELECT code, MAX(d) d FROM krx_surge WHERE code IN ($in) GROUP BY code");
-        $sg->execute($codes);
-        $sigs = [];
-        foreach ($sg->fetchAll(PDO::FETCH_ASSOC) as $r) $sigs[] = ['code' => $r['code'], 'd' => $r['d']];
-        if ($sigs) {
-            $bxAll = (new KrxAmt($pdo))->boxStatusMany($sigs);
-            foreach ($sigs as $s) {
-                $b = $bxAll[$s['code'] . '|' . $s['d']] ?? null;
-                if ($b) $bx[$s['code']] = ['st' => $b['st'], 'txt' => $b['txt'],
-                    'tip' => '최고 거래대금 신호일 ' . $s['d'] . ' — ' . $b['tip']];
-            }
-        }
-    } catch (Throwable $e) { /* 박스 없이 계속 */ }
-
-    foreach ($rows as &$r) {
-        if ($r['kind'] !== 'stock') { $r['q'] = null; continue; }
-        $h = $hist[$r['code']] ?? [];
-        $n = count($h);
-        $q = ['t' => '', 'cls' => '', 'tip' => '', 'hot' => 0, 'mom' => [], 'bx' => $bx[$r['code']] ?? null];
-
-        /* 20·40거래일 모멘텀 — 오늘 현재가 vs 20/40거래일 전 종가 (퀀트 momMany 와 같은 임계).
-         * ★ 창별·방향별로 나눠 보낸다(2026-08-02) — 화면은 「20일 +112%」처럼 기간+부호%로 그린다.
-         *   급등은 실측 근거가 있어 경고색, 급락은 근거가 없어 정보색(로그 대칭 임계일 뿐). */
-        $price = (float)$r['price'];
-        if ($price > 0 && $n >= 20) {
-            $c20 = (float)$h[$n - 20]['c'];
-            $m20 = $c20 > 0 ? $price / $c20 - 1 : null;
-            $m40 = null;
-            if ($n >= 40) { $c40 = (float)$h[$n - 40]['c']; if ($c40 > 0) $m40 = $price / $c40 - 1; }
-            foreach ([[20, $m20], [40, $m40]] as [$w, $m]) {
-                if ($m === null) continue;
-                $hi = ($w === 20) ? KrxAmt::MOM_HOT20  : KrxAmt::MOM_HOT40;
-                $lo = ($w === 20) ? KrxAmt::MOM_COLD20 : KrxAmt::MOM_COLD40;
-                if ($m >= $hi)      $q['mom'][] = ['w' => $w, 'v' => round($m * 100), 'hot' => 1];
-                elseif ($m <= $lo)  $q['mom'][] = ['w' => $w, 'v' => round($m * 100), 'hot' => 0];
-            }
-            if ($q['mom']) $q['hot'] = 1;   // 옛 소비자 호환 (합집합)
-        }
-
-        // 유형 — 오늘 거래대금이 직전 120거래일 최고를 넘었을 때만 (그 외엔 배지 없음)
-        $todayAmt = (float)$r['tradeEok'] * 1e8;   // stock_vol_cap = 억원
-        if ($n >= 40 && $todayAmt > 0) {
-            $win = array_slice($h, -120);
-            $maxAmt = 0.0;
-            foreach ($win as $b) if ((float)$b['amt'] > $maxAmt) $maxAmt = (float)$b['amt'];
-            if ($maxAmt > 0 && $todayAmt >= $maxAmt) {
-                $a20 = array_slice($h, -20);
-                $sum = 0.0;
-                foreach ($a20 as $b) $sum += (float)$b['amt'];
-                $mul = $sum > 0 ? $todayAmt / ($sum / count($a20)) : null;
-                $chg = (float)$r['rate'] / 100;    // stock_rate 는 % 단위
-                /* 불꽃형 = 옛 폭발형+추격주의 (2026-08-02 통합 · 어느 조건이 걸렸는지는 툴팁에 남긴다).
-                 * 중립도 배지로 그린다 — 빈 칸은 「중립」과 「신호 없음」을 구별하지 못한다. */
-                if ($chg >= 0.20)                                { $cls = 'flame'; $t = '불꽃형';
-                    $why = '신호일 등락 +20% 이상 폭등 — 실측 +20일 초과수익 중앙 -7.23% · 승률 34.6%'; }
-                elseif ($mul !== null && $mul >= 20)             { $cls = 'flame'; $t = '불꽃형';
-                    $why = '거래대금이 20일 평균의 20배 이상 폭발 — 실측 중앙 -4.24% · 승률 36.7%'; }
-                elseif ($mul !== null && $mul <= 5 && $chg >= 0 && $chg < 0.10) { $cls = 'acc'; $t = '🟢매집형';
-                    $why = '20일 평균의 5배 이하 + 등락 0~10%로 조용히 차오른 최고 거래대금 — 실측 중앙 +1.74% · 승률 55.2%'; }
-                else                                             { $cls = 'neu';   $t = '중립';
-                    $why = '실측상 우위도 열위도 뚜렷하지 않은 구간 — 중립×돌파도 동전(-1.23% · 승률 47.5%)'; }
-                $q['t'] = $t; $q['cls'] = $cls;
-                $q['tip'] = '오늘 거래대금 ' . number_format($todayAmt / 1e8) . '억 = 직전 120거래일 최고('
-                    . number_format($maxAmt / 1e8) . '억) 이상'
-                    . ($mul !== null ? ' · 20일 평균의 ' . round($mul, 1) . '배' : '')
-                    . ' — ' . $why . ' (장중엔 잠정 · 마감 후 확정)';
-            }
-        }
-        $r['q'] = ($q['t'] === '' && !$q['hot'] && $q['bx'] === null) ? null : $q;
+    // ETF 는 원장(krx_amt) 대상이 아니라 배지가 없다 — 아예 넣지 않는다(= q null).
+    $items = [];
+    foreach ($rows as $r) {
+        if ($r['kind'] !== 'stock') continue;
+        $items[$r['code']] = [
+            'price'  => (float)$r['price'],
+            'rate'   => (float)$r['rate'],      // %
+            'amtEok' => (float)$r['tradeEok'],  // stock_vol_cap = 억원
+        ];
     }
+    $q = quant_badge_many($pdo, $items);
+    foreach ($rows as &$r) $r['q'] = $q[$r['code']] ?? null;
     unset($r);
 }
 

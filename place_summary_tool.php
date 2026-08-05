@@ -327,17 +327,21 @@ if (!empty($_GET['add'])) {
                     ->execute([$lat, $lng, $addr, $lv1, $lv2, $toId]);
                 $upd[] = 'coords';
             }
-            // 요약 수정(제공 시)
+            // 요약·특성 수정 — ★특성(features)은 요약과 «따로» 병합한다.
+            //   기존 장소 보강 때는 「요약은 최초 1회만 고정」 규칙 때문에 summary 를 일부러 안 보내는데,
+            //   예전엔 features 병합이 summary 조건 안에 들어 있어 그때 태그까지 통째로 누락됐다.
             $sum = trim((string)($it['summary'] ?? ''));
-            if ($sum !== '') {
+            $ff  = []; foreach ((array)($it['features'] ?? []) as $f) { $f = trim((string)$f); if ($f !== '') $ff[] = $f; }
+            if ($sum !== '' || $ff) {
                 $sel0 = $pdo->prepare("SELECT attributes FROM place WHERE id=?"); $sel0->execute([$toId]);
                 $at0 = ($c0 = $sel0->fetchColumn()) ? (json_decode((string)$c0, true) ?: []) : [];
-                $at0['summary'] = $sum;
-                $ff = []; foreach ((array)($it['features'] ?? []) as $f) { $f = trim((string)$f); if ($f !== '') $ff[] = $f; }
-                if ($ff) $at0['features'] = array_values(array_unique(array_merge((array)($at0['features'] ?? []), $ff)));
+                if ($sum !== '') { $at0['summary'] = $sum; $upd[] = 'summary'; }
+                if ($ff) {
+                    $at0['features'] = array_values(array_unique(array_merge((array)($at0['features'] ?? []), $ff)));
+                    $upd[] = 'features';
+                }
                 $pdo->prepare("UPDATE place SET attributes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?")
                     ->execute([json_encode($at0, JSON_UNESCAPED_UNICODE), $toId]);
-                $upd[] = 'summary';
             }
             $moved = false;
             $rf = $it['ref'] ?? null;
@@ -382,9 +386,10 @@ if (!empty($_GET['add'])) {
         // attributes(요약·특성) — ★dedup 이 기존 장소에 매칭될 수 있으므로, upsertPlace 가 attributes 를
         // 통째로 덮어쓰기 전에 기존 값을 먼저 읽어와 병합한다(신규 생성이면 조회결과 없음=빈 배열에서 시작).
         $dedupKey = Place::makeDedupKey($name, $lv2);
-        $exSel = $pdo->prepare("SELECT attributes FROM place WHERE dedup_key = ?");
+        $exSel = $pdo->prepare("SELECT id, attributes FROM place WHERE dedup_key = ?");
         $exSel->execute([$dedupKey]);
-        $attrs = ($exAttr = $exSel->fetchColumn()) ? (json_decode((string)$exAttr, true) ?: []) : [];
+        $exRow = $exSel->fetch(PDO::FETCH_ASSOC) ?: null;   // ★있으면 "신규가 아니라 기존에 얹은 것" — 응답의 created 로 알린다
+        $attrs = ($exRow && !empty($exRow['attributes'])) ? (json_decode((string)$exRow['attributes'], true) ?: []) : [];
         $attrs['source_site'] = $attrs['source_site'] ?? 'ardentnews';
         $sum   = trim((string)($it['summary'] ?? ''));
         if ($sum !== '') $attrs['summary'] = $sum;
@@ -414,7 +419,7 @@ if (!empty($_GET['add'])) {
         foreach ((array)($it['months'] ?? []) as $m) { $m = (int)$m; if ($m >= 1 && $m <= 12) $tagIns->execute([$pid, 'month', (string)$m]); }
 
         $res[] = ['ok' => true, 'id' => (int)$pid, 'name' => $name, 'category' => $cat,
-                  'geocoded' => ($lat !== null), 'lat' => $lat, 'lng' => $lng, 'address' => $addr,
+                  'created' => ($exRow === null), 'geocoded' => ($lat !== null), 'lat' => $lat, 'lng' => $lng, 'address' => $addr,
                   'ref_moved_from' => ($moved ? (int)$it['detach_from'] : null)];
     }
     echo json_encode(['ok' => true, 'results' => $res], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);

@@ -259,19 +259,26 @@ function mkt_arrow(?string $dir): string { return $dir === 'up' ? '▲' : ($dir 
 function h(?string $s): string { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); }
 
 /**
- * 서빙 시점에 공통 상단 네비게이션(env/nav.inc)을 HTML 문자열에 주입한다.
- * 캐시 HTML에는 nav를 굽지 않고(메뉴 변경 자동반영·로그인 사용자명 정확) 출력 직전에만 삽입한다.
+ * 서빙 시점에 상단 헤더를 HTML 문자열에 주입한다.
+ * 캐시 HTML에는 굽지 않고(메뉴 변경 자동반영·로그인 사용자명 정확) 출력 직전에만 삽입한다.
+ *
+ * ★2026-08-04 공통 네비(env/nav.inc) → 「주식」 섹션 헤더(stock/lib/topbar.php).
+ *   모닝브리핑도 주식 이야기라 섹션 안에 둔다 — 공통 네비를 달면 여기 들어온 순간
+ *   단타·포트폴리오 같은 형제 화면으로 갈 길이 없어진다.
  */
 function mkt_inject_nav(string $html): string {
-    $navInc = __DIR__ . '/../env/nav.inc';
+    $navInc = __DIR__ . '/../stock/lib/topbar.php';
     if (!is_file($navInc)) return $html;
     require_once $navInc;
-    if (!function_exists('nav_css') || !function_exists('render_nav')) return $html;
-    ob_start(); nav_css();                 $css = ob_get_clean();
-    ob_start(); render_nav('morningbrief'); $nav = ob_get_clean();
-    // CSS는 </head> 직전, 네비 바는 <body> 직후에 1회 삽입
-    $html = preg_replace('/<\/head>/i', $css . '</head>', $html, 1);
+    if (!function_exists('pf_topbar_css') || !function_exists('pf_topbar')) return $html;
+    ob_start(); pf_topbar_css(); $css = ob_get_clean();
+    ob_start(); pf_topbar('brief'); $nav = ob_get_clean();
+    /* ★순서 주의 — 헤더(body 직후)를 «먼저», CSS(</head> 직전)를 «나중에» 넣는다.
+     * 거꾸로 하면 방금 넣은 CSS 안의 글자가 다음 정규식에 걸린다: 실제로 CSS 주석에 있던
+     * "<body …>" 라는 글자가 첫 body 태그로 잡혀 헤더가 통째로 head 안에 박혔다(2026-08-04).
+     * 이 순서면 헤더 마크업에 "</head>" 가 없는 한 안전하고, 헤더에는 그런 게 들어갈 일이 없다. */
     $html = preg_replace('/<body[^>]*>/i', '$0' . addcslashes($nav, '\\$'), $html, 1);
+    $html = preg_replace('/<\/head>/i', addcslashes($css, '\\$') . '</head>', $html, 1);
     return $html;
 }
 

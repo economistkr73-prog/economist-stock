@@ -607,6 +607,239 @@ class Dart
         return $n;
     }
 
+    // ══ 순이익 결측 보수 ════════════════════════════════════════════════
+    /**
+     * 계정명을 견줄 수 있는 꼴로 만든다.
+     *
+     * 회사마다 적는 법이 제각각이다 — 실측으로 본 것만:
+     *   `Ⅸ.당기순손실` · `XI. 분기순이익(손실)` · `분기연결순이익(손실)` · `연결당기순이익`
+     * 머리번호(로마·아라비아)와 괄호를 떼고 수식어를 지우면 전부 `순이익`·`순손실` 로 모인다.
+     */
+    private static function acctCore(string $nm): string
+    {
+        $s = str_replace(' ', '', $nm);
+        $s = preg_replace('/^[0-9IVXLCDM\x{2160}-\x{217F}]+[.．)\-]\s*/u', '', $s);  // 머리번호
+        $s = preg_replace('/\(.*?\)/u', '', $s);                                      // 괄호 안
+        return str_replace(['총', '연결', '별도', '당기', '분기', '반기', '반년'], '', $s);
+    }
+
+    /**
+     * 「당기순이익 합계」 행인가.
+     *
+     * ★ 걸러야 할 이웃들이 바로 옆줄에 있다 —
+     *   `법인세비용차감전순이익`(윗줄) · `지배기업의 소유주에게 귀속되는…`·`비지배지분…`(아랫줄) ·
+     *   `기본및희석주당순손익` · 포괄손익. 하나라도 새면 순이익 자리에 남의 숫자가 들어앉는다.
+     */
+    private static function isNetIncomeName(string $nm): bool
+    {
+        $s = str_replace(' ', '', $nm);
+        if (preg_match('/법인세|주당|포괄|지배|계속영업|중단영업|율/u', $s)) return false;
+        return in_array(self::acctCore($nm), ['순이익', '순손실', '순손익'], true);
+    }
+
+    /** 지배기업 소유주 귀속 순이익 행인가 (합계 행을 안 적는 회사 대비) */
+    private static function isOwnersNetName(string $nm): bool
+    {
+        $s = str_replace(' ', '', $nm);
+        if (preg_match('/법인세|주당|포괄|비지배/u', $s)) return false;
+        return preg_match('/지배/u', $s) && preg_match('/순이익|순손실|순손익/u', $s);
+    }
+
+    /** 비지배지분 귀속 순이익 행인가 */
+    private static function isNciNetName(string $nm): bool
+    {
+        $s = str_replace(' ', '', $nm);
+        if (preg_match('/법인세|주당|포괄/u', $s)) return false;
+        return preg_match('/비지배/u', $s) && preg_match('/순이익|순손실|순손익/u', $s);
+    }
+
+    /** 분기는 누적(add)이 정본이다 — 저장 규칙이 collectFinancials 와 같아야 한다 */
+    private static function acctAmt(array $x): ?float
+    {
+        $v = self::num($x['thstrm_add_amount'] ?? null);
+        return $v ?? self::num($x['thstrm_amount'] ?? null);
+    }
+
+    /* 표준계정코드(XBRL). ★ 한글 라벨이 「지배기업소유주지분」 이라 <b>이름에 순이익이라는 말이 없는</b>
+     * 회사가 많다(엠아이텍·레인보우로보틱스 실측) — 그런 회사는 이 ID 로만 짚힌다.
+     * 「…BeforeTax」·「…FromContinuingOperations」 와 섞이지 않게 <b>정확히 일치</b>로 본다. */
+    const ACC_NET_TOTAL  = 'ifrs-full_ProfitLoss';
+    const ACC_NET_OWNERS = 'ifrs-full_ProfitLossAttributableToOwnersOfParent';
+    const ACC_NET_NCI    = 'ifrs-full_ProfitLossAttributableToNoncontrollingInterests';
+    const ACC_NET_CONT   = 'ifrs-full_ProfitLossFromContinuingOperations';
+    const ACC_NET_DISC   = 'ifrs-full_ProfitLossFromDiscontinuedOperations';
+
+    /**
+     * 전체 재무제표 응답에서 당기순이익을 고른다. 손익계산서(IS) 우선, 없으면 포괄손익계산서(CIS).
+     *
+     * 짚는 순서 — 확실한 것부터다:
+     *   ① 표준계정 ID 합계  ② 이름으로 본 합계(표준계정 미사용 회사)
+     *   ③ 지배 + 비지배     ④ 계속영업 + 중단영업
+     *
+     * ★ 합계 행을 아예 안 적고 <b>지배·비지배로만</b> 쪼개 적는 회사가 있다
+     *   (인화정공·라이온켐텍·펌텍코리아 실측). 그때는 회계 항등식 그대로 합친다 —
+     *   비지배 행이 없으면 그 회사엔 비지배지분이 없다는 뜻이다.
+     *   검산(레인보우로보틱스 2025): 세전 721,586,616 − 법인세(−699,916,614) = 지배 1,421,503,230 ✓
+     */
+    private static function pickNetIncome(array $list): ?float
+    {
+        foreach (['IS', 'CIS'] as $sj) {
+            $byName = $own = $nci = $cont = $disc = null;
+
+            foreach ($list as $x) {
+                if ((string)($x['sj_div'] ?? '') !== $sj) continue;
+                $id = (string)($x['account_id'] ?? '');
+                $nm = (string)($x['account_nm'] ?? '');
+
+                if ($id === self::ACC_NET_TOTAL) {
+                    $v = self::acctAmt($x);
+                    if ($v !== null) return $v;                       // ① 가장 확실 — 바로 끝
+                }
+                if ($byName === null && self::isNetIncomeName($nm)) $byName = self::acctAmt($x);
+
+                /* 이름 판정은 「포괄」을 이미 걷어내므로 ID 가 없어도 안전하다 —
+                 * 실제로 포괄손익 귀속 행은 라벨에 「순이익」이라는 말이 없다(그래서 애초에 안 걸린다). */
+                if ($own === null && ($id === self::ACC_NET_OWNERS || self::isOwnersNetName($nm))) $own = self::acctAmt($x);
+                if ($nci === null && ($id === self::ACC_NET_NCI    || self::isNciNetName($nm)))    $nci = self::acctAmt($x);
+
+                /* ④ 는 ID 로만 본다 — 이름으로 「계속영업이익」을 주우면 순이익 자리에
+                 * 중단영업을 뺀 값이 조용히 들어앉을 수 있다 */
+                if ($cont === null && $id === self::ACC_NET_CONT) $cont = self::acctAmt($x);
+                if ($disc === null && $id === self::ACC_NET_DISC) $disc = self::acctAmt($x);
+            }
+
+            if ($byName !== null) return $byName;                     // ②
+            if ($own    !== null) return $own + ($nci ?? 0.0);        // ③
+            if ($cont   !== null) return $cont + ($disc ?? 0.0);      // ④
+        }
+        return null;
+    }
+
+    /**
+     * 매출은 있는데 순이익만 비어 있는 행을 전체 재무제표 API 로 메운다.
+     *
+     * 왜 생기나 — 주요계정 API(`fnlttMultiAcnt`)는 <b>표준계정으로 태깅한 회사만</b> 순이익을 내려준다.
+     * 현대차는 「연결당기순이익」(표준계정코드 미사용)이라 그 행이 응답에 아예 없다.
+     * 계정명 매핑을 늘려도 소용없다 — 오는 데이터에 그 행이 없기 때문이다.
+     * 실측(2026-08-04) **897행 · 233종목** (현대차 2018~2023 통째 21행 · SK이노 11 · 호텔신라 23 …).
+     *
+     * ★★ <b>별도(OFS) 값으로 연결(CFS) 행을 메우지 않는다.</b> 연결 매출에 별도 순이익을 붙이면
+     *    순이익률·ROE 가 조용히 틀린 값이 된다 — 빈칸보다 나쁘다.
+     *    그래서 <b>저장된 fs_div 와 같은 기준</b>으로만 받는다. 그 기준에 자료가 없으면 그냥 둔다.
+     *
+     * ★ 종목별 호출이라 1행 = 1콜이다. 남은 것만 고르는 <b>이어받기</b> 설계라
+     *   중간에 끊겨도 잃는 게 없고, 다 채우면 대상이 0 이 되어 저절로 공짜가 된다.
+     *
+     * @param int         $limit   이번 실행 최대 행수 (0 이면 제한 없음)
+     * @param int|null    $year    특정 연도만
+     * @param string|null $reprt   특정 보고서만
+     * @param bool        $krxOnly KRX 거래종목만 (폐지 종목에 호출을 쓰지 않는다)
+     * @param callable|null $stop  true 를 돌려주면 그 자리에서 멈춘다 (크론 시간예산)
+     * @return array [done, filled, empty, remain]
+     */
+    public function repairNetIncome(int $limit = 0, ?int $year = null, ?string $reprt = null,
+                                    bool $krxOnly = true, ?callable $progress = null,
+                                    ?callable $stop = null): array
+    {
+        $krxJoin = $krxOnly
+            ? "JOIN krx_daily k ON k.stock_code = f.stock_code
+                             AND k.bas_dd = (SELECT MAX(bas_dd) FROM krx_daily)"
+            : '';
+
+        $where = ['f.revenue IS NOT NULL', 'f.net_income IS NULL'];
+        $args  = [];
+        if ($year  !== null) { $where[] = 'f.bsns_year = ?';  $args[] = $year;  }
+        if ($reprt !== null) { $where[] = 'f.reprt_code = ?'; $args[] = $reprt; }
+
+        $st = $this->pdo->prepare("
+            SELECT f.stock_code, f.bsns_year, f.reprt_code, f.fs_div, c.corp_code
+              FROM stock_financial f
+              JOIN dart_corp_code c ON c.stock_code = f.stock_code
+              {$krxJoin}
+             WHERE " . implode(' AND ', $where) . "
+             ORDER BY f.bsns_year DESC, f.reprt_code, f.stock_code");
+        $st->execute($args);
+        $todo = $st->fetchAll(PDO::FETCH_ASSOC);
+
+        $remain = count($todo);
+        if ($limit > 0) $todo = array_slice($todo, 0, $limit);
+
+        $up = $this->pdo->prepare("
+            UPDATE stock_financial SET net_income = ?, updated_at = NOW()
+             WHERE stock_code = ? AND bsns_year = ? AND reprt_code = ?
+        ");
+
+        $done = $filled = $blank = 0;
+        foreach ($todo as $t) {
+            if ($stop !== null && $stop()) break;
+            $done++;
+
+            /* 저장된 기준과 같은 것만 본다. 기준이 비어 있는 행(옛 적재)은 연결→별도 순으로 찾는데,
+             * 연결이 없는 회사는 애초에 별도가 그 회사의 유일한 기준이라 섞이지 않는다. */
+            $divs = $t['fs_div'] === 'CFS' ? ['CFS'] : ($t['fs_div'] === 'OFS' ? ['OFS'] : ['CFS', 'OFS']);
+
+            $amt = null;
+            foreach ($divs as $fs) {
+                try {
+                    $j = $this->call('fnlttSinglAcntAll.json', [
+                        'corp_code'  => $t['corp_code'],
+                        'bsns_year'  => (string)$t['bsns_year'],
+                        'reprt_code' => $t['reprt_code'],
+                        'fs_div'     => $fs,
+                    ]);
+                } catch (Throwable $e) {
+                    // 한도 초과(020)면 더 돌아도 소용없다 — 여기서 멈춘다
+                    if (mb_strpos($e->getMessage(), '020') !== false) return
+                        ['done' => $done, 'filled' => $filled, 'empty' => $blank, 'remain' => $remain - $done];
+                    continue;
+                }
+                $amt = self::pickNetIncome($j['list'] ?? []);
+                if ($amt !== null) break;
+            }
+
+            if ($amt !== null) { $up->execute([(int)round($amt), $t['stock_code'], $t['bsns_year'], $t['reprt_code']]); $filled++; }
+            else               { $blank++; }
+
+            if ($progress && $done % 50 === 0) $progress($done, count($todo), $filled);
+        }
+
+        return ['done' => $done, 'filled' => $filled, 'empty' => $blank, 'remain' => $remain - $done];
+    }
+
+    /**
+     * 우선주면 본주 종목코드를 돌려준다.
+     *
+     * DART 는 <b>법인</b> 단위라 우선주에는 corp_code 가 없다(005385 현대차우) — 재무는 본주 것 하나뿐이다.
+     * 한국 상장코드는 보통주가 끝자리 0 이고 우선주는 5·7·9·K·L 이 붙으므로 <b>앞 5자리 + '0'</b> 이 본주다.
+     * 실측(2026-08-04) 거래 중 corp_code 없는 코드 <b>114개 전부</b> 이 규칙으로 본주가 잡혔다
+     * (00088K 한화3우B → 000880 · 33626L 두산퓨얼셀2우B → 336260 처럼 끝이 글자인 것도 포함).
+     *
+     * @return string|null 본주 코드. 이 코드 자체가 DART 에 있으면(=보통주) null
+     */
+    public function baseStockCode(string $code): ?string
+    {
+        if (strlen($code) !== 6) return null;
+
+        $st = $this->pdo->prepare("SELECT 1 FROM dart_corp_code WHERE stock_code = ?");
+        $st->execute([$code]);
+        if ($st->fetchColumn()) return null;                  // 본주 — 그대로 본다
+
+        $base = substr($code, 0, 5) . '0';
+        if ($base === $code) return null;
+        $st->execute([$base]);
+        return $st->fetchColumn() ? $base : null;
+    }
+
+    /** 순이익 결측 현황 — 화면 수집현황 카드용 */
+    public function netIncomeGap(): array
+    {
+        return $this->pdo->query("
+            SELECT COUNT(*) AS rows_missing, COUNT(DISTINCT stock_code) AS codes_missing
+              FROM stock_financial
+             WHERE revenue IS NOT NULL AND net_income IS NULL
+        ")->fetch(PDO::FETCH_ASSOC) ?: ['rows_missing' => 0, 'codes_missing' => 0];
+    }
+
     /**
      * 연도별 주식수를 채운다 (stock_financial.shares_out / shares_issued).
      *

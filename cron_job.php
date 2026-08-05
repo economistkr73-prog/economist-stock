@@ -136,6 +136,31 @@ const TASKS = [
         'get'  => ['ssk' => KWC_KEY, 'mode' => 'etf_update'],
         'desc' => 'ETF 편입종목 갱신 (ETF당 sleep 2초 · bg 필수)',
     ],
+    /* ★ 마감 뒤인 이유 — 이 잡은 「오늘이 거래일인가」를 krx_amt 의 오늘 행으로 판정하는데,
+     *   그 행은 15:50 dart_eod 가 넣는다. 그 앞에 두면 매일 「휴장일」로 오판해 조용히 건너뛴다.
+     *   (판정에 all_stock_info.uDate 폴백이 있지만, 순서를 지키는 편이 낫다)
+     * ★16:45 인 이유 — 바로 위 etf_update(16:20)가 실측 901.7초(435 ETF × sleep 2초)라 16:35 까지 돈다.
+     *   16:25 로 두면 그 한복판에서 시작해 10분을 겹친다. 늦춰도 잃는 것이 없어 뒤로 물렸다. */
+    'dt_min' => [
+        'file' => 'cron/dt_min.php', 'bg' => true, 'cron' => '45 16 * * 1-5',
+        'get'  => ['key' => 'econ-dt-min', 'job' => 'daily'],
+        'desc' => '단타 분봉 — 당일 수집 → 만료 삭제 → 구멍 치유 → 분할 감지 → 적재율 감시 (종목당 1초 · bg 필수)',
+    ],
+
+    // ── 급등주 분봉 아카이브 (한시적 적재 · 끝나면 크론에서 내린다) ───────
+    /* ★`job` 을 레지스트리에 넣지 않는다 — 그래야 &job=probe/events/verify/feat 를
+     *   URL 로 골라 부를 수 있다(레지스트리 값은 사용자 인자보다 «우선»한다).
+     * ★장중에는 돌리지 않는다. 한 콜 1초 × 수천 콜이라 밤에 천천히 채우는 잡이다.
+     *   수집이 끝나면(qm_task 에 state IN (0,1) 이 0건) 크론 사이트에서 내린다. */
+    /* ★적재 중에만 등록한다 — 끝나면(qm_task 에 state IN (0,1) 이 0건) 크론 사이트에서 내린다.
+     *   URL: cron_job.php?task=qm&k=…&job=work
+     *   워커는 `GET_LOCK('qm_work')` 로 «한 번에 하나»만 도므로, 서버에서 백그라운드로 돌고 있어도
+     *   크론이 겹쳐 부를 걱정이 없다(살아 있으면 그냥 물러난다). 죽어 있으면 크론이 이어받는다. */
+    'qm' => [
+        'file' => 'cron/qm_collect.php', 'bg' => true, 'cron' => '*/15 * * * *  (적재 중에만)',
+        'get'  => ['key' => 'econ-qm'],
+        'desc' => '급등주 분봉 아카이브 — &job=work 로 적재 (다중 실행은 DB 락이 막는다)',
+    ],
 
     // ── 매월 도는 것 ────────────────────────────────────────────────────
     'naver_food' => [
@@ -152,11 +177,6 @@ const TASKS = [
         'file' => 'cron/naver_collect.php', 'bg' => true, 'cron' => '0,10,20,30,40,50 2-7 3 * *',
         'get'  => ['key' => NAVER_KEY, 'cat' => 'camping', 'max' => '8', 'delay' => '4', 'max_sec' => '180'],
         'desc' => '네이버 캠핑장 수집 (매월 3일 · 캠핑장+오토캠핑 합집합이라 max 낮춤)',
-    ],
-    'ardent' => [
-        'file' => 'cron/ardent_crawl.php', 'bg' => true, 'cron' => '1 3 4 * *',
-        'get'  => ['key' => 'econ-ardent', 'run_ai' => '1', 'budget' => '180'],
-        'desc' => '아덴트뉴스 국내여행 → AI 추출 → 여행지 적재 (매월 4일)',
     ],
 
     // ── 연 1회 ──────────────────────────────────────────────────────────
@@ -204,6 +224,12 @@ const TASKS = [
         'get'  => ['key' => DART_KEY, 'job' => 'shares'],
         'desc' => '[SSH] 연도별 주식수 (종목당 1콜 · ~54분 · &budget= 로 조각내기)',
     ],
+    /* 매일 몫은 dart_fresh 안에 들어 있다 — 이건 옛 연도를 한 번에 메우는 일회성 배치다 */
+    'dart_nifix' => [
+        'file' => 'cron/dart_collect.php', 'bg' => true, 'cron' => '',
+        'get'  => ['key' => DART_KEY, 'job' => 'nifix'],
+        'desc' => '[SSH] 순이익 결측 보수 (행당 1콜 · &budget= &y= &rc=)',
+    ],
     'place_geo' => [
         'file' => 'cron/place_geocode.php', 'bg' => false, 'cron' => '',
         'get'  => ['key' => 'econ-place-geo'],
@@ -228,6 +254,21 @@ const TASKS = [
         'file' => 'cron/ardent_crawl.php', 'bg' => false, 'cron' => '',
         'get'  => ['key' => 'econ-ardent', 'status' => '1'],
         'desc' => '[확인] 아덴트 크롤 진행 상태',
+    ],
+    'ardent_new' => [
+        'file' => 'cron/ardent_crawl.php', 'bg' => false, 'cron' => '',
+        'get'  => ['key' => 'econ-ardent', 'new_list' => '1'],
+        'desc' => '[확인] 아직 안 본 아덴트 기사 목록 (Claude 콜 0회 · &fmt=json &pages= &limit=)',
+    ],
+    /* 2026-08-04 크론 등록 해제(사용자 지시). 여행지 DB 가 이미 3만 곳이라 상시 수집을 멈췄다.
+     * ★비용 주의: 기사 1건 = Claude 콜 1회(≈$0.015). 2026-08-04 실측으로 491건 처리에 $6 을 써
+     *   ANTHROPIC_API_KEY 잔액을 비웠고, 그 키를 같이 쓰는 모닝브리핑·명함스캔·음성일정등록이 함께 멈췄다.
+     *   지금 이 잡에는 콜 상한이 없다(있는 것은 1회 실행 시간예산 180초뿐) → 손으로 돌릴 때는
+     *   &budget= 을 작게 줘서 조금씩 돌린다. 다시 크론에 올릴 거면 콜 상한부터 넣는다. */
+    'ardent' => [
+        'file' => 'cron/ardent_crawl.php', 'bg' => true, 'cron' => '',
+        'get'  => ['key' => 'econ-ardent', 'run_ai' => '1', 'budget' => '180'],
+        'desc' => '[수동] 아덴트뉴스 국내여행 → AI 추출 → 여행지 적재 (⚠유료 API·상한 없음 · 2026-08-04 크론 해제)',
     ],
 ];
 

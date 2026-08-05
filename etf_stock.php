@@ -14,6 +14,12 @@ require_once "./env/keyword_news.inc";    // highlight_keyword(), get_keyword_ne
 #변수정의
 define('CUR_PHP', basename($_SERVER['PHP_SELF']));
 
+/* 상단 헤더 — 공통 네비가 아니라 「주식」 섹션 헤더를 단다(2026-08-04).
+ * env/header.php 를 두 곳(etf_iFrame · etf_mobile)에서 부르므로 여기 한 번만 세운다.
+ * 메뉴 정의는 stock/lib/topbar.php 의 pf_menus() 단일 소스. */
+$nav_kind   = 'stock';
+$nav_active = 'etf';
+
 // 1. 변수 안전하게 받기 (중복 선언 제거)
 $mode = $_REQUEST["mode"] ?? ''; 
 
