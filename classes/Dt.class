@@ -53,6 +53,23 @@ class Dt
     public const SRC_KIWOOM = 1;
     public const SRC_NAVER  = 2;
 
+    /**
+     * ★★장중 실시간 갱신 주기(초) — <b>한 숫자가 넷을 정한다</b> (2026-08-06).
+     *
+     *   ① 화면의 목록 타이머   ② 화면의 차트 덧대기 타이머
+     *   ③ 서버의 신선도 창(refreshQuotesLive 가 「이보다 새것이면 콜 안 함」)
+     *   ④ 화면에 찍히는 「LIVE N초」 글자
+     *
+     * 넷이 갈리면 <b>한 화면이 두 값을 말한다</b> — 실제로 그랬다. 차트는 30초로 도는데 목록은
+     * <code>all_stock_info</code> 크론(장중 정규 fire 가 09·11·13·15시 넷뿐)에 매여 있어
+     * 같은 종목의 현재가가 최대 <b>약 2시간</b> 어긋났다.
+     *
+     * 10초인 근거: 대상은 <code>targetCodes()</code>(실측 34종목)뿐이고 ka10095 가 100종목을
+     * <b>한 요청 0.03초</b>에 준다. 10초당 1콜이면 키움 한도(1 req/s)의 10%이고,
+     * 장중 6.5시간을 내내 열어 둬도 2,340콜이다.
+     */
+    public const TICK_SEC = 10;
+
     private PDO $pdo;
 
     public function __construct(PDO $pdo)
@@ -469,6 +486,243 @@ class Dt
             if (!isset($have[$c])) { $out[] = $c; $have[$c] = 1; }
         }
         return $out;
+    }
+
+    // ══ 장중 실시간 시세 (2026-08-06) ═══════════════════════════════════
+    /**
+     * <b>수집 대상 종목만</b> 실시간 시세로 메운다 — 키움 ka10095, 실패하면 네이버.
+     *
+     * ══ 왜 이 자리에 있나 ═══════════════════════════════════════════════
+     * <code>all_stock_info</code> 를 채우는 크론은 장중 정규 fire 가 <b>09·11·13·15시 넷뿐</b>이라
+     * 목록 현재가가 최대 약 2시간 낡는다. 그런데 단타는 차트가 초 단위로 도는 화면이라
+     * 같은 종목의 값이 <b>한 화면 안에서 갈렸다</b>. 전종목을 촘촘히 받는 것은 답이 아니고
+     * (28콜 × 10초 = 하루 1만 콜 · 네이버 IP 차단 위험), <b>보는 종목만</b> 받으면 34종목 1콜이다.
+     *
+     * ══ ★쓰는 곳은 all_stock_info 다 — 별도 표를 만들지 않는다 ═══════════
+     * 따로 담으면 단타는 키움 값을, 포트폴리오는 네이버 값을 보게 되어 지금보다 나빠진다.
+     * 소스가 섞여도 안전한 근거는 실측이다 — 키움을 <b>_AL 없이</b>(KRX 단독) 부르면
+     * 거래량 기준이 네이버와 같다(2026-08-04 분봉에서 확인 · 2026-08-06 ka10095 에서 재확인).
+     * 덤으로 이 종목들의 uDate 가 늘 신선해져 <b>네이버 전종목 크론이 이것들을 건너뛴다</b>.
+     *
+     * ══ ★신선도 판정을 여기 다시 적지 않는다 ════════════════════════════
+     * <code>NaverFinanceAPI::staleCutoff()</code> 단일본을 지난다. 마감 뒤 규칙
+     * (「오늘 15:30 이전」인 것만)이 한 군데에 있어야 NXT 갱신분과 안 부딪힌다.
+     *
+     * ══ ★시가총액·거래대금을 0 으로 덮지 않는다 ══════════════════════════
+     * 키움이 그 값을 주지 않는 종목(신규상장 등)이 있으면 <b>기존 값을 유지</b>한다.
+     * 목록 배지(시총·회전율)가 0 을 「없음」이 아니라 「0원」으로 그리기 때문이다.
+     *
+     * @param  ?int $maxAge 신선도(초). null 이면 TICK_SEC
+     * @param  bool $force  true 면 신선도를 안 따진다
+     * @return array [target, stale, fetched, updated, src] — src: kiwoom|naver|none
+     */
+    public function refreshQuotesLive(?int $maxAge = null, bool $force = false): array
+    {
+        $out = ['target' => 0, 'stale' => 0, 'fetched' => 0, 'updated' => 0, 'src' => 'none'];
+
+        /* ── ★장이 서 있을 때만 ────────────────────────────────────────
+         * 이 문지기가 없으면 <b>토요일에 화면을 열어 둔 것만으로</b> 10초마다 콜이 나간다 —
+         * 마감 뒤 신선도 규칙(「오늘 15:30 이전」)은 <b>거래일 안에서만</b> 뜻이 있어서,
+         * 휴장일에는 uDate 가 지난 거래일 것이라 매 tick 이 「낡음」으로 잡힌다.
+         *
+         * 값싼 것부터 본다: 시각·요일(DB 0회) → isTradingDay()(거래일 판정 단일본 · krx_amt).
+         * ★휴장일 판정을 새로 적지 않는다 — 별도 휴장일 표를 만들지 않는 사이트 규칙 그대로다. */
+        if (!$force) {
+            $hm = (int)date('Hi');
+            $w  = (int)date('N');
+            /* ★★상한이 <b>15:30 «전»</b> 이어야 한다 (2026-08-06 실측으로 되돌린 값).
+             *
+             * 처음엔 15:35 로 뒀다 — 「15:30 종가 단일가까지 받자」는 뜻이었는데, 정반대 일이 났다.
+             * 15:30:05 에 받은 값은 <b>종가 단일가가 체결되기 직전</b> 값이었고(실측 SK하이닉스
+             * 1,489,000 vs 실제 종가 1,495,000), 더 나쁜 것은 그 <code>uDate=15:30:05</code> 가
+             * <b>마감 메우기를 통째로 무력화</b>한다는 점이다:
+             *   staleCutoff() 는 마감 뒤 「uDate < 오늘 15:30」 인 것만 낡음으로 본다(NXT 보호 규칙).
+             *   15:30:05 는 그 조건 «밖»이라 영원히 신선으로 판정되어,
+             *   15:50 dart_eod 의 종가 메우기가 이 종목들을 건너뛴다 → <b>종가가 틀린 채 굳는다</b>.
+             *
+             * 그래서 15:30 부터는 손을 뗀다. 종가는 원래 설계대로 dart_eod(15:50)가 넣는다
+             * — 그 20분간 목록이 15:29 값인 것은 감수한다(예전에도 그랬다). */
+            if ($w > 5 || $hm < 900 || $hm >= 1530) return $out;
+            if (!$this->isTradingDay()) return $out;
+        }
+
+        $codes = $this->targetCodes();
+        if (!$codes) return $out;
+        $out['target'] = count($codes);
+
+        // ── 낡은 것만 고른다 (판정은 NaverFinanceAPI 단일본) ──
+        $age = ($maxAge !== null && $maxAge > 0) ? $maxAge : self::TICK_SEC;
+        $stale = $codes;
+        if (!$force) {
+            try {
+                $cut = date('Y-m-d H:i:s', NaverFinanceAPI::staleCutoff($age));
+                $ph  = implode(',', array_fill(0, count($codes), '?'));
+                $st  = $this->pdo->prepare(
+                    "SELECT stock_code FROM all_stock_info
+                      WHERE stock_code IN ($ph) AND (uDate IS NULL OR uDate < ?)");
+                $st->execute(array_merge($codes, [$cut]));
+                $stale = $st->fetchAll(PDO::FETCH_COLUMN);
+            } catch (Throwable $e) { /* 판정 실패 — 전부 받는다 */ }
+        }
+        $out['stale'] = count($stale);
+        if (!$stale) return $out;
+
+        // ── ① 키움 ──
+        $q = [];
+        try {
+            $kw = new Kiwoom($this->pdo);
+            if ($kw->hasKey()) { $q = $kw->quotes($stale); $out['src'] = 'kiwoom'; }
+        } catch (Throwable $e) {
+            $q = [];   // 토큰·IP 화이트리스트·장애 — 아래 폴백으로 떨어진다
+        }
+
+        /* ── ② 네이버 폴백 ──
+         * ★키움이 «일부만» 준 경우에도 폴백하지 않는다 — 못 받은 종목은 대개 거래정지라
+         *   네이버도 같은 답을 준다. 통째로 실패했을 때만 갈아탄다. */
+        if (!$q) {
+            try {
+                $r = (new NaverFinanceAPI())->refreshQuotes($this->pdo, $stale, $force, $age);
+                return ['target' => $out['target'], 'stale' => $out['stale'],
+                        'fetched' => (int)($r['fetched'] ?? 0), 'updated' => (int)($r['updated'] ?? 0),
+                        'src' => 'naver'];
+            } catch (Throwable $e) {
+                $out['src'] = 'none';
+                return $out;
+            }
+        }
+        $out['fetched'] = count($q);
+
+        /* ── 저장 ──
+         * ★uDate 를 <b>명시적으로</b> 찍는다. ON UPDATE CURRENT_TIMESTAMP 에 맡기면 값이 하나도
+         *   안 바뀐 행(거래정지 등)은 MySQL 이 UPDATE 를 건너뛰어 영원히 「낡음」으로 잡힌다.
+         * ★stock_cap·stock_vol_cap 은 <b>0 이 아닐 때만</b> 덮는다(위 주석).
+         * ★stock_rate_rt 에 직전 등락률을 밀어 둔다 — 기존 갱신 경로와 같은 규칙이다. */
+        $up = $this->pdo->prepare("
+            UPDATE all_stock_info
+               SET stock_rate_rt = stock_rate,
+                   stock_price   = :price,
+                   stock_yrate   = :yrate,
+                   stock_rate    = :rate,
+                   stock_vol     = :vol,
+                   stock_cap     = IF(:cap > 0, :cap2, stock_cap),
+                   stock_vol_cap = IF(:amt > 0, :amt2, stock_vol_cap),
+                   uDate         = NOW()
+             WHERE stock_code = :code
+        ");
+
+        $n = 0;
+        $this->pdo->beginTransaction();
+        try {
+            foreach ($q as $code => $x) {
+                $up->execute([
+                    ':price' => (int)$x['price'],
+                    ':yrate' => (int)$x['diff'],
+                    ':rate'  => (float)$x['rate'],
+                    ':vol'   => (int)$x['vol'],
+                    ':cap'   => (int)$x['capEok'],  ':cap2' => (int)$x['capEok'],
+                    ':amt'   => (float)$x['amtEok'], ':amt2' => (float)$x['amtEok'],
+                    ':code'  => $code,
+                ]);
+                $n += $up->rowCount();
+            }
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            return $out;
+        }
+        $out['updated'] = $n;
+        return $out;
+    }
+
+    // ══ 장중 당일 분봉 덧대기 (2026-08-06) ══════════════════════════════
+    /**
+     * <b>오늘치 1분봉</b>을 받아 온다 — 원장(`dt_min`)에 아직 없는 구간을 화면이 메우는 용도.
+     *
+     * ══ 왜 키움인가 (2026-08-06 사용자 결정) ═══════════════════════════
+     * 예전엔 네이버(`getMinuteOhlc`)로 얹었다 — 토큰이 필요 없고 빨라서였다. 그런데 그러면
+     * <b>한 화면의 봉이 두 소스로 섞인다</b>: 어제까지는 키움(원장), 오늘은 네이버.
+     * 분봉을 처음 쌓을 때 「거래량 기준이 섞이면 안 된다」고 정해 놓고(`KIWOOM_NO_SOR`)
+     * 정작 장중에 섞고 있었던 셈이다. 대상이 <b>최대 100종목</b>이고 화면이 보는 것은
+     * 그중 <b>한 종목</b>이라 콜 부담이 없어 키움으로 옮겼다.
+     *
+     * ══ ★캐시가 필요한 이유 ════════════════════════════════════════════
+     * 한 tick 에 <b>메인(1분)과 보조(3분)가 각각</b> 이 함수를 지난다. 캐시가 없으면 같은 종목을
+     * 두 번 받고, 키움은 1 req/s 라 <b>두 번째가 1초를 기다린다</b>(화면이 그만큼 늦는다).
+     * 원본이 같으니 한 번만 받아 나눠 쓴다 — 3분봉은 어차피 그 1분봉을 접어서 만든다.
+     * TTL 은 `TICK_SEC` — 화면이 다시 물을 때쯤 캐시도 같이 만료된다.
+     *
+     * ★<b>실패하면 네이버로 폴백</b>한다. 장중 덧대기가 통째로 사라지면 「어제 종가에 멈춘」
+     *   차트가 되는데, 그건 고장으로 읽힌다.
+     *
+     * @param  string $code
+     * @return array [['t'=>'Y-m-d H:i','o','h','l','c','v'], …] 오늘치만 · 실패하면 빈 배열
+     */
+    public function todayBars(string $code): array
+    {
+        $code = self::cleanCode($code);
+        if ($code === '') return [];
+
+        $today = date('Y-m-d');
+
+        /* ── ★언제 받을지는 «이 함수»가 정한다 (2026-08-06) ──────────────
+         * 부르는 쪽에 `09:00~16:00` 같은 창을 적어 두면 그 밖에서 조용히 구멍이 난다 —
+         * 실제로 <b>16:00~16:45 사이 45분</b>이 그랬다: 게이트가 막아 당일분이 안 붙는데
+         * 원장은 16:45 크론이 채우기 «전»이라, 그 45분 동안 차트가 <b>어제 봉</b>을 보여 줬다.
+         *
+         * 판정 셋 — 값이 싼 것부터:
+         *   ① 09:00 전이면 오늘 봉이 없다
+         *   ② 거래일이 아니면 받을 것이 없다 (휴장일 판정 단일본)
+         *   ③ <b>원장에 오늘 봉이 이미 있으면</b> 받지 않는다 — 크론(16:45)이 채운 뒤엔
+         *      원장이 정본이고, 덧대기는 «원장이 아직 비었을 때»를 메우는 임시방편이다. */
+        if ((int)date('Hi') < 900) return [];
+        if (!$this->isTradingDay()) return [];
+        try {
+            $st = $this->pdo->prepare(
+                "SELECT COUNT(*) FROM dt_min
+                  WHERE code = ? AND ts >= ? AND ts < ? + INTERVAL 1 DAY");
+            $st->execute([$code, $today . ' 00:00:00', $today]);
+            if ((int)$st->fetchColumn() >= self::BARS_OK) return [];
+        } catch (Throwable $e) { /* 판정 실패 — 받아 본다 */ }
+
+        $file = sys_get_temp_dir() . '/dt_today_' . $code . '.json';
+
+        // ── 캐시 (같은 tick 의 메인·보조가 나눠 쓴다) ──
+        if (is_file($file) && (time() - (int)@filemtime($file)) < self::TICK_SEC) {
+            $j = json_decode((string)@file_get_contents($file), true);
+            if (is_array($j) && ($j['d'] ?? '') === $today && is_array($j['rows'] ?? null)) {
+                return $j['rows'];
+            }
+        }
+
+        $rows = [];
+        // ── ① 키움 (원장과 같은 소스) ──
+        try {
+            $kw = new Kiwoom($this->pdo);
+            if ($kw->hasKey()) {
+                /* 오늘 하루치만 필요하다 — 정규장이 381봉이고 한 콜이 900봉이라 1콜로 충분하다. */
+                $r = $kw->minute($code, 1, $today, 1);
+                $rows = $r['rows'] ?? [];
+            }
+        } catch (Throwable $e) {
+            $rows = [];   // 토큰·IP·장애 → 아래 폴백
+        }
+
+        // ── ② 네이버 폴백 ──
+        if (!$rows) {
+            try {
+                $nv   = (new NaverFinanceAPI())->getMinuteOhlc($code);
+                $rows = self::normalize($nv['success'] ?? []);
+            } catch (Throwable $e) { $rows = []; }
+        }
+
+        // 오늘 것만 남긴다 — 키움은 어제 봉까지 딸려 올 수 있다(원장이 이미 갖고 있어 무해하지만 얇게 둔다)
+        $rows = array_values(array_filter($rows,
+            static fn($r) => substr((string)($r['t'] ?? ''), 0, 10) === $today));
+
+        if ($rows) {
+            @file_put_contents($file, json_encode(['d' => $today, 'rows' => $rows]), LOCK_EX);
+        }
+        return $rows;
     }
 
     /**

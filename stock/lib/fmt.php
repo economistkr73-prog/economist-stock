@@ -190,6 +190,16 @@ function pf_age_txt(?int $days): string
     return number_format($days / 365.25, 1) . '년';
 }
 
+/**
+ * 체결 시각 표시 — 'HH:MM'. 모르면 빈 문자열이다(옛 기록은 NULL 이다).
+ * ★ 빈 값을 '00:00' 으로 채우지 않는다 — 「모른다」와 「자정에 샀다」는 다른 말이다.
+ */
+function pf_hm($t): string
+{
+    $t = trim((string)($t ?? ''));
+    return ($t === '') ? '' : substr($t, 0, 5);
+}
+
 /** 포지션 상태 배지 */
 function pf_status_badge(string $status): string
 {

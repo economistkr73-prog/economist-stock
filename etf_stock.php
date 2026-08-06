@@ -767,17 +767,12 @@ const LAST_UPDATE_STR = '{$last_update_time}';
 const AUTO_THRESHOLD_MS = 2 * 60 * 1000;  // 2분
 const STORAGE_KEY = 'ar_market_status';   // 'open'(장중) | 'closed'(장마감)
 
-// NXT 장외 시간대 여부 (08:00~08:50, 15:30~20:00)
-function isNxtWindow() {
-    const now = new Date();
-    const t = now.getHours() * 60 + now.getMinutes();
-    return (t >= 480 && t < 530) || (t > 930 && t <= 1200);
-}
-
-// 업데이트 버튼 라벨 (NXT 시간대면 'NXT ' 접두사)
+/* 업데이트 버튼 라벨.
+   ★예전에는 NXT 시간대(08:00~08:49 · 15:31~20:00)면 'NXT ' 접두사를 붙였다.
+     2026-08-06 에 NXT 시세를 껐으므로(NaverFinanceAPI::USE_NXT=false) 그 시간대에도
+     받아 오는 값이 없다 — 접두사를 남겨 두면 <b>있지도 않은 갱신을 있다고 말한다</b>. */
 function getUpdateLabel(isAuto) {
-    const prefix = isNxtWindow() ? 'NXT ' : '';
-    return prefix + (isAuto ? '자동(2분) 업데이트중' : '시세업데이트');
+    return isAuto ? '자동(2분) 업데이트중' : '시세업데이트';
 }
 
 // 버튼 표시 갱신

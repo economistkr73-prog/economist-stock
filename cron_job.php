@@ -53,9 +53,12 @@
 
 $CLI = (PHP_SAPI === 'cli');
 
-// CLI 는 `task=etf_update` 꼴 인자를 $_GET 처럼 받는다
-if ($CLI) {
-    foreach (array_slice($argv, 1) as $a) {
+/* CLI 는 `task=etf_update` 꼴 인자를 $_GET 처럼 받는다.
+ * ★CRON_REGISTRY_ONLY(레지스트리만 읽기 · 아래 가드 참조)일 때는 건너뛴다 —
+ *   그 경로는 남의 스크립트 안에서 도는 것이라 $_GET 을 건드리면 안 되고,
+ *   CLI 라도 $argv 가 없는 실행 환경이 있다(register_argc_argv=Off). */
+if ($CLI && !defined('CRON_REGISTRY_ONLY')) {
+    foreach (array_slice($argv ?? [], 1) as $a) {
         if (strpos($a, '=') !== false) { [$k, $v] = explode('=', $a, 2); $_GET[$k] = $v; }
     }
 }
@@ -271,6 +274,16 @@ const TASKS = [
         'desc' => '[수동] 아덴트뉴스 국내여행 → AI 추출 → 여행지 적재 (⚠유료 API·상한 없음 · 2026-08-04 크론 해제)',
     ],
 ];
+
+/* ── 레지스트리만 읽고 싶을 때 (2026-08-06) ──────────────────────────────
+ * 「설정 > 시세 설정」 화면이 크론 시각·설명을 <b>여기서</b> 가져간다.
+ * 시각표를 화면에 손으로 옮겨 적으면 크론을 옮길 때 그 화면이 조용히 거짓말을 시작한다 —
+ * 단일본은 위의 TASKS 하나여야 한다(CRON.md §1 표가 이 파일을 보는 것과 같은 이유).
+ *
+ * 여기서 되돌아가므로 <b>인증도 디스패치도 일어나지 않는다</b>(부작용 0).
+ * 부르는 쪽: stock/lib/quote.php 의 quote_cron_tasks().
+ * ★소비자는 CRON_JOB_KEY 를 화면에 내보내지 않는다 — 이 include 로 그 상수도 정의된다. */
+if (defined('CRON_REGISTRY_ONLY')) return;
 
 // ── 인증 ────────────────────────────────────────────────────────────────
 // CLI 는 서버에 들어와야 돌릴 수 있으니 그 자체가 자격이다.

@@ -33,11 +33,19 @@ class Kiwoom
     /**
      * ★조회 전용 화이트리스트. 여기 없는 api-id 는 부를 수 없다.
      *   ka10080 주식분봉차트조회요청 · ka10081 주식일봉차트조회요청(예비)
+     *   ka10095 관심종목정보요청 — <b>복수 종목 현재가를 한 요청에</b> (2026-08-06 신설)
      */
     public const TR_MAP = [
         'ka10080' => '/api/dostk/chart',
         'ka10081' => '/api/dostk/chart',
+        'ka10095' => '/api/dostk/stkinfo',
     ];
+
+    /**
+     * ka10095 한 요청의 종목 수 상한 — <b>실측 2026-08-06</b>.
+     * 50·100 은 정상(각 0.03초), <b>150 은 return_code=5 로 거절</b>된다.
+     */
+    public const QUOTE_CHUNK = 100;
 
     /**
      * ★ 키움 분봉의 시각이 그 봉의 «시작»인가 «종료»인가 — [V-1] <b>2026-08-04 실측 확정: 'start'</b>.
@@ -239,6 +247,165 @@ class Kiwoom
             'upd_stkpc_tp' => '1',
         ], $body), $hdr);
     }
+    // ══ 일봉 (ka10081) ══════════════════════════════════════════════════
+    /**
+     * 일봉을 받는다 — <b>거래대금까지 한 번에</b>.
+     *
+     * ══ 실측으로 확정한 것 (2026-08-06 · 000660 실호출) ══════════════════
+     *   경로   POST /api/dostk/chart · api-id ka10081 (ka10080 과 같은 경로)
+     *   목록   응답 키 <b>stk_dt_pole_chart_qry</b> · <b>한 콜 600봉</b> (cont-yn=Y 로 더)
+     *   필드   dt(YYYYMMDD) · open_pric · high_pric · low_pric · <b>cur_prc(종가)</b> ·
+     *          trde_qty · <b>trde_prica(거래대금)</b> · trde_tern_rt(회전율)
+     *   단위   ★<b>trde_prica = 백만원</b> (ka10095 와 같다) → 원은 ×1,000,000
+     *
+     * ★★<b>네이버 일봉과 값이 같다</b> — 같은 종목 과거 7거래일의 종가·거래량이 <b>전부 일치</b>했다.
+     *   (어긋난 것은 «오늘» 한 건뿐이고 그건 장중이라 받은 시점이 다른 것이다.)
+     *   그래서 대상 종목만 이쪽으로 돌려도 <b>과거 차트가 달라지지 않는다</b> —
+     *   급등주 아카이브가 겪은 「수정주가 기준이 상수배로 어긋나는」 함정이 여기엔 없다.
+     *
+     * ★<code>upd_stkpc_tp='1'</code>(수정주가)를 준다 — 네이버가 수정주가 계열이라 기준을 맞춘다.
+     *
+     * @param  string $code
+     * @param  int    $want    필요한 봉 수 (600 을 넘으면 연속조회)
+     * @param  string $baseDt  기준일(YYYYMMDD 또는 Y-m-d). 비우면 오늘
+     * @return array [['t'=>'Y-m-d',o,h,l,c,v,'a'=>거래대금(원)], …] 오름차순
+     */
+    public function daily(string $code, int $want = 600, string $baseDt = ''): array
+    {
+        $code = Dt::cleanCode($code);
+        if ($code === '') return [];
+        $stk   = $code . (defined('KIWOOM_NO_SOR') && KIWOOM_NO_SOR ? '' : '_AL');
+        $want  = max(1, min(3000, $want));
+        $token = $this->token();
+
+        $rows = [];
+        $cont = 'N'; $next = '';
+        /* ★<b>base_dt 는 필수다</b> — 빼면 `[1511:필수입력 파라미터=base_dt]` 로 거절당한다
+         *   (분봉 ka10080 은 없어도 되는데 일봉은 다르다. 실측 2026-08-06에 걸렸다).
+         *   비워 들어오면 오늘로 채운다 — 「그 날 마감까지의 600봉」이 온다. */
+        $base = ($baseDt !== '') ? str_replace('-', '', $baseDt) : date('Ymd');
+
+        for ($i = 0; $i < 6; $i++) {                 // 600봉 × 6 = 3,600봉 상한
+            $body = ['stk_cd' => $stk, 'base_dt' => $base, 'upd_stkpc_tp' => '1'];
+
+            $res = $this->call('ka10081', $body, [
+                'authorization: Bearer ' . $token,
+                'api-id: ka10081',
+                'cont-yn: ' . ($cont === 'Y' ? 'Y' : 'N'),
+                'next-key: ' . $next,
+            ]);
+
+            $list = $res['body']['stk_dt_pole_chart_qry'] ?? self::pickList($res['body']);
+            if (!$list) break;
+
+            foreach ($list as $r) {
+                if (!is_array($r)) continue;
+                $d = (string)self::pick($r, ['dt']);
+                if (strlen($d) !== 8) continue;
+                $c = self::num(self::pick($r, ['cur_prc', 'close_pric']));
+                if ($c <= 0) continue;
+                $o  = self::num(self::pick($r, ['open_pric']));
+                $hi = self::num(self::pick($r, ['high_pric']));
+                $lo = self::num(self::pick($r, ['low_pric']));
+                $t  = substr($d, 0, 4) . '-' . substr($d, 4, 2) . '-' . substr($d, 6, 2);
+
+                $rows[$t] = [
+                    't' => $t,
+                    'o' => $o ?: $c, 'h' => $hi ?: max($o ?: $c, $c),
+                    'l' => $lo ?: min($o ?: $c, $c), 'c' => $c,
+                    'v' => self::num(self::pick($r, ['trde_qty'])),
+                    // 백만원 → 원. 일봉 소비자(dailychart)는 «원»으로 읽는다(krx_amt 와 같은 단위)
+                    'a' => self::num(self::pick($r, ['trde_prica'])) * 1000000,
+                ];
+            }
+            if (count($rows) >= $want) break;
+
+            $cont = strtoupper(trim((string)($res['head']['cont-yn'] ?? '')));
+            $next = trim((string)($res['head']['next-key'] ?? ''));
+            if ($cont !== 'Y' || $next === '') break;
+            usleep($this->gap);
+        }
+
+        ksort($rows);
+        $rows = array_values($rows);
+        if (count($rows) > $want) $rows = array_slice($rows, -$want);   // 최근 N봉만
+        return $rows;
+    }
+
+    // ══ 관심종목 현재가 (ka10095) ═══════════════════════════════════════
+    /**
+     * 복수 종목의 <b>현재가·등락·거래량·시총·거래대금</b>을 한 요청에 받는다.
+     *
+     * ══ 실측으로 확정한 것 (2026-08-06 · 005930 외 4종목 실호출) ══════════
+     *   경로   POST /api/dostk/stkinfo · api-id ka10095 · 본문 {"stk_cd":"005930|000660|…"}
+     *   목록   응답 최상위 키 <b>atn_stk_infr</b>
+     *   상한   <b>100종목</b> (150 은 return_code=5) · 100종목이 0.03초
+     *   단위   ★<b>mac(시가총액) = 억원 그대로</b> — 「현재가 × stkcnt(천주) ÷ 1억 = mac」 이
+     *          5종목 전부에서 <b>비 1.0000</b> 으로 떨어졌다. all_stock_info.stock_cap 과 같은 단위다.
+     *          ★<b>trde_prica(거래대금) = 백만원</b> → 억원은 ÷100.
+     *          (DB 와의 배율이 101.6~104.9 로 나오는데, 100 이 단위이고 나머지는 <b>시간차</b>다 —
+     *           DB 는 크론 값이고 이쪽은 실시간이라 그 사이 쌓인 거래대금이다.)
+     *
+     * ★<code>_AL</code>(SOR) 접미사를 붙이지 않는다 — 분봉과 같은 <b>KRX 단독</b> 기준이라야
+     *   한 종목의 값이 소스마다 다른 말을 하지 않는다(KIWOOM_NO_SOR 와 같은 규칙).
+     *   실측에서 거래량이 네이버 대비 1.004~1.049 로 나왔는데 이건 기준 차이가 아니라 시간차다
+     *   (기준이 달랐다면 <code>_AL</code> 처럼 1.49배가 나온다).
+     *
+     * ★키움 숫자는 <b>부호가 붙어 온다</b>("-230750"). 부호는 등락 방향이고 절대값이 값이다 —
+     *   num() 이 abs() 한다. 등락 방향은 rate 의 부호로 따로 온다.
+     *
+     * @param  string[] $codes 6자리 종목코드
+     * @return array<string,array> code => [name, price, diff, rate, vol, capEok, amtEok, tm]
+     *         못 받은 종목은 <b>키 자체가 없다</b> (호출자가 그 사실을 알 수 있게)
+     */
+    public function quotes(array $codes): array
+    {
+        $codes = array_values(array_unique(array_filter(array_map(
+            static fn($c) => Dt::cleanCode((string)$c), $codes))));
+        if (!$codes) return [];
+
+        $out   = [];
+        $first = true;
+        foreach (array_chunk($codes, self::QUOTE_CHUNK) as $chunk) {
+            if (!$first) usleep($this->gap);        // 1 req/s — 청크 사이에만 쉰다
+            $first = false;
+
+            $res = $this->call('ka10095', ['stk_cd' => implode('|', $chunk)], [
+                'authorization: Bearer ' . $this->token(),
+                'api-id: ka10095',
+                'cont-yn: N',
+                'next-key: ',
+            ]);
+
+            foreach (($res['body']['atn_stk_infr'] ?? []) as $r) {
+                if (!is_array($r)) continue;
+                $code = Dt::cleanCode((string)($r['stk_cd'] ?? ''));
+                if ($code === '') continue;
+
+                $price = self::num(self::pick($r, ['cur_prc']));
+                if ($price <= 0) continue;          // 거래정지·미상장 — 0 으로 덮지 않는다
+
+                /* 등락은 부호가 살아 있어야 한다. flu_rt 는 "-6.20" 처럼 그대로 오고,
+                 * pred_pre 는 절대값을 쓰되 방향을 flu_rt 에서 빌린다. */
+                $rate = (float)str_replace([',', '+'], '', (string)($r['flu_rt'] ?? '0'));
+                $diff = self::num(self::pick($r, ['pred_pre']));
+                if ($rate < 0) $diff = -$diff;
+
+                $out[$code] = [
+                    'name'   => trim((string)($r['stk_nm'] ?? '')),
+                    'price'  => (int)round($price),
+                    'diff'   => (int)round($diff),
+                    'rate'   => $rate,
+                    'vol'    => (int)round(self::num(self::pick($r, ['trde_qty']))),
+                    'capEok' => (int)round(self::num(self::pick($r, ['mac']))),          // 억원 그대로
+                    'amtEok' => round(self::num(self::pick($r, ['trde_prica'])) / 100, 2), // 백만원 → 억원
+                    'tm'     => (string)($r['cntr_tm'] ?? ''),
+                ];
+            }
+        }
+        return $out;
+    }
+
     // ══ 응답 해석 ═══════════════════════════════════════════════════════
     /** 본문에서 «배열인 값»을 찾는다 — 필드명이 문서와 달라도 살아남게 */
     private static function pickList($body): array

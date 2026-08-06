@@ -162,10 +162,39 @@ class NaverFinanceAPI {
         return $pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC);
     }
 
+    /**
+     * ★★<b>NXT(넥스트레이드) 시간외 시세를 쓰지 않는다</b> (2026-08-06 사용자 결정).
+     *
+     * 왜 껐나 — `all_stock_info` 는 <b>사이트 전 화면이 읽는 단일 원천</b>인데,
+     * 여기에 NXT 값이 들어오면 마감 뒤 <b>목록과 차트가 다른 말을 한다</b>:
+     *   목록(NXT 시간외) 231,500  vs  분봉·일봉(정규장) 230,500   ← 실측 2026-08-06 20:49
+     * 판단·기록의 기준을 <b>정규장 하나</b>로 두기로 했다. 종가는 15:50 `dart_eod` 가 넣는 값으로 굳는다.
+     *
+     * 껐을 때 무슨 일이 일어나나 — `stock_news` 크론의 <b>08:05·17:05·19:05</b> fire 는
+     * 시세 갱신 단계를 <b>건너뛴다</b>(그 셋이 NXT 창이다). 그 회차의 나머지 일
+     * (급등 TOP 9 · 종목 뉴스 · 키워드)은 그대로 돈다 — 정규장 종가 기준으로 도는 편이 오히려 맞다.
+     * `data_update_status` 의 `all_data_from_nxt` 키는 더 이상 갱신되지 않는다(그게 사실이다).
+     *
+     * ★<b>정규 경로로 돌리지 않고 «건너뛴다»</b>. 장 밖에 전종목 목록을 다시 받아 봐야 값이 그대로인데,
+     *   그 경로에는 <code>DELETE … NOT IN</code> 이 있어 부분 응답이 오면 종목이 통째로 사라진다.
+     *   얻을 것이 없는 위험은 지지 않는다.
+     *
+     * ★되살리려면 이 상수만 true 로 바꾼다 — `update_stock_price_from_nxt()`·`getAllNxtSise()` 는
+     *   지우지 않고 그대로 뒀다.
+     */
+    const USE_NXT = false;
+
     public function get_real_time_data_from_naver($pdo) {
         $t = (int)date('H') * 60 + (int)date('i');
         $is_nxt_window = ($t >= 480 && $t < 530) || ($t > 930 && $t <= 1200);
-        if ($is_nxt_window) return $this->update_stock_price_from_nxt($pdo);
+        if ($is_nxt_window) {
+            if (!self::USE_NXT) {
+                echo "NXT 창(08:00~08:49 · 15:31~20:00) — 시세 갱신을 건너뜁니다 "
+                   . "(USE_NXT=false · 정규장 값을 유지).<br>\n";
+                return true;   // «실패»가 아니다 — 호출자가 경고를 찍지 않게 true 를 준다
+            }
+            return $this->update_stock_price_from_nxt($pdo);
+        }
 
         $api = new NaverFinanceAPI();
         echo "데이터 수집을 시작합니다...<br>\n";
@@ -745,6 +774,29 @@ class NaverFinanceAPI {
     const QUOTE_MAX_AGE = 300;
 
     /**
+     * 「이 시각보다 오래된 <code>uDate</code> 는 낡음」 — <b>신선도 판정의 단일본</b>.
+     *
+     * ★ 이 규칙이 두 군데 있으면 안 되는 이유: 마감 뒤에는 <b>「오늘 15:30 이전」</b> 이라야
+     *   NXT 갱신분(uDate 가 15:31 이후)이 저절로 빠져 정규장 종가와 서로를 밀어내지 않는다.
+     *   한쪽만 고치면 종가와 장외가가 번갈아 덮어쓰는 상태로 돌아간다.
+     *
+     * ★ <code>refreshQuotes()</code>(네이버로 받아 온다)와 <code>Dt::refreshQuotesLive()</code>
+     *   (키움으로 받아 온다)가 <b>둘 다 이것을 본다</b> — 소스가 달라도 「무엇이 낡았나」는 하나여야
+     *   한 화면이 두 값을 말하지 않는다.
+     *
+     * @param  ?int $maxAge 장중 신선도(초). null 이면 QUOTE_MAX_AGE
+     * @return int  유닉스 타임스탬프 — 이 값보다 오래된 uDate 가 「낡음」
+     */
+    public static function staleCutoff(?int $maxAge = null): int
+    {
+        $now   = time();
+        $close = strtotime(date('Y-m-d') . ' ' . self::MARKET_CLOSE);
+        if ($now > $close) return $close;                     // 마감 뒤 — 시각 규칙이 이긴다
+        $age = ($maxAge !== null && $maxAge > 0) ? $maxAge : self::QUOTE_MAX_AGE;
+        return $now - $age;
+    }
+
+    /**
      * all_stock_info 의 <b>낡은 시세만</b> 골라 실시간 값으로 메운다.
      *
      * 왜 필요한가 (실측 2026-07-29):
@@ -760,12 +812,18 @@ class NaverFinanceAPI {
      *   마감 뒤 NXT 갱신분은 uDate 가 15:31 이후라 이 조건에서 저절로 빠진다.
      *   그래서 정규장 종가와 NXT 값이 서로를 밀어내는 일이 없다.
      *
+     * ★ 장중 신선도는 <b>호출자가 정할 수 있다</b>($maxAge). 화면마다 필요한 촘촘함이 다르다 —
+     *   단타는 차트가 10초로 도는데 목록만 5분이면 <b>같은 종목이 한 화면에서 두 값을 말한다</b>.
+     *   기본값(QUOTE_MAX_AGE)은 그대로라 기존 호출자(크론·포트폴리오 계열)는 안 바뀐다.
+     *   ★<b>마감 뒤 규칙에는 영향이 없다</b> — 거기서는 늘 「오늘 15:30 이전」이라야 NXT 와 안 부딪힌다.
+     *
      * @param  PDO      $pdo
      * @param  string[] $codes 빈 배열이면 all_stock_info 전 종목
      * @param  bool     $force true 면 신선도를 따지지 않고 전부 다시 받는다
+     * @param  ?int     $maxAge 장중 신선도(초). null 이면 QUOTE_MAX_AGE. 마감 뒤에는 무시된다
      * @return array [target, stale, fetched, updated]
      */
-    public function refreshQuotes(PDO $pdo, array $codes = [], bool $force = false): array
+    public function refreshQuotes(PDO $pdo, array $codes = [], bool $force = false, ?int $maxAge = null): array
     {
         $codes = array_values(array_unique(array_filter($codes,
             static fn($c) => preg_match('/^\w{6}$/', (string)$c))));
@@ -781,9 +839,7 @@ class NaverFinanceAPI {
         $rows = $st->fetchAll(PDO::FETCH_KEY_PAIR);
         if (!$rows) return ['target' => 0, 'stale' => 0, 'fetched' => 0, 'updated' => 0];
 
-        $now    = time();
-        $close  = strtotime(date('Y-m-d') . ' ' . self::MARKET_CLOSE);
-        $cutoff = ($now > $close) ? $close : ($now - self::QUOTE_MAX_AGE);
+        $cutoff = self::staleCutoff($maxAge);
 
         $stale = [];
         foreach ($rows as $code => $uDate) {

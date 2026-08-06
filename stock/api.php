@@ -88,7 +88,7 @@ function api_portfolio(string $action, PDO $pdo, Pf $pf): void
                 pf_api_done($back . ($id ? '&fid=' . $id : ''), 'err', '포트폴리오명을 입력하세요.');
             }
 
-            $newId = $pf->portfolioSave([
+            $save = [
                 'id'        => $id ?: null,
                 'name'      => $name,
                 'broker_id' => (int)($_POST['broker_id'] ?? 0),
@@ -97,7 +97,9 @@ function api_portfolio(string $action, PDO $pdo, Pf $pf): void
                 'note'      => mb_substr(trim($_POST['note'] ?? ''), 0, 200),
                 'sort_no'   => (int)($_POST['sort_no'] ?? 0),
                 'is_active' => isset($_POST['is_active']) ? 1 : 0,
-            ]);
+            ];
+
+            $newId = $pf->portfolioSave($save);
 
             // 원금은 입출금 이력의 합계다. 신규 등록에서 넣은 금액은 첫 줄로 기록한다.
             if (!$id) {
@@ -149,6 +151,29 @@ function api_portfolio(string $action, PDO $pdo, Pf $pf): void
             $fid = (int)($_POST['fid'] ?? 0);
             $pf->principalFlowDelete((int)($_POST['id'] ?? 0));
             pf_api_done($back . ($fid ? '&fid=' . $fid : ''), 'ok', '원금 변동 기록을 삭제했습니다.');
+
+        /* ── 이월손익·배당 (체결기록으로는 만들 수 없는 돈. 원금과 달리 수익률의 분자다)
+         *   금액은 부호를 그대로 받는다 — 배당소득세·이월손실이 음수로 들어온다.
+         *   그래서 원금처럼 「합계가 음수면 거절」 하지 않는다(손실이 이익보다 클 수 있다). */
+        case 'income_add':
+            $fid    = (int)($_POST['fid'] ?? 0);
+            $amt    = pf_money('amount');
+            $date   = trim($_POST['flow_at'] ?? '') ?: date('Y-m-d');
+            $reason = mb_substr(trim($_POST['reason'] ?? ''), 0, 80);
+            $kind   = trim($_POST['kind'] ?? 'dividend');
+            $to     = $back . ($fid ? '&fid=' . $fid : '');
+
+            if (!$fid)      pf_api_done($back, 'err', '포트폴리오를 먼저 선택하세요.');
+            if ($amt === 0) pf_api_done($to, 'err', '금액을 입력하세요.');
+
+            $pf->incomeFlowAdd($fid, $date, $amt, $kind, $reason);
+            $label = Pf::INCOME_KINDS[$kind] ?? Pf::INCOME_KINDS['etc'];
+            pf_api_done($to, 'ok', $label . ' ' . number_format($amt) . '원을 반영했습니다.');
+
+        case 'income_del':
+            $fid = (int)($_POST['fid'] ?? 0);
+            $pf->incomeFlowDelete((int)($_POST['id'] ?? 0));
+            pf_api_done($back . ($fid ? '&fid=' . $fid : ''), 'ok', '이월·배당 기록을 삭제했습니다.');
 
         // ── 메모 이력 (수정 없이 신규/삭제만)
         case 'memo_add':
@@ -587,6 +612,11 @@ function api_trade(string $action, PDO $pdo, Pf $pf): void
             $qty   = (int)str_replace(',', '', (string)($_POST['qty'] ?? 0));
             $price = (float)str_replace(',', '', (string)($_POST['price'] ?? 0));
             $date  = ($_POST['traded_at'] ?? '') ?: date('Y-m-d');
+            /* 체결 시각 — 비우면 「모른다」(NULL). type=time 은 HH:MM 또는 HH:MM:SS 로 온다.
+             * 형식이 아니면 조용히 버린다(틀린 시각을 넣느니 모르는 편이 낫다). */
+            $time  = trim((string)($_POST['traded_time'] ?? ''));
+            if ($time !== '' && !preg_match('/^\d{2}:\d{2}(:\d{2})?$/', $time)) $time = '';
+            if ($time !== '' && strlen($time) === 5) $time .= ':00';
 
             if ($qty <= 0 || $price <= 0) pf_api_done($back, 'err', '체결가와 수량을 확인하세요.');
 
@@ -612,6 +642,7 @@ function api_trade(string $action, PDO $pdo, Pf $pf): void
                 'step_no'     => ($side === 'sell') ? 0 : (int)($_POST['step_no'] ?? 0),
                 'side'        => $side,
                 'traded_at'   => $date,
+                'traded_time' => $time,
                 'price'       => $price,
                 'qty'         => $qty,
                 'memo'        => trim($_POST['memo'] ?? ''),
@@ -1155,9 +1186,26 @@ function api_dt(string $action, PDO $pdo): void
                                         : '받아 온 봉이 없습니다 (다음 수집 때 다시 시도합니다).'];
         };
 
+        /* ── 장중 실시간 시세 (2026-08-06) ────────────────────────────────
+         * 두 목록이 응답을 만들기 «전에» 지난다. 대상은 Dt::targetCodes()(단타 풀 ∪ 보유)뿐이고
+         * 키움 ka10095 가 100종목을 한 요청에 주므로 실측 34종목이 1콜·0.03초다.
+         *
+         * ★새 판정을 세우지 않는다 — 알맹이는 Dt::refreshQuotesLive() 단일본이고,
+         *   「무엇이 낡았나」는 다시 NaverFinanceAPI::staleCutoff() 단일본을 지난다.
+         *   TICK_SEC 안에 이미 받아 둔 것은 「낡음」에 안 걸려 콜이 아예 안 나간다
+         *   — 탭을 여럿 열어도, 두 목록을 잇달아 불러도 콜은 한 번이다.
+         * ★전종목을 여기서 갱신하지 않는다 — 28콜 × 10초면 하루 1만 콜이라
+         *   「사이트 전 주가의 단일 원천」을 IP 차단 위험에 올린다(CRON.md §4).
+         * ★실패해도 조용히 넘어간다 — 목록은 DB 값으로 그대로 뜬다. */
+        $live = static function () use ($dt) {
+            try { return $dt->refreshQuotesLive(); }
+            catch (Throwable $e) { return ['src' => 'none']; }
+        };
+
         switch ($action) {
             // ── 목록 ────────────────────────────────────────────────
             case 'pool_list': {
+                $lv   = $live();
                 $rows = $badge($dt->poolList());
                 /* 「내 목록」에도 보유 여부를 실어 보낸다 — 담아 놓고 나중에 산 종목이
                  * 두 탭에서 다른 말을 하면 안 된다(배지는 화면이 그린다). */
@@ -1170,6 +1218,8 @@ function api_dt(string $action, PDO $pdo): void
                     'window' => $dt->windowFrom(),
                     'days'   => $dt->tradingDays(),
                     'haskey' => (new Kiwoom($pdo))->hasKey(),
+                    'tick'   => Dt::TICK_SEC,
+                    'qsrc'   => $lv['src'] ?? 'none',   // 화면의 LIVE 배지가 소스를 밝힌다
                 ]);
             }
 
@@ -1177,12 +1227,39 @@ function api_dt(string $action, PDO $pdo): void
              * 원본은 pf_position 이다 — dt_pool 에 복사하지 않는다(Dt::targetCodes 주석).
              * 그래서 여기엔 담기·해지·순서바꾸기가 없다: 이 목록은 <b>포트폴리오가 정한다</b>. */
             case 'held_list': {
+                $lv   = $live();
                 $rows = $badge($dt->heldList());
                 $out([
                     'rows'   => $rows,
                     'window' => $dt->windowFrom(),
                     'days'   => $dt->tradingDays(),
+                    'tick'   => Dt::TICK_SEC,
+                    'qsrc'   => $lv['src'] ?? 'none',
                 ]);
+            }
+
+            /* ── 실계좌 체결 마커 (분봉·일봉에 얹는다)
+             * ★새 판정이 아니라 <b>기록</b>이다 — 단타 규칙 9(판정을 세우지 않는다)에 걸리지 않는다.
+             *   시뮬레이터의 「실계좌 체결 겹쳐보기」와 같은 성격이고 원본도 같다(pf_trade).
+             * ★시각이 없으면 분봉에 못 찍는다 — 거르지 않고 그대로 주고 화면이 정한다
+             *   (일봉 마커는 날짜만 있으면 되므로 여기서 지우면 그쪽까지 사라진다). */
+            case 'fills': {
+                if ($code === '') $out(['rows' => []]);
+                $pf   = new Pf($pdo);
+                $rows = [];
+                foreach ($pf->tradesByCode($code) as $t) {
+                    $rows[] = [
+                        'd'     => (string)$t['traded_at'],
+                        't'     => $t['traded_time'] !== null ? substr((string)$t['traded_time'], 0, 8) : null,
+                        'sell'  => ($t['side'] === 'sell') ? 1 : 0,
+                        'step'  => (int)$t['step_no'],
+                        'qty'   => (int)$t['qty'],
+                        'price' => (float)$t['price'],
+                        'pf'    => (string)$t['portfolio_name'],
+                        'pid'   => (int)$t['position_id'],
+                    ];
+                }
+                $out(['rows' => $rows]);
             }
 
             // ── 담기 (즉시 응답 · 적재는 pool_init 이 이어받는다) ──
@@ -1235,17 +1312,17 @@ function api_dt(string $action, PDO $pdo): void
                 $to   = Dt::cleanDate((string)($_GET['to'] ?? '')) ?: date('Y-m-d');
                 $from = Dt::cleanDate((string)($_GET['from'] ?? '')) ?: $to;
 
-                /* 장중 실시간 — 네이버 당일분을 얹는다(토큰 불필요·빠름).
-                 * 같은 분이 양쪽에 있으면 <b>DB(키움)가 이긴다</b> — 소스 섞임을 최소로. */
+                /* 장중 실시간 — 당일분을 얹는다.
+                 * ★소스는 <b>키움</b>이다(2026-08-06) — 원장(dt_min)과 같아야 한 화면의 봉이 안 섞인다.
+                 *   알맹이·캐시·네이버 폴백은 Dt::todayBars() 단일본에 있다.
+                 *   같은 tick 의 메인(1분)·보조(3분)가 그 캐시를 나눠 쓰므로 콜은 <b>한 번</b>이다.
+                 * 같은 분이 양쪽에 있으면 <b>DB 가 이긴다</b>(Dt::series 가 그렇게 합친다). */
+                /* ★시간 창을 여기 적지 않는다 — todayBars() 가 스스로 판단한다.
+                 *   여기에 `hm<=1600` 을 적어 뒀다가 <b>16:00~16:45 사이 45분</b> 동안
+                 *   차트가 어제 봉을 보여 줬다(원장은 16:45 크론이 채우기 전이었다). */
                 $extra = [];
                 $live  = !empty($_GET['live']) && $to === date('Y-m-d');
-                if ($live) {
-                    $hm = (int)date('Hi');
-                    if ($hm >= 900 && $hm <= 1600) {
-                        $nv = (new NaverFinanceAPI())->getMinuteOhlc($code);
-                        $extra = Dt::normalize($nv['success'] ?? []);
-                    }
-                }
+                if ($live) $extra = $dt->todayBars($code);
                 $out($dt->series($code, $unit, $from, $to,
                                  (int)($_GET['limit'] ?? 4000), $extra));
             }

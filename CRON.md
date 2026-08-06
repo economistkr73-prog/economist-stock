@@ -385,7 +385,21 @@ if (class_exists('Notify')) {
 3. 제목에서 키워드 TOP 20 추출
 4. `market_trend_snapshots` + `market_trend_keywords` 저장
 
-**★ 시각에 따라 소스가 갈린다** (`get_real_time_data_from_naver` 내부, 분 단위 `$t` 비교):
+> ## ★★ NXT 는 껐다 (2026-08-06 · `NaverFinanceAPI::USE_NXT = false`)
+>
+> 아래 「NXT 경로」 서술은 **끄기 전 동작의 기록**이다. 지금은 NXT 창(08:00~08:49 · 15:31~20:00) fire 가
+> 시세 갱신을 **건너뛴다** — 즉 **08:05 · 17:05 · 19:05 는 시세를 안 건드린다**(그 회차의 뉴스·키워드는 그대로 돈다).
+>
+> **왜** — `all_stock_info` 는 사이트 전 화면이 읽는 단일 원천인데, 시간외 값이 들어오면 마감 뒤
+> **목록과 차트가 다른 말을 한다**(실측 목록 231,500 vs 분봉·일봉 230,500). 기준을 **정규장 하나**로 뒀다.
+>
+> **그래서 달라지는 것** — 마감 뒤 종가는 **`job=eod`(15:50)** 가 넣는 값으로 굳고, 그 뒤로는 안 움직인다.
+> 즉 `job=eod` 는 이제 「NXT 가 못 훑는 구멍을 메우는」 잡이 아니라 **종가를 확정하는 유일한 잡**이다 —
+> 지우거나 15:30 이전으로 당기면 전종목 종가가 통째로 틀어진다.
+>
+> 되살리려면 상수 하나(`USE_NXT`)만 true 로 바꾼다. `update_stock_price_from_nxt()`·`getAllNxtSise()` 는 지우지 않았다.
+
+**★ 시각에 따라 소스가 갈린다** (`get_real_time_data_from_naver` 내부, 분 단위 `$t` 비교 · **끄기 전 기록**):
 - `$t >= 480 && $t < 530` = **08:00~08:49** / `$t > 930 && $t <= 1200` = **15:31~20:00**
   → `update_stock_price_from_nxt()` = NXT 장외 시세(`nxt_sise_market_sum.naver`), **UPDATE 만** 함
 - 그 밖의 시각 → 정규 `getAllNaverStocks(KOSPI/KOSDAQ)` + `getAllNaverEtfs()`, **INSERT…ON DUP + DELETE NOT IN**
@@ -404,6 +418,27 @@ if (class_exists('Notify')) {
 → 그 구멍을 메우는 것이 §3.1의 **`job=eod`(15:50)** 이다. **eod 를 지우거나 시각을 15:30 이전으로 당기면 전종목 종가가 다시 틀어진다.**
 
 > 대안으로 이 크론에 `15,16` 시 fire를 추가해도 15:31~20:00은 NXT 창이라 604종목만 받는다. **NXT 창 판정 자체를 고치지 않는 한 `job=eod` 가 유일한 해법**이다.
+
+**★ 위 표에는 마감 문제만 적혀 있었는데, 같은 원인이 «장중»에도 있다 (2026-08-06).**
+정규 경로의 장중 fire 는 **09:05 · 11:05 · 13:05 · 15:05 넷뿐**이다 — 즉 **14:50 에 화면을 열면 13:05 값**이고,
+장중 시세가 최대 **약 2시간** 낡는다. 화면이 자기 타이머로 새로고침해도 **DB를 다시 읽을 뿐**이라 같은 값이 온다.
+단타에서 「차트와 옆 목록의 현재가가 다른 말을 한다」로 드러났다.
+
+→ **크론을 늘려 풀지 않았다.** 전종목을 촘촘히 받으면 28콜 × 10초 = 하루 1만 콜이라 §4 의 IP 차단 위험에 걸린다.
+대신 **「보는 종목만 촘촘히 · 전종목은 성기게」** 로 갈랐다:
+
+| 층 | 대상 | 어떻게 | 주기 |
+|----|------|--------|------|
+| 화면 | `Dt::targetCodes()`(단타 풀 ∪ 보유 · 실측 34종목) | **키움 `ka10095`** — `Dt::refreshQuotesLive()` · 실패 시 네이버 폴백 | `Dt::TICK_SEC`(10초) |
+| 크론 | 전종목 2,751 | `stock_news`(평일 9회) + `dart_eod`(마감 메우기) | 그대로 |
+
+- 구현은 크론이 아니다 — `stock/api.php` `module=dt` 의 `pool_list`/`held_list` 가 응답 전에 지난다
+  (cron-job.org 는 최소 주기가 1분이라 10초를 크론으로 만들 수 없고, **안 보는 종목을 받을 이유도 없다**).
+- ★신선도 판정은 `NaverFinanceAPI::staleCutoff()` **단일본**을 키움·네이버 경로가 둘 다 본다.
+- ★휴장일·장 밖에서는 서버가 아예 안 나간다(`Dt::isTradingDay()`) — 없으면 **토요일에 화면을 열어 둔 것만으로**
+  10초마다 콜이 나간다.
+- ⚠**나머지 2,700여 종목은 여전히 크론 주기다.** 탐색 화면(상위 종목·퀀트·스크리너)의 현재가를 초 단위로 믿지 않는다.
+- ⚠**ETF(`all_etf_price`)에는 이 경로가 없다** — 아래 §5 의 ETF 항목 참조.
 
 **★ 위험**: 정규 경로는 저장 후 `DELETE FROM all_stock_info WHERE stock_code NOT IN (받은 코드들)` 를 실행한다. 네이버가 부분 응답을 주면 **종목이 통째로 사라진다.** `all_stock_info` 를 새 기능의 원천으로 쓸 때 반드시 기억할 것.
 
@@ -750,7 +785,7 @@ php cron/dt_min.php job=heal                구멍만 치유
 
 | 테이블 | 쓰는 크론 | 주의 |
 |--------|-----------|------|
-| `all_stock_info` | `keyword_collector`(stock_etf_news, **평일 9회**) / `dart_collect`(quotes·eod) | ★ **주가의 단일 원천.** ① 정규 경로에 `DELETE … NOT IN` 있음 ② **정규 fire 마지막이 15:05**, 그 뒤는 NXT(604종목)라 2,154종목 종가는 `job=eod`(15:50)가 메운다 ③ **주말 미갱신** ④ `uDate=NOW()` 명시 필수(`ON UPDATE CURRENT_TIMESTAMP` 는 값이 안 바뀌면 발동 안 해 거래정지 종목이 영원히 "낡음") |
+| `all_stock_info` | `keyword_collector`(stock_etf_news, **평일 6회** — NXT 창 3회는 건너뜀) / `dart_collect`(quotes·eod) / **단타 화면**(`Dt::refreshQuotesLive` · 대상 종목만 · 키움) | ★ **주가의 단일 원천.** ① 정규 경로에 `DELETE … NOT IN` 있음 ② **정규 fire 마지막이 15:05** → **종가는 `job=eod`(15:50)가 확정한다**(NXT 를 껐으므로 그 뒤로는 안 움직인다) ③ **주말 미갱신** ④ `uDate=NOW()` 명시 필수(`ON UPDATE CURRENT_TIMESTAMP` 는 값이 안 바뀌면 발동 안 해 거래정지 종목이 영원히 "낡음") ⑤ ★**15:30~15:35 에 `uDate` 를 찍지 말 것** — `staleCutoff()` 의 「오늘 15:30 이전」 조건 밖이라 영원히 신선으로 판정돼 `job=eod` 가 건너뛴다(실측으로 33종목 종가가 굳었다) |
 | `all_etf_price` / `all_etf_info` / `all_etf_holdings_info` | `keyword_collector`(stock_etf_news / etf_update) | – |
 | `krx_daily` | `dart_collect`(krx) | **상장주식수 + 거래종목 판정** 전담. `close_prc` 는 폴백 전용 |
 | `stock_financial` | `dart_collect`(fresh·quarter) | 분기는 **누적(YTD)** 저장. 규칙 `thstrm_add ?? thstrm` |

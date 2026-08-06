@@ -142,14 +142,37 @@ function api_stock(string $action, PDO $pdo): void
             if (!in_array($want, [160, 240, 480, 1000], true)) $want = $want >= 240 ? 240 : 160;
             $cal = (int)ceil($want * 1.55) + 10;     // 영업일 확보용 달력일수(주말·휴일 버퍼 포함)
 
-            $api = new NaverFinanceAPI();
-            $res = $api->getDailyOhlc($code, $cal);
-            if (isset($res['error']) || !isset($res['success'])) { echo json_encode([]); return; }
+            /* ★수집 대상(단타 풀 ∪ 보유 · 최대 100종목)은 <b>키움</b>으로 받는다 (2026-08-06 사용자 지시).
+             *
+             * 왜 — 같은 종목이 화면마다 다른 값을 말했다(실측: 1분봉 230,000 · 일봉 230,250 ·
+             * 3분봉 246,000). 소스가 셋(네이버 분봉 · 네이버 fchart 일봉 · 원장)이었기 때문이다.
+             * 현재가·분봉을 키움으로 옮겼으니 일봉도 같이 옮겨야 <b>한 화면이 한 값</b>을 말한다.
+             *
+             * ★과거 차트는 안 바뀐다 — ka10081 실측에서 네이버와 과거 7거래일 종가·거래량이
+             *   <b>전부 일치</b>했다(어긋난 건 장중인 오늘 하나뿐, 그것도 받은 시점 차이).
+             * ★대상이 아닌 종목은 <b>그대로 네이버</b>다 — 전종목을 키움에 걸면 1 req/s 라
+             *   종목을 훑을 때마다 1초씩 밀리고, 키움이 죽으면 전 화면 차트가 함께 죽는다.
+             * ★실패하면 네이버로 떨어진다(아래 if 가 그 폴백이다). */
+            $rows = [];
+            try {
+                $dtc = new Dt($pdo);
+                if (in_array($code, $dtc->targetCodes(), true)) {
+                    $kw = new Kiwoom($pdo);
+                    if ($kw->hasKey()) $rows = $kw->daily($code, $want);
+                }
+            } catch (Throwable $e) { $rows = []; }
+
+            if (!$rows) {
+                $api = new NaverFinanceAPI();
+                $res = $api->getDailyOhlc($code, $cal);
+                if (isset($res['error']) || !isset($res['success'])) { echo json_encode([]); return; }
+                $rows = $res['success'];
+            }
 
             // 최근 N영업일만 (오름차순 유지)
-            $rows = $res['success'];
             if (count($rows) > $want) $rows = array_slice($rows, -$want);
             $rows = array_values($rows);
+            if (!$rows) { echo json_encode([]); return; }
 
             /* 실제 거래대금(KRX) 병합 — 있는 날만 'a' 로 실어 보낸다.
              * 네이버 일봉엔 거래대금이 없어 지표 엔진이 「종가×거래량」으로 근사하는데,

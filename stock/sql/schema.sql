@@ -54,6 +54,22 @@ CREATE TABLE IF NOT EXISTS pf_principal_flow (
     REFERENCES pf_portfolio(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- 손익성 입출금 이력 — 체결기록으로는 만들 수 없는 돈 (들어오면 +, 나가면 −)
+--   kind = carry(이월 실현손익) · dividend(배당금) · etc(기타·세금 등)
+--   ★ pf_principal_flow 와 다른 표다: 원금은 수익률의 분모, 이건 분자다.
+CREATE TABLE IF NOT EXISTS pf_income_flow (
+  id           INT AUTO_INCREMENT PRIMARY KEY,
+  portfolio_id INT          NOT NULL,
+  flow_at      DATE         NOT NULL,
+  kind         VARCHAR(12)  NOT NULL DEFAULT 'dividend',
+  amount       BIGINT       NOT NULL DEFAULT 0,
+  reason       VARCHAR(80)  NOT NULL DEFAULT '',
+  created_at   DATETIME     NOT NULL,
+  KEY idx_pf_iflow (portfolio_id, flow_at, id),
+  CONSTRAINT fk_pf_iflow FOREIGN KEY (portfolio_id)
+    REFERENCES pf_portfolio(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- 시뮬레이터에 올린 일자별 종가. [["2015-07-24",306000], ...] 형태로 통째 보관한다.
 --   종목코드가 키다 (종목당 1건). 같은 종목을 다시 올리면 시세만 갈아끼운다.
 --   수익률 같은 결과는 저장하지 않는다 — 조건만 들고 있다가 볼 때마다 다시 계산한다.
@@ -148,6 +164,7 @@ CREATE TABLE IF NOT EXISTS pf_trade (
   step_no     TINYINT       NOT NULL DEFAULT 0,    -- 매수 차수 (매도는 0)
   side        ENUM('buy','sell') NOT NULL DEFAULT 'buy',
   traded_at   DATE          NOT NULL,
+  traded_time TIME          DEFAULT NULL,          -- 체결 시각. NULL = 모른다(옛 기록)
   price       DECIMAL(14,2) NOT NULL DEFAULT 0,    -- 실체결가 (비용 제외)
   qty         INT           NOT NULL DEFAULT 0,
   memo        VARCHAR(200)  NOT NULL DEFAULT '',

@@ -173,6 +173,50 @@ function qm_stat(array $v): array
             'win' => count(array_filter($v, fn($x) => $x > 0)) / $n * 100];
 }
 
+/**
+ * ★★krx_amt 의 하루가 «어떤 날»인가 — 사후 판정에 쓸 수 있는 날인지 가른다. <b>단일본</b>.
+ *
+ * PHP 는 `(float)null`·`(float)'0'` 을 0 으로 읽으므로 o/h/l 을 그냥 쓰면 저가가 «−100%»,
+ * 고가가 «0» 으로 계산되어 <b>가짜 손절·가짜 폭락</b>이 만들어진다. 그래서 부르는 쪽은
+ * 반드시 이 함수로 날을 가르고, 0 으로 «메우지» 않는다.
+ *
+ * ★2026-08-07 전수 실측(4,724,607행)이 «결측»이라 부르던 것의 정체를 밝혔다 —
+ *   o·h·l 이 0/NULL 인 173,085행 중
+ *   ·<b>170,454행은 거래정지일</b>이다. `vol=0`·`amt=0` 이고 `c` 는 직전가를 이월한 값이다
+ *     (실측 000030 이 2019-01-09~18 내내 14800). 원장 결함이 아니라 <b>시장 사실</b>이다.
+ *     `vol=0` 인데 `h>0` 인 행은 <b>0건</b>이라 「거래량 없음」과 「고저 없음」은 같은 날을 가리킨다.
+ *   ·<b>2,631행만이 진짜 결측</b>이다 — 거래는 있었는데(`vol>0`) o/h/l 이 없다
+ *     (대부분 `src='n'` 네이버 보강분 · 당일치라 아직 고저가 안 들어온 것).
+ *
+ * 반환 — 'ok' 정상 · 'halt' 거래정지 · 'gap' 진짜 결측
+ *   ★<b>'halt' 는 «건너뛴다»</b>(2026-08-07 사용자 선택) — 그 날은 체결이 불가능했으니
+ *     판정에서 빼고 다음 날로 넘어간다. 재개 뒤의 갭은 그 날 o/h/l 에 그대로 담긴다.
+ *     ⛔신호를 통째로 빼지 않는다 — 그러면 「정지된 적 있는 종목」이 표본에서 사라져
+ *     결과가 좋은 쪽으로 기운다(생존편향 · §9).
+ *   ★'gap' 은 «판정 불가»다 — 알 수 없는 것을 0 으로 적지 않는다.
+ *
+ * ★부르는 쪽은 `vol` 을 <b>반드시 함께 읽는다</b> — 그것이 halt 와 gap 을 가르는 유일한 자다.
+ *   o/h/l 은 안 읽어 왔으면 묻지 않는다(dbofill 처럼 `h` 만 필요한 잡이 있다).
+ */
+function qm_day_kind(?array $r): string
+{
+    if (!$r) return 'gap';
+    if (!array_key_exists('vol', $r)) {
+        throw new RuntimeException('qm_day_kind: SELECT 에 vol 을 함께 넣어야 한다 (halt/gap 을 가르는 자)');
+    }
+    if ($r['vol'] === null || (float)$r['vol'] <= 0) return 'halt';
+    foreach (['o', 'h', 'l'] as $k) {
+        if (array_key_exists($k, $r) && ($r[$k] === null || (float)$r[$k] <= 0)) return 'gap';
+    }
+    return 'ok';
+}
+
+/** 그 날의 고·저·시가를 그대로 믿어도 되는가 (= 'ok' 인가) — 옛 이름을 지킨다 */
+function qm_ohlc_ok(?array $r): bool
+{
+    return qm_day_kind($r) === 'ok';
+}
+
 /** Welch t — 표본이 크면 |t|>2 가 관행적 눈금이다. «유의»를 단정하지 않는다 */
 function qm_welch(array $a, array $b): ?float
 {
@@ -988,7 +1032,8 @@ case 'work': {
             $keep = $pdo->prepare("UPDATE qm_task t SET t.state=2, t.lock_at=NULL, t.upd_at=NOW()
                                     WHERE t.code=? AND t.state=1
                                       AND EXISTS(SELECT 1 FROM qm_bar b
-                                                  WHERE b.code=t.code AND DATE(b.ts)=t.d)");
+                                                  WHERE b.code=t.code
+                                                    AND b.ts >= t.d AND b.ts < t.d + INTERVAL 1 DAY)");
             $keep->execute([$code]);
             $up = $pdo->prepare("UPDATE qm_task SET state=IF(tries+1 >= ?, 9, 0), tries=tries+1,
                                         err=?, lock_at=NULL, upd_at=NOW()
@@ -1115,7 +1160,8 @@ case 'reset': {
                                 t.err='봉 유실 — 재수집', t.lock_at=NULL, t.upd_at=NOW()
                           WHERE t.state=2
                             AND NOT EXISTS(SELECT 1 FROM qm_bar b
-                                            WHERE b.code=t.code AND DATE(b.ts)=t.d)");
+                                            WHERE b.code=t.code
+                                              AND b.ts >= t.d AND b.ts < t.d + INTERVAL 1 DAY)");
     $st->execute();
     say('① 완료인데 봉 없음 → 대기로: ' . $st->rowCount() . '건');
 
@@ -1155,9 +1201,14 @@ case 'verify': {
     /* ★「완료인데 봉이 없다」 — 이 검사가 없으면 손실이 조용히 통과한다.
      *   실제로 그랬다(2026-08-05 · 179건). 종목 봉을 통째로 지우면서 이미 끝난 날짜를
      *   함께 잠그지 않아, 지운 뒤 다시 넣은 것이 «대기분»뿐이었다. */
+    /* ★날짜 대조는 «범위»로 적는다 — `DATE(b.ts)=t.d` 는 봉마다 함수를 씌우느라
+     *   qm_bar 의 PK(code,ts)를 못 타고 1,900만 행을 통째로 훑는다. 실제로 그 형태의
+     *   `job=reset` 이 900초 예산 안에 못 끝나고 죽었다(2026-08-06 · 봉 1,900만 시점).
+     *   범위로 바꾸면 PK 구간 탐색이 되고 뜻은 똑같다(ts 는 DATETIME). */
     $orphan = (int)$pdo->query("SELECT COUNT(*) FROM qm_task t WHERE t.state=2
                                   AND NOT EXISTS(SELECT 1 FROM qm_bar b
-                                                  WHERE b.code=t.code AND DATE(b.ts)=t.d)")
+                                                  WHERE b.code=t.code
+                                                    AND b.ts >= t.d AND b.ts < t.d + INTERVAL 1 DAY)")
                        ->fetchColumn();
     $chk('★완료인데 봉이 없음', $orphan === 0, $orphan . '건 (job=reset 으로 되돌린다)');
 
@@ -1180,7 +1231,8 @@ case 'verify': {
     // 이벤트일 봉 존재율
     $r = $pdo->query("SELECT COUNT(*) tot,
                              SUM(EXISTS(SELECT 1 FROM qm_bar b
-                                         WHERE b.code=e.code AND DATE(b.ts)=e.d)) has
+                                         WHERE b.code=e.code
+                                           AND b.ts >= e.d AND b.ts < e.d + INTERVAL 1 DAY)) has
                         FROM qm_event e")->fetch(PDO::FETCH_ASSOC);
     $chk('이벤트일 봉 존재', (int)$r['tot'] > 0 && (int)$r['has'] === (int)$r['tot'],
          $r['has'] . '/' . $r['tot'] . ' — 없는 이벤트는 분석 불가(q_bars_full=0)');
@@ -1194,7 +1246,8 @@ case 'verify': {
 
     // 이벤트일 고가 ≥ 종가 검산
     $st = $pdo->query("SELECT e.code, e.d, e.close_prc, MAX(b.h) mh
-                         FROM qm_event e JOIN qm_bar b ON b.code=e.code AND DATE(b.ts)=e.d
+                         FROM qm_event e JOIN qm_bar b ON b.code=e.code
+                                             AND b.ts >= e.d AND b.ts < e.d + INTERVAL 1 DAY
                         WHERE {$skipBasis}
                         GROUP BY e.code, e.d, e.close_prc HAVING mh < e.close_prc LIMIT 20");
     $bad = $st->fetchAll(PDO::FETCH_ASSOC);
@@ -1925,11 +1978,15 @@ case 'dbuild': {
         q_split TINYINT NOT NULL DEFAULT 0 COMMENT '★D~D+20 상장주식수 변동 — 수익률이 거짓이 된다',
         q_halt  TINYINT NOT NULL DEFAULT 0 COMMENT 'D+1~D+5 에 거래 없는 날',
         q_noname TINYINT NOT NULL DEFAULT 0 COMMENT '★이름을 못 찾음(대개 상장폐지) — 스팩/ETN 필터가 적용 안 됨',
+        q_ohlc  TINYINT NOT NULL DEFAULT 0 COMMENT '★진짜 결측(거래는 있었는데 o/h/l 없음)이 이벤트일 또는 사후 창에 있음',
         made_at DATETIME NOT NULL,
         PRIMARY KEY (code, d), KEY ix_yr (yr), KEY ix_d (d)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
     try { $pdo->exec("ALTER TABLE qm_dday ADD COLUMN IF NOT EXISTS q_noname TINYINT NOT NULL DEFAULT 0"); }
     catch (Throwable $e) {}
+    /* ★표가 이미 있으면 CREATE IF NOT EXISTS 는 건너뛴다 — 컬럼 추가는 «prepare 전에» 따로 한다 */
+    try { $pdo->exec("ALTER TABLE qm_dday ADD COLUMN IF NOT EXISTS q_ohlc TINYINT NOT NULL DEFAULT 0"); }
+    catch (Throwable $e) { say('  (q_ohlc 추가 실패: ' . $e->getMessage() . ')'); }
 
     $etf   = qm_etf_codes($pdo);
     /* 이름은 두 곳에서 모은다 — all_stock_info(현재 상장) + krx_daily(상장폐지 잔재).
@@ -1954,13 +2011,24 @@ case 'dbuild': {
 
     $sel = $pdo->prepare("SELECT d,o,h,l,c,vol,amt,list_shrs,mkt FROM krx_amt
                            WHERE code=? AND c>0 ORDER BY d");
+    /* ★ON DUPLICATE 는 «다시 계산한 칸을 전부» 덮는다 — 2026-08-07 이전에는 yr·q_noname 만 갱신해서
+     *   계산을 고쳐도 이미 있는 행이 옛 값을 그대로 들고 있었다(다시 채워도 아무 일이 없었다). */
     $ins = $pdo->prepare("INSERT INTO qm_dday
         (code,d,yr,name,mkt,chg_pct,close_prc,prev_prc,amt,
          f_open_gap,f_close_vs_high,f_range_pct,f_pre_vol_mult,f_amt_mult,f_pre_ret,
          f_nd_open_ret,f_nd_high_ret,f_nd_close_ret,f_d5_ret,f_d20_ret,
-         f_post_mdd,f_post_mfe,n_post,q_split,q_halt,q_noname,made_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
-        ON DUPLICATE KEY UPDATE yr=VALUES(yr), q_noname=VALUES(q_noname), made_at=NOW()");
+         f_post_mdd,f_post_mfe,n_post,q_split,q_halt,q_noname,q_ohlc,made_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
+        ON DUPLICATE KEY UPDATE yr=VALUES(yr), name=VALUES(name), mkt=VALUES(mkt),
+            chg_pct=VALUES(chg_pct), close_prc=VALUES(close_prc), prev_prc=VALUES(prev_prc),
+            amt=VALUES(amt), f_open_gap=VALUES(f_open_gap), f_close_vs_high=VALUES(f_close_vs_high),
+            f_range_pct=VALUES(f_range_pct), f_pre_vol_mult=VALUES(f_pre_vol_mult),
+            f_amt_mult=VALUES(f_amt_mult), f_pre_ret=VALUES(f_pre_ret),
+            f_nd_open_ret=VALUES(f_nd_open_ret), f_nd_high_ret=VALUES(f_nd_high_ret),
+            f_nd_close_ret=VALUES(f_nd_close_ret), f_d5_ret=VALUES(f_d5_ret),
+            f_d20_ret=VALUES(f_d20_ret), f_post_mdd=VALUES(f_post_mdd), f_post_mfe=VALUES(f_post_mfe),
+            n_post=VALUES(n_post), q_split=VALUES(q_split), q_halt=VALUES(q_halt),
+            q_noname=VALUES(q_noname), q_ohlc=VALUES(q_ohlc), made_at=NOW()");
 
     $nEv = 0; $nCode = 0; $excl = ['우선주'=>0,'스팩'=>0,'ETF'=>0,'ETN'=>0,'이름없음'=>0,'신규상장'=>0,'분할일'=>0];
     $pdo->beginTransaction();
@@ -2003,14 +2071,24 @@ case 'dbuild': {
             $c5   = $i >= 5 ? (float)$s[$i - 5]['c'] : 0;
 
             // ── 사후 (있는 만큼만 · 없으면 NULL) ──
+            /* ★날을 «가른 뒤» 잰다 (qm_day_kind 주석) — 거래정지일은 고·저가 아예 없고(0),
+             *   그대로 쓰면 저가 −100%·고가 0 이 되어 가짜 폭락이 만들어진다.
+             *   정지일·결측일은 최고/최저 계산에서 «빼고», 있었다는 사실만 표시한다. */
             $post = array_slice($s, $i + 1, 5);
             $nPost = count($post);
-            $lo = $hi = null; $halt = 0;
+            $lo = $hi = null; $halt = 0; $gapPost = 0;
             foreach ($post as $p) {
+                $dk = qm_day_kind($p);
+                if ($dk === 'halt') { $halt = 1;    continue; }
+                if ($dk === 'gap')  { $gapPost = 1; continue; }
                 $lo = $lo === null ? (float)$p['l'] : min($lo, (float)$p['l']);
                 $hi = $hi === null ? (float)$p['h'] : max($hi, (float)$p['h']);
-                if ((float)$p['vol'] <= 0) $halt = 1;
             }
+            /* 이벤트일 자체 — 거래대금 하한을 넘겼으니 정지일일 수는 없지만 결측일 수는 있다 */
+            $evOk = qm_day_kind($cur) === 'ok';
+            /* 「그 날 종가에 팔았다」는 칸들 — 그 날이 정지면 이월된 값이라 «팔 수 없던 값»이다 */
+            $p0ok = $nPost >= 1 && qm_day_kind($post[0]) === 'ok';
+            $p4ok = $nPost >= 5 && qm_day_kind($post[4]) === 'ok';
             /* ★수정주가가 아니다 — krx_amt 는 «그 날 있던 값»이라 분할이 끼면 수익률이 통째로 거짓이 된다.
              *   D~D+20 안에서 상장주식수가 흔들리면 표시해 둔다(빼지 않는다 · §9). */
             $split = 0;
@@ -2018,26 +2096,28 @@ case 'dbuild': {
                 $x = (int)$s[$k]['list_shrs'];
                 if ($ls > 0 && $x > 0 && abs($x / $ls - 1) > 0.05) { $split = 1; break; }
             }
-            $d20 = isset($s[$i + 20]) ? (float)$s[$i + 20]['c'] : null;
+            /* D+20 도 «그 날 팔 수 있었나»를 묻는다 — 정지일이면 이월된 값이라 비운다 */
+            $d20 = isset($s[$i + 20]) && qm_day_kind($s[$i + 20]) === 'ok'
+                ? (float)$s[$i + 20]['c'] : null;
 
             $r2 = fn($x) => $x === null ? null : round($x, 2);
             $ins->execute([
                 $code, $cur['d'], (int)substr($cur['d'], 0, 4), $nm, (string)$cur['mkt'],
                 round($chg, 2), (int)$cc, (int)$pc, (int)$cur['amt'],
-                $r2(((float)$cur['o'] / $pc - 1) * 100),
-                (float)$cur['h'] > 0 ? $r2(($cc / (float)$cur['h'] - 1) * 100) : null,
-                $r2((((float)$cur['h'] - (float)$cur['l']) / $pc) * 100),
+                $evOk ? $r2(((float)$cur['o'] / $pc - 1) * 100) : null,
+                $evOk ? $r2(($cc / (float)$cur['h'] - 1) * 100) : null,
+                $evOk ? $r2((((float)$cur['h'] - (float)$cur['l']) / $pc) * 100) : null,
                 $vAvg > 0 ? round((float)$cur['vol'] / $vAvg, 3) : null,
                 $aAvg > 0 ? round((float)$cur['amt'] / $aAvg, 3) : null,
                 $c5 > 0 ? $r2(($pc / $c5 - 1) * 100) : null,
-                $nPost ? $r2(((float)$post[0]['o'] / $cc - 1) * 100) : null,
-                $nPost ? $r2(((float)$post[0]['h'] / $cc - 1) * 100) : null,
-                $nPost ? $r2(((float)$post[0]['c'] / $cc - 1) * 100) : null,
-                $nPost >= 5 ? $r2(((float)$post[4]['c'] / $cc - 1) * 100) : null,
+                $p0ok ? $r2(((float)$post[0]['o'] / $cc - 1) * 100) : null,
+                $p0ok ? $r2(((float)$post[0]['h'] / $cc - 1) * 100) : null,
+                $p0ok ? $r2(((float)$post[0]['c'] / $cc - 1) * 100) : null,
+                $p4ok ? $r2(((float)$post[4]['c'] / $cc - 1) * 100) : null,
                 $d20 !== null ? $r2(($d20 / $cc - 1) * 100) : null,
                 $lo !== null ? $r2(($lo / $cc - 1) * 100) : null,
                 $hi !== null ? $r2(($hi / $cc - 1) * 100) : null,
-                $nPost, $split, $halt, $noName,
+                $nPost, $split, $halt, $noName, ($gapPost || !$evOk) ? 1 : 0,
             ]);
             $nEv++;
         }
@@ -2050,6 +2130,12 @@ case 'dbuild': {
     foreach ($excl as $k => $v) if ($v) say(sprintf('  − %-8s %s종목', $k, number_format($v)));
     $r = $pdo->query("SELECT yr, COUNT(*) n FROM qm_dday GROUP BY yr ORDER BY yr")->fetchAll(PDO::FETCH_KEY_PAIR);
     say('  연도별: ' . json_encode($r));
+    $qh = $pdo->query("SELECT SUM(q_halt) h, SUM(q_ohlc) g, SUM(f_post_mdd < -99) m FROM qm_dday")
+              ->fetch(PDO::FETCH_ASSOC);
+    say(sprintf('  ★사후에 거래정지일 %s건 · 진짜 결측 %s건 — 둘 다 «표시하고 남긴다»(빼면 생존편향)',
+        number_format((int)$qh['h']), number_format((int)$qh['g'])));
+    say('  ★사후 최대낙폭 −99%↓ ' . number_format((int)$qh['m'])
+        . '건 — 0 이어야 한다(그것이 정지일을 0 으로 읽던 가짜 폭락이다)');
     $mb = $pdo->query("SELECT ROUND((data_length+index_length)/1024/1024,1) FROM information_schema.tables
                         WHERE table_schema=DATABASE() AND table_name='qm_dday'")->fetchColumn();
     say('  qm_dday ' . $mb . ' MB');
@@ -2149,6 +2235,1403 @@ case 'danalyze': {
     say('');
     say('  통계적 사실만 적는다. 투자 판단·매매 규칙은 여기서 만들지 않는다.');
     say('  ⛔일봉으론 못 보는 것: 도달 «시각» · 첫 30분 몰림 · VWAP · 재돌파. 그건 분봉만 답한다.');
+    break;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  job=dbofill — 「신고가 돌파」 진입 조건을 qm_dday 에 채운다. API 콜 0 · 멱등
+//
+//  묻는 것: 「거래량 N일 평균의 x배 + 등락률 10%↑ + 종가가 최근 60/120일 고가 돌파」
+//           를 진입으로 잡으면 어떤가.
+//  ★등락률 10%↑ 와 거래대금 100억↑ 은 qm_dday 가 «이미» 그 표본이다 — 여기서 더하지 않는다.
+//
+//  ★★자료가 모자라면 0 이 아니라 NULL 이다. 상장 80일짜리 종목에 120일 돌파를 0/1 로 적으면
+//    「돌파 못 했다」로 세어져 비돌파 군이 신규상장으로 오염된다(§9 가 금지한 조용한 왜곡).
+// ══════════════════════════════════════════════════════════════════════════
+case 'dbofill': {
+    foreach ([
+        'f_hi60_brk'   => "TINYINT NULL COMMENT '종가가 직전 60거래일 최고가 초과=1 · 자료부족 NULL'",
+        'f_hi120_brk'  => "TINYINT NULL COMMENT '종가가 직전 120거래일 최고가 초과=1 · 자료부족 NULL'",
+        'f_hi60_over'  => "DECIMAL(6,2) NULL COMMENT '종가/직전 60일 최고가-1 (%)'",
+        'f_hi120_over' => "DECIMAL(6,2) NULL COMMENT '종가/직전 120일 최고가-1 (%)'",
+        'f_vol_mult20' => "DECIMAL(8,3) NULL COMMENT '거래량/직전 20일 평균'",
+        'f_vol_mult60' => "DECIMAL(8,3) NULL COMMENT '거래량/직전 60일 평균'",
+    ] as $c => $def) {
+        try { $pdo->exec("ALTER TABLE qm_dday ADD COLUMN IF NOT EXISTS {$c} {$def}"); }
+        catch (Throwable $e) { say('  (컬럼 ' . $c . ' 추가 실패: ' . $e->getMessage() . ')'); }
+    }
+
+    $codes = $pdo->query("SELECT DISTINCT code FROM qm_dday ORDER BY code")->fetchAll(PDO::FETCH_COLUMN);
+    say('신고가 돌파 조건 계산 — 종목 ' . number_format(count($codes)) . '개 · API 콜 0');
+    say('★자료가 60(120)거래일에 못 미치면 NULL 로 둔다 — 0 으로 적으면 비돌파 군이 오염된다.');
+
+    /* dbuild 와 «같은 계열»을 봐야 한다 — 거기도 c>0 로 걸러 훑었다.
+     * 다르게 걸면 「직전 60거래일」이 두 잡에서 다른 날을 가리킨다. */
+    $sel = $pdo->prepare("SELECT d,h,vol FROM krx_amt WHERE code=? AND c>0 ORDER BY d");
+    $tgt = $pdo->prepare("SELECT d, close_prc FROM qm_dday WHERE code=?");
+    $upd = $pdo->prepare("UPDATE qm_dday SET f_hi60_brk=?, f_hi120_brk=?, f_hi60_over=?,
+                                 f_hi120_over=?, f_vol_mult20=?, f_vol_mult60=?
+                           WHERE code=? AND d=?");
+
+    $nRow = 0; $n60 = 0; $n120 = 0; $nNull120 = 0;
+    $nUnk = 0;              // 결측이 껴 «돌파인지 모른다»로 비운 판정
+    $pdo->beginTransaction();
+    foreach ($codes as $ci => $code) {
+        $sel->execute([$code]);
+        $s = $sel->fetchAll(PDO::FETCH_ASSOC);
+        if (!$s) continue;
+        $idx = [];
+        foreach ($s as $i => $r) $idx[$r['d']] = $i;
+
+        $tgt->execute([$code]);
+        foreach ($tgt->fetchAll(PDO::FETCH_ASSOC) as $t) {
+            $i = $idx[$t['d']] ?? null;
+            if ($i === null) continue;                      // 원장에서 사라진 날 — 건드리지 않는다
+            $cc = (float)$t['close_prc'];
+
+            /* 직전 W거래일의 «고가» 최고 — 오늘은 뺀다.
+             * ★오늘을 넣으면 종가 ≤ 당일고가 라 돌파가 영영 성립하지 않는다
+             *   (분봉 「직전고가」 규칙과 같은 이유 — CLAUDE.md 차트 절).
+             * ★★창 안에 «진짜 결측»(거래는 있었는데 고가를 모르는 날)이 있으면 최고가는
+             *   «하한»일 뿐이다 — 실제 최고는 그보다 높을 수 있다. 그래서 두 번째 값으로
+             *   그 사실을 함께 돌려준다. 거래정지일은 고가가 «없는 게 사실»이라 그냥 지나간다. */
+            $peak = function (int $w) use ($s, $i) {
+                if ($i < $w) return [null, false];          // 자료 부족 — 0 이 아니라 없음
+                $m = 0.0; $lower = false;
+                for ($k = $i - $w; $k < $i; $k++) {
+                    if (qm_day_kind($s[$k]) === 'gap') { $lower = true; continue; }
+                    $m = max($m, (float)$s[$k]['h']);
+                }
+                return [$m > 0 ? $m : null, $lower];
+            };
+            $vmult = function (int $w) use ($s, $i) {
+                if ($i < $w) return null;
+                $sum = 0.0;
+                for ($k = $i - $w; $k < $i; $k++) $sum += (float)$s[$k]['vol'];
+                $avg = $sum / $w;
+                return $avg > 0 ? round((float)$s[$i]['vol'] / $avg, 3) : null;
+            };
+
+            /* ★결측이 낀 창은 «비돌파만» 확정할 수 있다 — 못 본 날의 고가는 최고를 올릴 수만 있으니
+             *   종가가 이미 그 하한에 못 미치면 결측이 어떻든 비돌파다. 반대로 넘었다면 «모른다»(NULL).
+             *   초과폭(%)은 최고가 자체가 하한이라 어느 쪽이든 적을 수 없다. */
+            $judge = function (array $pk) use ($cc, &$nUnk) {
+                [$p, $lower] = $pk;
+                if ($p === null) return [null, null];
+                if (!$lower)     return [$cc > $p ? 1 : 0, round(($cc / $p - 1) * 100, 2)];
+                if ($cc > $p)    { $nUnk++; return [null, null]; }
+                return [0, null];
+            };
+            [$b60,  $o60]  = $judge($peak(60));
+            [$b120, $o120] = $judge($peak(120));
+            $upd->execute([$b60, $b120, $o60, $o120, $vmult(20), $vmult(60), $code, $t['d']]);
+            $nRow++;
+            if ($b60 === 1)     $n60++;
+            if ($b120 === 1)    $n120++;
+            if ($b120 === null) $nNull120++;
+        }
+        if ($ci % 300 === 0) { $pdo->commit(); $pdo->beginTransaction(); }
+    }
+    $pdo->commit();
+
+    say('');
+    say(sprintf('  채운 행 %s · 60일 돌파 %s (%.1f%%) · 120일 돌파 %s (%.1f%%)',
+        number_format($nRow), number_format($n60), $nRow ? $n60 / $nRow * 100 : 0,
+        number_format($n120), $nRow ? $n120 / $nRow * 100 : 0));
+    say(sprintf('  120일 자료부족(NULL) %s건 — 상장 120거래일 미만이라 «판정 안 함»',
+        number_format($nNull120)));
+    say(sprintf('  ★결측이 껴 «돌파인지 모른다»로 비운 판정 %s건 — 못 본 날의 고가는 최고를 올릴 수만'
+        . ' 있어 「비돌파」는 확정할 수 있지만 「돌파」는 확정할 수 없다', number_format($nUnk)));
+    say('  ※거래정지일(vol=0)은 «고가가 없는 것이 사실»이라 그냥 지나간다 — 결측과 다르다.');
+    break;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  job=dbo — 신고가 돌파 진입의 일봉 검정. qm_dday 만 읽는다 · API 콜 0
+//
+//  ⛔규율은 danalyze 와 같다(§9). 여기에 더해 <b>오늘 배운 것</b>을 반드시 지킨다 —
+//    ★★「상한가 분해」를 빼놓지 않는다. 08-06 실측: 「상단마감 우위」의 정체가 상한가였고
+//      그 절반은 종가에 «살 수 없었다». 종가 진입을 재는 표는 전부 같은 함정 위에 있다.
+// ══════════════════════════════════════════════════════════════════════════
+case 'dbo': {
+    $rows = $pdo->query("SELECT * FROM qm_dday")->fetchAll(PDO::FETCH_ASSOC);
+    $col  = fn(array $rs, string $c) => array_map(fn($r) => $r[$c] === null ? null : (float)$r[$c], $rs);
+    $num  = fn($v) => number_format((int)$v);
+
+    say('신고가 돌파 진입 검정 — 8년 일봉  (' . date('Y-m-d H:i') . ')');
+    say('진입 정의: 등락률 +' . QM_CHG_MIN . '%↑ · 거래대금 '
+        . number_format(QM_AMT_MIN / 1e8) . '억↑ · 거래량 배수 · 종가가 직전 60(120)일 고가 초과');
+    say('진입 시점 = 그 날 «종가» · 자료 `krx_amt` 2019-01-02~ · API 콜 0');
+    say('제외: 우선주·스팩·ETF·ETN·분할일·상장 60거래일 미만 / ★상장폐지는 «빼지 않는다»(생존편향)');
+
+    if (!array_key_exists('f_hi60_brk', $rows[0] ?? [])) {
+        say('★컬럼이 없다 — 먼저 job=dbofill 을 돌린다.');
+        break;
+    }
+
+    /* 분할·거래정지가 낀 건은 수익률 자체가 거짓이라 그것만 뺀다(danalyze 와 같은 기준). */
+    $clean = array_values(array_filter($rows,
+        fn($r) => (int)$r['q_split'] === 0 && (int)$r['q_halt'] === 0));
+    $isLim = fn(array $r) => (float)$r['chg_pct'] >= 29.0;   // 상한가 판정 — gap 절과 같은 자
+    $has   = fn(array $r, string $c) => $r[$c] !== null;
+
+    hr('B0. 표본 — 조건을 하나씩 걸면 몇 건이 남나');
+    say(sprintf('  %-34s %8s', '전체 급등 이벤트(10%↑·100억↑)', $num(count($rows))));
+    say(sprintf('  %-34s %8s', '  분할·거래정지 뺀 것', $num(count($clean))));
+    foreach ([60, 120] as $w) {
+        $k  = "f_hi{$w}_brk";
+        $ok = array_values(array_filter($clean, fn($r) => $has($r, $k)));
+        $br = array_values(array_filter($ok, fn($r) => (int)$r[$k] === 1));
+        $lm = count(array_filter($br, $isLim));
+        say(sprintf('  %-34s %8s  (판정가능 %s 중 %.1f%%) · 그중 상한가 %s (%.1f%%)',
+            "  {$w}일 고가 돌파", $num(count($br)), $num(count($ok)),
+            count($ok) ? count($br) / count($ok) * 100 : 0, $num($lm),
+            count($br) ? $lm / count($br) * 100 : 0));
+    }
+    say('  ※ 「판정가능」이 전체보다 적은 것은 상장 120거래일 미만을 NULL 로 두기 때문이다.');
+
+    /* 결과변수는 여섯을 나란히 본다 — 하나만 보면 「어디서 벌고 어디서 잃나」가 안 보인다. */
+    $OUT = ['익일시가' => 'f_nd_open_ret', '익일종가' => 'f_nd_close_ret',
+            'D+5' => 'f_d5_ret', 'D+20' => 'f_d20_ret',
+            '사후 최대상승' => 'f_post_mfe', '사후 최대낙폭' => 'f_post_mdd'];
+
+    $table = function (array $g, string $label) use ($OUT, $col, $num) {
+        say(sprintf('    %-14s n=%6s', $label, $num(count($g))));
+        foreach ($OUT as $nm => $c) {
+            $s = qm_stat($col($g, $c));
+            if (!$s['n']) { say(sprintf('      %-14s n=0', $nm)); continue; }
+            say(sprintf('      %-14s n=%6d  평균 %7.2f%%  중앙 %7.2f%%  양(+) %5.1f%%%s',
+                $nm, $s['n'], $s['mean'], $s['med'], $s['win'],
+                $s['n'] < 30 ? '  ←n 30 미만 결론 보류' : ''));
+        }
+    };
+    /* 두 군의 «같은» 결과변수를 견준다 — 차이와 t 를 함께 적는다(§9 ②③) */
+    $cmp = function (array $a, array $b, string $la, string $lb) use ($OUT, $col) {
+        say(sprintf('      %-14s %10s %10s %10s %8s', '', $la, $lb, '차이(%p)', 'Welch t'));
+        foreach ($OUT as $nm => $c) {
+            $sa = qm_stat($col($a, $c)); $sb = qm_stat($col($b, $c));
+            if (!($sa['n'] ?? 0) || !($sb['n'] ?? 0)) continue;
+            $t = qm_welch($sa, $sb);
+            say(sprintf('      %-14s %9.2f%% %9.2f%% %+9.2f%%p %8s%s', $nm,
+                $sa['mean'], $sb['mean'], $sa['mean'] - $sb['mean'],
+                $t === null ? '-' : sprintf('%.2f', $t),
+                ($t !== null && abs($t) <= 2) ? '  (|t| 2 이하 — 주장 안 함)' : ''));
+        }
+    };
+
+    foreach ([60, 120] as $w) {
+        $k  = "f_hi{$w}_brk";
+        $ok = array_values(array_filter($clean, fn($r) => $has($r, $k)));
+        $br = array_values(array_filter($ok, fn($r) => (int)$r[$k] === 1));
+        $nb = array_values(array_filter($ok, fn($r) => (int)$r[$k] === 0));
+
+        hr("B1-{$w}. {$w}일 고가 돌파 vs 비돌파  (n=" . number_format(count($ok)) . ')');
+        $cmp($br, $nb, '돌파', '비돌파');
+
+        /* ★★상한가 분해 — 오늘의 교훈. 종가 진입은 상한가에서 «값이 있어도 못 산다».
+         *   빼고도 남는지가 그 조건이 진짜인지를 가른다. */
+        $brN = array_values(array_filter($br, fn($r) => !$isLim($r)));
+        $nbN = array_values(array_filter($nb, fn($r) => !$isLim($r)));
+        say('');
+        say('    ★상한가(등락률 29%↑)를 뺀 뒤 — 종가에 실제로 살 수 있는 건만');
+        $cmp($brN, $nbN, '돌파', '비돌파');
+    }
+
+    /* 거래량 배수는 «사용자가 정할 값»이라 구간을 나눠 보여 준다.
+     * 20일 기준과 60일 기준을 둘 다 — 기준일이 길수록 배수가 커지므로 같은 「3배」가 다른 뜻이다. */
+    foreach ([20, 60] as $vb) {
+        $vk = "f_vol_mult{$vb}";
+        hr("B2-{$vb}. 60일 돌파 «안에서» 거래량 배수별 (기준 직전 {$vb}일 평균)");
+        $base = array_values(array_filter($clean,
+            fn($r) => $has($r, 'f_hi60_brk') && (int)$r['f_hi60_brk'] === 1 && $has($r, $vk)));
+        say('    대상 n=' . number_format(count($base)) . ' (60일 돌파 · 배수 계산 가능)');
+        foreach ([[0, 2, '2배 미만'], [2, 3, '2~3배'], [3, 5, '3~5배'], [5, 10, '5~10배'],
+                  [10, 1e9, '10배 이상']] as [$lo, $hi, $lab]) {
+            $g = array_values(array_filter($base,
+                fn($r) => (float)$r[$vk] >= $lo && (float)$r[$vk] < $hi));
+            $d5 = qm_stat($col($g, 'f_d5_ret')); $o = qm_stat($col($g, 'f_nd_open_ret'));
+            $mfe = qm_stat($col($g, 'f_post_mfe')); $mdd = qm_stat($col($g, 'f_post_mdd'));
+            $lim = count($g) ? count(array_filter($g, $isLim)) / count($g) * 100 : 0;
+            say(sprintf('      %-10s n=%6s  익일시가 %6.2f%%  D+5 %6.2f%% (양 %4.1f%%)  '
+                . '최대상승 %6.2f%%  최대낙폭 %6.2f%%  상한가 %4.1f%%%s',
+                $lab, number_format(count($g)), $o['mean'] ?? 0, $d5['mean'] ?? 0, $d5['win'] ?? 0,
+                $mfe['mean'] ?? 0, $mdd['mean'] ?? 0, $lim,
+                count($g) < 30 ? '  ←n 30 미만' : ''));
+        }
+        /* ★구간 표에도 t 를 적는다 — 이 파일의 다른 표가 전부 그렇게 한다(§9 ②③).
+         *   없으면 「10배 이상이 나쁘다」를 눈대중으로 말하게 된다.
+         *   ⊕상한가를 뺀 값을 «함께» 낸다 — 10배 이상 구간은 상한가 비중이 배로 높아서
+         *     그것만으로도 구간 차이가 생길 수 있다(오늘 세 번째로 만난 함정). */
+        $bk = fn(float $lo, float $hi, bool $exLim) => array_values(array_filter($base,
+            fn($r) => (float)$r[$vk] >= $lo && (float)$r[$vk] < $hi && (!$exLim || !$isLim($r))));
+        foreach ([false, true] as $exLim) {
+            $lowS = qm_stat($col($bk(2, 10, $exLim), 'f_d5_ret'));
+            $hiS  = qm_stat($col($bk(10, 1e9, $exLim), 'f_d5_ret'));
+            $t    = qm_welch($lowS, $hiS);
+            say(sprintf('      → D+5 «2~10배» %.2f%% (n=%s) vs «10배 이상» %.2f%% (n=%s) '
+                . '차이 %+.2f%%p · Welch t=%s%s   [%s]',
+                $lowS['mean'] ?? 0, number_format($lowS['n'] ?? 0),
+                $hiS['mean'] ?? 0, number_format($hiS['n'] ?? 0),
+                ($lowS['mean'] ?? 0) - ($hiS['mean'] ?? 0),
+                $t === null ? '-' : sprintf('%.2f', $t),
+                ($t !== null && abs($t) <= 2) ? '  (|t| 2 이하 — 주장 안 함)' : '',
+                $exLim ? '상한가 제외' : '있는 그대로'));
+        }
+    }
+
+    /* ★국면 검증 — 8년 일봉을 쓰는 «유일한» 이유다. 한 해만 좋은 조건은 조건이 아니다. */
+    hr('B3. 연도별 일관성 — 60일 돌파 · 상한가 제외 (이 표가 국면 의존성을 가른다)');
+    say(sprintf('  %-6s %7s %10s %10s %10s %10s', '연도', 'n', '익일시가', 'D+5', 'D+5 양(+)', '최대상승'));
+    $bo = array_values(array_filter($clean, fn($r) => $has($r, 'f_hi60_brk')
+        && (int)$r['f_hi60_brk'] === 1 && !$isLim($r)));
+    $yrs = array_values(array_unique(array_map(fn($r) => (int)$r['yr'], $bo)));
+    sort($yrs);
+    $negD5 = 0;
+    foreach ($yrs as $y) {
+        $g = array_values(array_filter($bo, fn($r) => (int)$r['yr'] === $y));
+        $o = qm_stat($col($g, 'f_nd_open_ret')); $d5 = qm_stat($col($g, 'f_d5_ret'));
+        $mfe = qm_stat($col($g, 'f_post_mfe'));
+        if (($d5['mean'] ?? 0) < 0) $negD5++;
+        say(sprintf('  %-6d %7s %9.2f%% %9.2f%% %9.1f%% %9.2f%%', $y, number_format(count($g)),
+            $o['mean'] ?? 0, $d5['mean'] ?? 0, $d5['win'] ?? 0, $mfe['mean'] ?? 0));
+    }
+    say(sprintf('  ★D+5 평균이 음(−)인 해: %d / %d', $negD5, count($yrs)));
+
+    hr('B4. 플래그 — 빼지 않고 «몇 건인지» 적는다');
+    foreach ([['분할 낀 건', fn($r) => (int)$r['q_split'] === 1],
+              ['거래정지 낀 건', fn($r) => (int)$r['q_halt'] === 1],
+              ['이름 없음(대개 상장폐지)', fn($r) => (int)$r['q_noname'] === 1]] as [$nm, $f]) {
+        say(sprintf('  %-24s %8s건', $nm, number_format(count(array_filter($rows, $f)))));
+    }
+    say('');
+    say('  통계적 사실만 적는다. 투자 판단·매매 규칙은 여기서 만들지 않는다.');
+    say('  ⛔종가 진입의 «체결 가능성»은 일봉으로 못 잰다 — 상한가 비율을 함께 읽는다.');
+    break;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  job=dmfefill — 「최대상승이 «언제» 오는가」를 채운다. API 콜 0 · 멱등
+//
+//  진입은 정해진 것으로 둔다(급등일 종가 매수). 여기서 묻는 것은 <b>청산</b>뿐이다.
+//
+//  ★★n_post=5 인 건만 채운다. 사후창이 2일뿐인 건에 「며칠째」를 적으면
+//    최대가 1~2일에만 있을 수 있어 <b>분포가 앞으로 쏠린다</b> — 아무 표시 없이 거짓이 된다.
+//  ★★최고와 최저가 «같은 날»이면 어느 쪽이 먼저인지 일봉으론 모른다 → 2(판정불가)로 적는다.
+//    0/1 중 하나로 몰면 「기다리다 손절 먼저 맞나」의 답이 조용히 기운다.
+// ══════════════════════════════════════════════════════════════════════════
+case 'dmfefill': {
+    /* 목표가 청산 시뮬의 목표값(%) — 바꾸려면 여기 한 줄. 컬럼명이 값을 담으므로 함께 고친다. */
+    $TGT = [3 => 'f_exit3', 5 => 'f_exit5', 7 => 'f_exit7', 10 => 'f_exit10', 15 => 'f_exit15'];
+
+    $cols = [
+        'f_mfe_day'       => "TINYINT NULL COMMENT '사후 최대상승이 D+며칠째 (1~5) · n_post=5 만'",
+        'f_mdd_day'       => "TINYINT NULL COMMENT '사후 최대낙폭이 D+며칠째 (1~5)'",
+        'f_mfe_day_close' => "DECIMAL(6,2) NULL COMMENT '최대상승일의 «종가»/D0종가-1 — 고가에 못 팔았을 때'",
+        'f_mfe_order'     => "TINYINT NULL COMMENT '1=상승이 먼저 · 0=낙폭이 먼저 · 2=같은 날(일봉으론 판정불가)'",
+    ];
+    foreach ($TGT as $x => $c) $cols[$c] = "DECIMAL(6,2) NULL COMMENT '+{$x}% 목표가 청산 시뮬 수익률'";
+    foreach ($cols as $c => $def) {
+        try { $pdo->exec("ALTER TABLE qm_dday ADD COLUMN IF NOT EXISTS {$c} {$def}"); }
+        catch (Throwable $e) { say('  (컬럼 ' . $c . ' 추가 실패: ' . $e->getMessage() . ')'); }
+    }
+
+    $codes = $pdo->query("SELECT DISTINCT code FROM qm_dday WHERE n_post=5 ORDER BY code")
+                 ->fetchAll(PDO::FETCH_COLUMN);
+    say('사후 최대상승 시점 계산 — 종목 ' . number_format(count($codes)) . '개 · API 콜 0');
+    say('★사후창이 5거래일 «다 찬» 건만 채운다 — 덜 찬 건에 「며칠째」를 적으면 분포가 앞으로 쏠린다.');
+    say('★목표가 청산 시뮬: ' . implode('·', array_map(fn($x) => '+' . $x . '%', array_keys($TGT))));
+
+    say('★거래정지일은 «건너뛴다» — 고·저가 없는 날이라 0 으로 읽으면 최저가 −100%% 가 된다(qm_day_kind).');
+
+    $sel = $pdo->prepare("SELECT d,o,h,l,c,vol FROM krx_amt WHERE code=? AND c>0 ORDER BY d");
+    $tgt = $pdo->prepare("SELECT d, close_prc FROM qm_dday WHERE code=? AND n_post=5");
+    $set = implode(',', array_map(fn($c) => "{$c}=?",
+        array_merge(['f_mfe_day', 'f_mdd_day', 'f_mfe_day_close', 'f_mfe_order'], array_values($TGT))));
+    $upd = $pdo->prepare("UPDATE qm_dday SET {$set} WHERE code=? AND d=?");
+
+    $nRow = 0; $nSame = 0; $nNoDay = 0;
+    $pdo->beginTransaction();
+    foreach ($codes as $ci => $code) {
+        $sel->execute([$code]);
+        $s = $sel->fetchAll(PDO::FETCH_ASSOC);
+        if (!$s) continue;
+        $idx = [];
+        foreach ($s as $i => $r) $idx[$r['d']] = $i;
+
+        $tgt->execute([$code]);
+        foreach ($tgt->fetchAll(PDO::FETCH_ASSOC) as $t) {
+            $i = $idx[$t['d']] ?? null;
+            if ($i === null || !isset($s[$i + 5])) continue;
+            $c0 = (float)$t['close_prc'];
+            if ($c0 <= 0) continue;
+
+            /* ★거래정지·결측일은 고·저가 «없다» — 세지 않고 넘어간다.
+             *   0 으로 읽으면 그 날이 언제나 최저가 되어 「최대낙폭이 D+며칠째」가 통째로 거짓이 된다. */
+            $mfe = null; $mfeDay = 0; $mdd = null; $mddDay = 0; $lastOkJ = 0;
+            for ($j = 1; $j <= 5; $j++) {
+                $p = $s[$i + $j];
+                if (qm_day_kind($p) !== 'ok') continue;
+                $lastOkJ = $j;
+                $h = (float)$p['h']; $l = (float)$p['l'];
+                if ($mfe === null || $h > $mfe) { $mfe = $h; $mfeDay = $j; }
+                if ($mdd === null || $l < $mdd) { $mdd = $l; $mddDay = $j; }
+            }
+            if ($mfeDay === 0 || $mddDay === 0) { $nNoDay++; continue; }   // 창 안에 거래일이 없다
+            /* ★같은 날이면 «모른다» — 일봉은 그 날 안의 순서를 담지 않는다 */
+            $order = $mfeDay === $mddDay ? 2 : ($mfeDay < $mddDay ? 1 : 0);
+            if ($order === 2) $nSame++;
+
+            /* 목표가 청산 시뮬 — 규칙: D+1 부터 훑어
+             *   ①그 날 «시가»가 이미 목표 위면 시가에 판다(갭으로 넘겨 시작 — 실제로 더 좋다)
+             *   ②아니고 «고가»가 목표에 닿으면 목표가에 판다
+             *   ③끝까지 안 닿으면 D+5 «종가»에 판다
+             * ⛔①②는 «닿았다»를 «팔았다»로 본다 — 호가·체결은 일봉에 없다. 낙관 편향이다. */
+            $ex = [];
+            foreach ($TGT as $x => $cName) {
+                $ret = null;
+                for ($j = 1; $j <= 5; $j++) {
+                    $p = $s[$i + $j];
+                    if (qm_day_kind($p) !== 'ok') continue;      // 그 날은 못 판다
+                    $op = ((float)$p['o'] / $c0 - 1) * 100;
+                    $hp = ((float)$p['h'] / $c0 - 1) * 100;
+                    if ($op >= $x) { $ret = $op; break; }
+                    if ($hp >= $x) { $ret = (float)$x; break; }
+                }
+                /* ③끝까지 안 닿으면 «마지막 거래 가능일» 종가에 판다 — D+5 가 정지면 이월된 값이다 */
+                if ($ret === null) $ret = ((float)$s[$i + $lastOkJ]['c'] / $c0 - 1) * 100;
+                $ex[] = round($ret, 2);
+            }
+
+            $upd->execute(array_merge([
+                $mfeDay, $mddDay,
+                round(((float)$s[$i + $mfeDay]['c'] / $c0 - 1) * 100, 2),
+                $order,
+            ], $ex, [$code, $t['d']]));
+            $nRow++;
+        }
+        if ($ci % 300 === 0) { $pdo->commit(); $pdo->beginTransaction(); }
+    }
+    $pdo->commit();
+
+    say('');
+    say(sprintf('  채운 행 %s · 최고와 최저가 «같은 날» %s건 (%.1f%% — 순서 판정불가)',
+        number_format($nRow), number_format($nSame), $nRow ? $nSame / $nRow * 100 : 0));
+    if ($nNoDay) say('  ★사후 5일이 통째로 거래정지·결측이라 «안 채운» 행 ' . number_format($nNoDay) . '건');
+    break;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  job=dmfe — 「언제 파나」의 일봉 검정. qm_dday 만 읽는다 · API 콜 0
+// ══════════════════════════════════════════════════════════════════════════
+case 'dmfe': {
+    $rows = $pdo->query("SELECT * FROM qm_dday WHERE n_post=5 AND f_mfe_day IS NOT NULL")
+                ->fetchAll(PDO::FETCH_ASSOC);
+    if (!$rows) { say('★자료가 없다 — 먼저 job=dmfefill 을 돌린다.'); break; }
+    $col = fn(array $rs, string $c) => array_map(fn($r) => $r[$c] === null ? null : (float)$r[$c], $rs);
+    $isLim = fn(array $r) => (float)$r['chg_pct'] >= 29.0;
+
+    say('사후 최대상승은 «언제» 오는가 — 8년 일봉  (' . date('Y-m-d H:i') . ')');
+    say('진입은 정해진 것으로 둔다 — 급등일(+' . QM_CHG_MIN . '%↑·100억↑) «종가» 매수. 묻는 것은 청산뿐이다.');
+    say('★사후창이 5거래일 다 찬 건만 — 덜 찬 건은 「며칠째」가 앞으로 쏠린다.');
+    say('⛔최대상승은 «고가»의 최고치다 — 사후에만 아는 «위쪽 한계»이고 그 값에 팔 수 있다는 뜻이 아니다.');
+
+    $clean = array_values(array_filter($rows,
+        fn($r) => (int)$r['q_split'] === 0 && (int)$r['q_halt'] === 0));
+    $noLim = array_values(array_filter($clean, fn($r) => !$isLim($r)));
+
+    /* 며칠째 분포를 한 줄로 — n 과 비율을 «항상» 함께 적는다(§9 ②) */
+    $dist = function (array $g, string $label, string $key) {
+        $n = count($g);
+        if (!$n) { say(sprintf('    %-26s n=0', $label)); return; }
+        $c = array_fill(1, 5, 0);
+        foreach ($g as $r) { $d = (int)$r[$key]; if ($d >= 1 && $d <= 5) $c[$d]++; }
+        $s = '';
+        for ($d = 1; $d <= 5; $d++) $s .= sprintf(' D+%d %5.1f%%', $d, $c[$d] / $n * 100);
+        say(sprintf('    %-26s n=%6s %s', $label, number_format($n), $s));
+    };
+
+    hr('C1. 최대상승이 며칠째 오는가 — 이 표가 보유 기간을 정한다');
+    $dist($clean, '전체', 'f_mfe_day');
+    $dist($noLim, '상한가 제외', 'f_mfe_day');
+    say('');
+    say('  같은 자로 잰 최대낙폭의 날 — 견줄 대상이 있어야 «이르다/늦다»를 말할 수 있다');
+    $dist($clean, '전체 (최대낙폭)', 'f_mdd_day');
+    $dist($noLim, '상한가 제외 (최대낙폭)', 'f_mdd_day');
+
+    hr('C2. 그룹이 타이밍을 바꾸는가 — 바꾼다면 그건 «청산» 근거다');
+    foreach ([
+        ['60일 돌파', fn($r) => $r['f_hi60_brk'] !== null && (int)$r['f_hi60_brk'] === 1],
+        ['60일 비돌파', fn($r) => $r['f_hi60_brk'] !== null && (int)$r['f_hi60_brk'] === 0],
+        ['거래량 10배 이상', fn($r) => $r['f_vol_mult60'] !== null && (float)$r['f_vol_mult60'] >= 10],
+        ['거래량 2~10배', fn($r) => $r['f_vol_mult60'] !== null
+            && (float)$r['f_vol_mult60'] >= 2 && (float)$r['f_vol_mult60'] < 10],
+        ['상한가 마감', $isLim],
+    ] as [$nm, $f]) $dist(array_values(array_filter($clean, $f)), $nm, 'f_mfe_day');
+
+    hr('C3. ★순서 — 최대상승이 먼저인가, 최대낙폭이 먼저인가');
+    say('  이 표가 나쁘면 「최고점을 기다린다」는 말 자체가 성립하지 않는다 — 먼저 밀리기 때문이다.');
+    foreach ([['전체', $clean], ['상한가 제외', $noLim]] as [$nm, $g]) {
+        $n = count($g);
+        $a = count(array_filter($g, fn($r) => (int)$r['f_mfe_order'] === 1));
+        $b = count(array_filter($g, fn($r) => (int)$r['f_mfe_order'] === 0));
+        $c = count(array_filter($g, fn($r) => (int)$r['f_mfe_order'] === 2));
+        say(sprintf('    %-14s n=%6s   상승 먼저 %5.1f%%   낙폭 먼저 %5.1f%%   같은 날 %5.1f%%(판정불가)',
+            $nm, number_format($n), $n ? $a / $n * 100 : 0, $n ? $b / $n * 100 : 0, $n ? $c / $n * 100 : 0));
+    }
+
+    hr('C4. 고가에 못 팔면 얼마가 남나 — 같은 건을 세 가지로 잰 값');
+    foreach ([['전체', $clean], ['상한가 제외', $noLim]] as [$nm, $g]) {
+        say('    [' . $nm . '] n=' . number_format(count($g)));
+        foreach (['최대상승(고가·위쪽 한계)' => 'f_post_mfe',
+                  '그 날 종가에 팔았다면' => 'f_mfe_day_close',
+                  'D+5 종가까지 들었다면' => 'f_d5_ret',
+                  '최대낙폭(아래쪽 한계)' => 'f_post_mdd'] as $lab => $c) {
+            $s = qm_stat($col($g, $c));
+            if (!$s['n']) continue;
+            say(sprintf('      %-24s 평균 %7.2f%%  중앙 %7.2f%%  양(+) %5.1f%%',
+                $lab, $s['mean'], $s['med'], $s['win']));
+        }
+    }
+
+    hr('C5. 목표가 청산 시뮬 — ⛔「닿았다」를 「팔았다」로 본다(낙관 편향) · 비용 미반영');
+    say('  규칙: D+1~D+5 중 시가가 목표 위면 시가에, 고가가 목표에 닿으면 목표가에, 끝내 안 닿으면 D+5 종가에.');
+    foreach ([['전체', $clean], ['상한가 제외', $noLim]] as [$nm, $g]) {
+        say('    [' . $nm . '] n=' . number_format(count($g)));
+        $base = qm_stat($col($g, 'f_d5_ret'));
+        say(sprintf('      %-14s 평균 %7.2f%%  중앙 %7.2f%%  양(+) %5.1f%%   ← 견줄 기준',
+            'D+5 종가 보유', $base['mean'], $base['med'], $base['win']));
+        foreach ([3 => 'f_exit3', 5 => 'f_exit5', 7 => 'f_exit7', 10 => 'f_exit10', 15 => 'f_exit15']
+                 as $x => $c) {
+            $s = qm_stat($col($g, $c));
+            if (!$s['n']) continue;
+            /* 도달률 — 목표에 닿아 «중간에» 팔린 비율. 시뮬 값이 목표 이상이면 닿은 것이다. */
+            $hit = count(array_filter($g, fn($r) => $r[$c] !== null && (float)$r[$c] >= $x)) / max(1, count($g)) * 100;
+            $t = qm_welch($s, $base);
+            say(sprintf('      +%-2d%% 목표      평균 %7.2f%%  중앙 %7.2f%%  양(+) %5.1f%%  도달 %5.1f%%  '
+                . 'vs 보유 %+.2f%%p · t=%s%s', $x, $s['mean'], $s['med'], $s['win'], $hit,
+                $s['mean'] - $base['mean'], $t === null ? '-' : sprintf('%.2f', $t),
+                ($t !== null && abs($t) <= 2) ? '  (|t| 2 이하)' : ''));
+        }
+    }
+
+    hr('C6. 연도별 일관성 — 상한가 제외 · 목표가 청산이 보유를 이기는가');
+    say(sprintf('  %-6s %7s %10s %10s %10s %10s', '연도', 'n', 'D+5 보유', '+5% 청산', '+10% 청산', '최대상승일'));
+    $yrs = array_values(array_unique(array_map(fn($r) => (int)$r['yr'], $noLim)));
+    sort($yrs);
+    $win5 = 0;
+    foreach ($yrs as $y) {
+        $g = array_values(array_filter($noLim, fn($r) => (int)$r['yr'] === $y));
+        $b = qm_stat($col($g, 'f_d5_ret')); $e5 = qm_stat($col($g, 'f_exit5'));
+        $e10 = qm_stat($col($g, 'f_exit10'));
+        $md = qm_stat($col($g, 'f_mfe_day'));
+        if (($e5['mean'] ?? 0) > ($b['mean'] ?? 0)) $win5++;
+        say(sprintf('  %-6d %7s %9.2f%% %9.2f%% %9.2f%% %9.2f일', $y, number_format(count($g)),
+            $b['mean'] ?? 0, $e5['mean'] ?? 0, $e10['mean'] ?? 0, $md['mean'] ?? 0));
+    }
+    say(sprintf('  ★+5%% 청산이 보유를 이긴 해: %d / %d', $win5, count($yrs)));
+
+    say('');
+    say('  통계적 사실만 적는다. 투자 판단·매매 규칙은 여기서 만들지 않는다.');
+    say('  ⛔일봉으론 못 보는 것: 그 날 «몇 시»인가 · 그 값에 체결이 있었나. 그건 분봉만 답한다.');
+    break;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  job=dbrk tp=15 sl=10 days=5 — 「불꽃형에 +N% 익절 / −M% 손절을 걸면 승률은?」
+//
+//  ★★★일봉의 근본 한계를 정면으로 다룬다 — <b>같은 날 고가가 익절선에 닿고 저가가 손절선에도
+//    닿으면 어느 쪽이 먼저인지 모른다</b>. 그 건을 「모호」로 «따로 세고» 낙관·비관 두 경계를 낸다.
+//    한쪽으로 몰면 승률이 통째로 거짓이 된다(브래킷 백테스트가 늘 부풀려지는 이유가 이것이다).
+//
+//  ★갭을 먼저 본다 — 시가가 이미 익절선 위면 «그 시가»에 팔리고(더 좋다),
+//    시가가 손절선 아래면 «그 시가»에 팔린다(더 나쁘다). 브래킷은 갭을 못 막는다.
+// ══════════════════════════════════════════════════════════════════════════
+case 'dbrk': {
+    $TP   = (float)($_GET['tp'] ?? 15);
+    $SL   = (float)($_GET['sl'] ?? 10);
+    $DAYS = max(1, min(20, (int)($_GET['days'] ?? 5)));
+    $COST = 0.20;                                    // 왕복 비용 «가정»(%) — 실측이 아니다
+    $WIN  = 120; $MULT = 20;
+    /* 거래대금 하한 — «억» 단위로 받는다(기본 100억). 신호 정의의 다른 두 조건
+     * (직전 119봉 최고 거래대금 · 20평비 20배)과 «독립»이라, 이 값만 올리면 표본이
+     * 그대로 부분집합으로 좁아진다 — 그래서 재수집 없이 비교할 수 있다. */
+    $MINAMT = max(1, (int)($_GET['minamt'] ?? 100)) * 100000000;
+
+    $etf = qm_etf_codes($pdo);
+    $names = [];
+    foreach ($pdo->query("SELECT stock_code, stock_name FROM all_stock_info")->fetchAll(PDO::FETCH_ASSOC)
+             as $r) $names[$r['stock_code']] = $r['stock_name'];
+
+    say('불꽃형 브래킷 검정 — 8년 일봉  (' . date('Y-m-d H:i') . ')');
+    say(sprintf('규칙: 불꽃형 «신호일 종가»에 매수 → %d거래일 안에 +%.1f%% 익절 / −%.1f%% 손절, '
+        . '끝내 안 닿으면 D+%d 종가 청산', $DAYS, $TP, $SL, $DAYS));
+    say('신호: 직전 ' . ($WIN - 1) . '거래일 최고 거래대금 & 거래대금 '
+        . number_format($MINAMT / 1e8) . '억↑ & 20평비 ' . $MULT . '배↑');
+    say('★★같은 날 «둘 다» 닿은 건은 「모호」로 따로 센다 — 일봉은 그 날 안의 순서를 모른다.');
+    say('★거래정지일(vol=0)은 «건너뛴다» — 그 날은 체결이 불가능했다(qm_day_kind).');
+
+    $sel = $pdo->prepare("SELECT d,o,h,l,c,vol,amt,list_shrs FROM krx_amt WHERE code=? AND c>0 ORDER BY d");
+    $codes = $pdo->query("SELECT DISTINCT code FROM krx_amt ORDER BY code")->fetchAll(PDO::FETCH_COLUMN);
+
+    /* 신호 하나 = ['chg','yr','kind','opt','pes','gap']
+     *   kind: tp 익절 · sl 손절 · amb 모호 · non 미도달
+     *   opt/pes: 모호를 익절/손절로 각각 해석한 수익률 */
+    $rows = [];
+    $nHaltSig = 0;      // 사후 창에 거래정지일이 있어 «건너뛰며» 판정한 신호
+    $nGapSig  = 0;      // 진짜 결측이 끼어 판정을 접은 신호
+    $nNoDay   = 0;      // 창 안에 거래 가능한 날이 아예 없던 신호
+    foreach ($codes as $ci => $code) {
+        if (substr($code, -1) !== '0' || isset($etf[$code])) continue;
+        $nm = (string)($names[$code] ?? '');
+        if ($nm !== '' && (mb_strpos($nm, '스팩') !== false || stripos($nm, 'ETN') !== false)) continue;
+        $sel->execute([$code]);
+        $s = $sel->fetchAll(PDO::FETCH_ASSOC);
+        $n = count($s);
+        if ($n < $WIN + $DAYS + 2) continue;
+
+        for ($i = $WIN; $i < $n - $DAYS - 1; $i++) {
+            $amt = (float)$s[$i]['amt'];
+            if ($amt < $MINAMT) continue;
+            $mx = 0.0;
+            for ($k = $i - ($WIN - 1); $k < $i; $k++) $mx = max($mx, (float)$s[$k]['amt']);
+            if ($amt <= $mx) continue;
+            $a20 = 0.0;
+            for ($k = $i - 20; $k < $i; $k++) $a20 += (float)$s[$k]['amt'];
+            $a20 /= 20;
+            if ($a20 <= 0 || $amt / $a20 < $MULT) continue;      // 불꽃형만
+
+            $ls = (int)$s[$i]['list_shrs']; $bad = false;
+            for ($k = $i; $k <= min($n - 1, $i + $DAYS + 1); $k++) {
+                $x = (int)$s[$k]['list_shrs'];
+                if ($ls > 0 && $x > 0 && abs($x / $ls - 1) > 0.05) { $bad = true; break; }
+            }
+            if ($bad) continue;
+
+            $base = (float)$s[$i]['c'];                          // ★신호일 «종가»에 산다
+            if ($base <= 0) continue;
+            $prev = (float)$s[$i - 1]['c'];
+
+            $kind = 'non'; $opt = null; $pes = null; $gap = 0;
+            /* ★사후 창은 «어떤 날인가»부터 가른다 (qm_day_kind 주석).
+             *   halt = 거래정지 → 그 날은 못 판다. 건너뛰고 다음 날로 간다.
+             *   gap  = 진짜 결측 → 고·저를 모르니 이 신호는 판정하지 않는다. */
+            $hadHalt = false; $hadGap = false; $lastOk = null;
+            for ($j = 1; $j <= $DAYS; $j++) {
+                $p  = $s[$i + $j];
+                $dk = qm_day_kind($p);
+                if ($dk === 'gap')  { $hadGap = true; break; }
+                if ($dk === 'halt') { $hadHalt = true; continue; }
+                $lastOk = $p;
+                $op = ((float)$p['o'] / $base - 1) * 100;
+                $hp = ((float)$p['h'] / $base - 1) * 100;
+                $lp = ((float)$p['l'] / $base - 1) * 100;
+
+                /* ①갭 — 브래킷은 갭을 못 막는다. 시가가 이미 넘어섰으면 «그 시가»가 체결가다. */
+                if ($op >= $TP)  { $kind = 'tp'; $opt = $pes = $op; $gap = 1; break; }
+                if ($op <= -$SL) { $kind = 'sl'; $opt = $pes = $op; $gap = 1; break; }
+                /* ②같은 날 둘 다 — 순서를 «모른다» */
+                if ($hp >= $TP && $lp <= -$SL) { $kind = 'amb'; $opt = $TP; $pes = -$SL; break; }
+                if ($hp >= $TP)  { $kind = 'tp'; $opt = $pes = $TP;  break; }
+                if ($lp <= -$SL) { $kind = 'sl'; $opt = $pes = -$SL; break; }
+            }
+            if ($hadGap) { $nGapSig++; continue; }
+            if ($kind === 'non') {
+                /* ★청산가는 «마지막 거래 가능일»의 종가다 — D+5 가 정지일이면 그 종가는
+                 *   직전가를 이월한 값이라 «팔 수 없던 값»이다. */
+                if ($lastOk === null) { $nNoDay++; continue; }
+                $opt = $pes = ((float)$lastOk['c'] / $base - 1) * 100;
+            }
+            if ($hadHalt) $nHaltSig++;
+            $rows[] = ['chg' => $prev > 0 ? ($base / $prev - 1) * 100 : 0,
+                       'yr' => (int)substr($s[$i]['d'], 0, 4),
+                       'kind' => $kind, 'opt' => $opt, 'pes' => $pes, 'gap' => $gap];
+        }
+        if ($ci % 600 === 0) say('  … ' . $ci . '종목 · 신호 ' . number_format(count($rows)));
+    }
+    say('  불꽃형 신호 ' . number_format(count($rows)) . '건');
+    say(sprintf('  ★거래정지일을 건너뛰며 판정한 신호 %s건 · 진짜 결측이라 판정 접은 것 %s건 '
+        . '· 창 안에 거래일이 없던 것 %s건',
+        number_format($nHaltSig), number_format($nGapSig), number_format($nNoDay)));
+
+    $report = function (string $title, array $g) use ($TP, $SL, $DAYS, $COST) {
+        hr($title . '  (n=' . number_format(count($g)) . ')');
+        if (!$g) { say('    표본 없음'); return; }
+        $n = count($g);
+        $c = ['tp' => 0, 'sl' => 0, 'amb' => 0, 'non' => 0];
+        foreach ($g as $r) $c[$r['kind']]++;
+        say(sprintf('    익절 도달   %6s (%5.1f%%)', number_format($c['tp']), $c['tp'] / $n * 100));
+        say(sprintf('    손절 도달   %6s (%5.1f%%)', number_format($c['sl']), $c['sl'] / $n * 100));
+        say(sprintf('    ★모호(같은 날 둘 다) %6s (%5.1f%%) — 일봉으론 순서를 모른다',
+            number_format($c['amb']), $c['amb'] / $n * 100));
+        say(sprintf('    미도달→D+%d 종가 %6s (%5.1f%%)', $DAYS, number_format($c['non']),
+            $c['non'] / $n * 100));
+        $gp = count(array_filter($g, fn($r) => $r['gap'] === 1));
+        say(sprintf('    ※그중 «갭으로» 뚫린 건 %s (%.1f%%) — 원하는 값이 아니라 시가에 체결된다',
+            number_format($gp), $gp / $n * 100));
+        say('');
+        foreach ([['낙관(모호=익절)', 'opt'], ['비관(모호=손절)', 'pes']] as [$lab, $k]) {
+            $v = array_map(fn($r) => $r[$k], $g);
+            $s = qm_stat($v);
+            $wr = count(array_filter($v, fn($x) => $x > 0)) / $n * 100;
+            $wc = count(array_filter($v, fn($x) => $x - $COST > 0)) / $n * 100;
+            say(sprintf('    %-16s 평균 %7.2f%%  중앙 %7.2f%%  승률 %5.1f%%   '
+                . '| 비용 %.2f%% 뒤 평균 %+.2f%% · 승률 %5.1f%%',
+                $lab, $s['mean'], $s['med'], $wr, $COST, $s['mean'] - $COST, $wc));
+        }
+    };
+
+    $noLim = array_values(array_filter($rows, fn($r) => $r['chg'] < 29));
+    $report('R1. 불꽃형 전체', $rows);
+    $report('R2. 불꽃형 · 상한가 제외 (종가에 실제로 살 수 있는 것)', $noLim);
+
+    hr('R3. 연도별 — 상한가 제외 · 비관 기준(모호=손절) 평균');
+    say(sprintf('  %-6s %8s %10s %10s %10s', '연도', 'n', '익절%', '손절%', '비관 평균'));
+    $yrs = array_values(array_unique(array_map(fn($r) => $r['yr'], $noLim)));
+    sort($yrs);
+    $pos = 0; $cnt = 0;
+    foreach ($yrs as $y) {
+        $g = array_values(array_filter($noLim, fn($r) => $r['yr'] === $y));
+        if (!$g) continue;
+        $tp = count(array_filter($g, fn($r) => $r['kind'] === 'tp')) / count($g) * 100;
+        $sl = count(array_filter($g, fn($r) => $r['kind'] === 'sl')) / count($g) * 100;
+        $m  = qm_stat(array_map(fn($r) => $r['pes'], $g));
+        $cnt++; if (($m['mean'] ?? 0) - $COST > 0) $pos++;
+        say(sprintf('  %-6d %8s %9.1f%% %9.1f%% %9.2f%%', $y, number_format(count($g)), $tp, $sl, $m['mean']));
+    }
+    say(sprintf('  ★비용 뒤 평균이 «양(+)»인 해: %d / %d', $pos, $cnt));
+
+    say('');
+    say('  ⛔모호 구간이 크면 이 표로는 승률을 «말할 수 없다» — 그때는 분봉으로 순서를 가려야 한다.');
+    say('  ⛔호가 잔량·슬리피지 미반영. 손절은 «닿으면 그 값에 팔린다»고 보았다 — 실제로는 더 밀린다.');
+    say('  통계적 사실만 적는다. 투자 판단·매매 규칙은 여기서 만들지 않는다.');
+    break;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  job=flamefill days=365 tp=15 sl=10 — 불꽃형 신호를 «표로» 남긴다. API 콜 0 · 멱등
+//
+//  화면(퀀트 > 패턴분석(불꽃형))이 페이지마다 8년 원장을 훑을 수는 없다.
+//  ★결과(브래킷 판정·5일 최고/최저)까지 «여기서» 계산해 담는다 —
+//    화면이 판정을 다시 하면 잡과 화면이 다른 말을 하게 된다(Thr·ChartFeat 와 같은 패턴).
+// ══════════════════════════════════════════════════════════════════════════
+case 'flamefill': {
+    $DAYS_BACK = max(30, (int)($_GET['days'] ?? 365));
+    $TP = (float)($_GET['tp'] ?? 15);
+    $SL = (float)($_GET['sl'] ?? 10);
+    $HOLD = 5;
+    $WIN = 120; $MINAMT = 10000000000; $MULT = 20;
+
+    $pdo->exec("CREATE TABLE IF NOT EXISTS qm_flame (
+        code CHAR(6) NOT NULL, d DATE NOT NULL,
+        name VARCHAR(64) NOT NULL DEFAULT '', mkt CHAR(1) NOT NULL DEFAULT '',
+        amt BIGINT UNSIGNED NOT NULL, amt_mult DECIMAL(8,3) NOT NULL COMMENT '거래대금/직전 20일 평균',
+        chg_pct DECIMAL(6,2) NOT NULL, close_prc INT UNSIGNED NOT NULL, prev_prc INT UNSIGNED NOT NULL,
+        f_max5 DECIMAL(6,2) NULL COMMENT 'D+1~D+5 최고가/신호일 종가-1',
+        f_min5 DECIMAL(6,2) NULL, f_d5 DECIMAL(6,2) NULL,
+        f_max5_day TINYINT NULL, f_min5_day TINYINT NULL,
+        brk_kind CHAR(3) NULL COMMENT 'tp 익절 · sl 손절 · amb 모호 · non 미도달',
+        brk_ret DECIMAL(6,2) NULL, brk_tp DECIMAL(5,1) NULL, brk_sl DECIMAL(5,1) NULL,
+        q_ohlc TINYINT NOT NULL DEFAULT 0 COMMENT '★사후 창에 진짜 결측(거래는 있는데 o/h/l 없음) — 판정 불가',
+        q_halt TINYINT NOT NULL DEFAULT 0 COMMENT '★사후 창에 거래정지일 — 그 날은 건너뛰고 판정했다',
+        has_min TINYINT NOT NULL DEFAULT 0 COMMENT '분봉이 있나(급등 이벤트와 겹치나)',
+        made_at DATETIME NOT NULL,
+        PRIMARY KEY (code, d), KEY ix_d (d), KEY ix_kind (brk_kind)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    /* ★표가 이미 있으면 CREATE IF NOT EXISTS 는 건너뛴다 — 컬럼 추가는 «prepare 전에» 따로 해야 한다
+     *   (2026-08-06: prepare 뒤에 뒀다가 Unknown column 으로 잡이 죽었다). */
+    foreach (['q_ohlc', 'q_halt'] as $qc) {
+        try { $pdo->exec("ALTER TABLE qm_flame ADD COLUMN IF NOT EXISTS {$qc} TINYINT NOT NULL DEFAULT 0"); }
+        catch (Throwable $e) { say('  (' . $qc . ' 추가 실패: ' . $e->getMessage() . ')'); }
+    }
+
+    $from = $pdo->query("SELECT DATE_SUB(MAX(d), INTERVAL {$DAYS_BACK} DAY) FROM krx_amt")->fetchColumn();
+    say('불꽃형 신호 적재 — ' . $from . ' 이후 · API 콜 0');
+    say(sprintf('신호: 직전 %d거래일 최고 거래대금 & %s억↑ & 20평비 %d배↑ · 브래킷 +%.0f%%/−%.0f%% %d일',
+        $WIN - 1, number_format($MINAMT / 1e8), $MULT, $TP, $SL, $HOLD));
+
+    $etf = qm_etf_codes($pdo);
+    $names = [];
+    foreach ($pdo->query("SELECT stock_code, stock_name FROM all_stock_info")->fetchAll(PDO::FETCH_ASSOC)
+             as $r) $names[$r['stock_code']] = $r['stock_name'];
+    try {
+        foreach ($pdo->query("SELECT stock_code, MAX(stock_name) nm FROM krx_daily GROUP BY stock_code")
+                     ->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            if (!isset($names[$r['stock_code']]) && $r['nm'] !== '') $names[$r['stock_code']] = $r['nm'];
+        }
+    } catch (Throwable $e) {}
+
+    $sel = $pdo->prepare("SELECT d,o,h,l,c,vol,amt,list_shrs,mkt FROM krx_amt WHERE code=? AND c>0 ORDER BY d");
+    $ins = $pdo->prepare("INSERT INTO qm_flame
+        (code,d,name,mkt,amt,amt_mult,chg_pct,close_prc,prev_prc,
+         f_max5,f_min5,f_d5,f_max5_day,f_min5_day,brk_kind,brk_ret,brk_tp,brk_sl,q_ohlc,q_halt,has_min,made_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NOW())
+        ON DUPLICATE KEY UPDATE name=VALUES(name), f_max5=VALUES(f_max5), f_min5=VALUES(f_min5),
+            f_d5=VALUES(f_d5), f_max5_day=VALUES(f_max5_day), f_min5_day=VALUES(f_min5_day),
+            brk_kind=VALUES(brk_kind), brk_ret=VALUES(brk_ret), brk_tp=VALUES(brk_tp),
+            brk_sl=VALUES(brk_sl), q_ohlc=VALUES(q_ohlc), q_halt=VALUES(q_halt), made_at=NOW()");
+
+    $codes = $pdo->query("SELECT DISTINCT code FROM krx_amt ORDER BY code")->fetchAll(PDO::FETCH_COLUMN);
+    $n = 0;
+    $pdo->beginTransaction();
+    foreach ($codes as $ci => $code) {
+        if (substr($code, -1) !== '0' || isset($etf[$code])) continue;
+        $nm = (string)($names[$code] ?? '');
+        if ($nm !== '' && (mb_strpos($nm, '스팩') !== false || stripos($nm, 'ETN') !== false)) continue;
+        $sel->execute([$code]);
+        $s = $sel->fetchAll(PDO::FETCH_ASSOC);
+        $cnt = count($s);
+        if ($cnt < $WIN + 2) continue;
+
+        for ($i = $WIN; $i < $cnt; $i++) {
+            if ($s[$i]['d'] < $from) continue;
+            $amt = (float)$s[$i]['amt'];
+            if ($amt < $MINAMT) continue;
+            $mx = 0.0;
+            for ($k = $i - ($WIN - 1); $k < $i; $k++) $mx = max($mx, (float)$s[$k]['amt']);
+            if ($amt <= $mx) continue;
+            $a20 = 0.0;
+            for ($k = $i - 20; $k < $i; $k++) $a20 += (float)$s[$k]['amt'];
+            $a20 /= 20;
+            if ($a20 <= 0 || $amt / $a20 < $MULT) continue;
+
+            $base = (float)$s[$i]['c']; $prev = (float)$s[$i - 1]['c'];
+            if ($base <= 0 || $prev <= 0) continue;
+
+            /* ★사후가 아직 안 찬 건도 «담는다» — 최근 신호를 화면에서 빼면 「요즘 것」을 못 본다.
+             *   대신 결과 칸은 NULL 로 두고 화면이 「아직」이라고 적는다. */
+            $post = [];
+            for ($j = 1; $j <= $HOLD && isset($s[$i + $j]); $j++) $post[] = $s[$i + $j];
+            $max5 = $min5 = $d5 = $maxD = $minD = null; $kind = null; $ret = null;
+            /* ★사후 창의 날을 «가른 뒤» 판정한다 (qm_day_kind 주석 — 2026-08-07 전수 실측)
+             *   halt 거래정지 → 그 날은 체결이 불가능했다. «건너뛰고» 다음 날로 간다.
+             *                   신호를 통째로 빼지 않는다 — 그러면 정지된 적 있는 종목이 사라진다(생존편향).
+             *   gap  진짜 결측 → 고·저를 모르니 브래킷을 판정하지 않는다(종가는 멀쩡해 D+5 만 남긴다). */
+            $ohlcBad = 0; $haltPost = 0; $ok = [];      // $ok: [창에서 몇 번째(1-base) => 그 날 행]
+            foreach ($post as $j => $p) {
+                $dk = qm_day_kind($p);
+                if ($dk === 'gap')  { $ohlcBad = 1; break; }
+                if ($dk === 'halt') { $haltPost = 1; continue; }
+                $ok[$j + 1] = $p;
+            }
+            $full = count($post) === $HOLD;             // 사후 5일이 «다 찼나» (안 찬 최근 신호는 결과 NULL)
+            if ($ohlcBad) {
+                /* 종가는 멀쩡하므로 D+5 수익률만 남긴다 — 나머지는 «모른다»로 둔다 */
+                if ($full) $d5 = ((float)end($post)['c'] / $base - 1) * 100;
+            } elseif ($full && $ok) {
+                foreach ($ok as $j => $p) {
+                    $hp = ((float)$p['h'] / $base - 1) * 100;
+                    $lp = ((float)$p['l'] / $base - 1) * 100;
+                    if ($max5 === null || $hp > $max5) { $max5 = $hp; $maxD = $j; }
+                    if ($min5 === null || $lp < $min5) { $min5 = $lp; $minD = $j; }
+                }
+                /* ★청산은 «마지막 거래 가능일» 종가 — D+5 가 정지면 그 종가는 직전가를 이월한
+                 *   값이라 «팔 수 없던 값»이다. */
+                $d5 = ((float)end($ok)['c'] / $base - 1) * 100;
+                $kind = 'non'; $ret = $d5;
+                foreach ($ok as $p) {
+                    $op = ((float)$p['o'] / $base - 1) * 100;
+                    $hp = ((float)$p['h'] / $base - 1) * 100;
+                    $lp = ((float)$p['l'] / $base - 1) * 100;
+                    if ($op >= $TP)  { $kind = 'tp'; $ret = $op; break; }
+                    if ($op <= -$SL) { $kind = 'sl'; $ret = $op; break; }
+                    if ($hp >= $TP && $lp <= -$SL) { $kind = 'amb'; $ret = null; break; }
+                    if ($hp >= $TP)  { $kind = 'tp'; $ret = $TP;  break; }
+                    if ($lp <= -$SL) { $kind = 'sl'; $ret = -$SL; break; }
+                }
+            }
+            $r2 = fn($x) => $x === null ? null : round($x, 2);
+            $ins->execute([$code, $s[$i]['d'], $nm, (string)$s[$i]['mkt'], (int)$amt,
+                round($amt / $a20, 3), round(($base / $prev - 1) * 100, 2), (int)$base, (int)$prev,
+                $r2($max5), $r2($min5), $r2($d5), $maxD, $minD, $kind, $r2($ret), $TP, $SL,
+                $ohlcBad, $haltPost]);
+            $n++;
+        }
+        if ($ci % 400 === 0) { $pdo->commit(); $pdo->beginTransaction(); }
+    }
+    $pdo->commit();
+
+    /* 분봉이 있는지 = 그 날이 급등(+10%) 이벤트이기도 한가 (qm_bar 는 그것만 담는다) */
+    $pdo->exec("UPDATE qm_flame f SET has_min =
+                  EXISTS(SELECT 1 FROM qm_event e WHERE e.code=f.code AND e.d=f.d)");
+
+    $tot = (int)$pdo->query("SELECT COUNT(*) FROM qm_flame")->fetchColumn();
+    say('  담은 신호 ' . number_format($n) . ' · 표 전체 ' . number_format($tot) . '건');
+    $r = $pdo->query("SELECT COALESCE(brk_kind,'(판정불가)') k, COUNT(*) n FROM qm_flame
+                       GROUP BY k ORDER BY n DESC")->fetchAll(PDO::FETCH_KEY_PAIR);
+    say('  브래킷 판정: ' . json_encode($r, JSON_UNESCAPED_UNICODE));
+    say('  ★그중 진짜 결측(거래는 있었는데 o/h/l 이 없는 날이 사후 창에): '
+        . number_format((int)$pdo->query("SELECT COUNT(*) FROM qm_flame WHERE q_ohlc=1")->fetchColumn())
+        . '건 — 0 으로 메우지 않고 «판정 안 함»으로 둔다');
+    say('  ★사후 창에 거래정지일이 있어 «건너뛰며» 판정한 것: '
+        . number_format((int)$pdo->query("SELECT COUNT(*) FROM qm_flame WHERE q_halt=1")->fetchColumn())
+        . '건 — 그 날은 체결이 불가능했다(신호는 살려 둔다)');
+    say('  분봉 있는 건: ' . number_format((int)$pdo->query("SELECT COUNT(*) FROM qm_flame WHERE has_min=1")
+        ->fetchColumn()));
+    break;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  job=mbrk tp=15 sl=10 days=5 — 브래킷을 «분봉»으로 다시 판정한다. API 콜 0
+//
+//  job=dbrk 는 일봉이라 「같은 날 둘 다 닿음」의 순서를 모른다. 분봉은 안다.
+//  ★★그리고 이 잡의 진짜 값어치는 <b>같은 표본에서 일봉 판정과 분봉 판정을 나란히 놓는 것</b>이다
+//    — 「일봉 브래킷 백테스트를 믿어도 되나」의 답이 거기서 나온다.
+//
+//  ⚠표본 한계를 «먼저» 적는다: `qm_bar` 는 급등(+10%·100억) 이벤트만 담는다.
+//    그래서 여기 표본은 <b>불꽃형 ∩ 급등</b>이다 — 「+10% 안 오른 불꽃형」은 분봉이 아예 없다.
+//    이건 부분집합이지 불꽃형 전체가 아니다. 결과를 전체로 넓혀 읽으면 안 된다.
+// ══════════════════════════════════════════════════════════════════════════
+case 'mbrk': {
+    $TP = (float)($_GET['tp'] ?? 15);
+    $SL = (float)($_GET['sl'] ?? 10);
+    $DAYS = max(1, min(5, (int)($_GET['days'] ?? 5)));
+    $COST = 0.20;
+    $WIN = 120; $MINAMT = 10000000000; $MULT = 20;
+
+    $rg = $pdo->query("SELECT MIN(DATE(ts)) a, MAX(DATE(ts)) b FROM qm_bar")->fetch(PDO::FETCH_ASSOC);
+    say('불꽃형 브래킷 — «분봉»으로 판정  (' . date('Y-m-d H:i') . ')');
+    say(sprintf('규칙: 신호일 종가 매수 → %d거래일 안에 +%.1f%% 익절 / −%.1f%% 손절 (분봉 순서대로)',
+        $DAYS, $TP, $SL));
+    say('분봉 원장 구간: ' . $rg['a'] . ' ~ ' . $rg['b']);
+    say('⚠표본은 «불꽃형 ∩ 급등(+10%)»이다 — qm_bar 가 급등 이벤트만 담기 때문이다.');
+    say('   「+10% 안 오른 불꽃형」은 분봉이 없어 못 잰다. 부분집합이지 불꽃형 전체가 아니다.');
+
+    /* ① 분봉 구간 안의 불꽃형 신호를 krx_amt 에서 찾는다 */
+    $etf = qm_etf_codes($pdo);
+    $names = [];
+    foreach ($pdo->query("SELECT stock_code, stock_name FROM all_stock_info")->fetchAll(PDO::FETCH_ASSOC)
+             as $r) $names[$r['stock_code']] = $r['stock_name'];
+    $sel = $pdo->prepare("SELECT d,o,h,l,c,vol,amt,list_shrs FROM krx_amt WHERE code=? AND c>0 ORDER BY d");
+    $codes = $pdo->query("SELECT DISTINCT code FROM krx_amt ORDER BY code")->fetchAll(PDO::FETCH_COLUMN);
+
+    $sig = [];                                    // code => [ d => ['chg'=>, 'dkind'=>, 'dopt'=>, 'dpes'=>] ]
+    $nSig = 0; $nSkipDay = 0;
+    foreach ($codes as $code) {
+        if (substr($code, -1) !== '0' || isset($etf[$code])) continue;
+        $nm = (string)($names[$code] ?? '');
+        if ($nm !== '' && (mb_strpos($nm, '스팩') !== false || stripos($nm, 'ETN') !== false)) continue;
+        $sel->execute([$code]);
+        $s = $sel->fetchAll(PDO::FETCH_ASSOC);
+        $n = count($s);
+        if ($n < $WIN + $DAYS + 2) continue;
+        for ($i = $WIN; $i < $n - $DAYS - 1; $i++) {
+            if ($s[$i]['d'] < $rg['a'] || $s[$i]['d'] > $rg['b']) continue;
+            $amt = (float)$s[$i]['amt'];
+            if ($amt < $MINAMT) continue;
+            $mx = 0.0;
+            for ($k = $i - ($WIN - 1); $k < $i; $k++) $mx = max($mx, (float)$s[$k]['amt']);
+            if ($amt <= $mx) continue;
+            $a20 = 0.0;
+            for ($k = $i - 20; $k < $i; $k++) $a20 += (float)$s[$k]['amt'];
+            $a20 /= 20;
+            if ($a20 <= 0 || $amt / $a20 < $MULT) continue;
+
+            /* ★일봉 판정도 «여기서» 같이 낸다 — 뒤에서 분봉 판정과 한 표본으로 견주려면
+             *   두 판정이 반드시 같은 신호 집합 위에 있어야 한다. */
+            $base = (float)$s[$i]['c']; $prev = (float)$s[$i - 1]['c'];
+            if ($base <= 0) continue;
+            $dk = 'non'; $dopt = $dpes = null;
+            /* ★일봉 쪽도 dbrk 와 «같은 자»로 잰다 — 거래정지일은 건너뛰고 진짜 결측은 접는다.
+             *   여기서 자가 다르면 뒤의 「일봉 vs 분봉」 일치율이 두 잣대의 차이를 재게 된다. */
+            $hadGap = false; $lastOk = null;
+            for ($j = 1; $j <= $DAYS; $j++) {
+                $p = $s[$i + $j];
+                $kd = qm_day_kind($p);
+                if ($kd === 'gap')  { $hadGap = true; break; }
+                if ($kd === 'halt') continue;
+                $lastOk = $p;
+                $op = ((float)$p['o'] / $base - 1) * 100;
+                $hp = ((float)$p['h'] / $base - 1) * 100;
+                $lp = ((float)$p['l'] / $base - 1) * 100;
+                if ($op >= $TP)  { $dk = 'tp'; $dopt = $dpes = $op; break; }
+                if ($op <= -$SL) { $dk = 'sl'; $dopt = $dpes = $op; break; }
+                if ($hp >= $TP && $lp <= -$SL) { $dk = 'amb'; $dopt = $TP; $dpes = -$SL; break; }
+                if ($hp >= $TP)  { $dk = 'tp'; $dopt = $dpes = $TP;  break; }
+                if ($lp <= -$SL) { $dk = 'sl'; $dopt = $dpes = -$SL; break; }
+            }
+            if ($hadGap) { $nSkipDay++; continue; }
+            if ($dk === 'non') {
+                if ($lastOk === null) { $nSkipDay++; continue; }
+                $dopt = $dpes = ((float)$lastOk['c'] / $base - 1) * 100;
+            }
+            $sig[$code][$s[$i]['d']] = ['chg' => $prev > 0 ? ($base / $prev - 1) * 100 : 0,
+                                        'dkind' => $dk, 'dopt' => $dopt, 'dpes' => $dpes];
+            $nSig++;
+        }
+    }
+    say('  분봉 구간 안의 불꽃형 신호 ' . number_format($nSig) . '건 (' . number_format(count($sig)) . '종목)');
+    if ($nSkipDay) say('  ★일봉으로 판정할 수 없어 뺀 신호 ' . number_format($nSkipDay)
+        . '건 (진짜 결측 · 또는 창 안에 거래일 없음)');
+
+    /* ② 분봉으로 다시 판정 */
+    $bar = $pdo->prepare("SELECT ts, o, h, l, c FROM qm_bar WHERE code=? ORDER BY ts");
+    $out = []; $noBar = 0;
+    foreach ($sig as $code => $ds) {
+        $bar->execute([$code]);
+        $byDay = [];
+        foreach ($bar->fetchAll(PDO::FETCH_ASSOC) as $b) {
+            $byDay[substr($b['ts'], 0, 10)][] = [(float)$b['o'], (float)$b['h'], (float)$b['l'], (float)$b['c']];
+        }
+        if (!$byDay) { $noBar += count($ds); continue; }
+        $days = array_keys($byDay); sort($days);
+        foreach ($ds as $d => $info) {
+            if (!isset($byDay[$d])) { $noBar++; continue; }
+            $base = (float)end($byDay[$d])[3];           // ★신호일 마지막 분봉 종가
+            if ($base <= 0) { $noBar++; continue; }
+            $post = array_slice(array_values(array_filter($days, fn($x) => $x > $d)), 0, $DAYS);
+            if (count($post) < $DAYS) { $noBar++; continue; }
+
+            $kind = 'non'; $ret = null;
+            foreach ($post as $pd) {
+                foreach ($byDay[$pd] as $b) {
+                    $op = ($b[0] / $base - 1) * 100;
+                    $hp = ($b[1] / $base - 1) * 100;
+                    $lp = ($b[2] / $base - 1) * 100;
+                    /* 1분 봉 «시가»가 이미 넘었으면 그 값이 체결가다 (갭·급변) */
+                    if ($op >= $TP)  { $kind = 'tp'; $ret = $op; break 2; }
+                    if ($op <= -$SL) { $kind = 'sl'; $ret = $op; break 2; }
+                    /* ★한 «1분» 안에서 둘 다 닿은 경우만 모호다 — 일봉의 「하루」와 견주면 아주 좁다 */
+                    if ($hp >= $TP && $lp <= -$SL) { $kind = 'amb'; $ret = null; break 2; }
+                    if ($hp >= $TP)  { $kind = 'tp'; $ret = $TP;  break 2; }
+                    if ($lp <= -$SL) { $kind = 'sl'; $ret = -$SL; break 2; }
+                }
+            }
+            if ($kind === 'non') $ret = ((float)end($byDay[end($post)])[3] / $base - 1) * 100;
+            $out[] = $info + ['mkind' => $kind, 'mret' => $ret];
+        }
+    }
+    say('  분봉으로 판정한 것 ' . number_format(count($out)) . '건 · 분봉 없음 ' . number_format($noBar)
+        . '건 (그 신호일에 +10% 급등이 아니었다)');
+    if (!$out) { say('★표본이 없다.'); break; }
+
+    $noLim = array_values(array_filter($out, fn($r) => $r['chg'] < 29));
+    foreach ([['S1. 분봉 판정 — 전체', $out], ['S2. 분봉 판정 — 상한가 제외', $noLim]] as [$title, $g]) {
+        hr($title . '  (n=' . number_format(count($g)) . ')');
+        $n = count($g);
+        $c = ['tp' => 0, 'sl' => 0, 'amb' => 0, 'non' => 0];
+        foreach ($g as $r) $c[$r['mkind']]++;
+        foreach (['tp' => '익절 도달', 'sl' => '손절 도달', 'amb' => '★모호(같은 1분 봉 안)',
+                  'non' => '미도달→종가'] as $k => $lab) {
+            say(sprintf('    %-22s %6s (%5.1f%%)', $lab, number_format($c[$k]), $c[$k] / $n * 100));
+        }
+        $v = array_values(array_filter(array_map(fn($r) => $r['mret'], $g), fn($x) => $x !== null));
+        $st = qm_stat($v);
+        $wr = $v ? count(array_filter($v, fn($x) => $x > 0)) / count($v) * 100 : 0;
+        $wc = $v ? count(array_filter($v, fn($x) => $x - $COST > 0)) / count($v) * 100 : 0;
+        say(sprintf('    분봉 기준  평균 %7.2f%%  중앙 %7.2f%%  승률 %5.1f%%  '
+            . '| 비용 %.2f%% 뒤 평균 %+.2f%% · 승률 %5.1f%%',
+            $st['mean'] ?? 0, $st['med'] ?? 0, $wr, $COST, ($st['mean'] ?? 0) - $COST, $wc));
+    }
+
+    /* ③ ★★이 잡의 핵심 — 같은 표본에서 일봉 판정이 분봉 판정과 얼마나 달랐나 */
+    hr('S3. ★★일봉 판정 vs 분봉 판정 — 같은 신호 (상한가 제외 n=' . number_format(count($noLim)) . ')');
+    $lab = ['tp' => '익절', 'sl' => '손절', 'amb' => '모호', 'non' => '미도달'];
+    say(sprintf('  %-10s %8s %8s %8s %8s', '일봉\\분봉', '익절', '손절', '모호', '미도달'));
+    $mis = 0;
+    foreach (['tp', 'sl', 'amb', 'non'] as $dk) {
+        $r = [];
+        foreach (['tp', 'sl', 'amb', 'non'] as $mk) {
+            $r[$mk] = count(array_filter($noLim, fn($x) => $x['dkind'] === $dk && $x['mkind'] === $mk));
+            if ($dk !== $mk && $dk !== 'amb') $mis += $r[$mk];
+        }
+        say(sprintf('  %-10s %8s %8s %8s %8s', $lab[$dk], number_format($r['tp']), number_format($r['sl']),
+            number_format($r['amb']), number_format($r['non'])));
+    }
+    say(sprintf('  ★일봉이 «틀리게» 판정한 건: %s / %s (%.1f%%) — 모호였던 건은 뺐다',
+        number_format($mis), number_format(count($noLim)), count($noLim) ? $mis / count($noLim) * 100 : 0));
+    $da = qm_stat(array_map(fn($r) => $r['dpes'], $noLim));
+    $do = qm_stat(array_map(fn($r) => $r['dopt'], $noLim));
+    $mv = array_values(array_filter(array_map(fn($r) => $r['mret'], $noLim), fn($x) => $x !== null));
+    $ms = qm_stat($mv);
+    say('');
+    say(sprintf('  같은 표본의 평균 —  일봉 낙관 %+.2f%%  ·  일봉 비관 %+.2f%%  ·  ★분봉(진짜) %+.2f%%',
+        $do['mean'] ?? 0, $da['mean'] ?? 0, $ms['mean'] ?? 0));
+    say('  ⇒ 분봉 값이 두 경계 «밖»에 있으면 일봉 시뮬 자체가 틀린 것이다(갭 처리·순서 말고 다른 이유).');
+
+    say('');
+    say('  ⛔이 표본은 «불꽃형 ∩ 급등»이다 — 불꽃형 전체로 넓혀 읽지 않는다.');
+    say('  ⛔호가 잔량·슬리피지 미반영. 「닿았다」를 「그 값에 팔렸다」로 본다.');
+    say('  통계적 사실만 적는다. 투자 판단·매매 규칙은 여기서 만들지 않는다.');
+    break;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  job=mfill — 「사후 고점이 몇 시에 오는가」를 분봉에서 채운다. API 콜 0 · 멱등
+//
+//  일봉(job=dmfe)이 「D+1 에 42.8%」까지 답했다. 그 하루 «안»은 분봉만 안다.
+//
+//  ★★기준가는 <b>이벤트일 마지막 분봉의 종가</b>다 — krx_amt 종가를 쓰면 안 된다.
+//    분봉은 upd_stkpc_tp=1(지금 기준 수정주가)이고 krx_amt 는 «그 날 값»이라
+//    증자·분할이 끼면 상수배로 어긋난다(§11 · 실측 4.1%). 한 소스 안에서만 잰다.
+//  ★거래량 «비중»으로 체결 가능성을 본다 — 「그 값이 있었다」와 「거기서 손이 바뀌었다」는 다르다.
+//    ⛔단 이것도 «체결된 양»이지 호가 잔량이 아니다. 내 주문이 소화된다는 보장은 못 준다.
+// ══════════════════════════════════════════════════════════════════════════
+case 'mfill': {
+    $TGT = [3 => 'm_t3_hm', 5 => 'm_t5_hm', 10 => 'm_t10_hm'];
+    $cols = [
+        'm_npost_d'     => "TINYINT NULL COMMENT '분봉이 실린 사후 거래일 수 (0~5)'",
+        'm_mfe_day'     => "TINYINT NULL COMMENT 'D+1~D+5 최고가 봉의 날'",
+        'm_mfe_hm'      => "VARCHAR(5) NULL COMMENT '그 봉의 시각 HH:MM'",
+        'm_mfe_ret'     => "DECIMAL(6,2) NULL COMMENT '그 고가/이벤트일 마지막봉 종가-1'",
+        'm_mfe_vr'      => "DECIMAL(6,3) NULL COMMENT '그 봉 거래량 / 그 날 거래량 (%)'",
+        'm_nd_hi_hm'    => "VARCHAR(5) NULL COMMENT 'D+1 고가 시각'",
+        'm_nd_hi_ret'   => "DECIMAL(6,2) NULL",
+        'm_nd_hi_vr'    => "DECIMAL(6,3) NULL COMMENT 'D+1 고가 봉의 거래량 비중 (%)'",
+        'm_nd_lo_hm'    => "VARCHAR(5) NULL COMMENT 'D+1 «저가» 봉의 시각 — 고가보다 먼저인가'",
+        'm_nd_open_ret' => "DECIMAL(6,2) NULL COMMENT 'D+1 09:00 봉 시가 기준'",
+        'm_nd_close_ret'=> "DECIMAL(6,2) NULL",
+    ];
+    foreach ($TGT as $x => $c) $cols[$c] = "VARCHAR(5) NULL COMMENT 'D+1 안에서 +{$x}% 에 닿은 시각'";
+    foreach ($cols as $c => $def) {
+        try { $pdo->exec("ALTER TABLE qm_feat ADD COLUMN IF NOT EXISTS {$c} {$def}"); }
+        catch (Throwable $e) { say('  (컬럼 ' . $c . ' 추가 실패: ' . $e->getMessage() . ')'); }
+    }
+
+    $codes = $pdo->query("SELECT DISTINCT code FROM qm_event ORDER BY code")->fetchAll(PDO::FETCH_COLUMN);
+    say('사후 고점 «시각» 계산 — 종목 ' . number_format(count($codes)) . '개 · API 콜 0');
+    say('★기준가 = 이벤트일 «마지막 분봉»의 종가 (krx_amt 를 섞지 않는다 — §11 수정주가 함정)');
+
+    $evs = $pdo->prepare("SELECT d FROM qm_event WHERE code=? ORDER BY d");
+    /* ★한 번에 다 읽는다 — o·h·l·c·v 가 한 행에 있는데 나눠 읽고 시각으로 맞추면
+     *   봉마다 그 날 봉을 훑게 되어 1,960만 × 381 이 된다(안 끝난다). */
+    $bar = $pdo->prepare("SELECT ts, o, h, l, c, v FROM qm_bar WHERE code=? ORDER BY ts");
+    $set = implode(',', array_map(fn($c) => "{$c}=?", array_keys($cols)));
+    $upd = $pdo->prepare("UPDATE qm_feat SET {$set} WHERE code=? AND d=?");
+
+    $nRow = 0; $nFull = 0; $nNoBase = 0;
+    $pdo->beginTransaction();
+    foreach ($codes as $ci => $code) {
+        $bar->execute([$code]);
+        $byDay = [];                                   // 'YYYY-MM-DD' => [[hm,o,h,c,v,l], …]
+        foreach ($bar->fetchAll(PDO::FETCH_ASSOC) as $b) {
+            $byDay[substr($b['ts'], 0, 10)][] = [substr($b['ts'], 11, 5),
+                (float)$b['o'], (float)$b['h'], (float)$b['c'], (float)$b['v'], (float)$b['l']];
+        }
+        if (!$byDay) continue;
+        $days = array_keys($byDay);
+        sort($days);
+
+        $evs->execute([$code]);
+        foreach ($evs->fetchAll(PDO::FETCH_COLUMN) as $ed) {
+            /* ★기준가 = 이벤트일 마지막 봉의 종가 */
+            $d0 = $byDay[$ed] ?? null;
+            if (!$d0) { $nNoBase++; continue; }
+            $base = (float)end($d0)[3];
+            if ($base <= 0) { $nNoBase++; continue; }
+
+            $post = array_values(array_filter($days, fn($x) => $x > $ed));
+            $post = array_slice($post, 0, 5);
+            $nd   = count($post);
+            if (!$nd) { $nNoBase++; continue; }
+
+            $mfe = null; $mfeDay = null; $mfeHm = null; $mfeVr = null;
+            $ndHiHm = $ndHiRet = $ndHiVr = $ndLoHm = $ndOpen = $ndClose = null;
+            $tgtHm = array_fill_keys(array_keys($TGT), null);
+
+            foreach ($post as $j => $pd) {
+                $bs = $byDay[$pd];
+                $dayVol = 0.0;
+                foreach ($bs as $x) $dayVol += $x[4];
+                foreach ($bs as $x) {
+                    $r = ($x[2] / $base - 1) * 100;                       // 고가 기준
+                    if ($mfe === null || $r > $mfe) {
+                        $mfe = $r; $mfeDay = $j + 1; $mfeHm = $x[0];
+                        $mfeVr = $dayVol > 0 ? $x[4] / $dayVol * 100 : null;
+                    }
+                }
+                if ($j !== 0) continue;                                   // 아래는 D+1 전용
+
+                $ndOpen  = round(((float)$bs[0][1] / $base - 1) * 100, 2);
+                $ndClose = round(((float)end($bs)[3] / $base - 1) * 100, 2);
+                $hi = null; $lo = null;
+                foreach ($bs as $x) {
+                    if ($hi === null || $x[2] > $hi) {
+                        $hi = $x[2]; $ndHiHm = $x[0];
+                        $ndHiVr = $dayVol > 0 ? round($x[4] / $dayVol * 100, 3) : null;
+                    }
+                    if ($lo === null || $x[5] < $lo) { $lo = $x[5]; $ndLoHm = $x[0]; }   // 실제 저가
+                }
+                $ndHiRet = round(($hi / $base - 1) * 100, 2);
+                foreach ($TGT as $x => $cName) {
+                    foreach ($bs as $b2) {
+                        if (($b2[1] / $base - 1) * 100 >= $x || ($b2[2] / $base - 1) * 100 >= $x) {
+                            $tgtHm[$x] = $b2[0]; break;
+                        }
+                    }
+                }
+            }
+
+            $vals = [$nd, $mfeDay, $mfeHm, $mfe === null ? null : round($mfe, 2),
+                     $mfeVr === null ? null : round($mfeVr, 3),
+                     $ndHiHm, $ndHiRet, $ndHiVr, $ndLoHm, $ndOpen, $ndClose];
+            foreach ($TGT as $x => $cName) $vals[] = $tgtHm[$x];
+            $vals[] = $code; $vals[] = $ed;
+            $upd->execute($vals);
+            $nRow++;
+            if ($nd >= 5) $nFull++;
+        }
+        if ($ci % 100 === 0) { $pdo->commit(); $pdo->beginTransaction(); }
+        if ($ci % 300 === 0) say('  … ' . $ci . '종목 · 채운 이벤트 ' . number_format($nRow));
+    }
+    $pdo->commit();
+
+    say('');
+    say(sprintf('  채운 이벤트 %s · 그중 사후 5거래일 «분봉이 다 실린» 것 %s · 기준가/사후 없음 %s',
+        number_format($nRow), number_format($nFull), number_format($nNoBase)));
+    say('  ★분석은 «다 실린» 것만 쓴다 — 덜 실린 건을 섞으면 「며칠째」가 앞으로 쏠린다(일봉과 같은 규칙).');
+    break;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  job=mtime — 「몇 시에 파나」. qm_feat 만 읽는다 · API 콜 0
+// ══════════════════════════════════════════════════════════════════════════
+case 'mtime': {
+    $rows = $pdo->query("SELECT f.*, e.chg_pct FROM qm_feat f
+                           JOIN qm_event e ON e.code=f.code AND e.d=f.d
+                          WHERE f.m_npost_d >= 5 AND f.m_nd_hi_hm IS NOT NULL")
+                ->fetchAll(PDO::FETCH_ASSOC);
+    if (!$rows) { say('★자료가 없다 — 먼저 job=mfill 을 돌린다.'); break; }
+    $col  = fn(array $rs, string $c) => array_map(fn($r) => $r[$c] === null ? null : (float)$r[$c], $rs);
+    $isLim = fn(array $r) => (float)$r['chg_pct'] >= 29.0;
+
+    say('사후 고점은 «몇 시»에 오는가 — 분봉  (' . date('Y-m-d H:i') . ')');
+    say('진입은 정해진 것으로 둔다 — 급등일 종가 매수. 묻는 것은 <b>청산 시각</b>뿐이다.');
+    say('★전부 «분봉 안에서만» 계산 — 기준가는 이벤트일 마지막 봉 종가(§11 함정 없음).');
+    say('★사후 5거래일 분봉이 다 실린 건만: ' . number_format(count($rows)) . '건');
+
+    $clean = array_values(array_filter($rows,
+        fn($r) => (int)$r['q_halted'] === 0 && (int)$r['q_split_after'] === 0));
+    $noLim = array_values(array_filter($clean, fn($r) => !$isLim($r)));
+
+    /* 시각 버킷 — 30분 단위. ★09:00 과 15:30 은 «단일가»라 따로 센다(성격이 다른 봉이다). */
+    $BK = [['09:00', '09:00', '09:00 단일가'], ['09:01', '09:29', '09:01~09:29'],
+           ['09:30', '09:59', '09:30~09:59'], ['10:00', '10:59', '10:00~10:59'],
+           ['11:00', '11:59', '11:00~11:59'], ['12:00', '12:59', '12:00~12:59'],
+           ['13:00', '13:59', '13:00~13:59'], ['14:00', '14:59', '14:00~14:59'],
+           ['15:00', '15:19', '15:00~15:19'], ['15:30', '15:30', '15:30 단일가']];
+    $hmDist = function (array $g, string $key) use ($BK) {
+        $n = count($g);
+        if (!$n) { say('    n=0'); return; }
+        foreach ($BK as [$a, $b, $lab]) {
+            $c = count(array_filter($g, fn($r) => $r[$key] !== null && $r[$key] >= $a && $r[$key] <= $b));
+            $barw = (int)round($c / $n * 100 / 2);
+            say(sprintf('      %-14s %5.1f%%  %6s  %s', $lab, $c / $n * 100, number_format($c),
+                str_repeat('█', $barw)));
+        }
+    };
+
+    hr('M1. ★D+1 고가는 몇 시에 오는가 — 일봉이 「D+1 에 42.8%」까지만 답한 그 하루');
+    say('  [상한가 제외] n=' . number_format(count($noLim)));
+    $hmDist($noLim, 'm_nd_hi_hm');
+    say('');
+    say('  [상한가 마감] n=' . number_format(count($clean) - count($noLim)));
+    $hmDist(array_values(array_filter($clean, $isLim)), 'm_nd_hi_hm');
+
+    hr('M2. 사후 5거래일 «전체»의 최고가 — 며칠째 · 몇 시');
+    $dd = array_fill(1, 5, 0);
+    foreach ($noLim as $r) { $x = (int)$r['m_mfe_day']; if ($x >= 1 && $x <= 5) $dd[$x]++; }
+    $tot = max(1, array_sum($dd));
+    $s = '';
+    for ($i = 1; $i <= 5; $i++) $s .= sprintf(' D+%d %5.1f%%', $i, $dd[$i] / $tot * 100);
+    say('    [상한가 제외] 며칠째:' . $s);
+    say('    그 봉의 시각:');
+    $hmDist($noLim, 'm_mfe_hm');
+
+    hr('M3. ★그 시각에 «체결»이 있었나 — 값이 있어도 못 팔면 내 것이 아니다');
+    say('  D+1 고가 봉의 거래량 비중(그 날 거래량 대비 %) · 5일 최고가 봉도 같은 자로');
+    foreach ([['D+1 고가 봉', 'm_nd_hi_vr'], ['5일 최고가 봉', 'm_mfe_vr']] as [$nm, $c]) {
+        $st = qm_stat($col($noLim, $c));
+        if (!$st['n']) continue;
+        say(sprintf('    %-14s n=%6d  평균 %6.3f%%  중앙 %6.3f%%  25/75 %6.3f/%6.3f',
+            $nm, $st['n'], $st['mean'], $st['med'], $st['p25'], $st['p75']));
+    }
+    $zero = count(array_filter($noLim, fn($r) => $r['m_nd_hi_vr'] !== null && (float)$r['m_nd_hi_vr'] <= 0));
+    say(sprintf('    ★거래량 0 인 고가 봉: %s건 (%.2f%%)', number_format($zero),
+        count($noLim) ? $zero / count($noLim) * 100 : 0));
+    say('    ⛔이것은 «체결된 양»이지 호가 잔량이 아니다 — 내 주문이 소화된다는 보장은 못 준다.');
+
+    hr('M4. 시가 매도 vs D+1 안 목표가 매도 — 도달률과 «도달 시각»');
+    $o = qm_stat($col($noLim, 'm_nd_open_ret'));
+    $c1 = qm_stat($col($noLim, 'm_nd_close_ret'));
+    $hh = qm_stat($col($noLim, 'm_nd_hi_ret'));
+    foreach ([['D+1 시가에 판다', $o], ['D+1 종가에 판다', $c1], ['D+1 고가(위쪽 한계)', $hh]] as [$nm, $st]) {
+        if (!$st['n']) continue;
+        say(sprintf('    %-20s n=%6d  평균 %7.2f%%  중앙 %7.2f%%  양(+) %5.1f%%',
+            $nm, $st['n'], $st['mean'], $st['med'], $st['win']));
+    }
+    say('');
+    foreach ([3 => 'm_t3_hm', 5 => 'm_t5_hm', 10 => 'm_t10_hm'] as $x => $c) {
+        $hit = array_values(array_filter($noLim, fn($r) => $r[$c] !== null));
+        say(sprintf('    +%-2d%% 도달  %5.1f%% (%s건) — 도달 시각 분포:', $x,
+            count($noLim) ? count($hit) / count($noLim) * 100 : 0, number_format(count($hit))));
+        $hmDist($hit, $c);
+        say('');
+    }
+
+    hr('M5. 첫 30분 몰림(이벤트일)과 D+1 고점 시각이 같은 것을 말하는가');
+    say('  이르게 몰린 종목은 다음날 고점도 이른가 — 두 축을 잇는 물음이다.');
+    /* ★f_vol30_ratio 는 «비율»(0~1)이지 퍼센트가 아니다 — 10/20/30 으로 자르면 전부 첫 구간에
+     *   들어가 표가 한 줄이 된다(2026-08-06 실측: 6,066건이 통째로 들어갔다).
+     *   analyze 의 가설4 와 «같은 경계»를 써야 두 표를 견줄 수 있다. */
+    say(sprintf('    %-12s %7s %12s %12s', '첫30분 비중', 'n', 'D+1 고가 오전%', 'D+1 고가 평균'));
+    foreach ([[0, .10, '10% 미만'], [.10, .20, '10~20%'], [.20, .30, '20~30%'], [.30, 9, '30% 이상']]
+             as [$lo, $hi, $lab]) {
+        $g = array_values(array_filter($noLim, fn($r) => $r['f_vol30_ratio'] !== null
+            && (float)$r['f_vol30_ratio'] >= $lo && (float)$r['f_vol30_ratio'] < $hi));
+        if (!$g) continue;
+        $am = count(array_filter($g, fn($r) => $r['m_nd_hi_hm'] !== null && $r['m_nd_hi_hm'] < '12:00'));
+        $st = qm_stat($col($g, 'm_nd_hi_ret'));
+        say(sprintf('    %-12s %7s %11.1f%% %11.2f%%', $lab, number_format(count($g)),
+            $am / count($g) * 100, $st['mean'] ?? 0));
+    }
+
+    hr('M6. D+1 안에서 고가가 먼저인가, 저가가 먼저인가');
+    say('  둘 다 봉의 실제 고가·저가로 잰다. 같은 봉이면 그 안의 순서는 «모른다»(1분 안은 담기지 않는다).');
+    $a = count(array_filter($noLim, fn($r) => $r['m_nd_lo_hm'] !== null && $r['m_nd_hi_hm'] < $r['m_nd_lo_hm']));
+    $b = count(array_filter($noLim, fn($r) => $r['m_nd_lo_hm'] !== null && $r['m_nd_hi_hm'] > $r['m_nd_lo_hm']));
+    $e = count(array_filter($noLim, fn($r) => $r['m_nd_lo_hm'] !== null && $r['m_nd_hi_hm'] === $r['m_nd_lo_hm']));
+    $n = max(1, $a + $b + $e);
+    say(sprintf('    고가 먼저 %5.1f%%   저가 먼저 %5.1f%%   같은 봉 %5.1f%%  (n=%s)',
+        $a / $n * 100, $b / $n * 100, $e / $n * 100, number_format($n)));
+
+    say('');
+    say('  통계적 사실만 적는다. 투자 판단·매매 규칙은 여기서 만들지 않는다.');
+    say('  ⛔분봉이 답하지 못하는 것: 호가 잔량 · 시간우선순위. 「그 값에 내 주문이 체결되나」는 여전히 모른다.');
+    break;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  job=dp5 — 「패턴5(소문난 잔치)를 «하루만» 들면 어떤가」. API 콜 0
+//
+//  물음(2026-08-06 사용자): 패턴분석의 패턴5 실패 사례는 전부 <b>+20거래일 보유</b>다.
+//  욕심 안 내고 다음날 팔면 확률이 좋지 않겠나.
+//
+//  ★★모집단이 다르다 — 이건 `qm_dday`(급등 +10%)가 아니라 <b>120일 최고 거래대금</b> 신호다.
+//    거래대금 20평비도 «거래량» 배수가 아니라 «거래대금» 배수다. 그래서 krx_amt 를 다시 훑는다.
+//  ★매수 시점은 검증 탭과 같게 «신호 다음날 종가» — 신호는 마감 후에 아는 것이다.
+//    그래야 「중앙 −5.72% · 승률 37.4%」와 같은 자로 견줄 수 있다.
+//  ⛔시장 대비 초과수익이 «아니다» — 검증 탭은 같은 날 전종목 중앙값을 뺀다.
+//    짧은 보유(1~3일)는 시장 표류가 작아 큰 차이가 없지만, 20일 줄은 그만큼 부풀어 있다.
+// ══════════════════════════════════════════════════════════════════════════
+case 'dp5': {
+    $WIN   = 120;                                   // 최고 거래대금 창 (KrxAmt::SURGE_WIN 과 같은 값)
+    $MINAMT= 10000000000;                           // 하한 100억 (검증 탭 화면 기본값)
+    $HOLD  = [1, 2, 3, 5, 10, 20];                  // 매수 뒤 보유 거래일
+    $etf   = qm_etf_codes($pdo);
+    $names = [];
+    foreach ($pdo->query("SELECT stock_code, stock_name FROM all_stock_info")->fetchAll(PDO::FETCH_ASSOC)
+             as $r) $names[$r['stock_code']] = $r['stock_name'];
+
+    say('패턴5 「소문난 잔치」를 «하루만» 들면 — 8년 일봉  (' . date('Y-m-d H:i') . ')');
+    say('신호: 직전 ' . ($WIN - 1) . '거래일 최고 거래대금 초과 & 거래대금 '
+        . number_format($MINAMT / 1e8) . '억 이상');
+    say('★매수 = 신호 «다음날 종가»(검증 탭과 같은 기준) · 매도 = 그로부터 N거래일 뒤 종가');
+    say('★「익일 시가」 줄은 매수 다음날 09:00 시가에 판 것이다 — 하루도 안 들고 있는 셈');
+    say('⛔시장 대비 초과수익이 아니다 — 검증 탭의 −5.72% 는 초과수익이라 이 표와 «자가 다르다».');
+
+    say('★거래정지일은 «판정에서 뺀다» — 사는 날이 정지면 그 신호를 버리고, 파는 날이 정지면'
+        . ' 그 칸만 비운다(이월된 종가는 «팔 수 없던 값»이다 · qm_day_kind).');
+
+    $sel = $pdo->prepare("SELECT d,o,c,vol,amt,list_shrs FROM krx_amt WHERE code=? AND c>0 ORDER BY d");
+    $codes = $pdo->query("SELECT DISTINCT code FROM krx_amt ORDER BY code")->fetchAll(PDO::FETCH_COLUMN);
+    say('종목 ' . number_format(count($codes)) . '개를 훑는다…');
+
+    /* 신호 하나당 한 줄: [20평비, 등락률, 연도, [보유일 => 수익률], 시가매도수익률] */
+    $rows = [];
+    $nNoBuy = 0;        // 사는 날(신호 다음날)이 거래정지·결측이라 버린 신호
+    foreach ($codes as $ci => $code) {
+        if (substr($code, -1) !== '0' || isset($etf[$code])) continue;
+        $nm = (string)($names[$code] ?? '');
+        if ($nm !== '' && (mb_strpos($nm, '스팩') !== false || stripos($nm, 'ETN') !== false)) continue;
+        $sel->execute([$code]);
+        $s = $sel->fetchAll(PDO::FETCH_ASSOC);
+        $n = count($s);
+        if ($n < $WIN + 25) continue;
+
+        for ($i = $WIN; $i < $n - 22; $i++) {
+            $amt = (float)$s[$i]['amt'];
+            if ($amt < $MINAMT) continue;
+            $mx = 0.0;
+            for ($k = $i - ($WIN - 1); $k < $i; $k++) $mx = max($mx, (float)$s[$k]['amt']);
+            if ($amt <= $mx) continue;                          // 120일 최고가 아니다
+
+            $a20 = 0.0;
+            for ($k = $i - 20; $k < $i; $k++) $a20 += (float)$s[$k]['amt'];
+            $a20 /= 20;
+            if ($a20 <= 0) continue;
+
+            /* 분할이 낀 구간은 수익률 자체가 거짓이다 — 신호일부터 D+21 까지 본다 */
+            $ls = (int)$s[$i]['list_shrs']; $bad = false;
+            for ($k = $i; $k <= min($n - 1, $i + 21); $k++) {
+                $x = (int)$s[$k]['list_shrs'];
+                if ($ls > 0 && $x > 0 && abs($x / $ls - 1) > 0.05) { $bad = true; break; }
+            }
+            if ($bad) continue;
+
+            /* ★사는 날이 거래정지면 «살 수 없었다» — 그 신호는 잡지 못한 것이라 버린다.
+             *   이월된 종가로 사 두면 있지도 않은 체결을 표에 넣는 셈이다. */
+            if (qm_day_kind($s[$i + 1]) !== 'ok') { $nNoBuy++; continue; }
+            $buy = (float)$s[$i + 1]['c'];                       // ★신호 다음날 종가에 산다
+            if ($buy <= 0) continue;
+            $prev = (float)$s[$i - 1]['c'];
+            $r = ['m' => $amt / $a20, 'chg' => $prev > 0 ? ((float)$s[$i]['c'] / $prev - 1) * 100 : 0,
+                  'yr' => (int)substr($s[$i]['d'], 0, 4), 'h' => []];
+            /* 파는 날이 정지·결측이면 그 칸은 «모른다»로 비운다 — qm_stat 이 NULL 을 세지 않는다 */
+            $r['op'] = isset($s[$i + 2]) && qm_day_kind($s[$i + 2]) === 'ok'
+                ? ((float)$s[$i + 2]['o'] / $buy - 1) * 100 : null;
+            foreach ($HOLD as $h) {
+                $r['h'][$h] = isset($s[$i + 1 + $h]) && qm_day_kind($s[$i + 1 + $h]) === 'ok'
+                    ? ((float)$s[$i + 1 + $h]['c'] / $buy - 1) * 100 : null;
+            }
+            $rows[] = $r;
+        }
+        if ($ci % 500 === 0) say('  … ' . $ci . '종목 · 신호 ' . number_format(count($rows)));
+    }
+    say('  신호 ' . number_format(count($rows)) . '건'
+        . ($nNoBuy ? ' · ★사는 날이 거래정지라 버린 신호 ' . number_format($nNoBuy) . '건' : ''));
+
+    $col = fn(array $rs, $k) => array_map(fn($r) => is_int($k) ? $r['h'][$k] : $r[$k], $rs);
+    $tbl = function (string $title, array $g) use ($col, $HOLD) {
+        hr($title . '  (n=' . number_format(count($g)) . ')');
+        if (!$g) { say('    표본 없음'); return; }
+        say(sprintf('    %-14s %8s %9s %9s %8s', '매도 시점', 'n', '평균', '중앙', '승률'));
+        $one = function (string $lab, array $v) {
+            $s = qm_stat($v);
+            if (!$s['n']) { say(sprintf('    %-14s %8s', $lab, 'n=0')); return; }
+            say(sprintf('    %-14s %8s %8.2f%% %8.2f%% %7.1f%%%s', $lab, number_format($s['n']),
+                $s['mean'], $s['med'], $s['win'], $s['n'] < 30 ? '  ←n 30 미만' : ''));
+        };
+        $one('익일 시가', $col($g, 'op'));
+        foreach ($HOLD as $h) $one($h . '거래일 보유', $col($g, $h));
+    };
+
+    $flame = array_values(array_filter($rows, fn($r) => $r['m'] >= 20));
+    $rest  = array_values(array_filter($rows, fn($r) => $r['m'] <  20));
+    $tbl('P1. ★불꽃형 — 거래대금 20평비 20배 이상 (패턴5)', $flame);
+    $tbl('P2. 대조군 — 같은 신호인데 20배 미만', $rest);
+    $tbl('P3. 불꽃형 · 상한가(등락 29%↑) 제외', array_values(array_filter($flame, fn($r) => $r['chg'] < 29)));
+
+    /* ★한 해만 좋은 것은 규칙이 아니다 — 짧은 보유가 «매년» 20일 보유를 이기는지 본다 */
+    hr('P4. 연도별 — 불꽃형 (상한가 제외) · 1거래일 보유 vs 20거래일 보유');
+    $fx = array_values(array_filter($flame, fn($r) => $r['chg'] < 29));
+    $yrs = array_values(array_unique(array_map(fn($r) => $r['yr'], $fx)));
+    sort($yrs);
+    say(sprintf('  %-6s %8s %10s %10s %10s %10s', '연도', 'n', '1일 평균', '1일 중앙', '1일 승률', '20일 중앙'));
+    $pos = 0; $cnt = 0;
+    foreach ($yrs as $y) {
+        $g = array_values(array_filter($fx, fn($r) => $r['yr'] === $y));
+        $a = qm_stat($col($g, 1)); $b = qm_stat($col($g, 20));
+        if (!$a['n']) continue;
+        $cnt++; if ($a['mean'] > 0) $pos++;
+        say(sprintf('  %-6d %8s %9.2f%% %9.2f%% %9.1f%% %9.2f%%', $y, number_format($a['n']),
+            $a['mean'], $a['med'], $a['win'], $b['med'] ?? 0));
+    }
+    say(sprintf('  ★1일 보유 평균이 «양(+)»인 해: %d / %d', $pos, $cnt));
+
+    say('');
+    say('  ⛔거래비용 미반영 — 왕복 0.2%(세금+수수료)를 «건별로» 빼야 실제 값이 된다.');
+    say('  ⛔시장 대비가 아니다 — 20일 줄은 시장 표류만큼 부풀어 있다(짧은 보유는 영향이 작다).');
+    say('  통계적 사실만 적는다. 투자 판단·매매 규칙은 여기서 만들지 않는다.');
     break;
 }
 
