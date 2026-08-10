@@ -354,8 +354,13 @@ class Kiwoom
      * ★키움 숫자는 <b>부호가 붙어 온다</b>("-230750"). 부호는 등락 방향이고 절대값이 값이다 —
      *   num() 이 abs() 한다. 등락 방향은 rate 의 부호로 따로 온다.
      *
+     * ★<b>시·고·저도 함께 돌려준다</b>(2026-08-10 · 실호출로 필드 확인 — open_pric·high_pric·low_pric).
+     *   장중 박스 상향돌파 판정(boxbrk_live)이 이 셋을 본다. 시세 갱신 경로는 이 키들을 안 읽으므로
+     *   더해도 아무 데도 안 부딪힌다. 0 이면 <b>키를 안 담는다</b> — 「없음」과 「0원」을 섞지 않는다.
+     *
      * @param  string[] $codes 6자리 종목코드
-     * @return array<string,array> code => [name, price, diff, rate, vol, capEok, amtEok, tm]
+     * @return array<string,array> code => [name, price, diff, rate, vol, capEok, amtEok, tm,
+     *                                      open?, high?, low?]
      *         못 받은 종목은 <b>키 자체가 없다</b> (호출자가 그 사실을 알 수 있게)
      */
     public function quotes(array $codes): array
@@ -401,6 +406,11 @@ class Kiwoom
                     'amtEok' => round(self::num(self::pick($r, ['trde_prica'])) / 100, 2), // 백만원 → 억원
                     'tm'     => (string)($r['cntr_tm'] ?? ''),
                 ];
+                /* ★시·고·저 — 있을 때만 담는다(0 은 「못 받음」이지 「0원」이 아니다) */
+                foreach (['open' => 'open_pric', 'high' => 'high_pric', 'low' => 'low_pric'] as $k => $f) {
+                    $v = self::num(self::pick($r, [$f]));
+                    if ($v > 0) $out[$code][$k] = (int)round($v);
+                }
             }
         }
         return $out;

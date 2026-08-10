@@ -69,6 +69,9 @@ if ($CLI) {
 const BX_TP = 15.0, BX_SL = 10.0, BX_DAYS = 5;
 /** 1분봉 창 — 신호일 앞 5거래일 / 뒤 10거래일 */
 const BX_MIN_BACK = 5, BX_MIN_FWD = 10;
+/* ★「한 배치에서 받은 봉인가」의 문턱 — 이보다 넓게 흩어져 있으면 수정주가 기준이 섞였을 수 있어
+ *   「이미 있는 봉」으로 완료 처리하지 않고 구간을 통째로 다시 받는다 (bx_min_adopt) */
+const BX_MIN_BATCH_SEC = 21600;   // 6시간
 
 function bx_say(string $s): void { echo $s . "\n"; @ob_flush(); @flush(); }
 
@@ -361,9 +364,86 @@ function bx_fill_outcome(PDO $pdo, bool $verbose = true): int
  * ★네이버 폴백을 쓰지 않는다(급등주 규칙 §2) — 네이버는 «가장 최근 거래일 하루치»만 주므로
  *   과거 구간엔 무용한데, 성공하면 bars>0 이 되어 <b>목표 날짜가 비었는데도 성공으로 보인다</b>.
  */
+/**
+ * ★<b>받기 «전»에 `qm_bar` 를 먼저 본다</b> (2026-08-10 · API 0회).
+ *
+ * 왜 — 급등주 아카이브(`qm_*`)가 같은 종목·같은 시기를 이미 쌓아 둔다. 그래서
+ *   <b>한 콜도 안 쓰고 봉이 이미 있는 행</b>이 생기는데, `has_min` 은 「내가 받은 것」에만
+ *   켜지므로 화면이 「분봉을 아직 못 받았습니다」라고 <b>거짓말</b>을 했다
+ *   (실측 2026-08-10: 688건 중 634건이 그랬다). 화면은 `has_min` 으로 패널을 가르고
+ *   API 는 플래그를 안 보고 `qm_bar` 를 읽으니, 플래그만 조용히 문지기 노릇을 하고 있었다.
+ *   ★불꽃형 때 잡은 그 결함과 <b>같은 종류</b>다 — 「플래그는 표시용이지 판정의 문지기가 아니다」.
+ *
+ * 판정 — 받을 때와 <b>같은 자</b>(시장 거래일 −BX_MIN_BACK ~ +BX_MIN_FWD)를 쓴다.
+ *   has_min=1   : 신호일 봉이 실제로 있다 → 카드가 바로 뜬다
+ *   min_stage=2 : 구간의 «그 종목이 거래한 날»이 <b>전부</b> 있고 + <b>한 배치</b>에서 받은 것
+ *
+ * ★★배치가 갈리면 stage 를 <b>안</b> 올린다 — `upd_stkpc_tp=1` 은 «받는 시점» 기준 수정주가라,
+ *   따로따로 받은 날들을 한 종목 안에 두면 기준이 섞인다(급등주 규칙 §5·§11).
+ *   그런 행은 stage 0 으로 남겨 아래에서 구간을 <b>통째로</b> 다시 받게 둔다.
+ */
+function bx_min_adopt(PDO $pdo, array $days, array $idx, bool $verbose = true): array
+{
+    $n = ['sig' => 0, 'full' => 0];
+    $rows = $pdo->query("SELECT code, d FROM bx_cand
+                          WHERE min_stage < 2 OR has_min = 0")->fetchAll(PDO::FETCH_ASSOC);
+    if (!$rows) return $n;
+
+    $last    = count($days) - 1;
+    $stTrade = $pdo->prepare("SELECT d FROM krx_amt WHERE code=? AND d BETWEEN ? AND ? AND vol>0 ORDER BY d");
+    $stBars  = $pdo->prepare("SELECT DATE(ts) dd, MIN(fetched_at) f0, MAX(fetched_at) f1
+                                FROM qm_bar WHERE code=? AND ts>=? AND ts < ? + INTERVAL 1 DAY
+                               GROUP BY DATE(ts)");
+    $upHas   = $pdo->prepare("UPDATE bx_cand SET has_min=1 WHERE code=? AND d=?");
+    $upFull  = $pdo->prepare("UPDATE bx_cand SET has_min=1, min_stage=2 WHERE code=? AND d=?");
+
+    foreach ($rows as $r) {
+        $code = $r['code']; $d = $r['d'];
+        if (!isset($idx[$d])) continue;
+        $i = $idx[$d];
+        $a = $days[max(0, $i - BX_MIN_BACK)];
+        $b = $days[min($last, $i + BX_MIN_FWD)];
+
+        $stTrade->execute([$code, $a, $b]);
+        $want = $stTrade->fetchAll(PDO::FETCH_COLUMN);
+
+        $stBars->execute([$code, $a, $b]);
+        $have = []; $f0 = null; $f1 = null;
+        foreach ($stBars->fetchAll(PDO::FETCH_ASSOC) as $x) {
+            $have[$x['dd']] = 1;
+            if ($f0 === null || $x['f0'] < $f0) $f0 = $x['f0'];
+            if ($f1 === null || $x['f1'] > $f1) $f1 = $x['f1'];
+        }
+        if (!isset($have[$d])) continue;          // 신호일 봉이 없으면 그림이 안 된다
+
+        $miss = 0;
+        foreach ($want as $w) if (!isset($have[$w])) $miss++;
+        $full  = ($i + BX_MIN_FWD) <= $last && $want && $miss === 0;
+        $oneBt = $f0 !== null && (strtotime($f1) - strtotime($f0)) < BX_MIN_BATCH_SEC;
+
+        if ($full && $oneBt) { $upFull->execute([$code, $d]); $n['full']++; }
+        else                 { $upHas->execute([$code, $d]);  $n['sig']++;  }
+    }
+    if ($verbose && ($n['sig'] || $n['full'])) {
+        bx_say(sprintf('  분봉 — 이미 있는 봉을 가져다 씀 (콜 0) : 완료 %d건 · 표시만 %d건',
+            $n['full'], $n['sig']));
+    }
+    return $n;
+}
+
 function bx_minfill(PDO $pdo, int $budget = 120, bool $verbose = true): array
 {
     $done = ['s1' => 0, 's2' => 0, 'calls' => 0, 'skip' => 0];
+
+    /* ★거래일 목록을 먼저 만든다 — 「이미 있는 봉 가져다 쓰기」와 「받기」가 같은 자를 쓴다 */
+    $days = $pdo->query("SELECT DISTINCT d FROM krx_amt WHERE vol > 0 AND d >= DATE_SUB(CURDATE(), INTERVAL 400 DAY)
+                          ORDER BY d")->fetchAll(PDO::FETCH_COLUMN);
+    $idx = array_flip($days);
+
+    /* ★키움을 잡기 «전»에 부른다 — 키가 없어도 이건 되고, 콜을 아낀다 */
+    $ad = bx_min_adopt($pdo, $days, $idx, $verbose);
+    $done['adopt'] = $ad['full']; $done['adopt_sig'] = $ad['sig'];
+
     try { $kw = new Kiwoom($pdo); }
     catch (Throwable $e) {
         if ($verbose) bx_say('  분봉 — 키움 키가 없어 건너뛴다 (' . $e->getMessage() . ')');
@@ -383,10 +463,6 @@ function bx_minfill(PDO $pdo, int $budget = 120, bool $verbose = true): array
         SELECT code, d, 2 stage FROM bx_cand
          WHERE min_stage = 1 AND n_post >= " . BX_DAYS . "
          ORDER BY d DESC LIMIT 200")->fetchAll(PDO::FETCH_ASSOC));
-
-    $days = $pdo->query("SELECT DISTINCT d FROM krx_amt WHERE vol > 0 AND d >= DATE_SUB(CURDATE(), INTERVAL 400 DAY)
-                          ORDER BY d")->fetchAll(PDO::FETCH_COLUMN);
-    $idx = array_flip($days);
 
     foreach ($todo as $t) {
         if ($done['calls'] >= $budget) break;

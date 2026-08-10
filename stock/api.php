@@ -35,6 +35,7 @@ try {
         case 'dt':       api_dt($action, $pdo);            break;
         case 'qm':       api_qm($action, $pdo);            break;
         case 'fav':      api_fav($action, $pdo);           break;
+        case 'bx':       api_bx($action, $pdo);            break;
         default:         pf_api_fail('알 수 없는 module 입니다.');
     }
 } catch (Throwable $e) {
@@ -1359,6 +1360,75 @@ function api_dt(string $action, PDO $pdo): void
  * ★수집·판정은 여기서 하지 않는다 — 이 파일은 이미 쌓인 봉을 꺼내 줄 뿐이다.
  *   (키움을 부르는 자리는 `cron/qm_collect.php` 하나다.)
  */
+/**
+ * ══ module=bx — 박스 상향돌파 (2026-08-10 신설) ═════════════════════════
+ *
+ * action=live — ⚡<b>장중 «잠정» 후보</b>. 판정 단일본은 `stock/lib/boxbrk.php` 의 `boxbrk_live()`.
+ *
+ * ★<b>장 밖에서는 나가지 않는다</b> — 거래일·시각을 여기서 먼저 막는다(단타의 `refreshQuotesLive`
+ *   와 같은 문지기). 없으면 토요일에 화면을 열어 둔 것만으로 키움 콜이 나간다.
+ * ★상한이 <b>15:30 «전»</b>인 것은 시세 규칙과 같은 이유다 — 15:30 종가 단일가 «직전» 값을
+ *   확정처럼 보여 주면 안 된다. 마감 뒤의 답은 16:20 크론이 담은 `bx_cand` 다.
+ * ★결과를 <b>표에 담지 않는다</b>(boxbrk_live 주석) — 잠정치와 확정을 한 표에 섞지 않는다.
+ */
+function api_bx(string $action, PDO $pdo): void
+{
+    header('Content-Type: application/json; charset=utf-8');
+    $out = function ($v, int $code = 200) {
+        http_response_code($code);
+        echo json_encode($v, JSON_UNESCAPED_UNICODE);
+        exit;
+    };
+
+    try {
+        switch ($action) {
+            case 'live': {
+                require_once __DIR__ . '/lib/boxbrk.php';
+                $hm = (int)date('Hi');
+                $dt = new Dt($pdo);
+                if ($hm < 900 || $hm >= 1530 || !$dt->isTradingDay()) {
+                    $out(['ok' => 1, 'off' => 1, 'rows' => [], 'at' => date('H:i:s'),
+                          'note' => $dt->isTradingDay()
+                                    ? '장중(09:00~15:30)에만 잽니다 — 마감 뒤 확정 후보는 16:20 에 담깁니다.'
+                                    : '오늘은 거래일이 아닙니다.']);
+                }
+                $r = boxbrk_live($pdo);
+                $out(['ok' => 1, 'off' => 0] + $r);
+            }
+            /**
+             * action=search&q= — 패턴분석 검색칸의 자동완성.
+             *
+             * ★원천이 <b>`bx_cand` 자신</b>이다(`Pf::stockSearch()` 의 전종목이 아니다) —
+             *   이 화면은 「5조건을 통과한 날」만 담으므로, 신호가 없는 종목을 제안하면
+             *   고르는 순간 빈 화면이 된다. <b>제안은 반드시 결과가 있는 것</b>이어야 한다.
+             * ★건수를 함께 준다 — 한 종목이 여러 날 신호를 내므로 「몇 건인가」가 고를 때의 정보다.
+             */
+            case 'search': {
+                $q = trim((string)($_GET['q'] ?? ''));
+                if ($q === '' || mb_strlen($q) > 40) $out([]);
+                $like = '%' . str_replace(['\\', '%', '_'], ['\\\\', '\%', '\_'], $q) . '%';
+                $st = $pdo->prepare(
+                    "SELECT code, MAX(name) name, COUNT(*) n, MAX(d) last_d
+                       FROM bx_cand WHERE name LIKE :a OR code LIKE :b
+                      GROUP BY code ORDER BY n DESC, last_d DESC LIMIT 12");
+                $st->execute([':a' => $like, ':b' => $like]);
+                $rows = [];
+                foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                    $rows[] = ['code' => $r['code'], 'name' => (string)$r['name'],
+                               'n' => (int)$r['n'], 'last_d' => (string)$r['last_d']];
+                }
+                $out($rows);
+            }
+            default:
+                $out(['error' => '알 수 없는 action 입니다.'], 200);
+        }
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+}
+
 function api_qm(string $action, PDO $pdo): void
 {
     header('Content-Type: application/json; charset=utf-8');

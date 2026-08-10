@@ -12062,6 +12062,20 @@ function pf_page_boxbrk(PDO $pdo, Pf $pf): void
     $sort = ($_GET['s'] ?? '') === 'old' ? 'old' : 'new';
     $pg   = max(1, (int)($_GET['p'] ?? 1));
     $gid  = max(0, (int)($_GET['g'] ?? 0));
+    /* ★종목 검색(2026-08-10 사용자 지시) — 이름 «또는» 코드. 「날짜·관심차트」와 같은 <b>범위</b> 축이라
+     *   아래 `$scope` 에 넣는다(칩 숫자도 함께 좁아진다 — 안 그러면 「검색 중인데 등급 A 12건」처럼
+     *   화면이 두 말을 한다). 한 종목이 여러 날 신호를 내므로 결과는 <b>여러 건</b>이 정상이다. */
+    $q = trim((string)($_GET['q'] ?? ''));
+    if (mb_strlen($q) > 40) $q = mb_substr($q, 0, 40);
+    /* ★자동완성에서 고르면 «코드»로 들어온다(이름은 겹칠 수 있다) — 그러면 칩에 이름을 함께 적는다.
+     *   안 그러면 「047040 ✕」만 남아 무엇을 보고 있는지 코드를 외워야 안다. */
+    $qLabel = $q;
+    if ($q !== '' && preg_match('/^\d{6}$/', $q)) {
+        $st = $pdo->prepare("SELECT name FROM bx_cand WHERE code = ? LIMIT 1");
+        $st->execute([$q]);
+        $nm = (string)$st->fetchColumn();
+        if ($nm !== '') $qLabel = $nm . ' (' . $q . ')';
+    }
 
     $fav = new ChartFav($pdo);
     $favGroups = $fav->groups('boxbrk');
@@ -12081,6 +12095,11 @@ function pf_page_boxbrk(PDO $pdo, Pf $pf): void
      *   세면 「A 0건」 같은 자기모순이 화면에 뜬다). */
     $scope = ['1=1'];
     if ($d !== '')  $scope[] = 'd = ' . $pdo->quote($d);
+    if ($q !== '') {
+        /* ★`%` `_` 를 그대로 두면 「_」 한 글자가 아무 글자나 되어 엉뚱한 종목이 섞인다 */
+        $like = $pdo->quote('%' . str_replace(['\\', '%', '_'], ['\\\\', '\%', '\_'], $q) . '%');
+        $scope[] = '(name LIKE ' . $like . ' OR code LIKE ' . $like . ')';
+    }
     if ($gid > 0)   $scope[] = "EXISTS(SELECT 1 FROM chart_fav_item i WHERE i.fav_id = " . $gid
                              . " AND i.src = 'boxbrk' AND i.code = bx_cand.code AND i.d = bx_cand.d)";
     $scopeSql = implode(' AND ', $scope);
@@ -12151,16 +12170,13 @@ function pf_page_boxbrk(PDO $pdo, Pf $pf): void
         $docStat[$s2]['avg'] = $n2 ? array_sum($v) / $n2 : null;
         $docStat[$s2]['med'] = $n2 ? ($n2 % 2 ? $v[intdiv($n2, 2)] : ($v[$n2 / 2 - 1] + $v[$n2 / 2]) / 2) : null;
     }
-    /* 사례 — <b>자동 수집분에서만</b> 뽑는다. 직접 고른 것(pick)은 결과를 보고 담은 표본이라
-     *   사례로 쓰면 그 오염(룩어헤드)을 화면이 되풀이한다. 성공·실패 «극단» 3건씩. */
-    $caseOk  = $pdo->query("SELECT * FROM bx_cand WHERE src='auto' AND brk_kind='tp'
-                             AND f_d5 IS NOT NULL ORDER BY f_d5 DESC, d LIMIT 3")->fetchAll(PDO::FETCH_ASSOC);
-    $caseBad = $pdo->query("SELECT * FROM bx_cand WHERE src='auto' AND brk_kind='sl'
-                             AND f_d5 IS NOT NULL ORDER BY f_d5 ASC, d LIMIT 3")->fetchAll(PDO::FETCH_ASSOC);
+    /* ⊖「실제 사례」 카드는 2026-08-10 사용자 지시로 <b>삭제</b>했다 — 극단 3+3 을 보여 주던 자리인데,
+     *   전형은 위 표의 중앙값이고 낱건은 목록에서 얼마든지 본다. 뽑던 쿼리도 함께 지운다
+     *   (화면만 지우고 조회를 남기면 «아무도 안 보는 쿼리»가 매 요청 돈다). */
 
-    /* 관심차트 멤버십 — 목록 + 사례를 «한 번에» 묻는다 (사례 카드에도 체크칸이 산다) */
+    /* 관심차트 멤버십 — 목록의 것만 묻는다 */
     $favKeys = [];
-    foreach (array_merge($rows, $caseOk, $caseBad) as $r) $favKeys[] = $r['code'] . '|' . $r['d'];
+    foreach ($rows as $r) $favKeys[] = $r['code'] . '|' . $r['d'];
     $favMember = $fav->memberOf('boxbrk', array_values(array_unique($favKeys)));
     $cards = [];
 
@@ -12232,6 +12248,30 @@ function pf_page_boxbrk(PDO $pdo, Pf $pf): void
   background:#fff;color:#345;text-decoration:none}
 .fl-bar a.on{background:#12406b;border-color:#12406b;color:#fff;font-weight:700}
 .fl-bar select{border:1px solid #cfd9e2;border-radius:6px;padding:3px 7px;font-size:13px;background:#fff}
+/* 종목 검색 (2026-08-10) — 칩과 같은 높이·같은 둥근 모서리라 한 줄에 섞여도 어색하지 않다 */
+.fl-srch{display:inline-flex;gap:5px;align-items:center;margin:0}
+.fl-srch input{border:1px solid #cfd9e2;border-radius:14px;padding:3px 11px;font-size:13px;
+  background:#fff;width:150px}
+.fl-srch button{border:1px solid #cfd9e2;border-radius:14px;padding:3px 11px;font-size:13px;
+  background:#f4f7fa;color:#345;cursor:pointer}
+.fl-srch button:hover{background:#e9eff5}
+/* 자동완성 목록은 폼(≈230px)보다 넓어야 「이름·코드·건수」가 한 줄에 들어간다 */
+.fl-srch .stk-list{min-width:280px}
+/* 「기준」 버튼 — 찾기 옆에 붙지만 폼 밖이라 제출되지 않는다 */
+.fl-crit{border:1px solid #cfd9e2;border-radius:14px;padding:3px 11px;font-size:13px;
+  background:#fff;color:#12406b;font-weight:700;cursor:pointer}
+.fl-crit:hover{background:#f4f7fa}
+/* 모달 그릇 — 사이트의 다른 화면(pf-modal-back/pf-modal)과 같은 클래스·같은 모양 */
+.pf-modal-back{display:none;position:fixed;inset:0;background:rgba(16,32,48,.5);z-index:200;
+  align-items:flex-start;justify-content:center;padding:40px 14px;overflow-y:auto}
+.pf-modal-back.on{display:flex}
+.pf-modal{background:#fff;border-radius:13px;width:100%;max-width:660px;
+  box-shadow:0 18px 50px rgba(10,25,45,.3);overflow:hidden}
+.pfm-head{display:flex;justify-content:space-between;align-items:center;padding:13px 16px;
+  background:linear-gradient(90deg,#123c63,#1d5c93);color:#fff;font-size:16px;font-weight:800}
+.pfm-x{background:rgba(255,255,255,.16);border:none;color:#fff;font-size:14px;cursor:pointer;
+  width:28px;height:28px;border-radius:7px;line-height:1}
+.pfm-x:hover{background:rgba(255,255,255,.3)}
 .fl-pg{display:flex;gap:5px;flex-wrap:wrap;justify-content:center;margin:18px 0 4px;font-size:13px}
 .fl-pg a,.fl-pg span{display:inline-block;min-width:32px;text-align:center;padding:5px 8px;
   border:1px solid #dfe6ec;border-radius:6px;background:#fff;color:#345;text-decoration:none}
@@ -12254,12 +12294,12 @@ table.bx-doc th{background:#f4f7fa}
 table.bx-doc td:first-child,table.bx-doc th:first-child{text-align:left}
 </style>';
 
-    $url = function (array $ov) use ($d, $src, $gr, $fl, $bx, $k, $sort, $pg, $gid) {
-        $q = ['mode' => 'boxbrk', 'd' => $d, 'src' => $src, 'gr' => $gr, 'fl' => $fl, 'bx' => $bx,
-              'k' => $k, 's' => $sort, 'p' => $pg, 'g' => $gid ?: ''];
-        foreach ($ov as $k2 => $v) $q[$k2] = $v;
-        $q = array_filter($q, fn($v) => $v !== '' && $v !== null);
-        return '/stock/index.php?' . http_build_query($q);
+    $url = function (array $ov) use ($d, $src, $gr, $fl, $bx, $k, $sort, $pg, $gid, $q) {
+        $p = ['mode' => 'boxbrk', 'd' => $d, 'src' => $src, 'gr' => $gr, 'fl' => $fl, 'bx' => $bx,
+              'k' => $k, 's' => $sort, 'p' => $pg, 'g' => $gid ?: '', 'q' => $q];
+        foreach ($ov as $k2 => $v) $p[$k2] = $v;
+        $p = array_filter($p, fn($v) => $v !== '' && $v !== null);
+        return '/stock/index.php?' . http_build_query($p);
     };
     $chip = function (string $key, string $val, string $label, int $n) use ($url, $d, $src, $gr, $fl, $bx, $k) {
         $cur = ['src' => $src, 'gr' => $gr, 'fl' => $fl, 'bx' => $bx, 'k' => $k][$key] ?? '';
@@ -12279,10 +12319,28 @@ table.bx-doc td:first-child,table.bx-doc th:first-child{text-align:left}
        . ' <a href="/stock/index.php?mode=quantstat">검증 탭 ⑨</a>).'
        . ' 섞어서 세면 「이 패턴 승률 좋네」로 잘못 읽힙니다.</span></div></div></div>';
 
+    /* ── ⚡장중 잠정 (2026-08-10 · 사용자 요청 「장중에 확인할 수 없어?」) ──────────────
+     *
+     * ★<b>잠정</b>이라고 화면이 먼저 말한다 — 고가·저가·현재가가 마감까지 바뀌므로 조건 ③④⑤가
+     *   뒤집힐 수 있다. 그리고 <b>원장(`bx_cand`)에는 담지 않는다</b>(boxbrk_live 주석).
+     * ★자동 갱신을 걸지 않는다 — 후보를 «지켜보는» 자리가 아니라 «지금 있나» 묻는 자리다.
+     *   누를 때만 나간다(키움 1콜 · 전종목 훑기는 DB 뿐).
+     * ★판정을 화면이 다시 하지 않는다 — 서버가 `boxbrk_live()` 한 곳에서 재고 화면은 그린다. */
+    echo '<div class="card" id="bxlive"><h2>⚡ 장중 잠정 <span class="q-note" style="display:inline">'
+       . '(09:00~15:30 · 지금 값으로 5조건을 재 봅니다 — <b>마감까지 바뀝니다</b> · 표에 담지 않습니다)'
+       . '</span> <button type="button" id="bxlv-go" class="btn sm" style="float:right">다시 보기</button></h2>'
+       . '<div id="bxlv-body" class="q-note">불러오는 중…</div></div>';
+
     /* ── 패턴 지도 — 판정 순서 그대로 (옛 패턴분석의 「패턴 지도」를 잇는다 · 2026-08-10) ──
      * ★임계를 손으로 적지 않는다 — 전부 BoxBrk 상수에서 보간한다. 상수를 고치면 지도가 따라온다. */
+    /* ★기본은 «접힘»이다(2026-08-10 사용자 지시) — 정의는 한 번 읽으면 되는 글인데 늘 펴 있으면
+     *   화면을 열 때마다 «오늘 뜬 후보»가 스크롤 아래로 밀린다. 사례 카드와 같은 그릇(`details.card`)이라
+     *   여는 방법도 같다. ★없애지 않는 이유 — 조건을 잊었을 때 돌아올 자리가 있어야 한다. */
     $pcFmt = fn(float $v) => rtrim(rtrim(sprintf('%.1f', $v), '0'), '.');
-    echo '<div class="card"><h2>패턴 지도 — 판정 순서</h2><div class="bx-flow">'
+    echo '<details class="card"><summary>패턴 지도 — 판정 순서 · 특징'
+       . ' <span class="q-note" style="display:inline;font-weight:400">'
+       . '(다섯 조건과 지금까지 쌓인 것의 실측 · 눌러서 펼칩니다)</span>'
+       . '</summary><div class="bx-flow">'
        . '<div class="bx-fr"><span class="bx-fb bx-fk">최고 거래대금 신호</span>'
        .   '<span class="bx-fa">거래대금이 직전 ' . (BoxBrk::WIN - 1) . '거래일 최고 & '
        .   number_format(BoxBrk::MINAMT / 1e8) . '억↑ → 그 날 고가 H·저가 L = 새 «박스»'
@@ -12308,9 +12366,12 @@ table.bx-doc td:first-child,table.bx-doc th:first-child{text-align:left}
        .   ' B↑ 새 후보는 Pushover 알림</span></div>'
        . '</div><div class="q-note">★이 다섯 조건이 정의의 전부입니다 — 점수 컷은 없습니다.'
        . ' 그리고 <b>이 패턴에 측정된 성과 우위는 아직 없습니다</b> — 근거와 8년 실측은'
-       . ' <a href="/stock/index.php?mode=quantstat">검증 탭 ⑨</a>.</div></div>';
+       . ' <a href="/stock/index.php?mode=quantstat">검증 탭 ⑨</a>.</div>';
 
-    /* ── 특징·실측 — 필터와 무관한 «전체» 집계. 출처를 갈라 세는 것이 이 표의 존재 이유다 ── */
+    /* ── 특징·실측 — 필터와 무관한 «전체» 집계. 출처를 갈라 세는 것이 이 표의 존재 이유다.
+     * ★2026-08-10 사용자 지시로 <b>패턴 지도 카드 «안»</b>(뒤쪽)으로 넣었다 — 둘 다 「정의를 설명하는
+     *   글」이라 한 번 읽고 접어 두는 성질이 같다. 따로 두면 카드 하나는 접히고 하나는 늘 펴 있어
+     *   매일 쓰는 목록이 계속 아래로 밀린다. ★그래서 이 블록은 `</details>` «앞»에 있어야 한다. */
     $dsRow = function (string $key, string $label, string $tip) use ($docStat) {
         $r = $docStat[$key] ?? null;
         if (!$r) return '';
@@ -12325,7 +12386,7 @@ table.bx-doc td:first-child,table.bx-doc th:first-child{text-align:left}
              . '<td>' . ($r['avg'] !== null ? sprintf('%+.2f%%', $r['avg']) : '—') . '</td>'
              . '<td>' . ($r['med'] !== null ? sprintf('%+.2f%%', $r['med']) : '—') . '</td></tr>';
     };
-    echo '<div class="card"><h2>특징 — 지금까지 쌓인 것의 실측</h2>'
+    echo '<h3 style="font-size:13.5px;margin:16px 0 2px;color:#12406b">특징 — 지금까지 쌓인 것의 실측</h3>'
        . '<table class="bx-doc"><tr><th>출처</th><th>전체</th><th>익절</th><th>손절</th><th>미도달</th>'
        . '<th>모호</th><th>승률</th><th>평균</th><th>중앙</th></tr>'
        . $dsRow('pick', '★직접 고른 것 (정의 원본)',
@@ -12338,79 +12399,56 @@ table.bx-doc td:first-child,table.bx-doc th:first-child{text-align:left}
        . '★<b>직접 고른 것의 우위는 「눈」이 아니라 「결과」에서 왔습니다</b> — 옛 갤러리 카드가'
        . ' 사후 55거래일 차트와 결과 배지를 함께 띄웠고, 모양이 가장 «안» 닮은 무리에서 담은 것이'
        . ' 가장 좋았습니다(세 갈래 검정 · <a href="/stock/index.php?mode=quantstat">검증 탭 ⑨</a>).'
-       . ' 그래서 이 표는 두 줄을 절대 합치지 않습니다.</div></div>';
-
-    /* ── 실제 사례 — 성공·실패 극단 대표. <b>닫힌 채로 시작</b>한다(매일 쓰는 목록을 밀어내지 않게).
-     *   카드는 목록과 «같은 렌더러»(pf_bx_card)다 — 열면 그때 차트가 로드된다(IntersectionObserver). */
-    if ($caseOk || $caseBad) {
-        echo '<details class="card"><summary>실제 사례 — 성공 ' . count($caseOk) . ' · 실패 '
-           . count($caseBad) . ' (자동 수집분의 극단 대표 · 눌러 펼치기)</summary>'
-           . '<div class="q-note" style="margin-top:8px">★<b>극단을 골랐습니다</b> — D+5 수익률 상·하위'
-           . ' 3건씩이고, 전형적인 결과는 위 표의 <b>중앙값</b>입니다. 직접 고른 것(pick)은 결과를 보고'
-           . ' 담은 표본이라 사례에서 뺐습니다 — 넣으면 그 오염을 화면이 되풀이합니다.</div>'
-           . '<div class="fl-grid">';
-        foreach ($caseOk as $r) {
-            $cc = pf_bx_card($r, $axes, $favMember, $MSPAN, 'cs', ['성공 사례', 'bx-cs-ok']);
-            echo $cc['html'];
-            $cards[] = $cc['card'];
-        }
-        foreach ($caseBad as $r) {
-            $cc = pf_bx_card($r, $axes, $favMember, $MSPAN, 'cs', ['실패 사례', 'bx-cs-bad']);
-            echo $cc['html'];
-            $cards[] = $cc['card'];
-        }
-        echo '</div></details>';
-    }
+       . ' 그래서 이 표는 두 줄을 절대 합치지 않습니다.</div></details>';
 
     echo '<div class="card" style="padding:10px 14px">';
 
-    /* ① 정렬 — 그리고 «날짜로 들어왔을 때만» 그것을 풀 수 있는 칩.
-     * ★셀렉트는 걷어냈다(2026-08-09 사용자 지시) — 목록이 최신순이라 스크롤로 충분하고,
-     *   250개짜리 드롭다운은 고를 값어치가 없었다.
-     * ★그래도 `d` 파라미터는 <b>살려 둔다</b> — 알림 링크가 `?mode=boxbrk&d=…` 로 들어온다.
-     *   그때 풀 길이 없으면 그 날에 «갇힌» 화면이 된다. */
-    echo '<div class="fl-bar"><b>정렬</b>'
-       . '<a href="' . pf_h($url(['s' => 'new', 'p' => 1])) . '"' . ($sort === 'new' ? ' class="on"' : '') . '>최신순</a>'
-       . '<a href="' . pf_h($url(['s' => 'old', 'p' => 1])) . '"' . ($sort === 'old' ? ' class="on"' : '') . '>오래된순</a>'
-       . ($d !== ''
-          ? '<b style="margin-left:10px">날짜</b>'
-            . '<a class="on" href="' . pf_h($url(['d' => '', 'p' => 1])) . '"'
-            . ' title="이 날짜만 보고 있습니다 — 누르면 전체로 돌아갑니다">'
-            . pf_h($d) . ' ✕</a>'
+    /* ① 종목 검색 — <b>맨 앞</b>이다(2026-08-11 사용자 지시). 「무엇을 볼까」를 좁히는 자리라
+     *   고르는 칩들보다 먼저 온다.
+     * ★GET 폼이라 결과가 <b>주소에 남는다</b>(북마크·뒤로가기가 산다). 다른 축은 hidden 으로 지고 간다
+     *   — 검색했다고 박스·결과가 조용히 풀리면 안 된다.
+     * ★페이지(p)는 일부러 안 싣는다 — 3페이지를 보다 검색하면 1페이지부터다. */
+    echo '<div class="fl-bar"><b>검색</b>'
+       . '<form method="get" action="/stock/index.php" class="fl-srch stk-wrap">'
+       . '<input type="hidden" name="mode" value="boxbrk">'
+       . implode('', array_map(
+            fn($n, $v) => $v === '' ? '' : '<input type="hidden" name="' . $n . '" value="' . pf_h((string)$v) . '">',
+            ['d', 'src', 'gr', 'fl', 'bx', 'k', 's', 'g'],
+            [$d, $src, $gr, $fl, $bx, $k, $sort, $gid ?: '']))
+       . '<input type="text" id="bxqSearch" name="q" value="' . pf_h($q) . '"'
+       . ' placeholder="종목명 또는 코드" autocomplete="off">'
+       . '<button type="submit">찾기</button>'
+       . '<ul id="bxqList" class="stk-list"></ul></form>'
+       /* ★「기준」은 <b>폼 밖</b>에 둔다 — 안에 두면 버튼이 제출로 읽혀 엔터·클릭이 검색을 태운다 */
+       . '<button type="button" class="fl-crit" id="bxCrit"'
+       . ' title="브래킷(+15%/−10%)·등급·점수 축이 무슨 뜻인지">기준</button>'
+       . ($q !== ''
+          ? '<a class="on" href="' . pf_h($url(['q' => '', 'p' => 1])) . '"'
+            . ' title="이 종목만 보고 있습니다 — 누르면 전체로 돌아갑니다">'
+            . pf_h($qLabel) . ' ✕</a>'
           : '')
        . '</div>';
 
-    /* ② 출처 — ★이 화면에서 가장 중요한 축 */
-    echo '<div class="fl-bar"><b>출처</b>'
-       . $chip('src', '', '전체', (int)$agg['n'])
-       . $chip('src', 'pick', '★직접 고른 것', (int)$agg['pick'])
-       . $chip('src', 'auto', '자동 수집', (int)$agg['auto'])
-       . '</div>';
-
-    /* ③ 등급 · ④ 유형 */
-    echo '<div class="fl-bar"><b>등급</b>'
-       . $chip('gr', '', '전체', -1)
-       . $chip('gr', 'A', 'A ' . boxbrk_grade(BoxBrk::Z_Q95)[1], (int)$agg['gA'])
-       . $chip('gr', 'B', 'B ' . boxbrk_grade(BoxBrk::Z_Q90)[1], (int)$agg['gB'])
-       . $chip('gr', 'C', 'C ' . boxbrk_grade(BoxBrk::Z_Q75)[1], (int)$agg['gC'])
-       /* ★D 는 「상위 25%에 못 든 것」이다 — 컷이 없어졌으므로 «걸러진 것»이 아니라 그냥 한 등급이다.
-        *   이 칩이 없으면 A+B+C 가 전체와 안 맞아 조용히 거짓말하는 화면이 된다. */
-       . $chip('gr', 'D', 'D 그 밖', (int)$agg['gD'])
-       . '<b style="margin-left:10px">유형</b>'
-       . $chip('fl', '', '전체', -1)
-       . $chip('fl', '1', '불꽃형', (int)$agg['fl1'])
-       . $chip('fl', '0', '그 밖', (int)$agg['fl0'])
-       /* ★「박스」 = 차트에 계단이 몇 «벌» 그려지나(신호일 + 옛 단계 최대 3). 창과 무관하다. */
+    /* ② 정렬 · 박스 · 결과 — <b>한 줄</b>(2026-08-11 사용자 지시). 셋 다 「고르는」 것이라 같은 줄이다.
+     * ★뒤에 붙는 ✕ 칩들은 «칩을 내린 축»(날짜·출처·유형·등급)이 주소로 들어왔을 때만 나온다 —
+     *   안 그러면 «보이지 않는 필터»가 된다(알림 링크가 `?mode=boxbrk&d=…` 로 들어온다). */
+    $offChip = function (string $key, string $label, string $shown) use ($url) {
+        return '<b style="margin-left:10px">' . $label . '</b>'
+             . '<a class="on" href="' . pf_h($url([$key => '', 'p' => 1])) . '"'
+             . ' title="주소로 들어온 ' . $label . ' 필터입니다 — 누르면 전체로 돌아갑니다">'
+             . $shown . ' ✕</a>';
+    };
+    echo '<div class="fl-bar"><b>정렬</b>'
+       . '<a href="' . pf_h($url(['s' => 'new', 'p' => 1])) . '"' . ($sort === 'new' ? ' class="on"' : '') . '>최신순</a>'
+       . '<a href="' . pf_h($url(['s' => 'old', 'p' => 1])) . '"' . ($sort === 'old' ? ' class="on"' : '') . '>오래된순</a>'
+       /* 박스 — 차트에 계단이 몇 «벌» 그려지나(신호일 + 옛 단계 최대 3). 창과 무관하다. */
        . '<b style="margin-left:10px">박스</b>'
        . $chip('bx', '', '전체', -1)
        . ((int)$agg['bx1'] > 0 ? $chip('bx', '1', '1벌(뚫을 박스 없음)', (int)$agg['bx1']) : '')
        . $chip('bx', '2', '2벌', (int)$agg['bx2'])
        . $chip('bx', '3', '3벌', (int)$agg['bx3'])
        . $chip('bx', '4', '4벌↑', (int)$agg['bx4'])
-       . '</div>';
-
-    /* ⑤ 결과 */
-    echo '<div class="fl-bar"><b>결과</b>'
+       . '<b style="margin-left:10px">결과</b>'
        . $chip('k', '', '전체', -1)
        . $chip('k', 'tp', '익절', (int)$agg['tp'])
        . $chip('k', 'sl', '손절', (int)$agg['sl'])
@@ -12418,11 +12456,30 @@ table.bx-doc td:first-child,table.bx-doc th:first-child{text-align:left}
        . $chip('k', 'amb', '모호', (int)$agg['amb'])
        . $chip('k', 'wait', '사후 미완', (int)$agg['wait'])
        . $chip('k', 'bad', '판정불가', (int)$agg['bad'])
+       . ($d   !== '' ? $offChip('d',   '날짜', pf_h($d)) : '')
+       . ($src !== '' ? $offChip('src', '출처', $src === 'pick' ? '★직접 고른 것' : '자동 수집') : '')
+       . ($fl  !== '' ? $offChip('fl',  '유형', $fl === '1' ? '불꽃형' : '그 밖') : '')
+       . ($gr  !== '' ? $offChip('gr',  '등급', pf_h($gr)) : '')
        . '</div>';
 
+    /* ⊖「출처」·「유형」 칩은 2026-08-10 사용자 지시로 <b>내렸다</b> — 둘 다 카드에 배지로 이미 붙어 있고
+     *   (★내가 고름/자동 · 불꽃형), 하루 몇 건짜리 목록에서 그것으로 «거르는» 일은 없었다.
+     * ★그래도 파라미터(`src`·`fl`)는 <b>살려 둔다</b> — 옛 북마크로 들어올 수 있는데 칩이 없으면
+     *   보이지 않는 필터에 «갇힌» 화면이 된다. 들어오면 아래 정렬 줄에 ✕ 칩으로 드러난다.
+     * ★출처를 «세는» 자리는 그대로다 — 패턴 지도 카드의 특징 표가 pick/auto 를 갈라 센다
+     *   (CLAUDE.md 규칙 1 의 「섞어서 결과를 세지 않는다」는 그 표가 지킨다). */
+
+    /* ⊖「등급」 칩도 2026-08-10 사용자 지시로 내렸다 — 카드에 등급 배지(A~D + 확률)가 이미 붙는다.
+     *   ★덤으로 옛 걱정 하나가 사라졌다: 「A+B+C 만 칩으로 두면 전체와 안 맞아 조용히 거짓말한다」
+     *     (그래서 D 칩을 뒀었다) — 칩 자체가 없으면 부분합을 보여 줄 일이 없다.
+     *   ★파라미터 `gr` 은 살려 둔다(알림·북마크) → 들어오면 정렬 줄에 ✕ 칩으로 드러난다. */
+
     /* ★다섯 조건의 서술은 위 «패턴 지도» 카드로 옮겼다(2026-08-10) — 두 곳에 적으면
-     *   상수를 고칠 때 한쪽이 조용히 거짓이 된다. 여기는 브래킷·등급·축 설명만 남긴다. */
-    echo '<div class="q-note">신호의 <b>다섯 조건</b>은 위 «패턴 지도»가 정의합니다 —'
+     *   상수를 고칠 때 한쪽이 조용히 거짓이 된다. 여기는 브래킷·등급·축 설명만 남긴다.
+     * ★2026-08-11 사용자 지시로 이 글을 <b>「기준」 모달</b>로 옮겼다 — 매일 보는 자리는 목록이라
+     *   설명이 목록 위에 늘 깔려 있을 이유가 없다. 지우지 않은 이유는 그대로다: 브래킷(+15/−10)과
+     *   등급의 뜻을 모르면 카드의 배지가 읽히지 않는다. */
+    $critHtml = '<div class="q-note">신호의 <b>다섯 조건</b>은 위 «패턴 지도»가 정의합니다 —'
        . ' <b>점수 컷은 없습니다</b>(등급은 표시·정렬·알림용).'
        . ' <span class="muted">불꽃형의 「20평비 20배↑」는 <b>안 걸었습니다</b> — 담기 취향은 오히려'
        . ' 20평비가 «낮은» 쪽이라 유형은 배지로만 구분합니다.</span><br>'
@@ -12441,13 +12498,35 @@ table.bx-doc td:first-child,table.bx-doc th:first-child{text-align:left}
        . implode(' · ', array_map(function ($kk) use ($axes) {
              return '<b>' . pf_h($axes[$kk]['n']) . '</b>' . ($axes[$kk]['dir'] > 0 ? '↑' : '↓');
          }, ['vola20', 'brkHi120', 'dYHigh', 'posPrev60', 'stepsAbove']))
-       . '</div>'
-       . pf_flame_fav_bar($url, $favGroups, $gid)
        . '</div>';
 
+    echo pf_flame_fav_bar($url, $favGroups, $gid)
+       . '</div>';
+
+    /* 「기준」 모달 — 그릇은 사이트 공용(`pf-modal-back`/`pf-modal`)이라 여기서 새로 만들지 않는다 */
+    echo '<div class="pf-modal-back" id="bxCritBack"><div class="pf-modal" style="max-width:760px">'
+       . '<div class="pfm-head">기준 — 이 화면의 숫자를 읽는 법'
+       . '<button type="button" class="pfm-x" id="bxCritX">✕</button></div>'
+       . '<div style="padding:14px 16px">' . $critHtml . '</div></div></div>';
+
     if (!$rows) {
+        /* ★왜 비었는지를 «갈라» 적는다 — 「검색어에 맞는 종목이 없다」와 「그 종목은 있는데 지금 건
+         *   등급·결과 필터에 안 걸린다」는 전혀 다른 이야기다(빈 칸은 고장으로 읽힌다). */
+        $qHit = 0;
+        if ($q !== '') $qHit = (int)$agg['n'];      // $agg 는 «범위»(검색 포함)만 걸고 센 값이다
         echo '<div class="card"><div class="q-note">이 조건에 맞는 것이 없습니다.'
            . ($gid > 0 ? ' 이 <b>관심차트 그룹이 비어</b> 있거나 필터와 겹치는 것이 없습니다.' : '')
+           . ($q !== ''
+              ? ($qHit > 0
+                 ? ' <b>「' . pf_h($q) . '」</b> 은 ' . number_format($qHit) . '건 있으나'
+                   . ' 지금 고른 등급·유형·박스·결과 필터에 걸리는 것이 없습니다 —'
+                   . ' <a href="' . pf_h($url(['gr' => '', 'fl' => '', 'bx' => '', 'k' => '', 'p' => 1]))
+                   . '">필터만 풀기</a>.'
+                 : ' <b>「' . pf_h($q) . '」</b> 로 잡히는 신호가 없습니다.'
+                   . ' <span class="muted">이 표는 <b>박스 상향돌파 5조건을 통과한 날</b>만 담습니다 —'
+                   . ' 그 종목에 신호가 없었다는 뜻이지 종목이 없다는 뜻이 아닙니다.</span>'
+                   . ' <a href="' . pf_h($url(['q' => '', 'p' => 1])) . '">검색 지우기</a>.')
+              : '')
            . '</div></div>';
     } else {
         echo '<div class="fl-grid">';
@@ -12663,8 +12742,162 @@ DailyChart.load().then(function () {
 </script>
 JS;
 
+    pf_bx_live_js();
+    pf_bx_search_js($url(['q' => '__Q__', 'p' => 1]));
+    /* 「기준」 모달 — 열고 닫기만. ★Esc·배경 클릭으로도 닫힌다(모달을 열고 갇히는 자리를 만들지 않는다) */
+    echo <<<'JS'
+<script>
+(function () {
+  var btn = document.getElementById('bxCrit'), back = document.getElementById('bxCritBack');
+  if (!btn || !back) return;
+  function open()  { back.classList.add('on'); }
+  function close() { back.classList.remove('on'); }
+  btn.addEventListener('click', open);
+  var x = document.getElementById('bxCritX');
+  if (x) x.addEventListener('click', close);
+  back.addEventListener('click', function (e) { if (e.target === back) close(); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') close(); });
+})();
+</script>
+JS;
     pf_flame_fav_js('boxbrk');
     pf_foot();
+}
+
+/**
+ * 패턴분석 종목 검색 자동완성 (2026-08-10).
+ *
+ * ★키보드 이동은 <b>`AcNav` 단일본</b>이 맡는다 — 화면에 keydown 을 다시 적지 않는다
+ *   (사이트 공통 규칙 · 안 하면 「마우스로만 고를 수 있는 검색창」이 또 생긴다).
+ * ★제안의 원천은 <b>`bx_cand` 자신</b>이다(`module=bx&action=search`) — 이 표에 없는 종목을
+ *   제안하면 고르는 순간 빈 화면이 된다. 건수·마지막 신호일을 함께 보여 고를 거리를 준다.
+ * ★고르면 <b>코드</b>로 옮긴다 — 이름은 겹칠 수 있고, 코드가 그 종목의 유일한 이름이다.
+ *   그때도 <b>다른 필터는 지고 간다</b>(주소를 서버가 만들어 심는다 — JS 가 조립하지 않는다).
+ * ★Enter 는 <b>친 글자 그대로 검색</b>이다(`enterFirst` 를 켜지 않는다) — 「대우」로 여럿을 보고
+ *   싶을 수 있는데 첫 항목으로 튀면 그 길이 막힌다. 화살표로 고른 뒤의 Enter 만 «고르기»다.
+ */
+function pf_bx_search_js(string $urlTpl): void
+{
+    pf_stock_picker_css();      // .stk-wrap / .stk-list — 사이트의 자동완성과 같은 그릇
+    pf_acnav_js();
+    $js = <<<'JS'
+<script>
+(function () {
+  var inp = document.getElementById('bxqSearch');
+  var box = document.getElementById('bxqList');
+  if (!inp || !box) return;
+  var TPL = '__TPL__', timer = null, items = [];
+
+  function close() { box.innerHTML = ''; box.classList.remove('on'); }
+  function pick(i) { if (items[i]) location.href = TPL.replace('__Q__', encodeURIComponent(items[i].code)); }
+
+  function render() {
+    box.innerHTML = '';
+    if (!items.length) { close(); return; }
+    items.forEach(function (it, i) {
+      var li = document.createElement('li');
+      li.innerHTML = '<b>' + it.name + '</b><span>' + it.code + '</span>'
+                   + '<em>' + it.n + '건 · ' + String(it.last_d).slice(2) + '</em>';
+      li.addEventListener('mousedown', function (e) { e.preventDefault(); pick(i); });
+      box.appendChild(li);
+    });
+    box.classList.add('on');
+  }
+
+  inp.addEventListener('input', function () {
+    var v = inp.value.trim();
+    clearTimeout(timer);
+    if (v.length < 1) { close(); return; }
+    timer = setTimeout(function () {
+      fetch('/stock/api.php?module=bx&action=search&q=' + encodeURIComponent(v), { credentials: 'same-origin' })
+        .then(function (r) { return r.json(); })
+        .then(function (l) { items = l || []; render(); })
+        .catch(close);
+    }, 220);
+  });
+
+  /* ↓/↑/Enter/Esc — 공용 모듈이 맡는다 */
+  AcNav.attach(inp, { box: box, pick: function (li, i) { pick(i); }, close: close });
+  inp.addEventListener('blur', function () { setTimeout(close, 120); });
+})();
+</script>
+JS;
+    echo str_replace('__TPL__', addslashes($urlTpl), $js);
+}
+
+/**
+ * ⚡장중 잠정 후보 — 그리기만 한다 (2026-08-10).
+ *
+ * ★판정은 서버 `boxbrk_live()` 하나뿐이다. 여기서 조건을 다시 재지 않는다
+ *   (Thr.class·ChartFeat 와 같은 「원본 → 화면 표시」 패턴).
+ * ★장 밖이면 서버가 `off:1` 로 답한다 — 화면이 시각을 판단하지 않는다(서버가 거래일까지 본다).
+ * ★한 줄은 <b>왜 후보인가</b>를 함께 적는다(기존 박스 대비·시가→종가) — 숫자 없이 이름만 뜨면
+ *   「지금 뭘 보고 있나」를 알 수 없다.
+ */
+function pf_bx_live_js(): void
+{
+    echo <<<'JS'
+<script>
+(function () {
+  var body = document.getElementById('bxlv-body'), btn = document.getElementById('bxlv-go');
+  if (!body) return;
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+    return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]; }); }
+  function pct(v, d) { return (v >= 0 ? '+' : '') + Number(v).toFixed(d == null ? 1 : d) + '%'; }
+
+  function draw(j) {
+    if (!j || j.error) { body.innerHTML = '<span class="muted">잴 수 없었습니다 — ' + esc(j && j.error) + '</span>'; return; }
+    if (j.off) { body.innerHTML = '<span class="muted">' + esc(j.note) + '</span>'; return; }
+    var rows = j.rows || [];
+    /* ★「오늘 새 박스」와 「5조건 통과」를 갈라 적는다 — 박스 «생성»(조건②)은 거래대금이
+     *   누적이라 장중에 한 번 넘으면 되돌아가지 않는다(=확정). 뒤집힐 수 있는 것은 그 뒤의
+     *   조건들(④의 저가·⑤의 시가→현재가)이다. 「훑은 종목 수」로 적으면 이 사실이 숨는다. */
+    var head = '<div class="muted" style="margin-bottom:6px">'
+             + esc(j.at) + ' 기준 · <b>오늘 새 박스 ' + (j.cand || 0) + '종목</b>'
+             + '<span title="거래대금은 누적이라 한 번 직전 119거래일 최고를 넘으면 되돌아가지 않습니다">(확정)</span>'
+             + ' · 그중 5조건 통과 <b>' + rows.length + '</b>'
+             + (j.src_at ? ' · 전종목 스냅샷 ' + esc(String(j.src_at).slice(11, 16)) : '')
+             + '</div>';
+    if (!rows.length) {
+      body.innerHTML = head + '<span class="muted">지금은 5조건을 다 만족하는 종목이 <b>없습니다</b>. '
+                     + esc(j.note || '') + '</span>';
+      return;
+    }
+    var h = head + '<div class="tbl-scroll"><table class="pf pos"><thead><tr>'
+          + '<th class="center">등급</th><th>종목</th><th class="num">현재가</th>'
+          + '<th class="num">등락</th><th class="num">시가→현재</th><th class="num">거래대금(억)</th>'
+          + '<th class="num">기존박스 대비</th><th class="center">박스</th></tr></thead><tbody>';
+    rows.forEach(function (r) {
+      var m = r.meta || {};
+      h += '<tr>'
+         + '<td class="center"><span class="bxr bxr-g">' + esc(r.grade) + '</span></td>'
+         + '<td class="stk"><a class="q-name" href="/stock/index.php?mode=fund&code=' + esc(r.code) + '">'
+         +   esc(r.name || r.code) + '</a><span class="code">' + esc(r.code) + '</span></td>'
+         + '<td class="num">' + Number(m.close || 0).toLocaleString() + '</td>'
+         + '<td class="num">' + pct(m.chg || 0) + '</td>'
+         + '<td class="num"><b>' + pct(m.ocPct || 0) + '</b></td>'
+         + '<td class="num">' + Math.round((m.amt || 0) / 1e8).toLocaleString() + '</td>'
+         + '<td class="num">' + pct(m.gapPct || 0) + '</td>'
+         + '<td class="center">' + (1 + Math.min(3, m.boxN || 0)) + '벌</td>'
+         + '</tr>';
+    });
+    h += '</tbody></table></div>'
+       + '<div class="q-note" style="margin-top:6px">★ <b>잠정입니다</b> — 고가·저가·현재가가 마감까지'
+       + ' 바뀌므로 조건이 뒤집힐 수 있습니다. 확정 후보는 16:20 적재분이며 이 목록은 어디에도 담지 않습니다.</div>';
+    body.innerHTML = h;
+  }
+
+  function load() {
+    body.innerHTML = '<span class="muted">불러오는 중…</span>';
+    fetch('/stock/api.php?module=bx&action=live', { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); }).then(draw)
+      .catch(function () { body.innerHTML = '<span class="muted">불러오지 못했습니다.</span>'; });
+  }
+  if (btn) btn.addEventListener('click', load);
+  load();
+})();
+</script>
+JS;
 }
 
 /**
@@ -13796,7 +14029,7 @@ CSS;
 
     echo '<script src="/style/dailychart.js?v=53"></script>';
     // 목록 배지(ETF 편입 수·퀀트) — 그리기·색의 단일본(사이트 공통 모듈)
-    echo '<script src="/style/quantbadge.js?v=1"></script>';
+    echo '<script src="/style/quantbadge.js?v=2"></script>';   // v2 = ⚡잠정 신박스 색 (2026-08-10)
     pf_acnav_js();                                        // 종목 추가 검색창의 ↓/↑ 이동
     echo ChartFeat::boot('short', $pdo);
     echo '<script>var DT_DAYS=' . json_encode($days) . ';'

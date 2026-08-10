@@ -510,4 +510,169 @@ function boxbrk_scan(PDO $pdo, string $d, ?float $minZ = null): array
     usort($out, fn($a, $b) => $b['z'] <=> $a['z']);
     return $out;
 }
+
+/**
+ * ⚡<b>장중 «잠정» 판정</b> (2026-08-10 신설 · 사용자 요청 「장중에 확인할 수 없어?」).
+ *
+ * ══ 왜 따로 있나 ═══════════════════════════════════════════════════════
+ * `boxbrk_scan()` 은 `krx_amt` 를 읽는데 <b>오늘 행은 15:50 `dart_eod` 가 넣는다</b>.
+ * 그래서 장중에는 훑을 원장이 아예 없다 — 그것이 크론이 16:20 인 이유다.
+ * 여기서는 <b>오늘 봉만 «실시간 시세»로 지어</b> 과거 원장 뒤에 붙이고,
+ * <b>판정은 아래 함수들을 그대로 부른다</b>(is_signal → feat → hard_ok → 게이트 넷 → score).
+ * ★판정 로직을 여기에 다시 적지 않는다 — 적는 순간 장중 화면과 마감 표가 다른 말을 한다.
+ *
+ * ══ 두 층으로 나눈다 ═══════════════════════════════════════════════════
+ *   ① 후보 추리기 : `all_stock_info.stock_vol_cap`(억원 · 09·11·13·15시 갱신)로
+ *                   「거래대금 100억↑ ∧ 직전 119거래일 최고 초과」인 종목만 남긴다. <b>DB 뿐</b>.
+ *   ② 판정       : 그 후보만 키움 `ka10095` <b>한 콜</b>로 시·고·저·현재가·거래대금을 받아 잰다.
+ * ★①의 값이 낡아도 <b>거짓 후보는 안 생긴다</b> — 거래대금은 장중에 늘기만 하므로 낡은 값은
+ *   «과소»평가다. 놓치는 쪽으로만 틀린다(그리고 다음 갱신에서 잡힌다).
+ *
+ * ══ 담지 않는다 ════════════════════════════════════════════════════════
+ * ★★결과를 <b>`bx_cand` 에 넣지 않는다</b>. 고가·저가·종가가 마감까지 계속 바뀌므로 조건 ③④⑤가
+ *   시시각각 뒤집힌다 — 잠정치를 원장에 담으면 그 표가 「확정 신호」와 「그때 그랬던 것」 두 뜻을
+ *   갖게 되어 승률·검정이 통째로 흐려진다. 원장의 주인은 <b>16:20 크론 하나</b>다.
+ *
+ * @return array{rows:array,at:string,cand:int,src_at:?string,note:string}
+ */
+function boxbrk_live(PDO $pdo): array
+{
+    $today = date('Y-m-d');
+    $out   = ['rows' => [], 'at' => date('H:i:s'), 'cand' => 0, 'src_at' => null, 'note' => ''];
+
+    /* ── ① 후보 추리기 (DB 만) ─────────────────────────────────────── */
+    $snap = $pdo->query("SELECT stock_code, stock_name, stock_vol_cap, uDate
+                           FROM all_stock_info
+                          WHERE stock_vol_cap >= " . (BoxBrk::MINAMT / 1e8) . "
+                            AND stock_price > 0")->fetchAll(PDO::FETCH_ASSOC);
+    if (!$snap) { $out['note'] = '전종목 시세 스냅샷이 비어 있습니다.'; return $out; }
+
+    $etf = [];
+    try {
+        foreach ($pdo->query("SELECT DISTINCT etf_code FROM all_etf_price")->fetchAll(PDO::FETCH_COLUMN) as $c) {
+            $etf[$c] = 1;
+        }
+    } catch (Throwable $e) { /* ETF 표가 없어도 계속 */ }
+
+    $cand = [];   // code => [name, amtEok(스냅샷)]
+    foreach ($snap as $r) {
+        $c = (string)$r['stock_code'];
+        if (strlen($c) !== 6 || substr($c, -1) !== '0' || isset($etf[$c])) continue;   // 우선주·ETF
+        $nm = (string)$r['stock_name'];
+        if ($nm !== '' && (mb_strpos($nm, '스팩') !== false || stripos($nm, 'ETN') !== false)) continue;
+        $cand[$c] = ['name' => $nm, 'amtEok' => (float)$r['stock_vol_cap']];
+        if ($out['src_at'] === null || $r['uDate'] > $out['src_at']) $out['src_at'] = (string)$r['uDate'];
+    }
+    if (!$cand) { $out['note'] = '거래대금 100억을 넘긴 종목이 아직 없습니다.'; return $out; }
+
+    /* 직전 (WIN-1) 거래일의 최고 거래대금과 견준다 — 넘지 못하면 신호가 될 수 없다 */
+    $days = $pdo->query("SELECT DISTINCT d FROM krx_amt WHERE d < '" . $today . "'
+                          ORDER BY d DESC LIMIT " . BoxBrk::WIN)->fetchAll(PDO::FETCH_COLUMN);
+    if (count($days) < BoxBrk::WIN - 1) { $out['note'] = '원장 이력이 모자랍니다.'; return $out; }
+    $from = $days[BoxBrk::WIN - 2];
+
+    $keep = [];
+    foreach (array_chunk(array_keys($cand), 500) as $ck) {
+        $in = implode(',', array_fill(0, count($ck), '?'));
+        $q  = $pdo->prepare("SELECT code, MAX(amt) mx FROM krx_amt
+                              WHERE code IN ($in) AND d >= ? AND d < ? GROUP BY code");
+        $q->execute(array_merge($ck, [$from, $today]));
+        foreach ($q->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            if ($cand[$r['code']]['amtEok'] * 1e8 > (float)$r['mx']) $keep[] = $r['code'];
+        }
+    }
+    $out['cand'] = count($keep);
+    if (!$keep) { $out['note'] = '직전 119거래일 최고 거래대금을 넘긴 종목이 아직 없습니다.'; return $out; }
+
+    /* ── ② 그 후보만 실시간으로 받아 «오늘 봉»을 짓는다 ────────────── */
+    $kw = new Kiwoom($pdo);
+    $qt = $kw->quotes($keep);
+    if (!$qt) { $out['note'] = '실시간 시세를 받지 못했습니다.'; return $out; }
+
+    foreach (array_chunk(array_keys($qt), 80) as $ck) {
+        $in = implode(',', array_fill(0, count($ck), '?'));
+        $q  = $pdo->prepare("SELECT code,d,o,h,l,c,vol,amt,mktcap FROM krx_amt
+                              WHERE code IN ($in) AND d < ? AND c > 0 ORDER BY code, d");
+        $q->execute(array_merge($ck, [$today]));
+        $bars = [];
+        foreach ($q->fetchAll(PDO::FETCH_ASSOC) as $b) $bars[$b['code']][] = $b;
+
+        foreach ($ck as $code) {
+            $s = $bars[$code] ?? [];
+            if (count($s) < BoxBrk::HIST_MIN + 2) continue;
+            $t = $qt[$code];
+            /* ★시·고·저가 하나라도 없으면 판정하지 않는다 — 0 을 넣으면 「모른다」가 값이 된다 */
+            if (empty($t['open']) || empty($t['high']) || empty($t['low']) || empty($t['price'])) continue;
+
+            $s[] = ['code' => $code, 'd' => $today,
+                    'o' => $t['open'], 'h' => $t['high'], 'l' => $t['low'], 'c' => $t['price'],
+                    'vol' => $t['vol'], 'amt' => $t['amtEok'] * 1e8, 'mktcap' => $t['capEok']];
+            $i = count($s) - 1;
+
+            if (!boxbrk_is_signal($s, $i)) continue;
+            $f = boxbrk_feat($s, $i, boxbrk_boxes($s));
+            if ($f === null) continue;
+            if (!boxbrk_hard_ok($f['x'], $f['meta'])) continue;
+            if ($f['meta']['boxN100'] < BoxBrk::MIN_PRIOR_BOX) continue;
+            if ($f['meta']['gapPct'] === null || $f['meta']['gapPct'] > BoxBrk::BOX_GAP_MAX * 100) continue;
+            if (!boxbrk_higher_box($f['meta'])) continue;
+            if ($f['meta']['ocPct'] === null || $f['meta']['ocPct'] < BoxBrk::OC_MIN) continue;
+
+            $z = boxbrk_score($f['x']);
+            [$g, $gl] = boxbrk_grade($z);
+            $out['rows'][] = ['code' => $code, 'd' => $today,
+                              'name' => $t['name'] !== '' ? $t['name'] : ($cand[$code]['name'] ?? ''),
+                              'x' => $f['x'], 'meta' => $f['meta'],
+                              'z' => $z, 'prob' => boxbrk_prob($z), 'grade' => $g, 'grade_label' => $gl,
+                              'tm' => $t['tm']];
+        }
+    }
+    usort($out['rows'], fn($a, $b) => $b['z'] <=> $a['z']);
+    return $out;
+}
+
+/**
+ * ⚡장중 잠정 — <b>캐시를 씌운 것</b> (2026-08-10 · 목록 배지용).
+ *
+ * ★왜 캐시가 필요한가 — 단타 목록은 <b>10초마다</b> 도는 자리다(`Dt::TICK_SEC`). 배지가
+ *   `boxbrk_live()` 를 직접 부르면 키움 콜이 <b>분당 6번</b> 나가고 전종목 훑기도 그만큼 돈다.
+ *   ⇒ 파일 캐시 한 장으로 묶어 <b>분당 한 콜</b>로 만든다(`Dt::todayBars()` 와 같은 방식).
+ * ★문지기도 여기 둔다 — 장 밖·휴장일이면 <b>계산 자체를 안 한다</b>. 부르는 쪽(배지·화면)이
+ *   시각을 판단하면 그 판단이 여러 곳으로 흩어진다.
+ * ★실패하면 <b>빈 것을 돌려주고 조용히 지나간다</b> — 배지는 곁들이는 것이라, 키움이 막혔다고
+ *   목록이 통째로 죽으면 안 된다.
+ *
+ * @return array{rows:array,cand:int,at:string}  장 밖이면 rows 빈 배열
+ */
+function boxbrk_live_cached(PDO $pdo, int $ttl = 60): array
+{
+    $empty = ['rows' => [], 'cand' => 0, 'at' => ''];
+    try {
+        $hm = (int)date('Hi');
+        if ($hm < 900 || $hm >= 1530) return $empty;
+        if (!(new Dt($pdo))->isTradingDay()) return $empty;
+
+        $file = sys_get_temp_dir() . '/bx_live.json';
+        $old  = is_file($file) ? json_decode((string)@file_get_contents($file), true) : null;
+        if ($old && (time() - (int)@filemtime($file)) < $ttl) return $old;
+
+        /* ★계산 «전»에 시각을 먼저 찍는다 — 목록이 10초마다 도는 자리라, 캐시가 만료되는 순간
+         *   여러 요청이 <b>동시에</b> 계산하러 들어간다(그만큼 키움 콜이 겹친다).
+         *   먼저 찍어 두면 나머지는 옛 값을 쓰고 지나간다. 계산이 실패해도 옛 값이 한 주기 더 산다. */
+        if (is_file($file)) @touch($file);
+
+        $r = boxbrk_live($pdo);
+        $keep = ['rows' => array_map(static fn($x) => [
+                     'code' => $x['code'], 'name' => $x['name'], 'grade' => $x['grade'],
+                     'z' => $x['z'], 'ocPct' => $x['meta']['ocPct'], 'amt' => $x['meta']['amt'],
+                 ], $r['rows']),
+                 'cand' => $r['cand'], 'at' => $r['at']];
+        /* ★임시파일 → rename 으로 갈아 끼운다 — 반쯤 쓰인 파일을 다른 요청이 읽지 않게 */
+        $tmp = $file . '.' . getmypid();
+        if (@file_put_contents($tmp, json_encode($keep, JSON_UNESCAPED_UNICODE)) !== false) @rename($tmp, $file);
+        return $keep;
+    } catch (Throwable $e) {
+        return $empty;
+    }
+}
 ?>

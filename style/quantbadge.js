@@ -44,6 +44,10 @@ var QuantBadge = (function () {
     '.qbx.bx-dn{background:#3b1518;color:#f87171}   .qbx.bx-in{background:#1e2637;color:#93a4c3}',
     '.qbx.bx-new{background:#242c3d;color:#8893ab}  .qbx.bx-fake{background:#3a2410;color:#f0a13b}',
     '.qbx.bx-na{background:#242c3d;color:#5b6884}',
+    /* ⚡장중 «잠정» 신박스 (2026-08-10) — 확정 배지와 <b>색을 갈라 둔다</b>.
+     * 마감까지 뒤집힐 수 있는 판정이라, 같은 회색(bx-new)으로 두면 「오늘 확정된 것」으로 읽힌다.
+     * 점선 테두리 = 「아직 굳지 않았다」는 뜻(사이트에서 잠정을 그렇게 그린다). */
+    '.qbx.bx-live{background:#3a2f10;color:#f5c451;border:1px dashed #7a6320}',
     /* 좁은 목록용 축소판 — 단타 사이드바(262px)처럼 폭이 모자란 자리 */
     '.qb-sm .etfb,.qb-sm .qb,.qb-sm .qbx{font-size:10px;padding:0 5px;margin-left:4px;',
     '  line-height:1.6;letter-spacing:0}'
