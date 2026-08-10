@@ -29,7 +29,7 @@ $embed = !empty($_GET['embed']);
 echo "<!DOCTYPE html><html lang='ko'><head><meta charset='utf-8'>";
 echo "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
 echo "<title>차트 스타일 갤러리</title>";
-echo "<script src='/style/dailychart.js?v=50'></script>";
+echo "<script src='/style/dailychart.js?v=53'></script>";
 echo "<script src='/style/bandchart.js?v=3'></script>";      // 구성 ⑥ 밴드형 (dailychart 위의 얇은 층)
 if (!$embed) nav_css();
 echo <<<'HTML'
@@ -227,6 +227,9 @@ echo <<<'HTML'
       <span class="form-title" id="inTitle">새 지표</span>
       <label>이름 <input id="inName" maxlength="60" style="width:150px"></label>
       <label>방식 <select id="inDraw"><option value="line">선 긋기</option><option value="point">점 찍기(조건)</option></select></label>
+      <!-- ★지표의 성질이지 차트의 성질이 아니다 — 계단선은 「지나간 단계가 얼마였나」를 묻지만
+           이동평균처럼 최근값만 보는 선은 따라다녀 봐야 숫자가 흔들리기만 한다 -->
+      <label title="차트에서 마우스가 짚은 봉의 값을 범례(차트 위 값 표시)에 보여 줍니다.&#10;끄면 늘 마지막 값입니다. 선 위에는 숫자를 띄우지 않습니다 — 캔들과 겹쳐 안 읽힙니다.&#10;계단선(최고거래량 H/L)처럼 지나간 단계의 값을 묻는 지표에 켜세요."><input type="checkbox" id="inHover">십자선 값 표시</label>
       <button type="button" class="btn btn-outline form-close" onclick="indClose()" title="닫기">✕</button>
     </div>
     <div class="ind-row syntax" style="margin-top:-2px;line-height:1.6">
@@ -530,6 +533,11 @@ DailyChart.load().then(function(){
     return '<span class="tag tf" title="이 시간축의 차트에서만 그립니다">'
          + esc(lb.join('·')) + '봉만</span>';
   }
+  /* 「십자선 값 표시」 뱃지 — 켠 것에만 붙인다(기본이 끔이라 붙어 있는 쪽이 특별한 상태다) */
+  function hoverTag(d){
+    if (!+(d.hover || 0)) return '';
+    return '<span class="tag tf" title="마우스가 짚은 봉의 값을 범례에 보여 줍니다">십자선 값</span>';
+  }
   /* 뱃지 속 선 견본 — 두께·종류가 그대로 보이게 (점 지표는 동그라미) */
   function lineSwatch(s, col, isPoint){
     if (isPoint) return 'background:' + col;
@@ -581,7 +589,7 @@ DailyChart.load().then(function(){
         + '<span class="tags">'
         +   '<span class="tag draw' + (d.draw === 'point' ? ' point' : '') + '">'
         +     (d.draw === 'point' ? '점 ●' : '선 ─') + '</span>'
-        +   tfTag(d) + lineTags(d) + varTags(d)
+        +   tfTag(d) + hoverTag(d) + lineTags(d) + varTags(d)
         + '</span>'
         + '<button type="button" class="ind-more" data-act="menu" title="수정 · 삭제">⋯</button>';
       box.appendChild(card);
@@ -853,6 +861,7 @@ DailyChart.load().then(function(){
   window.indNew = function(){
     G('inId').value = ''; G('inName').value = ''; G('inDraw').value = 'line';
     G('inNote').value = '';
+    G('inHover').checked = false;     // 기본 끔 — 켜는 것은 「지나간 값을 묻는 지표」의 선택이다
     G('inTitle').textContent = '새 지표';
     EDIT_VARS = fillVars({});
     fillTfs(null);                    // 새 지표는 전 축 — 만들자마자 어디선가 안 보이면 헷갈린다
@@ -940,6 +949,7 @@ DailyChart.load().then(function(){
     body.set('note', G('inNote').value);
     body.set('vars', JSON.stringify(formVars()));
     body.set('tfs', JSON.stringify(tfs));       // 넷 다면 서버가 「전 축」으로 접는다
+    body.set('hover', G('inHover').checked ? '1' : '0');
     fetch('/stock_analysis_api.php', { method: 'POST', body: body, credentials: 'same-origin' })
       .then(function(r){ return r.json(); })
       .then(function(r){
@@ -953,6 +963,7 @@ DailyChart.load().then(function(){
   function indEdit(d){
     G('inId').value = d.id; G('inName').value = d.name; G('inDraw').value = d.draw;
     G('inNote').value = d.note || '';
+    G('inHover').checked = !!+(d.hover || 0);
     G('inTitle').textContent = '수정';
     EDIT_VARS = fillVars(d.vars || {});
     fillTfs(d.tfs);

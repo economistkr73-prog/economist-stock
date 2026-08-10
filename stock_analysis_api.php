@@ -252,6 +252,9 @@ function quant_augment(PDO $pdo, array &$rows): void
 //   action=feat             → {catalog, values, over}  화면별 기능 구성 (원본 = ChartFeat)
 //   action=feat_save (POST screen, vals|reset) → {ok:1, values}
 //   action=view_save (POST chart_key, view)    → {ok:1, view}  화면이 기억하는 보기 값(차트 높이 …)
+//   action=hline (?code=)   → {lines:[{id,price,color,width,style,memo}, …]}  사용자가 그은 수평선
+//   action=hline_save (POST code, price, [id,color,width,style,memo]) → {ok:1, line:{…}}
+//   action=hline_del  (POST id) → {ok:1}
 // ==========================================================
 function api_ind(string $action, PDO $pdo): void
 {
@@ -323,6 +326,27 @@ function api_ind(string $action, PDO $pdo): void
             if (!is_array($vals)) $vals = [];
             $merged = $ci->featuresSave($screen, $vals, $reset);
             echo json_encode(['ok' => 1, 'values' => $merged], JSON_UNESCAPED_UNICODE);
+            return;
+        }
+
+        /* ── 사용자가 그은 수평선 — «종목»의 것이라 화면·축을 가리지 않는다 ──
+         * 목록 조회는 종목코드 하나로 끝난다. 어느 차트에서 물어도 같은 답이 와야
+         * 「재무분석에서 그은 선이 단타에서 안 보인다」가 생기지 않는다. */
+        case 'hline': {
+            $code = trim((string)($_GET['code'] ?? $_POST['code'] ?? ''));
+            echo json_encode(['lines' => $ci->hlines($code)], JSON_UNESCAPED_UNICODE);
+            return;
+        }
+        case 'hline_save': {
+            $line = $ci->hlineSave($_POST);
+            echo json_encode(['ok' => 1, 'line' => $line], JSON_UNESCAPED_UNICODE);
+            return;
+        }
+        case 'hline_del': {
+            $id = (int)($_POST['id'] ?? 0);
+            if ($id <= 0) { http_response_code(400); echo json_encode(['error' => 'id 누락']); return; }
+            $ci->hlineDelete($id);
+            echo json_encode(['ok' => 1]);
             return;
         }
 

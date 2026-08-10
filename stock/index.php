@@ -52,8 +52,7 @@ $routes = [
 
     'watch'     => 'pf_page_watch',       // 관심종목 (재무분석에서 담아 둔 것)
     'quant'     => 'pf_page_quant',       // 퀀트 > 최고 거래대금 (krx_amt 전종목 원장)
-    'pattern'   => 'pf_page_pattern',     // 퀀트 > 패턴분석 — 5개 패턴을 실제 차트로 (정의·특징·사례)
-    'flame'     => 'pf_page_flame',       // 퀀트 > 패턴분석(불꽃형) — 최근 1년 불꽃형 신호를 차트로 (10개씩)
+    'boxbrk'    => 'pf_page_boxbrk',      // 퀀트 > 패턴분석 (박스 상향돌파) — 한 패턴을 매일 쌓는다
     'signal'    => 'pf_page_signal',      // 퀀트 > 신호분석 — 화면 곳곳의 배지·신호 전체의 기준을 한 자리에
     'quantstat' => 'pf_page_quantstat',   // 퀀트 > 검증 — 신호가 수익으로 이어졌나 (백테스트 보고서)
     'portfolio' => 'pf_page_portfolio',   // 설정 > 포트폴리오
@@ -62,6 +61,14 @@ $routes = [
     'ruleset'   => 'pf_page_ruleset',     // 설정 > 룰셋
     'quote'     => 'pf_page_quote',       // 설정 > 시세 — 화면별 시세 지도 + 원천·크론 현황
 ];
+
+/* ★옛 주소를 살려 둔다 — 「패턴분석 (불꽃형)」은 2026-08-09 에, 옛 「패턴분석」(5개 패턴
+ *   수기 사례 화면 · mode=pattern)은 2026-08-10 에 「패턴분석 (박스 상향돌파)」로 합쳐졌다.
+ *   북마크·옛 알림 링크가 말없이 대시보드로 떨어지면 「사라졌다」로 읽힌다.
+ *   옛 5개 패턴(매집형 돌파·계단지지·첫 폭발·불꽃형 둘)의 «근거 표»는 검증 탭 ④~⑥에 그대로다. */
+if ($mode === 'flame' || $mode === 'pattern') {
+    header('Location: /stock/index.php?mode=boxbrk', true, 301); exit;
+}
 
 if (isset($routes[$mode]) && function_exists($routes[$mode])) {
     $routes[$mode]($pdo, $pf);
@@ -105,8 +112,11 @@ function pf_sub_menus(string $section = 'setting'): array
          * 배지의 근거가 한 클릭 안에 있어야 배지를 믿고 쓸 수 있다. */
         'quant' => [
             ['key' => 'surge',   'href' => '/stock/index.php?mode=quant',     'label' => '최고 거래대금'],
-            ['key' => 'pattern', 'href' => '/stock/index.php?mode=pattern',   'label' => '패턴분석'],
-            ['key' => 'flame',   'href' => '/stock/index.php?mode=flame',    'label' => '패턴분석 (불꽃형)'],
+            /* ★2026-08-09 「패턴분석 (불꽃형)」과 「오늘의 후보」를 <b>하나로 합쳤고</b>,
+             *   2026-08-10 옛 「패턴분석」(5개 패턴 수기 사례 화면)도 여기로 흡수했다(사용자 지시).
+             *   불꽃형은 전수를 «훑는» 자리라 다 보고 나면 할 일이 없었고, 옛 패턴분석은 수기
+             *   사례 31건의 1회성 문서였다. 이제 하나가 매일 쌓인다 — 패턴지도·사례도 이 화면 안이다. */
+            ['key' => 'boxbrk',  'href' => '/stock/index.php?mode=boxbrk',   'label' => '패턴분석 (박스 상향돌파)'],
             ['key' => 'signal',  'href' => '/stock/index.php?mode=signal',    'label' => '신호분석'],
             ['key' => 'stat',    'href' => '/stock/index.php?mode=quantstat', 'label' => '검증 (백테스트)'],
         ],
@@ -643,12 +653,18 @@ function pf_drag_handle(): string
  * 대상 표의 tbody 행에 data-id 가 있어야 하고, 놓는 즉시 $apiUrl 로 순서를 POST 한다.
  * 행 클릭(data-href)은 드래그와 구분해서 처리한다.
  */
-function pf_sort_script(string $tableId, string $apiUrl): void
+/**
+ * 화면 아래에 잠깐 뜨는 알림(pfToast) 한 벌. once 가드가 있어 여러 번 불러도 한 번만 실린다.
+ * ★단일본이다 — 예전에는 pf_sort_script() 안에만 있어서, 정렬 표가 없는 화면(관심차트 등)이
+ *   pfToast 를 부르면 조용히 아무 일도 안 일어났다.
+ */
+function pf_toast_js(): void
 {
-    static $toastDone = false;
-    if (!$toastDone) {
-        echo '<div class="pf-toast" id="pfToast"></div>';
-        echo <<<'JS'
+    static $done = false;
+    if ($done) return;
+    $done = true;
+    echo '<div class="pf-toast" id="pfToast"></div>';
+    echo <<<'JS'
 <script>
 var pfToastTimer = null;
 function pfToast(msg, isErr){
@@ -662,8 +678,11 @@ function pfToast(msg, isErr){
 }
 </script>
 JS;
-        $toastDone = true;
-    }
+}
+
+function pf_sort_script(string $tableId, string $apiUrl): void
+{
+    pf_toast_js();
 
     $t = json_encode($tableId);
     $u = json_encode($apiUrl);
@@ -970,6 +989,28 @@ CSS;
 JS;
     pf_acnav_js();
     echo str_replace('__PFX__', $prefix, $js);
+}
+
+/**
+ * FnGuide 기업분석(wcomp) 바로가기 버튼.
+ *
+ * 우리 화면은 DART 원본 재무만 그린다 — 컨센서스·업종비교·지분구조처럼 <b>우리가 안 가진 것</b>을
+ * 보고 싶을 때가 있어 밖으로 나가는 문을 하나 둔다.
+ *
+ * ★ <b>팝업</b>이다(같은 탭 이동 아님) — 보던 재무 표를 그대로 두고 옆에 띄워 견주는 게 이 버튼의 쓸모다.
+ * ★ URL·창 크기를 화면에 다시 적지 않는다 — 다른 화면에도 달게 되면 여기 한 줄만 본다.
+ * ★ 코드는 6자리 그대로 넣는다(우선주는 상세가 이미 본주로 옮겨 온 뒤라 본주 코드가 온다).
+ */
+function pf_fnguide_btn(string $code, string $cls = 'btn btn-outline'): void
+{
+    $code = preg_replace('/[^0-9A-Za-z]/', '', $code);
+    if ($code === '') return;
+    $url = 'https://wcomp.fnguide.com/?c_id=AA&menu_type=01&cmp_cd=' . rawurlencode($code);
+    // href 를 남겨 둔다 — JS 가 없거나 팝업이 막히면 새 탭으로라도 열려야 한다
+    echo '<a class="' . pf_h($cls) . '" href="' . pf_h($url) . '" target="_blank" rel="noopener"'
+       . ' title="FnGuide 기업분석 — 컨센서스·업종비교 등 DART 에 없는 것을 팝업으로 봅니다"'
+       . ' onclick="return !window.open(this.href,\'fnguide\','
+       . '\'width=1180,height=920,scrollbars=yes,resizable=yes\')">FnGuide</a> ';
 }
 
 // ── 최근조회 종목 (etf_stock 과 표를 공유) ─────────────────────────────
@@ -1457,7 +1498,10 @@ function pf_stair_alert_map(array $positions): array
     if (!$sigs) return [];
 
     try {
-        $box = (new KrxAmt($GLOBALS['pdo']))->boxStatusMany(array_values($sigs));
+        /* ★$bxOnly=false — 경로 게이트(2026-08-10 박스 상향돌파 재정의)의 <b>유일한 예외</b>다.
+         *   여기 기준 박스는 편입 시 못박은 «기록»(pf_position.surge_event_d)이고, 이 경보는
+         *   지지 구조 소멸을 알리는 안전장치라 탐색 기준이 바뀌어도 계속 봐야 한다. */
+        $box = (new KrxAmt($GLOBALS['pdo']))->boxStatusMany(array_values($sigs), false);
         $map = [];
         foreach ($mine as $id => $key) {
             $b = $box[$key] ?? null;
@@ -4102,7 +4146,7 @@ function pf_page_position(PDO $pdo, Pf $pf): void
     }
 
     // 차트는 공용 모듈(style/dailychart.js)이 그린다 — 라이브러리 로드도 모듈이 맡는다
-    echo '<script src="/style/dailychart.js?v=50"></script>';
+    echo '<script src="/style/dailychart.js?v=53"></script>';
     echo ChartFeat::boot('position', $pdo);   // DC_SCREEN·DC_FEATS·DC_VIEW (기능 구성 + 저장한 높이)
     echo '<script>';
     echo 'const PF_CODE=' . json_encode($pos['stock_code']) . ';';
@@ -4195,13 +4239,14 @@ JS;
     echo '<input type="hidden" name="side" value="buy">';
     echo '<input type="hidden" name="step_no" id="pfmBuyStep" value="">';
     echo '<div class="fld-row">';
-    echo '<label class="fld">일자<input type="date" name="traded_at" value="' . date('Y-m-d') . '" required></label>';
+    echo '<label class="fld">일자<input type="date" id="pfmBuyDate" name="traded_at" value="' . date('Y-m-d') . '" required></label>';
     /* 시각은 <b>선택</b>이다 — 옛 체결은 모르고, 모르는 것을 00:00 으로 채우면 거짓이 된다.
-     * step=1 이라야 초까지 받는다(HTS 체결시각이 15:02:46 처럼 초까지 나온다). */
-    echo '<label class="fld">시각<input type="time" name="traded_time" step="1" style="width:120px" '
-       . 'title="HTS 체결시각. 모르면 비워 두세요 — 분봉에 찍을 때만 씁니다."></label>';
+     * step=1 이라야 초까지 받는다(HTS 체결시각이 15:02:46 처럼 초까지 나온다).
+     * 기본값은 <b>모달을 열 때 pfNowFields() 가</b> 지금 시각으로 채운다(서버 렌더 시각이 아니다). */
+    echo '<label class="fld">시각<input type="time" id="pfmBuyTime" name="traded_time" step="1" style="width:155px" '
+       . 'title="HTS 체결시각. 지금 시각이 기본값입니다 — 다르면 고치고, 모르면 비우세요(분봉에 찍을 때만 씁니다)."></label>';
     echo '<label class="fld">체결가<input type="text" class="num-comma" inputmode="numeric" id="pfmBuyPrice" name="price" style="width:120px" required></label>';
-    echo '<label class="fld">수량<input type="text" class="num-comma" inputmode="numeric" id="pfmBuyQty" name="qty" style="width:110px" required></label>';
+    echo '<label class="fld">수량<input type="text" class="num-comma" inputmode="numeric" id="pfmBuyQty" name="qty" style="width:80px" required></label>';
     echo '<label class="fld" style="flex:1;min-width:150px">메모<input type="text" name="memo"></label>';
     echo '</div>';
     echo '<div class="pfm-preview" id="pfmBuyPreview"></div>';
@@ -4214,11 +4259,11 @@ JS;
     echo '<input type="hidden" name="position_id" value="' . (int)$pos['id'] . '">';
     echo '<input type="hidden" name="side" value="sell">';
     echo '<div class="fld-row">';
-    echo '<label class="fld">일자<input type="date" name="traded_at" value="' . date('Y-m-d') . '" required></label>';
-    echo '<label class="fld">시각<input type="time" name="traded_time" step="1" style="width:120px" '
-       . 'title="HTS 체결시각. 모르면 비워 두세요 — 분봉에 찍을 때만 씁니다."></label>';
+    echo '<label class="fld">일자<input type="date" id="pfmSellDate" name="traded_at" value="' . date('Y-m-d') . '" required></label>';
+    echo '<label class="fld">시각<input type="time" id="pfmSellTime" name="traded_time" step="1" style="width:155px" '
+       . 'title="HTS 체결시각. 지금 시각이 기본값입니다 — 다르면 고치고, 모르면 비우세요(분봉에 찍을 때만 씁니다)."></label>';
     echo '<label class="fld">매도가<input type="text" class="num-comma" inputmode="numeric" id="pfmSellPrice" name="price" style="width:120px" required></label>';
-    echo '<label class="fld">수량<input type="text" class="num-comma" inputmode="numeric" id="pfmSellQty" name="qty" style="width:110px" required></label>';
+    echo '<label class="fld">수량<input type="text" class="num-comma" inputmode="numeric" id="pfmSellQty" name="qty" style="width:80px" required></label>';
     echo '<label class="fld" style="flex:1;min-width:150px">메모<input type="text" name="memo"></label>';
     echo '</div>';
     echo '<div class="qbtns" id="pfmQuick"></div>';
@@ -4437,6 +4482,24 @@ function pfInVal(id){
   return el ? (parseFloat(String(el.value).replace(/,/g, '')) || 0) : 0;
 }
 
+/**
+ * 체결 일자·시각 기본값 = <b>지금</b>. 모달을 <b>열 때마다</b> 다시 채운다.
+ *
+ * ★서버 렌더 시각을 쓰지 않는 이유 — 화면을 열어 둔 채 몇 시간 뒤에 담으면 그 값이 낡는다.
+ *   일자도 함께 갱신한다(시각만 지금이고 일자는 어제면 두 칸이 다른 말을 한다).
+ * ★비우면 여전히 「모른다」(NULL) 다 — 기본값을 준 것이지 필수로 만든 것이 아니다.
+ * ★브라우저 로컬 시각이라 서버 타임존 설정에 기대지 않는다(사용자가 보는 시계와 같다).
+ */
+function pfNowFields(){
+  var d = new Date(), p = function(n){ return ('0' + n).slice(-2); };
+  var ymd = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  var hms = p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());   // step=1 이라 초까지
+  [['pfmBuyDate', ymd], ['pfmSellDate', ymd], ['pfmBuyTime', hms], ['pfmSellTime', hms]].forEach(function(x){
+    var el = document.getElementById(x[0]);
+    if (el) el.value = x[1];
+  });
+}
+
 /** 이 체결가에서 목표(누적목표 − 투입액)를 채우는 수량. 채울 것이 없으면 null */
 function pfRecommendQty(pr){
   var s = PF_STEPS[PF_CUR];
@@ -4511,6 +4574,7 @@ function pfOpenStep(n){
     }).join('');
   }
 
+  pfNowFields();
   pfTab('buy');
   document.getElementById('pfModal').classList.add('on');
   document.body.style.overflow = 'hidden';
@@ -4557,6 +4621,7 @@ function pfOpenSellAll(){
     return '<button type="button" class="btn btn-outline btn-sm" onclick="pfSellSet(' + x[1] + ')">' + x[0] + '</button>';
   }).join('');
 
+  pfNowFields();
   pfTab('sell');
   document.getElementById('pfModal').classList.add('on');
   document.body.style.overflow = 'hidden';
@@ -5713,7 +5778,7 @@ document.querySelector('form[action*="action=save"]').addEventListener('submit',
 });
 pfBoxToggle();
 </script>
-<script src="/style/dailychart.js?v=50"></script>
+<script src="/style/dailychart.js?v=53"></script>
 <style>
 .fld-fixed{padding:7px 10px;background:#f2f6fa;border:1px solid #e0e8f0;border-radius:6px;
   font-size:13px;font-weight:700;color:#22303f;min-width:120px}
@@ -7470,7 +7535,7 @@ tr.rs-row:hover{background:#f2f8fd}
 CSS;
 
     // 차트는 공용 모듈(style/dailychart.js)이 그린다 — 라이브러리 로드도 모듈이 맡는다
-    echo '<script src="/style/dailychart.js?v=50"></script>';
+    echo '<script src="/style/dailychart.js?v=53"></script>';
     echo ChartFeat::boot('sim');   // DC_SCREEN·DC_FEATS·DC_VIEW 를 한 줄에
     echo <<<'JS'
 <script>
@@ -8116,7 +8181,7 @@ function pf_page_earncase(PDO $pdo, Pf $pf): void
          'buy' => '2026-03-11', 'exit' => '2026-06-09',
          'note' => '2025년 4분기 영업이익이 자기 평소 출렁임의 <b>7.7배</b>(SUE 7.7)로 튀며 3/10 사업보고서 공시.'
                  . ' 다음날 종가 매수 → +60거래일 <b>+385%</b>(시장 대비 +398%p). ★두 달 뒤(5/12) 퀀트의 매집형'
-                 . ' 최고 거래대금 신호도 같은 종목을 잡았다(패턴분석 탭 사례 1) — <b>재무가 먼저 말하고 수급이 뒤따른</b> 교과서.'],
+                 . ' 최고 거래대금 신호도 같은 종목을 잡았다 — <b>재무가 먼저 말하고 수급이 뒤따른</b> 교과서.'],
         ['id' => 'e2', 'kind' => 'ok', 'name' => 'SK하이닉스', 'code' => '000660', 'dt' => '2026-03-17',
          'buy' => '2026-03-18', 'exit' => '2026-06-16',
          'note' => 'SUE 5.0 · 3/17 사업보고서 → +60거래일 <b>+125.6%</b>. 온 시장이 지켜보는 대형주조차 발표 당일에'
@@ -8235,7 +8300,7 @@ function pf_page_earncase(PDO $pdo, Pf $pf): void
        . '· 오늘 시장의 신호는 같은 탭이 매 분기 자동으로 보여 준다 — 이 페이지는 그 배지를 <b>믿어도 되는 이유</b>다.</div></div>';
 
     /* ── 차트 — dailychart.js 재사용. 마커는 날짜 스냅뿐이라 수정주가 정합 문제가 없다 ── */
-    echo '<script src="/style/dailychart.js?v=50"></script>';
+    echo '<script src="/style/dailychart.js?v=53"></script>';
     echo '<script>const EC_CASES=' . json_encode($CASES, JSON_UNESCAPED_UNICODE) . ';</script>';
     echo <<<'JS'
 <script>
@@ -9521,6 +9586,8 @@ function pf_page_fund_detail(PDO $pdo, Dart $dart, string $code, ?Pf $pf = null)
            . '&code=' . rawurlencode($code) . '&name=' . rawurlencode($name ?: $code)
            . '" title="포트폴리오에 편입 — 종목 추가 폼이 열립니다 · 포트폴리오 미지정 저장 = 편입 관심종목">편입</a> ';
     }
+    // 밖으로 나가는 문 — 컨센서스·업종비교처럼 DART 원본에 없는 것을 옆에 띄워 견준다
+    pf_fnguide_btn($code);
     echo '<a class="btn btn-outline" href="/stock/index.php?mode=fund">← 재무분석</a></div>';
     echo '</div>';
 
@@ -9731,7 +9798,7 @@ function pf_fund_detail_chart(PDO $pdo, string $code): void
     echo '</div>';
 
     // 차트는 공용 모듈(style/dailychart.js)이 그린다 — 라이브러리 로드도 모듈이 맡는다
-    echo '<script src="/style/dailychart.js?v=50"></script>';
+    echo '<script src="/style/dailychart.js?v=53"></script>';
     echo ChartFeat::boot('fund', $pdo);       // DC_SCREEN·DC_FEATS·DC_VIEW (기능 구성 + 저장한 높이)
     echo '<script>const FD_CODE=' . json_encode($code) . ';</script>';
     echo <<<'JS'
@@ -11081,38 +11148,75 @@ function pf_page_quant(PDO $pdo, Pf $pf): void
         $rows = $keep;
     }
 
-    /* ── 박스 상태(지지·저항 경로) + 매집형 박스 추적 ──
-     * 경로 연구(2026-07-31)·위치 연구(2026-08-01)의 승자 규칙을 화면으로:
-     *   매집형 × 돌파 매수 +2.26%·57.9% / 매집형 × 계단지지(아래층 박스 3개↑만) +2.40%·58.5%
-     * 추적 카드 하한은 측정 조건(100억) 고정 — min 필터를 낮춰도 규칙의 전제는 안 바뀐다. */
-    $box = []; $acc = []; $accBox = []; $accEv = [];
-    $accTotal = 0; $accDedup = 0;   // M6 — 자른 사실을 세어 화면에 밝힌다(no silent caps)
+    /* ── 박스 상향돌파(5조건) 압축 보기 (2026-08-10 사용자 지시) ──
+     * ★★<b>압축이 기본값이다</b>(같은 날 재지시 — 「하단에 박스상향돌파만, 다른 건 보여줄 필요 없어」).
+     *   그 날 신호 전체는 `&bx=0`(「전체 보기」 칩)으로만 푼다.
+     * ★판정을 여기서 다시 하지 않는다 — `bx_cand`(16:20 크론 적재)를 <b>읽기만</b> 한다.
+     *   그래서 <b>오늘 날짜는 적재 전까지 빈다</b> — 잠정치에는 시가·고가·저가가 없어 장중에는
+     *   5조건 판정 자체가 성립하지 않는다(③④⑤가 그 값을 본다). 다음날 13:05 확정값이 덮이면
+     *   크론이 직전 거래일을 재판정하므로 어제까지는 늘 확정 판정이다. */
+    $bxOn  = ((string)($_GET['bx'] ?? '1') !== '0');
+    $bxMap = [];
+    if ($day !== '') {
+        try {
+            $q3 = $pdo->prepare("SELECT code, grade, src FROM bx_cand WHERE d = ?");
+            $q3->execute([$day]);
+            foreach ($q3->fetchAll(PDO::FETCH_ASSOC) as $b3) $bxMap[$b3['code']] = $b3;
+        } catch (Throwable $e) { /* 표가 없어도 목록은 뜬다 */ }
+    }
+    $bxHidden = 0;
+    if ($bxOn) {
+        $keep = [];
+        foreach ($rows as $r) {
+            if (isset($bxMap[$r['code']])) $keep[] = $r;
+            else $bxHidden++;
+        }
+        $rows = $keep;
+    }
+
+    /* ── 📦 박스 상향돌파 추적 — 「패턴이 나왔을 때만 보이고, 결과(피드백)가 따라온다」
+     *   (2026-08-10 사용자 지시: 「해당 패턴이 나왔을 때만 이 화면에 보여주고 피드백 받는 것」).
+     * ★여기도 판정을 다시 하지 않는다 — bx_cand 의 후보·결과(brk_kind/brk_ret)를 «읽기만» 한다.
+     *   결과 칸이 곧 피드백이다: 익절/손절/미도달은 브래킷(+15/−10·5일) 실측, 사후 미완은 진행중. */
+    $bxTrack = []; $bxTrackBox = []; $bxLastD = '';
+    if ($day !== '') {
+        try {
+            $q4 = $pdo->prepare("SELECT code, d, name, src, grade, chg_pct, amt,
+                                        brk_kind, brk_ret, n_post, q_ohlc
+                                   FROM bx_cand
+                                  WHERE d <= ? AND d >= DATE_SUB(?, INTERVAL " . KrxAmt::TRACK_DAYS . " DAY)
+                                  ORDER BY d DESC, z DESC LIMIT 20");
+            $q4->execute([$day, $day]);
+            $bxTrack = $q4->fetchAll(PDO::FETCH_ASSOC);
+            if ($bxTrack) {
+                $bxTrackBox = $krx->boxStatusMany(
+                    array_map(fn($t) => ['code' => $t['code'], 'd' => $t['d']], $bxTrack));
+            } else {
+                $bxLastD = (string)($pdo->query("SELECT MAX(d) FROM bx_cand WHERE d <= "
+                                              . $pdo->quote($day))->fetchColumn() ?: '');
+            }
+        } catch (Throwable $e) { /* 표가 없어도 목록은 뜬다 */ }
+    }
+
+    /* ── 박스 상태(지지·저항 경로) ──
+     * ★2026-08-10 전면 재정의 — boxStatusMany 가 «박스 상향돌파(5조건) 박스»에만 경로를 단다
+     *   (단일본 게이트 · KrxAmt 주석). 「매집형 박스 추적」 카드와 그 데이터(accBoxes·surgeEventStates)는
+     *   같은 날 삭제했다 — 그 카드의 모집단(매집형 전체)이 새 기준 밖이다. */
+    $box = [];
     try {
         $box = $krx->boxStatusMany(array_map(fn($r) => ['code' => $r['code'], 'd' => $day], $rows));
-        $accRaw = $krx->accBoxes($day, KrxAmt::TRACK_DAYS, Thr::SURGE_MIN_AMT, 40, $accTotal);
-        $seen = [];
-        foreach ($accRaw as $a) {                       // 같은 종목이면 최신 박스만 (계단의 맨 위층)
-            if (isset($seen[$a['code']])) { $accDedup++; continue; }
-            $seen[$a['code']] = 1;
-            $acc[] = $a;
-        }
-        $sigAcc  = array_map(fn($a) => ['code' => $a['code'], 'd' => $a['d']], $acc);
-        $accBox  = $krx->boxStatusMany($sigAcc);
-        $accEv   = $krx->surgeEventStates($sigAcc, $day);   // 추적 잔여일 · 교체 여부
     } catch (Throwable $e) { /* 상태 없이도 목록은 뜬다 */ }
 
     /* 단기급등 ⚠ — 신호일까지 20일 +80% 또는 40일 +100% 급등(검증 탭 ⑧: 엣지 없는 복권 자리) */
     $mom = [];
     try {
-        $sigsAll = array_map(fn($r) => ['code' => $r['code'], 'd' => $day], $rows);
-        foreach ($acc as $a) $sigsAll[] = ['code' => $a['code'], 'd' => $a['d']];
-        $mom = $krx->momMany($sigsAll);
+        $mom = $krx->momMany(array_map(fn($r) => ['code' => $r['code'], 'd' => $day], $rows));
     } catch (Throwable $e) { /* 급등 표시는 없어도 목록은 뜬다 */ }
     // 창별 칩 — 단일본은 pf_mom_chips. 이 표는 <b>신호일</b> 기준이라 그 사실을 칩에 싣는다
     $hotChip = static fn(?array $mm, string $d): string => pf_mom_chips($mm, $d, false);
 
     // 이름·관심종목·배지·정렬 — 배지 그룹(매집형 먼저) 안에서 거래대금 큰 순
-    $nameCodes = array_unique(array_merge(array_column($rows, 'code'), array_column($acc, 'code')));
+    $nameCodes = array_unique(array_merge(array_column($rows, 'code'), array_column($bxTrack, 'code')));
     $names = $nameCodes ? $krx->names($nameCodes) : [];
     /* ★ 예전엔 array_flip 을 한 번 더 걸었는데 watchCodes() 가 <b>이미</b> [코드 => n] 이라
      *   그 결과는 [n => 코드]가 됐다 — isset($watch[$code]) 가 늘 false 라 ☆ 가 켜지지 않았다
@@ -11143,6 +11247,20 @@ function pf_page_quant(PDO $pdo, Pf $pf): void
     pf_subtabs('surge', 'quant');
     pf_flash();
     pf_quant_css();
+    /* 📦 배지·압축 토글·추적 카드 — 이 화면 전용이라 공용 CSS 에 넣지 않는다 */
+    echo '<style>.qb-bx{background:#e8f0fe;color:#1a56c4;border:1px solid #c6dafc}
+.bx-tgl{display:inline-block;margin-left:8px;padding:2px 10px;border:1px solid #c6dafc;border-radius:12px;
+  background:#f4f8ff;color:#1a56c4;font-size:12.5px;font-weight:700;text-decoration:none;vertical-align:1px;white-space:nowrap}
+.bx-tgl.on{background:#12406b;border-color:#12406b;color:#fff}
+.bxr{display:inline-block;padding:2px 9px;border-radius:10px;font-size:12px;font-weight:700;white-space:nowrap}
+.bxr-tp{background:#e6f4ea;color:#1e7e34}.bxr-sl{background:#fdecea;color:#c62828}
+.bxr-non{background:#eef2f6;color:#55636f}.bxr-amb{background:#fdf3e0;color:#b26a00}
+.bxr-wait{background:#eaf3fb;color:#1565c0}
+.bxr-pick{background:#12406b;color:#fff}
+.bxr-g{background:#dce9f7;color:#12406b}
+details.card>summary{cursor:pointer;font-size:14px;font-weight:700;color:#12406b;list-style:none}
+details.card>summary::before{content:"▸ ";color:#9ab}
+details.card[open]>summary::before{content:"▾ "}</style>';
 
     echo '<div class="pf-head"><div><h1>최고 거래대금</h1>';
     echo '<div class="sub">그 종목의 <b>최근 ' . KrxAmt::SURGE_WIN . '거래일 중 최고 거래대금</b>을 찍은 종목입니다'
@@ -11154,6 +11272,7 @@ function pf_page_quant(PDO $pdo, Pf $pf): void
         echo '<div class="act"><form method="get" action="/stock/index.php" class="fld-row">'
            . '<input type="hidden" name="mode" value="quant">'
            . ($selCode !== '' ? '<input type="hidden" name="code" value="' . pf_h($selCode) . '">' : '')
+           . '<input type="hidden" name="bx" value="' . ($bxOn ? '1' : '0') . '">'   // 날짜를 옮겨도 보기 상태 유지
            . '<select name="d" onchange="this.form.submit()">';
         foreach ($dates as $dd) {
             echo '<option value="' . pf_h($dd) . '"' . ($dd === $day ? ' selected' : '') . '>' . pf_h($dd) . '</option>';
@@ -11186,85 +11305,98 @@ function pf_page_quant(PDO $pdo, Pf $pf): void
            . '내일 13:05 KRX 확정값으로 자동 대체됩니다. 시가·고가·저가는 잠정치에 없습니다.</div>';
     }
 
-    /* ── 매집형 박스 추적 — 경로 연구의 승자 규칙을 매일 보는 자리 ── */
-    if ($acc) {
-        $prio = ['bx-brk' => 0, 'bx-in' => 1, 'bx-new' => 2, 'bx-lad' => 3, 'bx-fake' => 4, 'bx-dn' => 5, 'bx-na' => 6];
-        usort($acc, function ($x, $y) use ($accBox, $prio) {
-            $sx = $prio[$accBox[$x['code'] . '|' . $x['d']]['st'] ?? 'bx-na'] ?? 9;
-            $sy = $prio[$accBox[$y['code'] . '|' . $y['d']]['st'] ?? 'bx-na'] ?? 9;
-            return [$sx, $y['d']] <=> [$sy, $x['d']];
-        });
-        /* 카드 머리말 — 창·하한은 정본(KrxAmt::TRACK_DAYS · Thr)에서 읽는다(M5). 손으로 적으면 갈린다. */
-        $SHOW = 15;
-        echo '<div class="card"><h2>🟢 매집형 박스 추적 <span class="q-note" style="display:inline">'
-           . '(최근 ' . KrxAmt::TRACK_DAYS . '일 · 하한 ' . number_format(Thr::SURGE_MIN_AMT / 1e8) . '억 · 종목당 최신 박스)</span></h2>';
-
-        /* ★★M6 — <b>자른 것을 밝힌다</b>(no silent caps). 예전에는 SQL LIMIT 40 과 표시 15 가
-         *   말없이 잘라, 화면이 「이게 전부」인 것처럼 읽혔다. 세 층을 각각 적는다. */
-        $trunc = [];
-        if ($accTotal > count($accRaw)) $trunc[] = '조회 ' . number_format($accTotal) . '건 중 최신 ' . count($accRaw) . '건만 가져옴';
-        if ($accDedup > 0)              $trunc[] = '같은 종목의 옛 박스 ' . $accDedup . '건 접음';
-        if (count($acc) > $SHOW)        $trunc[] = '종목 ' . count($acc) . '개 중 ' . $SHOW . '개 표시';
-        if ($trunc) {
-            echo '<div class="q-note" style="margin:0 0 6px">※ ' . pf_h(implode(' · ', $trunc))
-               . ' <span class="muted">— 판정(boxStatusMany)이 행수에 비례해 봉을 읽어 상한을 둡니다. '
-               . '잘린 것이 있다는 사실 자체를 숨기지 않습니다.</span></div>';
-        }
-
+    /* ── 📦 박스 상향돌파 추적 — 이 화면의 «얼굴». 패턴이 나왔을 때만 줄이 생긴다 ── */
+    echo '<div class="card"><h2>📦 박스 상향돌파 추적 <span class="q-note" style="display:inline">'
+       . '(최근 ' . KrxAmt::TRACK_DAYS . '일 · 나왔을 때만 실립니다 · 결과 = +15%/−10% 5거래일 브래킷 실측)</span></h2>';
+    if (!$bxTrack) {
+        echo '<div class="q-note">최근 ' . KrxAmt::TRACK_DAYS . '일 안에 이 패턴이 <b>없었습니다</b>'
+           . ($bxLastD !== ''
+              ? ' — 마지막 후보 <a href="/stock/index.php?mode=boxbrk&d=' . pf_h($bxLastD) . '">'
+                . pf_h($bxLastD) . '</a>'
+              : '')
+           . '. 새 후보가 뜨면 여기와 <a href="/stock/index.php?mode=boxbrk">패턴분석</a>에 실리고,'
+           . ' 등급 B↑는 Pushover 알림이 옵니다.'
+           . ' <span class="muted">0건인 날이 흔합니다 — 시장 거래대금이 식으면 「직전 119거래일 최고」를'
+           . ' 넘길 수가 없습니다(버그가 아니라 시장 상태).</span></div>';
+    } else {
         echo '<div class="tbl-scroll"><table class="pf pos"><thead><tr>';
-        // 이 카드는 매집형만 모아 놓은 자리라 「신호」 열이 없다 — 상태 열은 그 뒤의 <b>경로</b>다
-        foreach ([['경로', 'center'], ['종목', ''], ['신호일', 'center'], ['추적', 'center'],
-                  ['저항 H', 'num'], ['지지 L', 'num']] as [$l, $cl]) {
+        foreach ([['결과', 'center'], ['경로', 'center'], ['종목', ''], ['신호일', 'center'],
+                  ['등급', 'center'], ['등락', 'num'], ['거래대금(억)', 'num'], ['카드', 'center']] as [$l, $cl]) {
             echo '<th class="' . $cl . '">' . pf_h($l) . '</th>';
         }
         echo '</tr></thead><tbody>';
-        foreach (array_slice($acc, 0, $SHOW) as $a2) {
-            $k2 = $a2['code'] . '|' . $a2['d'];
-            $b2 = $accBox[$k2] ?? ['st' => 'bx-na', 'txt' => '-', 'tip' => '', 'h' => 0, 'l' => 0];
-            echo '<tr class="q-row" data-code="' . pf_h($a2['code']) . '">';
-            echo '<td class="center"><span class="bx ' . $b2['st'] . '" title="' . pf_h($b2['tip']) . '">' . pf_h($b2['txt']) . '</span>'
-               . $hotChip($mom[$k2] ?? null, (string)$a2['d']) . '</td>';
-            echo '<td class="stk"><a class="q-name" href="/stock/index.php?mode=fund&code=' . pf_h($a2['code']) . '">'
-               . pf_h($names[$a2['code']] ?? $a2['code']) . '</a><span class="code">' . pf_h($a2['code']) . '</span></td>';
-            echo '<td class="center">' . pf_h(substr($a2['d'], 5)) . '</td>';
-
-            /* ★추적 칸 (M6) — krx_surge_event 가 <b>이 표에서만 알 수 있는 것</b>을 준다:
-             *   「교체」 = 그 뒤 같은 종목에 새 신호가 떴다. 신호 하나만 보고는 알 수 없는 사실이다.
-             *   잔여일은 정의상 d + TRACK_DAYS 지만 정의를 한 자리에 두려고 같은 표에서 읽는다. */
-            $ev = $accEv[$k2] ?? null;
-            if ($ev === null) {
-                echo '<td class="center"><span class="muted" title="확정 신호로 등록되기 전입니다(잠정치는 이벤트로 남기지 않습니다)">잠정</span></td>';
-            } elseif ($ev['state'] === 'superseded') {
-                echo '<td class="center"><span class="bx bx-na" title="'
-                   . pf_h('이 뒤에 같은 종목의 새 신호가 떴습니다 — 추적 기준이 새 박스로 옮겨졌습니다') . '">교체</span></td>';
-            } elseif ($ev['left'] < 0) {   // 만료일 당일은 아직 추적 중 — 배치(`until < CURDATE()`)와 같은 경계
-                echo '<td class="center"><span class="muted" title="' . pf_h('추적 기간(' . KrxAmt::TRACK_DAYS . '일) 종료 — ' . $ev['until']) . '">종료</span></td>';
-            } else {
-                echo '<td class="center"><span class="muted" title="' . pf_h('추적 종료 ' . $ev['until']) . '">D-'
-                   . (int)$ev['left'] . '</span></td>';
-            }
-
-            echo '<td class="num">' . ($b2['h'] > 0 ? pf_n($b2['h']) : '-') . '</td>';
-            echo '<td class="num">' . ($b2['l'] > 0 ? pf_n($b2['l']) : '-') . '</td>';
-            echo '</tr>';
+        foreach ($bxTrack as $t) {
+            $k4 = $t['code'] . '|' . $t['d'];
+            $b4 = $bxTrackBox[$k4] ?? null;
+            /* 결과 = bx_cand 가 담아 둔 브래킷 판정 — 이것이 「피드백」이다 */
+            if     ($t['brk_kind'] === 'tp')  $res = '<span class="bxr bxr-tp">익절 ' . sprintf('%+.1f%%', (float)$t['brk_ret']) . '</span>';
+            elseif ($t['brk_kind'] === 'sl')  $res = '<span class="bxr bxr-sl">손절 ' . sprintf('%+.1f%%', (float)$t['brk_ret']) . '</span>';
+            elseif ($t['brk_kind'] === 'non') $res = '<span class="bxr bxr-non" title="5거래일 안에 익절·손절선 둘 다 안 닿음 — D+5 종가 기준">D+5 ' . sprintf('%+.1f%%', (float)$t['brk_ret']) . '</span>';
+            elseif ($t['brk_kind'] === 'amb') $res = '<span class="bxr bxr-amb" title="같은 날 둘 다 닿아 일봉으로는 순서를 모릅니다">모호</span>';
+            elseif ((int)$t['q_ohlc'] === 1)  $res = '<span class="bxr bxr-non">판정불가</span>';
+            else $res = '<span class="bxr bxr-wait" title="사후 5거래일이 아직 안 찼습니다">사후 ' . (int)$t['n_post'] . '/5</span>';
+            echo '<tr class="q-row" data-code="' . pf_h($t['code']) . '">'
+               . '<td class="center">' . $res . '</td>'
+               . '<td class="center">' . ($b4
+                   ? '<span class="bx ' . $b4['st'] . '" title="' . pf_h($b4['tip']) . '">' . pf_h($b4['txt']) . '</span>'
+                   : '-') . '</td>'
+               . '<td class="stk"><a class="q-name" href="/stock/index.php?mode=fund&code=' . pf_h($t['code']) . '">'
+               . pf_h($t['name'] !== '' ? $t['name'] : $t['code']) . '</a><span class="code">' . pf_h($t['code']) . '</span>'
+               . ((string)$t['src'] === 'pick' ? ' <span class="bxr bxr-pick" title="직접 담으셨던 신호(정의 원본)">★내가 고름</span>' : '')
+               . '</td>'
+               . '<td class="center">' . pf_h(substr((string)$t['d'], 5)) . '</td>'
+               . '<td class="center">' . ($t['grade'] !== null
+                   ? '<span class="bxr bxr-g" title="「담은 것과 닮음」의 백분위 — 오를 확률이 아닙니다">'
+                     . pf_h((string)$t['grade']) . '</span>' : '-') . '</td>'
+               . '<td class="num"><span class="' . pf_updown((float)$t['chg_pct']) . '">'
+               . pf_pct((float)$t['chg_pct'], 1) . '</span></td>'
+               . '<td class="num"><b>' . pf_eok($t['amt']) . '</b></td>'
+               . '<td class="center"><a href="/stock/index.php?mode=boxbrk&d=' . pf_h($t['d'])
+               . '" title="패턴분석의 그 날 카드(일봉+1분봉)로">카드</a></td>'
+               . '</tr>';
         }
-        echo '</tbody></table></div>';
-        echo '<div class="q-note">실측 규칙(검증 탭 ④~⑥): 매수 = <b>돌파✓</b>(+2.26%·57.9%) 또는 <b>계단지지 1단</b>'
-           . '(<b>아래층 박스 3개 이상일 때만</b> +2.40%·58.5% — 1~2개는 실측 음수라 ⚠표시·관망) 확인일. '
-           . '매도 = 손절선(진입박스 L·새 박스 생기면 상향) 기준 — <b>돌파 진입은 바로 아래 계단이 종가로 깨질 때</b>(시간 규칙 없음), '
-           . '<b>계단지지 진입은 20거래일 보유 후 손절선 이탈 시</b>. 불꽃형의 돌파는 금지(−5.7~−7.6%).</div></div>';
+        echo '</tbody></table></div>'
+           . '<div class="q-note">★<b>성과 우위 미검증</b> — 8년 재측정에서 기준선과 사실상 같았습니다'
+           . '(<a href="/stock/index.php?mode=quantstat">검증 탭 ⑨</a>). 매수 신호가 아니라 판단 소집입니다.'
+           . ' 행 클릭 = 재무분석 상세 · 「카드」 = 패턴분석의 그 날 일봉+1분봉.</div>';
     }
+    echo '</div>';
+
+    /* ⛔「매집형 박스 추적」 카드는 2026-08-10 삭제 — 같은 날의 «전면 재정의»(경로 판정을 박스
+     *   상향돌파 박스에만)로 그 카드의 모집단(매집형 전체)이 기준 밖이 됐다. 트리거 실측(검증 ④~⑥)은
+     *   기록으로 남고, 관측은 위 📦 카드가 잇는다. accBoxes()·surgeEventStates() 호출도 함께 걷었다. */
+
+    /* 보기 토글 — 기본이 «압축»이고, 전체는 명시적으로 푼다. 주소에 실려 북마크에서 유지된다 */
+    $bxN = 0;
+    foreach ($rows as $r) if (isset($bxMap[$r['code']])) $bxN++;
+    $bxUrl = '/stock/index.php?' . http_build_query(array_filter(
+        ['mode' => 'quant', 'd' => $day, 'min' => (string)$minEok,
+         'code' => $selCode, 'bx' => $bxOn ? '0' : '1'],
+        fn($v) => $v !== '' && $v !== null));
+    $bxTip = $bxOn
+        ? '지금은 박스 상향돌파 5조건 통과분만 보입니다(기본) — 누르면 그 날 신호 전체를 봅니다'
+        : '기본 보기(5조건 통과분만)로 돌아갑니다 — 판정은 bx_cand(매일 16:20 적재)를 읽습니다.'
+          . ' ★오늘 날짜는 적재 전까지 비고(잠정치엔 시고저가 없어 장중 판정 불가),'
+          . ' 성과 우위는 미검증입니다(검증 탭 ⑨)';
 
     echo '<div class="card"><h2>' . pf_h($day) . ' — ' . count($rows) . '종목 '
        . '<span class="q-note" style="display:inline">'
        . '(🟢매집형 ' . $cnt[0] . ' · 중립 ' . $cnt[1] . ' · 불꽃형 ' . $cnt[2]
        . ($hidden > 0 ? ' · 거래대금 ' . number_format($minEok) . '억 미만 <b>' . $hidden . '종목 숨김</b>' : '')
-       . ')</span></h2>';
+       . ($bxOn && $bxHidden > 0 ? ' · 5조건 밖 <b>' . $bxHidden . '종목 숨김</b>' : '')
+       . ')</span>'
+       . '<a class="bx-tgl' . ($bxOn ? ' on' : '') . '" href="' . pf_h($bxUrl) . '" title="' . pf_h($bxTip) . '">'
+       . ($bxOn ? '전체 보기 +' . $bxHidden : '📦 박스 상향돌파만 ' . $bxN) . '</a></h2>';
 
     if (!$rows) {
-        echo '<div class="warn">이 날짜에는 ' . ($hidden > 0
-            ? '거래대금 ' . number_format($minEok) . '억 이상인 신호가 없습니다 (' . $hidden . '종목이 하한에 걸림 — 하한을 낮춰 보세요).'
-            : '신호가 없습니다.') . '</div></div>';
+        echo '<div class="warn">이 날짜에는 ' . ($bxOn
+            ? '박스 상향돌파 5조건에 맞는 신호가 없습니다'
+              . ($bxHidden > 0 ? ' (' . $bxHidden . '종목이 조건 밖)' : '')
+              . ' — 0건인 날이 흔합니다(시장 상태). ★오늘 날짜라면 <b>16:20 크론 적재 뒤</b>에야 판정이 붙습니다.'
+              . ' 그 날 신호 전체는 위 <b>「전체 보기」</b>로 봅니다.'
+            : ($hidden > 0
+               ? '거래대금 ' . number_format($minEok) . '억 이상인 신호가 없습니다 (' . $hidden . '종목이 하한에 걸림 — 하한을 낮춰 보세요).'
+               : '신호가 없습니다.')) . '</div></div>';
         echo '</div><div class="q-right">' . $panel . '</div></div>';   // 좌측 닫고 우측 패널
         pf_foot(); return;
     }
@@ -11290,7 +11422,16 @@ function pf_page_quant(PDO $pdo, Pf $pf): void
         echo '<tr class="q-row' . ($code === $selCode ? ' q-sel' : '') . '" data-code="' . pf_h($code) . '">';
         /* ★ 중립도 배지로 그린다(2026-08-02 사용자) — 빈 칸은 「판정했더니 중립」과
          *   「판정할 재료가 없음」을 구별하지 못한다. 중립이 45.5%로 가장 흔한 판정이라 더 그렇다. */
+        /* 📦 = 박스 상향돌파 5조건 통과 — bx_cand 를 «읽기만» 한 표시(등급 = 닮음, 오를 확률 아님) */
+        $bx3 = $bxMap[$code] ?? null;
         $chips = '<span class="qb ' . $bc . '" title="' . pf_h($bt) . '">' . pf_h($bl) . '</span>'
+               . ($bx3 !== null
+                  ? '<span class="qb qb-bx" title="' . pf_h('박스 상향돌파 5조건 통과 · 등급 '
+                      . (string)($bx3['grade'] ?? '-') . ' = 「담은 것과 닮음」(오를 확률이 아닙니다)'
+                      . ' · 성과 우위 미검증(검증 탭 ⑨) · 카드는 패턴분석 화면에'
+                      . (($bx3['src'] ?? '') === 'pick' ? ' · ★직접 담으셨던 신호' : '')) . '">📦'
+                    . pf_h((string)($bx3['grade'] ?? '')) . '</span>'
+                  : '')
                . $hotChip($mom[$code . '|' . $day] ?? null, (string)$day);
         echo '<td class="center">' . ($chips !== '' ? $chips : '<span class="muted">-</span>') . '</td>';
         echo '<td class="center">' . ($bx
@@ -11323,6 +11464,10 @@ function pf_page_quant(PDO $pdo, Pf $pf): void
        . '이미 자리가 있으면 그 자리에 <span class="badge st-held">보유</span>·'
        . '<span class="badge st-slot">편입됨</span> 이 대신 서고 눌러서 그 종목 상세로 갑니다'
        . '(재무분석·어닝·관심종목과 같은 판정) · '
+       . '<b>📦</b> = 박스 상향돌파 5조건 통과(글자는 등급 — 「담은 것과 닮음」이지 오를 확률이 아닙니다 · '
+       . '판정은 <code>bx_cand</code> 16:20 적재라 <b>오늘 것은 마감 뒤에 붙습니다</b> · 성과 우위 미검증 — '
+       . '<a href="/stock/index.php?mode=quantstat">검증 탭 ⑨</a>) · '
+       . '이 목록은 <b>기본이 5조건 압축</b>이고 그 날 신호 전체는 「전체 보기」로 폅니다 · '
        . '정렬 = 퀀트신호(매집형 → 중립 → 불꽃형) → 거래대금 큰 순 · 거래대금 0(거래정지)인 날은 판정에서 제외 · '
        . '「20일 +N%」·「40일 +N%」 = 신호일까지의 모멘텀(시장 계열) — 20일 +80%·40일 +100% 이상이면 주황: 이 무리의 돌파 매수는 실측 엣지 없음(검증 탭 ⑧). 회색은 같은 창의 급락(20일 −30%·40일 −40% — 지정값·근거 없음)</div>';
     echo '</div>';
@@ -11510,8 +11655,11 @@ function pf_page_quantstat(PDO $pdo, Pf $pf): void
        . '<tr><td>🚫 <b>불꽃형</b>(20평비 20배↑) × 돌파</td><td>431</td><td class="down">−5.72%</td><td>37.4%</td><td>−4.88%</td><td>−6.78%</td></tr></table>'
        . '<div class="q-note">네 규칙 모두 기간 2분할에서 부호 유지 · 매집형 돌파는 178개 종목에 분산.'
        . ' 「계단 번호·대금 가속으로 막차를 미리 가려내기」는 판별력이 약해 채택하지 않았다(정직하게 기각).'
-       . ' 계단 정의는 삼성물산 사례(직전 박스가 위에 겹쳐 진짜 아래층을 잃음)로 한 번 고쳐 재측정했다.'
-       . ' 목록의 「박스」 열과 「매집형 박스 추적」 카드가 이 규칙을 매일 보여 준다.</div></div>';
+       . ' 계단 정의는 삼성물산 사례(직전 박스가 위에 겹쳐 진짜 아래층을 잃음)로 한 번 고쳐 재측정했다.<br>'
+       . ' ★<b>2026-08-10 전면 재정의(사용자 지시)</b>: 경로 배지·트리거는 이제 <b>박스 상향돌파(⑨) 박스에만</b>'
+       . ' 붙는다(단일본 boxStatusMany 의 게이트). 이 절의 실측은 <b>전체 모집단 기준의 기록</b>이라 새 기준에서는'
+       . ' 참고치다 — 5조건 부분집합에서의 트리거 성적은 따로 잰 적이 없다. 「매집형 박스 추적」 카드도 같은 날 내렸다.'
+       . ' 예외는 포트폴리오 <b>계단관통↓ 경보</b> 하나(편입 시 기준 박스 = 기록 · 안전장치).</div></div>';
 
     echo '<div class="card"><h2>⑤ 청산 연구 — 매도도 박스 기준으로 (2026-08-01)</h2>'
        . '<div style="font-size:13px;line-height:1.8">'
@@ -11616,6 +11764,52 @@ function pf_page_quantstat(PDO $pdo, Pf $pf): void
        . ' 같은 무리다</b>(신호 전 40일 +139% 실측) — ⚠가 붙어도 큰 승자가 나온다는 것이 정확히 「중앙 0·평균 +7%'
        . ' 복권 분포」의 뜻이다. ⚠는 금지가 아니라 <b>기대값 없이 복권을 사는 자리라는 고지</b>다.</div></div>';
 
+    /* ── ⑨ 박스 상향돌파 (2026-08-10 신설) — 수치는 그날 실측한 «측정 기록»이라 리터럴로 둔다.
+     *   재측정은 SSH `php cron/bx_scan.php job=bt8y` (30초) — 정의(BoxBrk 상수)를 바꾸면 반드시 다시 잰다. */
+    echo '<div class="card"><h2>⑨ 박스 상향돌파 — 「내가 고른 패턴」은 이기는 패턴인가 (2026-08-10)</h2>'
+       . '<div style="font-size:13px;line-height:1.8">'
+       . '관심차트에 담아 두신 「박스_상향돌파」 그룹을 되맞춰 정의(5조건 · 판정 단일본'
+       . ' <code>stock/lib/boxbrk.php</code>)를 만들고, <a href="/stock/index.php?mode=boxbrk">패턴분석</a>이'
+       . ' 매일 쌓습니다. 여기는 그 패턴의 <b>성과 검정 기록</b>입니다.</div>'
+
+       . '<div class="q-note" style="margin:8px 0 10px">★★<b>먼저 알아야 할 발견 — 「담기」는 룩어헤드였습니다</b>'
+       . ' (2026-08-09 · 세 갈래 검정). 옛 불꽃형 갤러리 카드는 신호일 <b>이후</b> 55거래일 차트와 결과'
+       . ' 배지를 함께 띄웠고, 거기서 담긴 것의 승률 우위(55.9% vs 46.9%)는 «모양»이 아니라 <b>«결과»를 본'
+       . ' 데서 왔습니다</b>: ①사전 모양을 되맞춘 모델의 상위 24%는 승률 43.6%로 전체(49.1%)보다 나쁘고'
+       . ' ②8년 기간 밖에서 상위 10% +0.40% vs 기준선 −0.25%로 사실상 같으며 ③결정적으로, <b>모양이 가장'
+       . ' «안» 닮은 4분위에서 담은 것이 가장 좋았습니다</b>(68.4% — 모양과 직교).'
+       . ' ⇒ 일반화: <b>판단 표본을 만드는 화면이 결과를 함께 보여 주면, 그 표본은 판단의 기록이 아니라'
+       . ' 결과의 사본입니다.</b> 그래서 지금 화면은 오늘 뜬 것(사후 미완)을 보고 담게 되어 있고,'
+       . ' 나중에 깨끗한 표본만 가를 자(담은 시각과 신호일의 간격)가 남습니다.</div>'
+
+       . '<div style="font-size:13px;line-height:1.8;margin-bottom:4px"><b>8년 재측정 (2026-08-10)</b> —'
+       . ' 조건 ③④⑤를 조인 <b>최종 5조건 정의</b>로 다시 쟀습니다(옛 검정은 조이기 전 정의).'
+       . ' 잣대는 불꽃형 8년 표와 같은 자: 신호일 <b>종가</b> 매수 → <b>5거래일 +15%/−10%</b> 브래킷 ·'
+       . ' 모호는 낙관/비관 두 경계 · 거래정지 건너뜀 · 상장주식수 5% 변동 제외 · 왕복 비용 0.20% 가정.'
+       . ' 재측정: <code>job=bt8y</code>(30초).</div>'
+       . '<table class="qstat"><tr><th>모집단 (2019-07 ~ 2026-07 · 상한가 제외)</th><th>표본</th>'
+       . '<th>익절</th><th>손절</th><th>미도달</th><th>비관 평균</th><th>중앙</th><th>승률</th><th>비용 뒤</th></tr>'
+       . '<tr><td>기준선 — 최고 거래대금 신호 전체 (100억↑)</td><td>27,707</td>'
+       . '<td>23.6%</td><td>31.3%</td><td>44.5%</td><td>−0.00%</td><td class="down">−2.28%</td>'
+       . '<td>41.4~42.0%</td><td class="down">−0.20%</td></tr>'
+       . '<tr><td><b>박스 상향돌파 (5조건)</b></td><td>4,426</td>'
+       . '<td>29.0%</td><td>38.6%</td><td>31.8%</td><td>+0.21%</td><td class="down"><b>−3.30%</b></td>'
+       . '<td><b>41.7~42.4%</b></td><td>+0.01%</td></tr>'
+       . '<tr><td>└ 등급 A (닮음 상위 5%)</td><td>724</td><td colspan="3" style="color:#9ab">—</td>'
+       . '<td>+0.94%</td><td class="down">−2.63%</td><td>45.2%</td><td>+0.74%</td></tr>'
+       . '<tr><td>└ 등급 D (그 밖)</td><td>1,651</td><td colspan="3" style="color:#9ab">—</td>'
+       . '<td class="down">−0.15%</td><td class="down">−4.12%</td><td>39.6%</td><td class="down">−0.35%</td></tr></table>'
+       . '<div class="q-note">★<b>결론: 측정된 성과 우위가 없습니다.</b> 평균은 기준선보다 0.2%p쯤 위지만'
+       . ' (비용 뒤 +0.01% vs −0.20%) 승률은 사실상 같고(41.7 vs 41.4%) <b>중앙은 오히려 더 나쁩니다</b>'
+       . '(−3.30 vs −2.28% — 익절·손절 양쪽이 늘어난 «더 크게 움직이는» 무리라 평균만 끌립니다).'
+       . ' 비용 뒤 평균이 양(+)인 해는 <b>2/8</b> · 기간 2분할은 +0.34/+0.09%로 부호는 유지되나 미미합니다.'
+       . ' 등급 A(승률 45.2%·중앙 −2.63%)도 판을 뒤집지 못합니다 — 등급은 「담은 것과 닮았나」이지'
+       . ' 「오를까」가 아닙니다.</div>'
+       . '<div class="q-note">⇒ 그래서 이 패턴의 화면·알림은 <b>매수 신호가 아니라 판단 소집</b>입니다'
+       . ' — 알림 본문 끝의 「※성과 우위 미검증」 한 줄이 그 기록이고, 지우지 않습니다.'
+       . ' 몇 달 뒤 «결과를 못 본 채» 담은 표본이 쌓이면 「내 눈이 진짜인가」를 처음으로 정직하게'
+       . ' 잴 수 있습니다.</div></div>';
+
     echo '<div class="card"><h2>한계 (읽고 쓸 것)</h2><div style="font-size:13px;line-height:1.8">'
        . '· 120일 창은 이력 요건 탓에 <b>표본이 18개월</b>이다(2025-02~). 깊은 하락장은 여전히 없다.<br>'
        . '· 슬리피지·수수료 미반영. 초과수익 중앙 +1.7%는 <b>엣지이지 보증이 아니다</b> — 45%는 여전히 시장보다 못 간다.<br>'
@@ -11626,659 +11820,651 @@ function pf_page_quantstat(PDO $pdo, Pf $pf): void
     pf_foot();
 }
 
-// ══════════════════════════════════════════════════════════════════════
-//  퀀트 > 패턴분석 — 5개 패턴을 실제 차트로 (정의 · 특징 · 성공/실패 사례)
-// ══════════════════════════════════════════════════════════════════════
+/* ⛔옛 「패턴분석」(mode=pattern · 5개 패턴 수기 사례 31건 · pf_page_pattern)은 2026-08-10 에
+ *   삭제됐다(사용자 지시) — 「패턴분석 (박스 상향돌파)」(pf_page_boxbrk)가 패턴지도·사례를 잇고
+ *   옛 주소는 301 로 그리 보낸다. 5개 패턴(매집형 돌파·계단지지·첫 폭발·불꽃형 둘)의 근거 표는
+ *   검증 탭 ④~⑥(pf_page_quantstat)에 그대로 있다 — 트리거 규칙 자체는 살아 있다. */
+
 /**
- * 사례는 <b>전부 실측에서 발굴한 실화</b>다 — krx_amt 원장 6,058건 백테스트에서 각 패턴의
- * 상·하위 대표를 뽑았고(2026-08-01), 시세 정합(네이버 수정주가 = KRX 원본가)을 종목별로 확인했다.
- * 차트 H/L·계단 값은 그때 확인한 원장 값을 그대로 박는다(측정치 고정 — quantstat 과 같은 원칙).
- * ⚠성공 사례 = 그 패턴의 «최상위» 결과다. 전형은 중앙값(+2%대)이다 — 페이지 끝 「사례 읽는 법」.
+ * 관심차트 바 — 「그 그룹만 보기」 + 「선택을 그룹에 담기」 + 그룹 관리 (2026-08-07)
+ *
+ * ★그룹 목록을 화면에 다시 적지 않는다 — 서버가 준 $groups 한 벌을 셀렉트 셋(필터·담기·관리)이
+ *   나눠 쓰고, 담기·삭제 응답이 그 한 벌을 통째로 갈아 준다(JS 의 renderGroups).
+ *   세 곳이 각자 목록을 들면 새 그룹을 만든 뒤 한 곳만 옛 목록을 말한다.
+ * ★「따로 불러서 보기」는 <b>주소</b>(`&g=`)다 — JS 로 숨기지 않는다.
+ *   그래야 그 화면을 그대로 북마크·공유할 수 있고, 결과 필터와 겹쳐 쓸 수 있다.
  */
-function pf_pt_case(array $c): void
+function pf_flame_fav_bar(callable $url, array $groups, int $gid): string
 {
-    $cls = ['ok' => 'pt-ok', 'bad' => 'pt-bad', 'bait' => 'pt-bait', 'warn' => 'pt-warn'][$c['kind']];
-    $lbl = ['ok' => '성공 사례', 'bad' => '실패 사례', 'bait' => '미끼 사례', 'warn' => '경고 사례'][$c['kind']];
-    echo '<div class="pt-case"><div class="pt-ct"><span class="pt-badge ' . $cls . '">' . $lbl . '</span> '
-       . '<b>' . pf_h($c['name']) . '</b> <span class="code">' . pf_h($c['code']) . '</span>'
-       . ' · 신호 ' . pf_h($c['sig']) . '</div>'
-       . '<div id="ptc_' . pf_h($c['id']) . '" class="pt-chart"><span class="pt-loading">차트 불러오는 중…</span></div>'
-       . '<div class="pt-note">' . $c['note'] . '</div></div>';
+    $sel = '<select id="flGf" onchange="flGo(this.value)">'
+         . '<option value="0"' . ($gid === 0 ? ' selected' : '') . '>전체 (관심차트 아님)</option>';
+    foreach ($groups as $g) {
+        $sel .= '<option value="' . (int)$g['id'] . '"' . ($gid === (int)$g['id'] ? ' selected' : '') . '>'
+              . pf_h($g['name']) . ' (' . (int)$g['n'] . ')</option>';
+    }
+    $sel .= '</select>';
+
+    /* ★체크칸이 곧 «담김»이다 (2026-08-07 사용자 지시) — 「담기」 버튼을 없앴다.
+     *   버튼이 있으면 카드를 고르고 → 맨 위로 올라가 누르고 → 다시 내려와 다음 페이지를 눌러야 했다.
+     *   그래서 체크칸은 「선택」이 아니라 «지금 담을 그룹에 들어 있나»를 뜻한다
+     *   (체크 = 담기 · 해제 = 빼기 · 둘 다 즉시 저장). 그러면 아래에 버튼을 또 둘 이유가 없다. */
+    $h = '<div class="fl-sel">'
+       . '<b style="font-size:12.5px;color:#556">보기</b>' . $sel
+       . '<button type="button" class="gh" onclick="flGmToggle()">⚙ 그룹 관리</button>'
+       . '<span style="flex:1"></span>'
+       . '<b style="font-size:12.5px;color:#556">담을 그룹</b>'
+       . '<select id="flGadd" onchange="flTargetChange()"></select>'
+       . '<label style="display:flex;align-items:center;gap:5px;cursor:pointer">'
+       . '<input type="checkbox" id="flAll" onchange="flCheckAll(this.checked)"> 이 페이지 전체</label>'
+       . '<span id="flSelN" class="muted"></span>'
+       . '</div>';
+
+    /* 그룹 관리 — 쓰는 일이 드물어 탭·모달을 차지할 값어치가 없다(gift 의 그룹 모달과 같은 판단) */
+    $h .= '<div class="fl-gm" id="flGm" style="display:none">'
+        . '<table id="flGmT"><tbody></tbody></table>'
+        . '<div style="display:flex;gap:6px;margin-top:8px">'
+        . '<input type="text" id="flGnew" placeholder="새 그룹 이름" maxlength="60" style="flex:1">'
+        . '<button type="button" class="pri" onclick="flGroupSave(0)">＋ 새 그룹</button></div>'
+        . '<div class="muted" style="margin-top:6px;font-size:12px">'
+        . '카드의 체크칸은 위에서 고른 <b>「담을 그룹」</b>에 들어 있는지를 뜻합니다 —'
+        . ' 체크하면 담기고 풀면 빠지며, <b>버튼 없이 바로 저장</b>됩니다.<br>'
+        . '그룹을 지워도 <b>신호 자체는 그대로</b>입니다 — 담아 둔 목록만 사라집니다.</div>'
+        . '</div>';
+    return $h;
 }
 
-function pf_page_pattern(PDO $pdo, Pf $pf): void
+/**
+ * 카드 한 장 — 「목록」과 「실제 사례」 절이 <b>같은 것</b>을 그린다 (2026-08-10 사례 절을 내며 분리).
+ *
+ * ★같은 신호가 목록과 사례에 동시에 실릴 수 있어 $idPfx 로 DOM id 를 가른다 —
+ *   차트 컨테이너(flc_/flm_)가 겹치면 한쪽 차트가 조용히 안 그려진다.
+ *   체크칸의 data-key 는 일부러 안 가른다 — 같은 신호면 두 체크칸이 함께 움직여야 맞다.
+ * @param ?array $tag 사례 절이 다는 배지 [라벨, css클래스] — 목록에서는 null
+ * @return array ['html' => 카드 마크업, 'card' => FL_CARDS 한 줄]
+ */
+function pf_bx_card(array $r, array $axes, array $favMember, int $mspan, string $idPfx = '', ?array $tag = null): array
 {
-    pf_head('퀀트 · 패턴분석', 'quant', 'wide');
-    pf_subtabs('pattern', 'quant');
+    $KB = ['tp' => ['익절', 'fl-tp'], 'sl' => ['손절', 'fl-sl'], 'non' => ['미도달', 'fl-non'],
+           'amb' => ['모호', 'fl-amb']];
+    $id  = pf_h($idPfx . $r['code'] . '_' . str_replace('-', '', $r['d']));
+    $key = $r['code'] . '|' . $r['d'];
+    [$kl, $kc] = $KB[$r['brk_kind']]
+        ?? ((int)$r['q_ohlc'] === 1 ? ['판정불가', 'fl-amb'] : ['사후 미완', 'fl-wait']);
+    $ret = $r['brk_ret'] === null ? '' :
+        ' <b style="color:' . ((float)$r['brk_ret'] >= 0 ? '#1e7e34' : '#c62828') . '">'
+        . sprintf('%+.2f%%', (float)$r['brk_ret']) . '</b>';
+    $isPick = ((string)$r['src'] === 'pick');
+    $h = '<div class="fl-card' . ($isPick ? ' pick' : '') . '" id="flcard_' . $id . '"><div class="fl-hd">'
+       . '<input type="checkbox" class="fl-ck" data-key="' . pf_h($key) . '"'
+       . ' onchange="flCheck(this)"'
+       . ' title="체크하면 위의 «담을 그룹»에 바로 담깁니다 — 체크를 풀면 그 그룹에서 뺍니다">'
+       . ($tag ? '<span class="fl-b ' . pf_h($tag[1]) . '">' . pf_h($tag[0]) . '</span>' : '')
+       /* ★출처를 카드에서도 밝힌다 — 목록을 섞어 볼 때 「이건 내가 고른 것」이 한눈에 보여야 한다 */
+       . '<span class="fl-b ' . ($isPick ? 'fl-pick">★내가 고름' : 'fl-auto">자동') . '</span>'
+       . ($r['grade'] !== null
+          ? '<span class="fl-b fl-g' . pf_h((string)$r['grade']) . '" title="점수 '
+            . number_format((float)$r['z'], 2) . ' — 「그 날이었다면 담으셨을 확률」 '
+            . round((float)$r['prob'] * 100) . '%">' . pf_h((string)$r['grade']) . ' '
+            . round((float)$r['prob'] * 100) . '%</span>' : '')
+       . '<span class="fl-b ' . $kc . '">' . $kl . '</span>' . $ret
+       . ' <b>' . pf_h($r['name'] !== '' ? $r['name'] : $r['code']) . '</b>'
+       . '<span class="code">' . pf_h($r['code']) . '</span>'
+       . ((int)$r['is_flame'] === 1
+          ? '<span class="fl-b fl-fm" title="거래대금이 20일 평균의 20배 이상 — 불꽃형 배지가 붙는 조건입니다(점수에는 안 씁니다).">불꽃형</span>' : '')
+       . ((float)$r['chg_pct'] >= 29 ? '<span class="fl-b fl-lim">상한가</span>' : '')
+       /* ★차트에는 정지일이 «평평한 봉»으로 보인다 — 판정이 그 날을 건너뛴 것을 알려야 헤매지 않는다 */
+       . ((int)($r['q_halt'] ?? 0) === 1
+          ? '<span class="fl-b fl-halt" title="사후 5일 안에 거래가 멈춘 날이 있어 그 날을 빼고 판정했습니다">'
+            . '거래정지 건너뜀</span>' : '')
+       . (($r['brk_src'] ?? 'd') === 'm'
+          ? '<span class="fl-b fl-msrc" title="일봉으로는 같은 날 익절선·손절선을 둘 다 닿아 순서를 몰랐습니다.'
+            . ' 1분봉 순서로 갈랐습니다 — 수익률도 분봉 기준입니다.">분봉이 가름</span>' : '')
+       . '<span class="fl-warn" id="fw_' . $id . '">가격기준 어긋남</span>'
+       . '<span class="fl-gs" id="fg_' . $id . '">'
+       . implode('', array_map(fn($g) => '<span class="fl-g">' . pf_h($g['name']) . '</span> ',
+                               $favMember[$key] ?? []))
+       . '</span>'
+       . '<span class="dt">' . pf_h($r['d']) . '</span></div>'
+       . '<div class="fl-meta">'
+       . '<span>등락 <b>' . sprintf('%+.2f%%', (float)$r['chg_pct']) . '</b></span>'
+       . '<span>거래대금 <b>' . number_format((int)$r['amt'] / 1e8) . '억</b></span>'
+       . '<span>20평비 <b>' . number_format((float)$r['amt_mult'], 1) . '배</b></span>'
+       . '<span>종가 <b>' . number_format((int)$r['close_prc']) . '</b></span>'
+       . ($r['mktcap'] ? '<span>시총 <b>' . number_format((int)$r['mktcap'] / 1e8) . '억</b></span>' : '')
+       /* ★기존 박스와 얼마나 붙어 있나 — 음수면 기존 박스 «안»에서 뚫은 것이다 */
+       . ($r['m_gap_pct'] !== null
+          ? '<span title="현재 박스 저가와 기존 박스 고가('
+            . number_format((int)$r['m_prev_h']) . ')의 차이'
+            . ' — 음수면 기존 박스 «안»에서 뚫은 것입니다">기존박스 대비 <b>'
+            . sprintf('%+.1f%%', (float)$r['m_gap_pct']) . '</b></span>' : '')
+       /* ★시가→종가 — 「등락(전일 종가 대비)」과 다른 자다. 갭으로 뜬 뒤 흘러내린 봉을 가른다. */
+       . ($r['m_oc_pct'] !== null
+          ? '<span title="그 날 시가 대비 종가 — 등락(전일 종가 대비)과 다릅니다.'
+            . ' 갭으로 뜬 뒤 하루 종일 흘러내린 봉은 등락이 플러스여도 여기가 음수입니다">'
+            . '시가→종가 <b>' . sprintf('%+.1f%%', (float)$r['m_oc_pct']) . '</b></span>' : '')
+       . ($r['f_max5'] !== null
+          ? '<span>5일 최고 <b style="color:#1e7e34">' . sprintf('%+.2f%%', (float)$r['f_max5'])
+            . '</b>(D+' . (int)$r['f_max5_day'] . ')</span>'
+            . '<span>최저 <b style="color:#c62828">' . sprintf('%+.2f%%', (float)$r['f_min5'])
+            . '</b>(D+' . (int)$r['f_min5_day'] . ')</span>'
+            . ($r['f_d5'] !== null ? '<span>D+5 <b>' . sprintf('%+.2f%%', (float)$r['f_d5']) . '</b></span>' : '')
+          : ((int)$r['q_ohlc'] === 1
+             ? '<span class="muted">사후 창에 <b>거래는 있었는데 고가·저가가 원장에 없는 날</b>이 있어'
+               . ' 판정하지 않았습니다</span>'
+             : '<span class="muted">사후 5거래일이 아직 안 찼습니다 ('
+               . (int)$r['n_post'] . '/' . 5 . '일)</span>'))
+       . '</div>'
+       /* 점수 축 다섯 — 「왜 이것이 후보인가」를 카드에서 바로 읽는다 */
+       . '<div class="fl-ax">'
+       . '<div title="' . pf_h(strip_tags($axes['vola20']['w'])) . '"><i>직전 변동성</i><b>'
+       . ($r['f_vola20'] === null ? '—' : number_format((float)$r['f_vola20'], 1) . '%') . '</b></div>'
+       . '<div title="' . pf_h(strip_tags($axes['brkHi120']['w'])) . '"><i>120일 고가</i><b>'
+       . ($r['f_brk_hi120'] === null ? '—' : sprintf('%+.1f%%', (float)$r['f_brk_hi120'])) . '</b></div>'
+       . '<div title="' . pf_h(strip_tags($axes['dYHigh']['w'])) . '"><i>52주 고가</i><b>'
+       . ($r['f_dyhigh'] === null ? '—' : sprintf('%+.1f%%', (float)$r['f_dyhigh'])) . '</b></div>'
+       . '<div title="' . pf_h(strip_tags($axes['posPrev60']['w'])) . '"><i>60일 위치</i><b>'
+       . ($r['f_pos60'] === null ? '—' : number_format((float)$r['f_pos60'], 0) . '%') . '</b></div>'
+       . '<div title="' . pf_h(strip_tags($axes['stepsAbove']['w'])) . '"><i>머리 위 계단</i><b>'
+       . ($r['f_steps_above'] === null ? '—' : (int)$r['f_steps_above'] . '개') . '</b></div>'
+       . '</div>'
+       /* ── 좌: 일봉(앞뒤 55거래일) · 우: 1분봉 ── */
+       . '<div class="fl-body">'
+       . '<div class="fl-pane"><div class="fl-ptit"><b>일봉</b> 앞뒤 55거래일</div>'
+       . '<div id="flc_' . $id . '" class="fl-chart">'
+       . '<span class="fl-loading">차트 불러오는 중…</span></div></div>'
+       . '<div class="fl-pane"><div class="fl-ptit"><b>1분봉</b> '
+       . '<span id="flmt_' . $id . '">' . ((int)$r['has_min'] ? '아카이브' : '없음') . '</span>'
+       . ((int)$r['has_min'] ? '<span class="fl-mz" id="flz_' . $id . '">'
+                          . '<button type="button" data-z="all" class="on">전체</button>'
+                          . '<button type="button" data-z="sig">신호일</button>'
+                          . '<button type="button" data-z="post">신호~D+5</button></span>' : '')
+       . '</div>'
+       . '<div id="flm_' . $id . '" class="fl-mchart">'
+       . '<span class="fl-loading">' . ((int)$r['has_min'] ? '분봉 불러오는 중…'
+          : ((int)$r['min_stage'] === 0
+             ? '분봉을 아직 못 받았습니다 — 크론이 하루 예산 안에서 차례로 받아 옵니다.'
+             : '이 신호는 분봉 아카이브에 없습니다.')) . '</span></div></div>'
+       . '</div>'
+       . '</div>';
+    return ['html' => $h,
+            'card' => ['id' => $id, 'code' => $r['code'], 'sig' => $r['d'],
+                       'c' => (int)$r['close_prc'],
+                       'tp' => (float)($r['brk_tp'] ?? 15), 'sl' => (float)($r['brk_sl'] ?? 10),
+                       'hm' => (int)$r['has_min'], 'span' => $mspan]];
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  퀀트 > 패턴분석 (박스 상향돌파) — 2026-08-09 (2026-08-10 옛 패턴분석 흡수: 지도·사례)
+//
+//  ★한 패턴만 «매일 쌓이는» 자리다. 옛 패턴분석(불꽃형)은 「불꽃형 전수 1,528건을 훑는」
+//    화면이었고 필터 칩이 여덟 개였다. 여기는 하루 몇 건씩 쌓이므로 묻는 것이 다르다 —
+//    축을 다섯으로 정리했다: 날짜 · 출처 · 등급 · 유형 · 결과.
+//
+//  ★★<b>「출처」가 새 축이고, 그것이 이 화면에서 가장 중요하다.</b>
+//    'pick'  = 사용자가 직접 고른 365건 — 이 패턴의 «정의 원본»
+//    'auto'  = 그것을 되맞춘 점수로 매일 자동으로 뽑은 것
+//    둘을 섞어 결과를 세면 <b>「이 패턴 승률 좋네」로 잘못 읽힌다</b> — 'pick' 은 «고른 것»이라
+//    승률 55.9% 인데 'auto' 는 8년 검정에서 기준선과 사실상 같다(stock/lib/boxbrk.php 머리말).
+//
+//  ★판정을 여기서 다시 하지 않는다 — `stock/lib/boxbrk.php` 가 정하고 `cron/bx_scan.php` 가
+//    `bx_cand` 에 담는다(점수·등급·결과·분봉까지). 화면은 «고르기만» 한다.
+//  ★차트는 옛 패턴분석과 <b>같은 로직</b>이다 — 좌 일봉(앞뒤 55거래일 · 익절/손절선 · 최고
+//    거래대금 계단) + 우 1분봉(`qm_bar`). 사용자 지시로 그대로 옮겼다.
+// ══════════════════════════════════════════════════════════════════════
+function pf_page_boxbrk(PDO $pdo, Pf $pf): void
+{
+    require_once __DIR__ . '/lib/boxbrk.php';   // 축 카탈로그·컷을 화면이 «읽는다»(다시 적지 않는다)
+
+    pf_head('퀀트 · 패턴분석 (박스 상향돌파)', 'quant', 'wide');
+    pf_subtabs('boxbrk', 'quant');
     pf_flash();
     pf_quant_css();
-    echo '<style>
-.pt-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:10px}
-@media(max-width:1500px){.pt-grid{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:980px){.pt-grid{grid-template-columns:1fr}}
-.pt-case{border:1px solid #dfe6ec;border-radius:10px;padding:10px 12px;background:#fff;min-width:0}
-.pt-ct{font-size:14px;margin-bottom:6px}.pt-ct .code{color:#9ab;font-size:12px;margin-left:2px}
-.pt-chart{height:340px;position:relative}
-.pt-loading{position:absolute;top:45%;left:0;right:0;text-align:center;color:#9ab;font-size:13px}
-.pt-note{font-size:13px;line-height:1.7;color:#334;margin-top:8px;border-top:1px dashed #e3e9ef;padding-top:8px}
-.pt-badge{display:inline-block;padding:2px 9px;border-radius:10px;font-size:12px;font-weight:700}
-.pt-ok{background:#e6f4ea;color:#1e7e34}.pt-bad{background:#fdecea;color:#c62828}
-.pt-bait{background:#fdf3e0;color:#b26a00}.pt-warn{background:#fff3cd;color:#8a6d1a}
-.pt-def{background:#f4f7fa;border-radius:8px;padding:10px 14px;font-size:13px;line-height:1.8;margin:8px 0}
-.pt-act{font-size:13px;font-weight:700;margin-left:8px}
-.pt-flow{display:flex;flex-direction:column;gap:6px;font-size:13px;margin:10px 0}
-.pt-fr{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.pt-fb{border:1px solid #dfe6ec;border-radius:8px;padding:5px 10px;background:#fff;white-space:nowrap}
-.pt-fa{color:#9ab}.pt-fk{font-weight:700}
-.pt-legend{font-size:12px;color:#667;margin:4px 0 0}
-.pt-legend .sw{display:inline-block;width:16px;height:0;border-top:2px solid;vertical-align:middle;margin:0 4px 2px 8px}
-</style>';
+    pf_toast_js();
 
-    echo '<div class="pf-head"><div><h1>패턴분석</h1>'
-       . '<div class="sub">120일 최고 거래대금에서 갈라지는 <b>5개 패턴</b> — 정의 · 특징 · 실제 사례(성공과 실패 모두).'
-       . ' 모든 수치는 원장 6,058건 백테스트 실측이며 근거 전문은 <a href="/stock/index.php?mode=quantstat">검증 탭</a>에 있다.</div></div></div>';
+    $PER     = 5;      // 한 줄에 한 건(좌 일봉 : 우 분봉 = 1:2)이라 페이지당 5건 — 옛 화면과 같다
+    $INDBARS = 120;    // 조건지표 「최고_거래대금선」 변수_봉수 — 옛 화면과 같은 계단을 본다
+    $MSPAN   = 10;     // 우측 분봉이 싣는 구간(거래일)
+    /* ★일봉 차트가 보여 주는 앞뒤 거래일 수. <b>「박스」 필터가 이 값을 함께 쓴다</b> —
+     *   「차트에 박스가 몇 개 보이나」는 이 창 안에서 세야 화면과 필터가 같은 말을 한다.
+     *   그래서 JS 에도 여기서 심는다(예전엔 JS 안에 55 를 따로 적어 두 곳에 살았다). */
+    $SPAN    = 55;
 
-    /* ── 패턴 지도 — 신호 하나가 어느 패턴으로 갈라지는가 (판정 순서 그대로) ── */
-    echo '<div class="card"><h2>패턴 지도 — 판정 순서</h2><div class="pt-flow">'
-       . '<div class="pt-fr"><span class="pt-fb pt-fk">120일 최고 거래대금 발생</span><span class="pt-fa">→ 신호일 고가 H = 저항 · 저가 L = 지지 (박스)</span></div>'
-       . '<div class="pt-fr"><span class="pt-fa">①</span><span class="pt-fb">등락 +20% 이상 폭등?</span><span class="pt-fa">→ 예:</span><span class="pt-fb pt-fk">패턴4 마지막 불꽃 🚫</span></div>'
-       . '<div class="pt-fr"><span class="pt-fa">②</span><span class="pt-fb">거래대금 20일 평균의 20배 이상?</span><span class="pt-fa">→ 예:</span><span class="pt-fb pt-fk">패턴5 소문난 잔치 🚫</span></div>'
-       . '<div class="pt-fr"><span class="pt-fa">③</span><span class="pt-fb">20평비 ≤5배 그리고 등락 0~+10%?</span><span class="pt-fa">→ 예: 🟢매집형 — 아래로 계속 · 아니오:</span><span class="pt-fb">중립 → 관망</span></div>'
-       . '<div class="pt-fr"><span class="pt-fa">④</span><span class="pt-fb">매집형인데 아래 계단이 0개?</span><span class="pt-fa">→ 예:</span><span class="pt-fb pt-fk">패턴3 첫 폭발 → 관망</span></div>'
-       . '<div class="pt-fr"><span class="pt-fa">⑤</span><span class="pt-fb">이후 종가가 H 돌파?</span><span class="pt-fa">→</span><span class="pt-fb pt-fk">패턴1 매집형 돌파 🟢 매수</span></div>'
-       . '<div class="pt-fr"><span class="pt-fa">⑥</span><span class="pt-fb">붕괴 후 계단에서 지지 확인?</span><span class="pt-fa">→ 아래층 3개 이상:</span><span class="pt-fb pt-fk">패턴2 매집+바닥 🟢 매수</span><span class="pt-fa">· 1~2개: ⚠관망</span></div>'
-       . '</div><div class="q-note">차트 읽는 법: <span style="display:inline-block;width:15px;height:11px;background:rgba(240,165,0,0.18);'
-       . 'border-top:2px solid #d33;border-bottom:2px solid #1565c0;vertical-align:middle;margin:0 4px 2px 8px"></span>'
-       . '노란 박스 = <b>이번 신호의 박스</b>(위 빨강 = 저항 H · 아래 파랑 = 지지 L)'
-       . ' <span style="display:inline-block;width:15px;height:11px;background:rgba(110,135,160,0.15);'
-       . 'border-top:1px solid rgba(211,51,51,.5);border-bottom:1px solid rgba(21,101,192,.5);vertical-align:middle;margin:0 4px 2px 8px"></span>'
-       . '회색 박스 = <b>그 전의 박스들</b>(계단이 쌓여 온 모양 — 다음 박스가 생길 때까지)'
-       . ' <span class="sw" style="border-color:#9aa7b4;border-top-style:dashed"></span>회색 파선 = 신호 이후에도 살아있는 계단 레벨.'
-       . ' ▲매수 ▼청산 마커는 실측 시점(+20거래일 잣대) 그대로.'
-       . ' 초기 화면은 신호 전후만 확대해 보여 준다 — <b>왼쪽으로 드래그하면 이전 계단</b>이, 휠로 확대·축소가 된다.</div></div>';
-
-    /* ── 사례 데이터 — 2026-08-01 백테스트에서 발굴·시세 정합 확인 완료 ── */
-    $CASES = [
-        // 패턴1 매집형 돌파
-        ['id' => 'p1s', 'kind' => 'ok', 'name' => '삼성전기', 'code' => '009150', 'sig' => '2026-05-12',
-         'H' => 995000, 'L' => 899000, 'lv' => [796000, 779000, 753000, 686000],
-         'buy' => '2026-05-13', 'exit' => '2026-06-12', 'from' => '2026-02-01', 'to' => '2026-07-10', 'pat' => 1,
-         'note' => '5/12 매집형 신호(등락 +6.4% · 20평비 5배 이하 · 아래층 박스 7개). 다음날 종가 1,029,000원으로'
-                 . ' 저항 995,000원을 돌파 → <b>매수</b>. +20거래일 뒤 1,714,000원 — <b>+66.6%</b>(시장 대비 +80.9%p).'
-                 . ' 계단을 층층이 쌓아 올린 뒤의 조용한 최고 거래대금이 교과서적으로 이어진 사례.'],
-        ['id' => 'p1f', 'kind' => 'bad', 'name' => 'SK하이닉스', 'code' => '000660', 'sig' => '2026-06-19',
-         'H' => 2891000, 'L' => 2688000, 'lv' => [2379000, 2290500, 1967000, 1804000],
-         'buy' => '2026-06-22', 'exit' => '2026-07-21', 'from' => '2026-03-01', 'to' => '', 'pat' => 1,
-         'note' => '6/19 매집형 신호(등락 +2.9% · 아래층 13개 — 조건은 완벽했다). 6/22 돌파 매수 2,919,000원'
-                 . ' → +20거래일 1,836,000원 — <b>−37.1%</b>. 대형주도, 계단이 많아도 <b>규칙대로 사서 이렇게 진다</b>.'
-                 . ' 승률 57.9%의 나머지 42%가 이런 얼굴이다. 실전 청산규칙(한 계단 유예)은 계단 이탈에서 더 일찍 끊는다.'],
-        // 패턴2 매집+바닥 (계단지지)
-        ['id' => 'p2s', 'kind' => 'ok', 'name' => '주성엔지니어링', 'code' => '036930', 'sig' => '2026-03-24',
-         'H' => 85700, 'L' => 74100, 'lv' => [67200, 64000],
-         'buy' => '2026-03-27', 'exit' => '2026-04-24', 'from' => '2025-12-15', 'to' => '2026-05-29', 'pat' => 2,
-         'note' => '3/24 매집형 신호(아래층 7개) 후 지지 74,100원이 무너짐 → 3/27 계단 67,200원에 저가가 닿고'
-                 . ' 종가 70,000원으로 버팀 = <b>계단지지 확인 매수</b>. +20거래일 123,900원 — <b>+77.0%</b>.'
-                 . ' 붕괴가 곧 실패가 아니다 — 계단이 받아주면(실측 74.9%) 거기가 바닥이 된다.'],
-        ['id' => 'p2f', 'kind' => 'bad', 'name' => 'LG전자', 'code' => '066570', 'sig' => '2026-06-02',
-         'H' => 438000, 'L' => 330000, 'lv' => [293000, 248500, 194900, 160400],
-         'buy' => '2026-06-05', 'exit' => '2026-07-03', 'from' => '2026-03-02', 'to' => '', 'pat' => 2,
-         'note' => '6/2 신호 후 붕괴 → 6/5 계단 293,000원 지지 확인 매수 303,000원. 그런데 계단이 <b>연쇄로</b>'
-                 . ' 무너지며 +20거래일 191,000원 — <b>−37.0%</b>. 아래층 6개도 폭락 국면은 못 막는다 —'
-                 . ' 계단은 확률(승률 58.5%)이지 보증이 아니다. 이런 낙폭이 중앙 +2.40%의 실체다.'],
-        ['id' => 'p2w', 'kind' => 'warn', 'name' => '와이지엔터테인먼트', 'code' => '122870', 'sig' => '2026-02-27',
-         'H' => 77600, 'L' => 71400, 'lv' => [62000, 56300],
-         'buy' => '2026-03-04', 'exit' => '2026-04-01', 'from' => '2025-11-20', 'to' => '2026-05-08', 'pat' => 2,
-         'note' => '⚠<b>아래층 1개뿐인 계단지지</b> — 3/4 계단 62,000원 지지가 확인돼 62,600원에 샀다면'
-                 . ' +20거래일 53,300원 — <b>−14.9%</b>. 아래층 1~2개의 계단지지는 실측 중앙 −2.47%·승률 45%로'
-                 . ' <b>지는 자리</b>다. 그래서 매수 규칙에 「아래층 3개 이상」 조건이 붙었다(목록의 ⚠ 표시).'],
-        // 패턴3 첫 폭발
-        ['id' => 'p3c', 'kind' => 'bad', 'name' => '한미반도체', 'code' => '042700', 'sig' => '2025-02-19',
-         'H' => 111000, 'L' => 100100, 'lv' => [],
-         'low' => '2025-04-09', 'from' => '2024-12-01', 'to' => '2025-06-15', 'pat' => 3,
-         'note' => '2/19 매집형 최고 거래대금 — 그러나 <b>첫 박스(아래 계단 0개)</b>. 지지 100,100원이 깨지자 받아줄 곳이'
-                 . ' 없이 4/9 59,500원까지 — <b>지지 대비 −40.6%</b>. 계단 없는 붕괴가 위험한 이유의 전형.'],
-        ['id' => 'p3a', 'kind' => 'bad', 'name' => '엠로', 'code' => '058970', 'sig' => '2025-02-04',
-         'H' => 80100, 'L' => 74600, 'lv' => [],
-         'buy' => '2025-02-06', 'exit' => '2025-03-07', 'from' => '2024-11-15', 'to' => '2025-04-30', 'pat' => 3,
-         'note' => '첫 박스인데 돌파해서 2/6 83,000원에 샀다면 → +20거래일 55,000원 — <b>−33.7%</b>.'
-                 . ' 첫 박스는 돌파해도 이력 쌓인 구간 실측이 −1.94%(표본 19건이라 규칙화는 보류)로 근거가 약하다.'
-                 . ' <b>관망이 기본</b> — 이 박스는 훗날 다음 박스의 계단이 된다.'],
-        // 패턴4 마지막 불꽃
-        ['id' => 'p4f', 'kind' => 'bad', 'name' => '시공테크', 'code' => '020710', 'sig' => '2025-04-11',
-         'H' => 7290, 'L' => 6300, 'lv' => [6140, 4580],
-         'buy' => '2025-04-14', 'exit' => '2025-05-16', 'from' => '2025-01-10', 'to' => '2025-07-01', 'pat' => 4,
-         'note' => '4/11 <b>+25.7% 폭등하며</b> 최고 거래대금(불꽃형). 4/14 돌파 매수 8,060원 → 5/16 3,900원 —'
-                 . ' <b>−51.6%</b>. 폭등일의 최고 거래대금은 돌파율이 67.7%로 가장 높아 「잘 가는 것처럼 보이는」 것이'
-                 . ' 함정이다 — 사면 3번 중 2번 진다(중앙 −7.60%).'],
-        ['id' => 'p4w', 'kind' => 'bait', 'name' => '광전자', 'code' => '017900', 'sig' => '2026-03-25',
-         'H' => 3395, 'L' => 2560, 'lv' => [2160, 2055, 2040],
-         'buy' => '2026-04-02', 'exit' => '2026-05-06', 'from' => '2025-12-15', 'to' => '2026-06-15', 'pat' => 4,
-         'note' => '같은 불꽃형(+20% 폭등) 돌파인데 <b>+205.8%</b>. <b>이런 사례가 미끼다</b> — 눈에 남는 건 이 한 방이지만'
-                 . ' 실측 분포는 중앙 −7.60%·승률 35.7%. 한 번의 +205%를 보고 들어가는 것은 기대값이 아니라'
-                 . ' 복권을 사는 것이고, 복권값은 위 시공테크가 치른다.'],
-        // 패턴5 소문난 잔치
-        ['id' => 'p5f', 'kind' => 'bad', 'name' => '보해양조', 'code' => '000890', 'sig' => '2026-06-22',
-         'H' => 2765, 'L' => 1981, 'lv' => [],
-         'buy' => '2026-06-23', 'exit' => '2026-07-22', 'from' => '2026-03-20', 'to' => '', 'pat' => 5,
-         'note' => '6/22 거래대금이 20일 평균의 <b>20배 이상 폭발</b>(불꽃형). 6/23 돌파 매수 3,040원 →'
-                 . ' 7/22 1,442원 — <b>−52.6%</b>. 온 시장이 쳐다보는 날의 거래대금 폭발은 관심의 정점 ='
-                 . ' 물량 소화의 자리다.'],
-        ['id' => 'p5w', 'kind' => 'bait', 'name' => '동양고속', 'code' => '084670', 'sig' => '2025-11-24',
-         'H' => 20000, 'L' => 12390, 'lv' => [12110, 10710, 10000, 8440],
-         'buy' => '2025-12-03', 'exit' => '2026-01-09', 'from' => '2025-08-20', 'to' => '2026-02-27', 'pat' => 5,
-         'note' => '불꽃형(20배↑)인데 <b>+177.3%</b> — 역시 미끼 사례. 이 조건의 돌파 실측 분포는 중앙 −5.72%·'
-                 . '승률 37.4%·두 기간 모두 마이너스다. 승자 몇이 눈에 띄고, 다수의 패자가 조용히 사라진다.'],
-        // ── 확장 사례 20건 (2026-08-01 · 시세 정합 확인 · RF머트리얼즈는 수정주가 불일치로 좋은사람들로 교체) ──
-        ['id' => 'p1s2', 'kind' => 'ok', 'name' => 'DSC인베스트먼트', 'code' => '241520', 'sig' => '2026-01-29',
-         'H' => 9060, 'L' => 7950, 'lv' => [7160, 6000, 4495],
-         'buy' => '2026-02-04', 'exit' => '2026-03-10', 'from' => '2025-10-20', 'to' => '2026-04-17', 'pat' => 1,
-         'note' => '1/29 매집형 신호(아래층 3개). 2/4 종가 9,280원으로 저항 9,060원 돌파 매수'
-                 . ' → +20거래일 16,100원 — <b>+73.5%</b>.'],
-        ['id' => 'p1s3', 'kind' => 'ok', 'name' => '한국석유', 'code' => '004090', 'sig' => '2026-01-29',
-         'H' => 15100, 'L' => 14350, 'lv' => [14030],
-         'buy' => '2026-01-30', 'exit' => '2026-03-05', 'from' => '2025-10-20', 'to' => '2026-04-10', 'pat' => 1,
-         'note' => '1/30 돌파 매수 15,950원 → 3/5 28,150원 — <b>+76.5%</b>. 다만 아래층 1개의 얕은 이력'
-                 . ' — 이런 구조가 항상 통하는 건 아니라는 게 패턴3의 교훈이다.'],
-        ['id' => 'p1f2', 'kind' => 'bad', 'name' => '툴젠', 'code' => '199800', 'sig' => '2026-05-06',
-         'H' => 108900, 'L' => 90800, 'lv' => [82900, 67200, 56000, 48550],
-         'buy' => '2026-05-07', 'exit' => '2026-06-08', 'from' => '2026-01-25', 'to' => '2026-07-10', 'pat' => 1,
-         'note' => '5/7 돌파 매수 118,500원 → 6/8 43,050원 — <b>−63.7%</b>, 이 규칙 표본의 최악 낙폭.'
-                 . ' 아래층 4개도 재료 소멸은 못 막는다 — 그래서 청산 규칙(계단 이탈)이 세트다.'],
-        ['id' => 'p1f3', 'kind' => 'bad', 'name' => '프럼파스트', 'code' => '035200', 'sig' => '2025-04-03',
-         'H' => 6800, 'L' => 5600, 'lv' => [4985, 3730],
-         'buy' => '2025-04-07', 'exit' => '2025-05-08', 'from' => '2024-12-20', 'to' => '2025-06-15', 'pat' => 1,
-         'note' => '4/7 돌파 매수 6,990원 → 5/8 4,515원 — <b>−35.4%</b>(시장 대비 −45.1%p).'
-                 . ' 돌파 직후 되꺾여 계단까지 함께 무너진 전형.'],
-        ['id' => 'p2s2', 'kind' => 'ok', 'name' => '흥구석유', 'code' => '024060', 'sig' => '2026-01-30',
-         'H' => 15950, 'L' => 14320, 'lv' => [13720, 12240],
-         'buy' => '2026-02-02', 'exit' => '2026-03-06', 'from' => '2025-10-20', 'to' => '2026-04-10', 'pat' => 2,
-         'note' => '1/30 신호 후 붕괴 → 2/2 계단 13,720원에서 지지 확인 매수 13,610원 → 3/6 27,600원'
-                 . ' — <b>+102.8%</b>, 이 규칙 표본의 최고 성과.'],
-        ['id' => 'p2s3', 'kind' => 'ok', 'name' => '좋은사람들', 'code' => '033340', 'sig' => '2025-06-25',
-         'H' => 1710, 'L' => 1439, 'lv' => [1358, 1293, 1127],
-         'buy' => '2025-07-22', 'exit' => '2025-08-20', 'from' => '2025-03-15', 'to' => '2025-10-02', 'pat' => 2,
-         'note' => '석 달에 걸쳐 박스 6층을 쌓은 뒤 6/25 신호 → 붕괴 → 7/22 계단 지지 확인 매수 1,325원'
-                 . ' → 8/20 2,510원 — <b>+89.4%</b>. 층층이 쌓인 계단의 교과서.'],
-        ['id' => 'p2f2', 'kind' => 'bad', 'name' => '오리엔탈정공', 'code' => '014940', 'sig' => '2025-10-27',
-         'H' => 12900, 'L' => 11380, 'lv' => [11070, 10100, 8740],
-         'buy' => '2025-10-28', 'exit' => '2025-11-25', 'from' => '2025-07-20', 'to' => '2025-12-31', 'pat' => 2,
-         'note' => '10/28 계단 11,070원 지지 확인 매수 11,260원 → 11/25 8,240원 — <b>−26.8%</b>.'
-                 . ' 아래층 3개로 조건을 충족해도 지는 41.5%는 있다.'],
-        ['id' => 'p2f3', 'kind' => 'bad', 'name' => '중앙에너비스', 'code' => '000440', 'sig' => '2026-03-12',
-         'H' => 35650, 'L' => 30000, 'lv' => [28750, 24850],
-         'buy' => '2026-03-18', 'exit' => '2026-04-15', 'from' => '2025-12-01', 'to' => '2026-05-22', 'pat' => 2,
-         'note' => '3/18 계단 28,750원 지지 확인 매수 28,700원 → 4/15 21,500원 — <b>−25.1%</b>.'
-                 . ' 아래층 7개였지만 그 계단 대부분이 직전 2~3주 급등 중에 생긴 것이었다.'],
-        ['id' => 'p2w2', 'kind' => 'warn', 'name' => '갤럭시아머니트리', 'code' => '094480', 'sig' => '2025-06-18',
-         'H' => 15880, 'L' => 14110, 'lv' => [13100, 11300],
-         'buy' => '2025-06-23', 'exit' => '2025-07-21', 'from' => '2025-03-10', 'to' => '2025-08-29', 'pat' => 2,
-         'note' => '⚠아래층 1개 — 6/23 계단 13,100원 지지가 확인돼 13,900원에 샀다면 → 7/21 10,940원'
-                 . ' — <b>−21.3%</b>. 규칙(3개 이상)이 걸러 주는 자리.'],
-        ['id' => 'p2w3', 'kind' => 'warn', 'name' => '제이앤티씨', 'code' => '204270', 'sig' => '2025-11-03',
-         'H' => 29850, 'L' => 27450, 'lv' => [22900, 22000],
-         'buy' => '2025-11-14', 'exit' => '2025-12-12', 'from' => '2025-07-25', 'to' => '2026-01-23', 'pat' => 2,
-         'note' => '⚠아래층 2개 — 11/14 계단 22,900원 지지 22,600원 매수했다면 → 12/12 20,650원 — <b>−8.6%</b>.'
-                 . ' 1~2개 구역의 전형(실측 중앙 −2.47%·승률 45%).'],
-        ['id' => 'p3c2', 'kind' => 'bad', 'name' => '에이직랜드', 'code' => '445090', 'sig' => '2026-06-02',
-         'H' => 32200, 'L' => 28400, 'lv' => [],
-         'low' => '2026-07-30', 'from' => '2026-02-20', 'to' => '', 'pat' => 3,
-         'note' => '6/2 첫 박스 → 지지 28,400원 붕괴 → 받아줄 계단 없이 7/30 14,720원까지 —'
-                 . ' <b>지지 대비 −48.2%</b>, 이 표본 최악의 첫 폭발 붕괴.'],
-        ['id' => 'p3a2', 'kind' => 'bad', 'name' => '인투셀', 'code' => '287840', 'sig' => '2025-11-28',
-         'H' => 69400, 'L' => 60300, 'lv' => [],
-         'buy' => '2025-12-02', 'exit' => '2026-01-02', 'from' => '2025-08-20', 'to' => '2026-02-13', 'pat' => 3,
-         'note' => '첫 박스 돌파를 12/2 69,500원에 샀다면 → 1/2 53,500원 — <b>−23.0%</b>.'
-                 . ' 첫 박스는 돌파해도 근거가 약하다는 또 하나의 실측.'],
-        ['id' => 'p4f2', 'kind' => 'bad', 'name' => '성호전자', 'code' => '043260', 'sig' => '2026-06-02',
-         'H' => 49600, 'L' => 39700, 'lv' => [38600, 30200], 'wf' => 1,
-         'buy' => '2026-06-04', 'exit' => '2026-07-02', 'from' => '2025-11-20', 'to' => '', 'pat' => 4,
-         'note' => '6/2 +20.4% 폭등하며 최고 거래대금 → 6/4 돌파 매수 51,400원 → 7/2 21,900원 — <b>−57.4%</b>.'
-                 . ' ★차트 왼쪽을 보라 — <b>같은 종목이 반년 전(2025-12월) 같은 패턴으로 +123%</b> 갔었다.'
-                 . ' 그 기억이 이번 추격을 부르고, 이번엔 반토막이 났다. 미끼가 작동하는 방식 그 자체.'],
-        ['id' => 'p4f3', 'kind' => 'bad', 'name' => '아모센스', 'code' => '357580', 'sig' => '2026-03-11',
-         'H' => 20050, 'L' => 15300, 'lv' => [8460, 7380, 6960, 5600],
-         'buy' => '2026-03-12', 'exit' => '2026-04-09', 'from' => '2025-12-01', 'to' => '2026-05-15', 'pat' => 4,
-         'note' => '3/11 +29.8% 폭등하며 최고 거래대금 → 3/12 돌파 매수 24,050원 → 4/9 12,580원 — <b>−47.7%</b>.'],
-        ['id' => 'p4w2', 'kind' => 'bait', 'name' => '다원넥스뷰', 'code' => '323350', 'sig' => '2026-01-08',
-         'H' => 6630, 'L' => 5040, 'lv' => [],
-         'buy' => '2026-01-20', 'exit' => '2026-02-20', 'from' => '2025-10-01', 'to' => '2026-03-31', 'pat' => 4,
-         'note' => '+30% 폭등하며 최고 거래대금 → 1/20 돌파 매수 7,200원 → 2/20 18,700원 — <b>+159.7%</b>.'
-                 . ' 미끼 사례: 이 무리 전체의 중앙은 −7.60%다.'],
-        ['id' => 'p4w3', 'kind' => 'bait', 'name' => '한스바이오메드', 'code' => '042520', 'sig' => '2025-09-15',
-         'H' => 14900, 'L' => 11860, 'lv' => [11490, 10170, 9300, 8450],
-         'buy' => '2025-09-18', 'exit' => '2025-10-23', 'from' => '2025-06-05', 'to' => '2025-11-28', 'pat' => 4,
-         'note' => '9/18 돌파 매수 16,000원 → 10/23 33,800원 — <b>+111.2%</b>. 승자의 기억이 다음 패자를'
-                 . ' 만든다 — 위 성호전자가 정확히 그 다음 장면이다.'],
-        ['id' => 'p5f2', 'kind' => 'bad', 'name' => '부방', 'code' => '014470', 'sig' => '2025-04-03',
-         'H' => 2410, 'L' => 1910, 'lv' => [],
-         'buy' => '2025-04-07', 'exit' => '2025-05-08', 'from' => '2024-12-20', 'to' => '2025-06-15', 'pat' => 5,
-         'note' => '거래대금 20일 평균의 28배 폭발 → 4/7 돌파 매수 2,615원 → 5/8 1,575원 —'
-                 . ' <b>−39.8%</b>(시장 대비 −49.4%p).'],
-        ['id' => 'p5f3', 'kind' => 'bad', 'name' => '모헨즈', 'code' => '006920', 'sig' => '2025-04-11',
-         'H' => 4950, 'L' => 3980, 'lv' => [3595, 3320, 3310],
-         'buy' => '2025-04-28', 'exit' => '2025-05-29', 'from' => '2025-01-05', 'to' => '2025-07-10', 'pat' => 5,
-         'note' => '34배 폭발 → 4/28 돌파 매수 5,070원 → 5/29 2,965원 — <b>−41.5%</b>.'],
-        ['id' => 'p5w2', 'kind' => 'bait', 'name' => '서산', 'code' => '079650', 'sig' => '2026-06-11',
-         'H' => 1653, 'L' => 1273, 'lv' => [974],
-         'buy' => '2026-06-12', 'exit' => '2026-07-14', 'from' => '2026-03-01', 'to' => '', 'pat' => 5,
-         'note' => '92배 폭발 → 6/12 돌파 매수 1,690원 → 7/14 5,530원 — <b>+227.2%</b>.'
-                 . ' 이 페이지에서 가장 큰 수익이자 가장 위험한 착시 — 같은 자리의 중앙은 −5.72%다.'],
-        ['id' => 'p5w3', 'kind' => 'bait', 'name' => '나무에이엑스', 'code' => '242040', 'sig' => '2025-12-30',
-         'H' => 1552, 'L' => 1308, 'lv' => [],
-         'buy' => '2026-01-16', 'exit' => '2026-02-13', 'from' => '2025-09-20', 'to' => '2026-03-27', 'pat' => 5,
-         'note' => '175배 폭발 → 1/16 돌파 매수 1,585원 → 2/13 3,610원 — <b>+127.8%</b>. 미끼 사례.'],
-    ];
-    /* 과거 박스 이력(차트 창 안·krx_surge×krx_amt 실측 2026-08-01) — [신호일, H, L].
-     * 화면에서 회색 음영 박스로 그려져 「계단이 쌓여 온 모양」을 첨부 차트처럼 보여 준다.
-     * 창 밖의 더 옛 박스(와이지엔터·보해양조 등)는 계단 파선으로만 남는다. */
-    $BOXES = [
-        'p1s' => [['2026-02-02', 300000, 280000], ['2026-02-19', 363000, 321000], ['2026-02-23', 436500, 392000],
-                  ['2026-04-21', 779000, 686000], ['2026-04-23', 796000, 753000], ['2026-05-06', 971000, 898500]],
-        'p1f' => [['2026-03-04', 954000, 846000], ['2026-05-06', 1614000, 1557000], ['2026-05-11', 1949000, 1826000],
-                  ['2026-05-12', 1967000, 1804000], ['2026-05-29', 2379000, 2290500]],
-        'p2s' => [['2026-01-08', 35900, 30700], ['2026-03-03', 64900, 54600], ['2026-03-04', 63900, 53700],
-                  ['2026-03-05', 69900, 56800], ['2026-03-10', 74300, 64000], ['2026-03-20', 78500, 67200]],
-        'p2f' => [['2026-05-12', 194900, 160400], ['2026-05-29', 293000, 248500]],
-        'p4f' => [['2025-04-08', 6140, 4580]],
-        'p4w' => [['2026-01-13', 1911, 1819], ['2026-02-25', 2160, 2040], ['2026-03-24', 2615, 2055]],
-        'p5w' => [['2025-11-20', 12110, 10710], ['2025-11-21', 15740, 14180]],
-        'p1s2' => [['2026-01-16', 8180, 7160]],
-        'p1s3' => [['2026-01-06', 14800, 14030], ['2026-01-14', 15230, 14310]],
-        'p1f3' => [['2025-03-07', 4985, 3730]],
-        'p2s2' => [['2026-01-05', 13440, 11830], ['2026-01-06', 14100, 12240], ['2026-01-14', 15230, 13720]],
-        'p2s3' => [['2025-04-03', 723, 612], ['2025-04-14', 869, 750], ['2025-05-30', 1012, 785],
-                   ['2025-06-05', 1240, 941], ['2025-06-09', 1358, 1127], ['2025-06-12', 1498, 1293]],
-        'p2f2' => [['2025-08-07', 8190, 6340], ['2025-09-08', 11070, 8740], ['2025-10-21', 11710, 10100]],
-        'p2f3' => [['2026-02-20', 21150, 18200], ['2026-02-23', 23200, 18460], ['2026-03-04', 32800, 28050],
-                   ['2026-03-05', 38000, 24850], ['2026-03-06', 37700, 28750]],
-        'p2w2' => [['2025-06-10', 13100, 11300]],
-        'p2w3' => [['2025-10-15', 28000, 22900]],
-        'p4f2' => [['2025-12-08', 3860, 3120], ['2025-12-10', 6510, 4780], ['2026-03-06', 38600, 30200],
-                   ['2026-03-10', 49700, 41000], ['2026-03-11', 59600, 45850]],
-        'p4w3' => [['2025-06-11', 10600, 9120], ['2025-09-09', 10170, 8450], ['2025-09-10', 11490, 9300]],
-        'p5f3' => [['2025-04-07', 3595, 3320], ['2025-04-10', 4240, 3310]],
-        'p5w2' => [['2026-06-10', 1272, 974]],
-    ];
-    foreach ($CASES as &$c) $c['boxes'] = $BOXES[$c['id']] ?? [];
-    unset($c);
-
-    // 그리드 순서 = 성공 → 실패 → 경고 → 미끼 (usort 는 PHP 8 부터 안정 정렬이라 같은 무리 안 순서 유지)
-    $kord = ['ok' => 0, 'bad' => 1, 'warn' => 2, 'bait' => 3];
-    usort($CASES, fn($x, $y) => [$x['pat'], $kord[$x['kind']]] <=> [$y['pat'], $kord[$y['kind']]]);
-
-    $byPat = [];
-    foreach ($CASES as $c) $byPat[$c['pat']][] = $c;
-
-    /* ── 패턴 카드 5장 — ①정의 ②특징 ③사례 ── */
-    $PATS = [
-        1 => ['t' => '패턴1 「조용한 매집 → 돌파」', 'act' => '🟢 매수', 'actc' => '#1e7e34',
-              'def' => '<b>①정의</b> — 120일 최고 거래대금인데 <b>요란하지 않다</b>: 거래대금이 20일 평균의 5배 이하,'
-                     . ' 등락 0~+10% (=🟢매집형 배지). 신호일에 사지 않고, 이후 <b>종가가 저항 H를 넘는 날</b> 산다.',
-              'feat' => '<b>②특징</b> — 표본 304건 · 초과수익 중앙 <b>+2.26%</b> · 승률 <b>57.9%</b> · 기간 2분할 +1.69/+2.97 모두 ＋ ·'
-                      . ' 178개 종목 분산. 핵심은 돌파를 <b>확인하고</b> 사는 것 — 신호일 추격은 다른 패턴(전체 중앙 −3.36%)이다.'
-                      . ' 청산은 「한 계단 유예」(시간 규칙 없음 · 평균 +26.01%): 손절선이 깨져도 바로 아래 계단이 살아있으면 버티고,'
-                      . ' 그 계단마저 종가로 깨질 때 나온다.'],
-        2 => ['t' => '패턴2 「매집 + 바닥」 (계단지지)', 'act' => '🟢 매수 (아래층 3개 이상일 때만)', 'actc' => '#1e7e34',
-              'def' => '<b>①정의</b> — 매집형 박스가 <b>붕괴</b>(종가 &lt; L)한 뒤, 아래 계단(옛 박스의 H·L 레벨)에 저가가 닿고'
-                     . ' <b>종가가 그 계단 위에서 버틴 날</b> 산다. 단 <b>아래층 박스가 3개 이상</b> 쌓여 있을 때만.',
-              'feat' => '<b>②특징</b> — 아래층 3개↑ 표본 94건 · 중앙 <b>+2.40%</b> · 승률 <b>58.5%</b> · 양기간 ＋ · 85개 종목 분산.'
-                      . ' 붕괴해도 계단이 있으면 <b>74.9%는 계단에서 지지</b>되고 끝까지 관통은 2.5%뿐. 반면 아래층 1~2개는'
-                      . ' 실측 <b>중앙 −2.47%·승률 45%</b>로 지는 자리(위치 연구 2026-08-01) — 목록에서 ⚠로 표시된다.'
-                      . ' 청산은 「20거래일 잠금 → 손절선」: 이미 깊은 계단에서 산 자리라 한 계단 더 기다리면 너무 깊다.'],
-        3 => ['t' => '패턴3 「첫 폭발」 (계단 없는 첫 박스)', 'act' => '관망', 'actc' => '#667',
-              'def' => '<b>①정의</b> — 매집형 조건은 다 갖췄는데 <b>아래 계단이 하나도 없다</b>: 이 종목의 첫 거래대금 폭발.',
-              'feat' => '<b>②특징</b> — 붕괴하면 <b>받아줄 곳이 없다</b>(계단 있는 붕괴와 정반대). 돌파해도 이력이 쌓인 구간'
-                      . ' 실측 −1.94%(표본 19건 — 작아서 금지 규칙까지는 안 갔다). 기본 행동은 <b>관망</b> — 지금 박스가'
-                      . ' 훗날 다음 박스의 계단이 되고, 계단이 쌓인 뒤의 신호(패턴1·2)가 우리가 사는 자리다.'],
-        4 => ['t' => '패턴4 「마지막 불꽃」 (불꽃형 — 등락 +20%↑)', 'act' => '🚫 매수 금지', 'actc' => '#c62828',
-              'def' => '<b>①정의</b> — <b>등락 +20% 이상 폭등하며</b> 최고 거래대금 (=<b>불꽃형</b> 배지의 두 조건 중 하나). 돌파 여부와 무관하게 안 산다.',
-              'feat' => '<b>②특징</b> — 표본 821건 · 돌파 시 중앙 <b>−7.60%</b> · 승률 35.7% · 양기간 −. 역설이 핵심이다:'
-                      . ' <b>돌파율은 67.7%로 전 패턴 중 최고</b> — 가장 잘 가는 것처럼 보이는 자리가 가장 지는 자리다.'
-                      . ' 온 시장이 이미 알아버린 재료의 마지막 불꽃.'],
-        5 => ['t' => '패턴5 「소문난 잔치」 (불꽃형 — 20평비 20배↑)', 'act' => '🚫 매수 금지', 'actc' => '#c62828',
-              'def' => '<b>①정의</b> — 거래대금이 직전 20일 평균의 <b>20배 이상</b>으로 폭발하며 찍은 최고 거래대금 (=<b>불꽃형</b> 배지의 나머지 조건).'
-                     . ' 패턴4와 <b>배지는 같고</b>(불꽃형) 터지는 곳이 가격이냐 대금이냐만 다르다 — 실사례를 갈라 두려고 패턴 번호는 남긴다.',
-              'feat' => '<b>②특징</b> — 표본 431건 · 돌파 시 중앙 <b>−5.72%</b> · 승률 37.4% · 양기간 −. 매집형과 정반대 극 —'
-                      . ' 같은 최고 거래대금이라도 <b>조용히 찍는가, 온 동네가 알게 찍는가</b>가 승부를 가른다. 소문난 잔치에 먹을 것 없다.'],
-    ];
-    foreach ($PATS as $no => $p) {
-        echo '<div class="card"><h2>' . $p['t'] . '<span class="pt-act" style="color:' . $p['actc'] . '">' . $p['act'] . '</span></h2>'
-           . '<div class="pt-def">' . $p['def'] . '</div>'
-           . '<div style="font-size:13px;line-height:1.8">' . $p['feat'] . '</div>'
-           . '<div style="font-size:13px;margin-top:10px"><b>③실제 사례</b></div><div class="pt-grid">';
-        foreach ($byPat[$no] ?? [] as $c) pf_pt_case($c);
-        echo '</div></div>';
+    $has = false;
+    try { $pdo->query("SELECT 1 FROM bx_cand LIMIT 1"); $has = true; } catch (Throwable $e) { $has = false; }
+    if (!$has) {
+        echo '<div class="card"><div class="q-note">아직 적재되지 않았습니다 —'
+           . ' <code>php cron/bx_scan.php job=migrate</code> 뒤'
+           . ' <code>job=backfill from=2025-08-01</code> 을 돌립니다.</div></div>';
+        pf_foot();
+        return;
     }
 
-    /* ── 사례 읽는 법 — 체리픽 오해 방지 ── */
-    echo '<div class="card"><h2>사례 읽는 법 (중요)</h2><div style="font-size:13px;line-height:1.8">'
-       . '· 여기 실린 성공·실패 사례는 각 패턴의 <b>상·하위 대표</b>다 — 눈에 잘 보이라고 극단을 골랐다.'
-       . ' <b>전형적인 결과는 중앙값(+2%대)</b>이지 +66%나 −37%가 아니다.<br>'
-       . '· 패턴의 힘은 개별 사례가 아니라 <b>분포</b>에 있다: 매수 패턴(1·2)은 수백 건에서 중앙 ＋·승률 58%,'
-       . ' 금지 패턴(4·5)은 수백 건에서 중앙 −6~−8%·승률 36%. 근거 전문은 <a href="/stock/index.php?mode=quantstat">검증 탭</a>.<br>'
-       . '· 수익률은 전부 <b>+20거래일 · 같은 날 시장(전종목 일중앙) 대비 초과</b> 잣대의 실측이고, 실전 청산 규칙'
-       . '(한 계단 유예 / 20일 잠금)은 이보다 길게 들고 간다 — 검증 탭 ⑤절.<br>'
-       . '· 차트 가격은 네이버 수정주가, H·L·계단 값은 KRX 원장 — 이 11개 종목은 <b>두 값이 일치함을 종목별로 확인</b>했다'
-       . '(액면분할 등이 끼면 어긋날 수 있어, 사례 추가 시 반드시 재확인).<br>'
-       . '· 오늘 시장에서 이 패턴들이 어디 있는지는 <a href="/stock/index.php?mode=quant">최고 거래대금 목록</a>의'
-       . ' 퀀트신호·최고 거래대금 박스 열이 실시간으로 보여 준다.</div></div>';
-
-    /* ── 차트 렌더 — dailychart.js 공용모듈. 값(H/L/계단)은 서버가 박고, 그리기만 JS ── */
-    echo '<script src="/style/dailychart.js?v=50"></script>';
-    echo '<script>const PT_CASES=' . json_encode($CASES, JSON_UNESCAPED_UNICODE) . ';</script>';
-    echo <<<'JS'
-<script>
-DailyChart.load().then(function () {
-  function renderCase(c) {
-    var host = document.getElementById('ptc_' + c.id);
-    var dc = DailyChart.create('ptc_' + c.id, { theme: 'light' });
-    if (!dc) { if (host) host.textContent = '차트 라이브러리를 불러오지 못했습니다.'; return Promise.resolve(); }
-    return DailyChart.fetchDaily(c.code, 480).then(function (rows) {
-      if (!rows.length) { host.textContent = '일봉 데이터를 가져오지 못했습니다.'; return; }
-      var ld = host.querySelector('.pt-loading'); if (ld) ld.remove();
-      dc.setData(rows);
-      var last = rows[rows.length - 1].time;
-      // 시간값은 전부 실제 봉에 스냅 — 비거래일을 선 데이터에 넣으면 시간축에 유령 칸이 생긴다
-      function snap(d) { for (var i = 0; i < rows.length; i++) if (rows[i].time >= d) return rows[i].time; return last; }
-      var end = c.to && c.to < last ? snap(c.to) : last;
-      function seg(fromT, v, col, w, st) {
-        dc.addLine({ color: col, width: w, style: st || 'solid' })
-          .setData([{ time: fromT, value: v }, { time: end, value: v }]);
-      }
-      var sig = snap(c.sig);
-      // 박스 오버레이 — 과거 박스는 다음 박스가 생길 때까지(계단 모양), 신호 박스는 화면 끝까지
-      var boxes = (c.boxes || []).map(function (b, i) {
-        var nx = c.boxes[i + 1] ? c.boxes[i + 1][0] : c.sig;
-        return { from: snap(b[0]), to: snap(nx), top: b[1], bottom: b[2],
-                 fill: 'rgba(110,135,160,0.09)', topColor: 'rgba(211,51,51,0.45)',
-                 bottomColor: 'rgba(21,101,192,0.45)', topW: 1, bottomW: 1 };
-      });
-      boxes.push({ from: sig, to: end, top: c.H, bottom: c.L, fill: 'rgba(240,165,0,0.10)',
-                   topColor: '#d33', bottomColor: '#1565c0', sideColor: '#c9b37e', label: '신호박스' });
-      dc.setBoxes(boxes);
-      (c.lv || []).forEach(function (v) {
-        if (v >= c.L * 0.55) seg(sig, v, '#9aa7b4', 1, 'dashed');   // 계단 연장선 — 신호 이후에도 살아있는 옛 레벨
-      });
-      var mk = [];
-      if (c.buy)  mk.push({ time: c.buy, text: '매수' });
-      if (c.exit) mk.push({ time: c.exit, sell: true, text: '청산' });
-      if (c.low)  mk.push({ time: c.low, sell: true, text: '저점' });
-      dc.setMarkers(mk);
-      /* 초기 화면 = 신호 40봉 전 ~ 청산 15봉 후 — 봉을 크게. 데이터·박스는 c.from 부터
-         전부 있으니 이전 계단은 차트를 왼쪽으로 드래그하면 나온다. wf=1 이면 넓게 시작
-         (성호전자처럼 노트가 차트 왼쪽 장면을 가리키는 사례). */
-      var iSig = rows.findIndex(function (r) { return r.time >= c.sig; });
-      if (iSig < 0) iSig = rows.length - 1;
-      var endKey = c.exit || c.low || '';
-      var iEnd = endKey ? rows.findIndex(function (r) { return r.time >= endKey; }) : -1;
-      if (iEnd < 0) iEnd = rows.length - 1;
-      iEnd = Math.min(rows.length - 1, iEnd + 15);
-      var zFrom = c.wf ? c.from : rows[Math.max(0, iSig - 40)].time;
-      dc.zoomRange(zFrom, rows[iEnd].time, { minBars: 40, pad: 2 });
-    }).catch(function () { host.textContent = '차트를 불러오지 못했습니다.'; });
-  }
-
-  /* 지연 로드 — 차트 30여 개가 페이지를 열자마자 네이버 일봉을 한꺼번에 때리지 않게:
-     화면에 가까워진(±500px) 차트만 큐에 넣고, 동시 실행은 2개로 제한한다. */
-  var active = 0, waitq = [];
-  function kick(c) {
-    if (active >= 2) { waitq.push(c); return; }
-    active++;
-    renderCase(c).then(function () { active--; if (waitq.length) kick(waitq.shift()); });
-  }
-  var pending = {};
-  PT_CASES.forEach(function (c) { pending[c.id] = c; });
-  if (window.IntersectionObserver) {
-    var io = new IntersectionObserver(function (es) {
-      es.forEach(function (en) {
-        if (!en.isIntersecting) return;
-        var id = en.target.id.slice(4);   // 'ptc_' 접두 제거
-        var c = pending[id];
-        if (!c) return;
-        delete pending[id];
-        io.unobserve(en.target);
-        kick(c);
-      });
-    }, { rootMargin: '500px 0px' });
-    PT_CASES.forEach(function (c) {
-      var h = document.getElementById('ptc_' + c.id);
-      if (h) io.observe(h); else delete pending[c.id];
-    });
-  } else {
-    PT_CASES.forEach(kick);
-  }
-}).catch(function () {});
-</script>
-JS;
-
-    pf_foot();
-}
-
-// ══════════════════════════════════════════════════════════════════════
-//  퀀트 > 패턴분석 (불꽃형) — 최근 1년 불꽃형 신호를 «전부» 차트로 (10개씩 · 페이지 넘김)
-//
-//  패턴분석(1)은 «고른 사례» 11개고, 여기는 <b>고르지 않은 전수</b>다.
-//  통계가 「−1.72%」라고 말할 때 그 안이 실제로 어떻게 생겼는지는 눈으로 봐야 알 수 있다.
-//
-//  ★판정을 여기서 다시 하지 않는다 — 신호·브래킷 결과는 `qm_flame`(cron job=flamefill)이 담는다.
-//    화면이 다시 계산하면 잡과 화면이 다른 말을 하게 된다(Thr·ChartFeat 와 같은 규칙).
-//  ★차트 가격은 «네이버 수정주가»이고 우리 값은 «KRX 원장»이다 — 분할이 끼면 어긋난다.
-//    사례를 손으로 고른 패턴분석(1)과 달리 전수라 일일이 확인할 수 없으므로,
-//    JS 가 신호일 종가를 대조해 어긋나면 카드에 «가격기준 어긋남»을 띄운다.
-// ══════════════════════════════════════════════════════════════════════
-function pf_page_flame(PDO $pdo, Pf $pf): void
-{
-    pf_head('퀀트 · 패턴분석 (불꽃형)', 'quant', 'wide');
-    pf_subtabs('flame', 'quant');
-    pf_flash();
-    pf_quant_css();
-
-    $PER = 15;                 // 가로 3 × 세로 5 (2026-08-07 사용자 지시 · .fl-grid 와 같이 고친다)
-    $INDBARS = 120;            // 조건지표 「최고_거래대금선」의 변수_봉수 (2026-08-07 사용자 지시)
-    $kind = (string)($_GET['k'] ?? '');
-    if (!in_array($kind, ['tp', 'sl', 'non', 'amb', 'wait', 'bad', 'halt'], true)) $kind = '';
+    /* ── 필터 읽기 ── 축 다섯 + 정렬 + 관심차트 그룹 ── */
+    $d   = (string)($_GET['d'] ?? '');
+    $src = (string)($_GET['src'] ?? '');   if (!in_array($src, ['pick', 'auto'], true)) $src = '';
+    /* ★'D'(컷 아래)도 고를 수 있어야 한다 — 직접 고른 것의 74%가 거기 있다. 칩을 안 두면
+     *   A+B+C 가 전체와 안 맞아 「숫자가 새는」 화면이 된다. */
+    $gr  = (string)($_GET['gr'] ?? '');    if (!in_array($gr, ['A', 'B', 'C', 'D'], true)) $gr = '';
+    $fl  = (string)($_GET['fl'] ?? '');    if (!in_array($fl, ['0', '1'], true))        $fl  = '';
+    /* 「박스」 — <b>차트에 계단이 몇 «벌» 그려지나</b> = 1(신호일 자신) + LEAST(3, 이전 박스 수).
+     *
+     * ★★2026-08-09 정정: 처음엔 「앞 55거래일 «안»의 박스 봉 수」로 셌는데 <b>화면과 달랐다</b>.
+     *   지표가 옛 단계를 3개까지 «연장»해 그려서(lines_json 의 ext:3), 박스 봉이 창 밖이어도
+     *   선은 보인다. 실제로 하나마이크론 2026-05-15 는 직전 박스가 72거래일 전(창 밖)이라
+     *   내 필터는 「1개」라 했지만 화면엔 계단이 <b>2벌</b> 있었다.
+     *   ⇒ 창으로 세지 않는다. `m_box_n`(이전 박스 «총» 개수)만 본다.
+     * ★신호일은 <b>반드시</b> 박스이고(신호 하한 100억 > 박스 하한 10억), 이전 박스가 0개인 것은
+     *   이제 아예 안 담는다(BoxBrk::MIN_PRIOR_BOX) — 그래서 auto 는 «2벌 이상»만 있다. */
+    $bx  = (string)($_GET['bx'] ?? '');
+    if (!in_array($bx, ['1', '2', '3', '4'], true)) $bx = '';
+    $k   = (string)($_GET['k'] ?? '');
+    if (!in_array($k, ['tp', 'sl', 'non', 'amb', 'wait', 'bad'], true)) $k = '';
     $sort = ($_GET['s'] ?? '') === 'old' ? 'old' : 'new';
-    $noLim = ((string)($_GET['nl'] ?? '') === '1');
     $pg   = max(1, (int)($_GET['p'] ?? 1));
+    $gid  = max(0, (int)($_GET['g'] ?? 0));
 
-    /* ★「원장 결측」과 「사후 미완」을 «갈라» 둔다 — 둘 다 brk_kind IS NULL 이지만 뜻이 다르다.
-     *   결측을 미도달에 섞으면 가짜 손절을 만든 것과 같은 종류의 거짓이 된다.
-     * ★★「거래정지」는 또 다른 것이다(2026-08-07) — 판정은 «했고», 그 날만 건너뛰었다.
-     *   그래서 결과 필터가 아니라 «곁들이는» 필터다(익절/손절 안에도 섞여 있다). */
-    $w = ['1=1'];
-    if ($kind === 'bad')      $w[] = 'q_ohlc = 1';
-    elseif ($kind === 'halt') $w[] = 'q_halt = 1';
-    elseif ($kind === 'wait') $w[] = 'brk_kind IS NULL AND q_ohlc = 0';
-    elseif ($kind !== '')     $w[] = "brk_kind = " . $pdo->quote($kind);
-    if ($noLim)               $w[] = 'chg_pct < 29';
+    $fav = new ChartFav($pdo);
+    $favGroups = $fav->groups('boxbrk');
+    if ($gid > 0 && !$fav->group($gid)) $gid = 0;
+
+    /* ★날짜 문지기 — 셀렉트를 걷어낸 뒤에도 `d` 는 <b>알림 링크</b>로 들어온다.
+     *   없는 날이면 조용히 전체로 되돌린다(빈 화면을 보여 주는 것보다 낫다).
+     *   예전엔 250행을 세어 목록을 만들었는데, 그 목록은 셀렉트 말고 쓰는 데가 없었다. */
+    if ($d !== '') {
+        $chk = $pdo->prepare("SELECT EXISTS(SELECT 1 FROM bx_cand WHERE d = ?)");
+        $chk->execute([$d]);
+        if (!(int)$chk->fetchColumn()) $d = '';
+    }
+
+    /* ★「범위」와 「분해」를 가른다 — 날짜·관심차트는 <b>범위</b>이고, 나머지 네 축은
+     *   그 범위 «안의 분해»다. 그래서 칩의 숫자는 범위만 걸고 센다(지금 고른 등급까지 걸어
+     *   세면 「A 0건」 같은 자기모순이 화면에 뜬다). */
+    $scope = ['1=1'];
+    if ($d !== '')  $scope[] = 'd = ' . $pdo->quote($d);
+    if ($gid > 0)   $scope[] = "EXISTS(SELECT 1 FROM chart_fav_item i WHERE i.fav_id = " . $gid
+                             . " AND i.src = 'boxbrk' AND i.code = bx_cand.code AND i.d = bx_cand.d)";
+    $scopeSql = implode(' AND ', $scope);
+
+    $agg = $pdo->query("SELECT COUNT(*) n,
+                          SUM(src='pick') pick, SUM(src='auto') auto,
+                          SUM(grade='A') gA, SUM(grade='B') gB, SUM(grade='C') gC,
+                          SUM(grade='D') gD,
+                          SUM(src='pick' AND grade IN ('A','B','C')) pickHit,
+                          SUM(is_flame=1) fl1, SUM(is_flame=0) fl0,
+                          SUM(LEAST(4, 1 + IFNULL(m_box_n,0)) = 1) bx1,
+                          SUM(LEAST(4, 1 + IFNULL(m_box_n,0)) = 2) bx2,
+                          SUM(LEAST(4, 1 + IFNULL(m_box_n,0)) = 3) bx3,
+                          SUM(LEAST(4, 1 + IFNULL(m_box_n,0)) = 4) bx4,
+                          SUM(brk_kind='tp') tp, SUM(brk_kind='sl') sl, SUM(brk_kind='non') non,
+                          SUM(brk_kind='amb') amb,
+                          SUM(brk_kind IS NULL AND q_ohlc=0) wait, SUM(q_ohlc=1) bad,
+                          SUM(has_min=1) hm
+                        FROM bx_cand WHERE {$scopeSql}")->fetch(PDO::FETCH_ASSOC);
+
+    $w = $scope;
+    if ($src !== '') $w[] = 'src = ' . $pdo->quote($src);
+    if ($gr  !== '') $w[] = 'grade = ' . $pdo->quote($gr);
+    if ($fl  !== '') $w[] = 'is_flame = ' . (int)$fl;
+    if ($bx !== '') $w[] = 'LEAST(4, 1 + IFNULL(m_box_n,0)) = ' . (int)$bx;
+    if ($k === 'wait')     $w[] = 'brk_kind IS NULL AND q_ohlc = 0';
+    elseif ($k === 'bad')  $w[] = 'q_ohlc = 1';
+    elseif ($k !== '')     $w[] = 'brk_kind = ' . $pdo->quote($k);
     $where = implode(' AND ', $w);
 
-    $tot = (int)$pdo->query("SELECT COUNT(*) FROM qm_flame WHERE {$where}")->fetchColumn();
+    $tot   = (int)$pdo->query("SELECT COUNT(*) FROM bx_cand WHERE {$where}")->fetchColumn();
     $pages = max(1, (int)ceil($tot / $PER));
     if ($pg > $pages) $pg = $pages;
     $off = ($pg - 1) * $PER;
-
-    $rows = $pdo->query("SELECT * FROM qm_flame WHERE {$where}
-                          ORDER BY d " . ($sort === 'old' ? 'ASC' : 'DESC') . ", code
+    $rows = $pdo->query("SELECT * FROM bx_cand WHERE {$where}
+                          ORDER BY d " . ($sort === 'old' ? 'ASC' : 'DESC') . ", z DESC, code
                           LIMIT {$PER} OFFSET {$off}")->fetchAll(PDO::FETCH_ASSOC);
 
-    /* 머리말에 쓸 전체 집계 — 필터와 무관하게 «표 전체»를 적는다(지금 보는 것이 일부임을 알리려고) */
-    $agg = $pdo->query("SELECT COUNT(*) n, MIN(d) a, MAX(d) b,
-                          SUM(brk_kind='tp') tp, SUM(brk_kind='sl') sl,
-                          SUM(brk_kind='non') non, SUM(brk_kind='amb') amb,
-                          SUM(brk_kind IS NULL AND q_ohlc=0) wait, SUM(q_ohlc=1) bad,
-                          SUM(q_halt=1) halt, SUM(has_min=1) hm,
-                          MAX(brk_tp) btp, MAX(brk_sl) bsl
-                        FROM qm_flame")->fetch(PDO::FETCH_ASSOC);
-
-    /* ★조건지표 「최고_거래대금선」을 차트에 얹는다 (2026-08-07 사용자 지시).
-     *   원본은 `chart_indicator` 다 — 수식·색·굵기·옛 단계 연장 수를 화면에 다시 적지 않는다
-     *   (Thr.class·ChartFeat 와 같은 「원본 → 화면은 고르기만」 패턴). 이름도 원본에서 읽어 쓴다.
-     *   ★서버가 정의를 통째로 실어 보낸다 — JS 가 `loadIndicators()` 로 따로 받으면 카드 15장이
-     *     같은 목록을 두고 이름으로 «짐작»하게 되고, 지표 이름이 바뀌면 조용히 사라진다.
-     *   ★변수는 `변수_봉수` 하나만 덮는다 — `기본_거래대금`(10억)은 지표의 day 기본값을 그대로 쓴다
-     *     (buildEnv 가 축별 기본값 «위에» 덮으므로 안 적은 변수는 살아 있다). */
+    /* 조건지표 — 원본은 `chart_indicator` 다. 이름·색·굵기를 화면에 다시 적지 않는다. */
     $flInd = null;
     try {
-        foreach ((new ChartIndicator($pdo))->list() as $d) {
-            if (strpos((string)$d['name'], '최고_거래대금선') === 0) { $flInd = $d; break; }
+        foreach ((new ChartIndicator($pdo))->list() as $def) {
+            if (strpos((string)$def['name'], '최고_거래대금선') === 0) { $flInd = $def; break; }
         }
-    } catch (Throwable $e) { $flInd = null; }   // 지표가 없어도 차트는 그린다 — 조용히 생략
+    } catch (Throwable $e) { $flInd = null; }
+
+    /* ── 문서층 (2026-08-10 옛 패턴분석 흡수) — 지도·특징·사례가 읽는 데이터 ──
+     *
+     * ★특징 표는 «필터와 무관하게 전체»를 센다 — 패턴의 정의·성적을 말하는 자리라
+     *   지금 보는 범위를 따라 흔들리면 「같은 표가 날마다 다른 말」을 한다.
+     * ★판정을 다시 하지 않는다 — bx_cand 가 담은 brk_kind/brk_ret 을 «세기만» 한다.
+     * ★brk_ret 의 모호(amb)는 −10(비관) 으로 담겨 있다 — 표에 「비관 기준」이라 적는다. */
+    $axes = boxbrk_axes();
+    $docStat = [];
+    foreach ($pdo->query("SELECT src, COUNT(*) n,
+                            SUM(brk_kind='tp') tp, SUM(brk_kind='sl') sl,
+                            SUM(brk_kind='non') non, SUM(brk_kind='amb') amb,
+                            SUM(brk_kind IS NOT NULL) nj,
+                            SUM(brk_kind IS NOT NULL AND brk_ret > 0) win
+                          FROM bx_cand GROUP BY src")->fetchAll(PDO::FETCH_ASSOC) as $r) {
+        $docStat[$r['src']] = $r;
+    }
+    foreach ($docStat as $s2 => $r) {
+        $v = $pdo->query("SELECT brk_ret FROM bx_cand WHERE src = " . $pdo->quote($s2)
+                       . " AND brk_kind IS NOT NULL ORDER BY brk_ret")->fetchAll(PDO::FETCH_COLUMN);
+        $v = array_map('floatval', $v);
+        $n2 = count($v);
+        $docStat[$s2]['avg'] = $n2 ? array_sum($v) / $n2 : null;
+        $docStat[$s2]['med'] = $n2 ? ($n2 % 2 ? $v[intdiv($n2, 2)] : ($v[$n2 / 2 - 1] + $v[$n2 / 2]) / 2) : null;
+    }
+    /* 사례 — <b>자동 수집분에서만</b> 뽑는다. 직접 고른 것(pick)은 결과를 보고 담은 표본이라
+     *   사례로 쓰면 그 오염(룩어헤드)을 화면이 되풀이한다. 성공·실패 «극단» 3건씩. */
+    $caseOk  = $pdo->query("SELECT * FROM bx_cand WHERE src='auto' AND brk_kind='tp'
+                             AND f_d5 IS NOT NULL ORDER BY f_d5 DESC, d LIMIT 3")->fetchAll(PDO::FETCH_ASSOC);
+    $caseBad = $pdo->query("SELECT * FROM bx_cand WHERE src='auto' AND brk_kind='sl'
+                             AND f_d5 IS NOT NULL ORDER BY f_d5 ASC, d LIMIT 3")->fetchAll(PDO::FETCH_ASSOC);
+
+    /* 관심차트 멤버십 — 목록 + 사례를 «한 번에» 묻는다 (사례 카드에도 체크칸이 산다) */
+    $favKeys = [];
+    foreach (array_merge($rows, $caseOk, $caseBad) as $r) $favKeys[] = $r['code'] . '|' . $r['d'];
+    $favMember = $fav->memberOf('boxbrk', array_values(array_unique($favKeys)));
+    $cards = [];
 
     echo '<style>
-/* 가로 3 × 세로 5 = 15개/페이지 ($PER 과 «함께» 고친다 — 한쪽만 바꾸면 마지막 줄이 빈다) */
-.fl-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:10px}
-@media(max-width:1500px){.fl-grid{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:1000px){.fl-grid{grid-template-columns:1fr}}
+.fl-grid{display:grid;grid-template-columns:1fr;gap:14px;margin-top:10px}
 .fl-card{border:1px solid #dfe6ec;border-radius:10px;padding:10px 12px;background:#fff;min-width:0}
+.fl-card.sel{border-color:#12406b;box-shadow:0 0 0 2px rgba(18,64,107,.12)}
+.fl-card.pick{border-left:4px solid #12406b}
+.fl-body{display:grid;grid-template-columns:1fr 2fr;gap:12px;align-items:start}
+@media(max-width:1100px){.fl-body{grid-template-columns:1fr}}
+.fl-pane{min-width:0}
+.fl-ptit{font-size:11.5px;color:#8496a6;margin:0 0 3px;display:flex;align-items:center;gap:6px}
+.fl-ptit b{color:#556}
 .fl-hd{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:14px}
 .fl-hd .code{color:#9ab;font-size:12px}
 .fl-hd .dt{color:#556;font-size:12.5px;margin-left:auto}
+.fl-hd .fl-ck{margin-right:2px;width:16px;height:16px;cursor:pointer;align-self:center}
 .fl-meta{font-size:12px;color:#667;margin:4px 0 6px;display:flex;gap:10px;flex-wrap:wrap}
 .fl-meta b{color:#334}
+.fl-ax{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin:2px 0 7px;font-size:11.5px;max-width:640px}
+.fl-ax div{background:#f7fafc;border:1px solid #eef3f7;border-radius:6px;padding:3px 6px;text-align:center}
+.fl-ax i{display:block;color:#93a2b0;font-style:normal;font-size:10.5px;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.fl-ax b{color:#22303f;font-size:12.5px}
 .fl-chart{height:300px;position:relative}
-.fl-loading{position:absolute;top:45%;left:0;right:0;text-align:center;color:#9ab;font-size:13px}
+.fl-mchart{height:300px;position:relative;background:#12181f;border-radius:6px}
+.fl-mchart .fl-loading{color:#7d8c9b}
+.fl-loading{position:absolute;top:45%;left:0;right:0;text-align:center;color:#9ab;font-size:13px;
+  padding:0 12px;line-height:1.5}
+.fl-mz{display:flex;gap:4px;margin-left:auto}
+.fl-mz button{border:1px solid #dfe6ec;background:#fff;color:#345;border-radius:11px;
+  padding:1px 9px;font-size:11.5px;cursor:pointer;line-height:1.7}
+.fl-mz button.on{background:#12406b;border-color:#12406b;color:#fff;font-weight:700}
+.fl-g{display:inline-block;padding:1px 8px;border-radius:9px;font-size:11.5px;font-weight:700;
+  background:#e8f0fe;color:#1a56c4;border:1px solid #c6dafc}
+.fl-sel{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0 2px;font-size:13px;
+  padding:7px 10px;background:#f4f7fa;border:1px solid #e3ebf2;border-radius:8px}
+.fl-sel select,.fl-sel input[type=text]{border:1px solid #cfd9e2;border-radius:6px;padding:3px 7px;
+  font-size:13px;background:#fff}
+.fl-sel button{border:1px solid #12406b;background:#12406b;color:#fff;border-radius:6px;
+  padding:4px 12px;font-size:13px;cursor:pointer}
+.fl-sel button.gh{background:#fff;color:#345;border-color:#cfd9e2}
+.fl-gm{margin:8px 0 2px;padding:9px 11px;background:#fff;border:1px solid #e3ebf2;border-radius:8px}
+.fl-gm table{width:100%;border-collapse:collapse;font-size:13px}
+.fl-gm td{padding:4px 6px;border-bottom:1px solid #eef3f7}
+.fl-gm input[type=text]{border:1px solid #cfd9e2;border-radius:6px;padding:3px 7px;width:100%;
+  font-size:13px;box-sizing:border-box}
+.fl-gm button{border:1px solid #cfd9e2;background:#fff;color:#345;border-radius:6px;padding:3px 10px;
+  font-size:12.5px;cursor:pointer}
+.fl-gm button.pri{background:#12406b;border-color:#12406b;color:#fff}
+.fl-gm button.del{color:#c62828;border-color:#f0c9c6}
 .fl-b{display:inline-block;padding:2px 9px;border-radius:10px;font-size:12px;font-weight:700}
 .fl-tp{background:#e6f4ea;color:#1e7e34}.fl-sl{background:#fdecea;color:#c62828}
 .fl-non{background:#eef2f6;color:#55636f}.fl-amb{background:#fdf3e0;color:#b26a00}
 .fl-wait{background:#eaf3fb;color:#1565c0}
 .fl-lim{background:#fff3cd;color:#8a6d1a}
 .fl-halt{background:#eceff1;color:#546e7a;border:1px solid #cfd8dc}
+.fl-msrc{background:#ede7f6;color:#5e35b1;border:1px solid #d1c4e9}
+.fl-pick{background:#12406b;color:#fff}
+.fl-auto{background:#eef2f6;color:#55636f;border:1px solid #dfe6ec}
+.fl-gA{background:#12406b;color:#fff}.fl-gB{background:#dce9f7;color:#12406b}
+.fl-gC{background:#eef2f6;color:#55636f}
+.fl-fm{background:#fdf3e0;color:#b26a00;border:1px solid #f0dcb4}
 .fl-warn{background:#fdecea;color:#c62828;font-size:11.5px;padding:1px 7px;border-radius:9px;
   font-weight:700;display:none}
 .fl-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0 2px;font-size:13px}
+.fl-bar>b{font-size:12.5px;color:#556;min-width:34px}
 .fl-bar a{display:inline-block;padding:3px 10px;border:1px solid #dfe6ec;border-radius:14px;
   background:#fff;color:#345;text-decoration:none}
 .fl-bar a.on{background:#12406b;border-color:#12406b;color:#fff;font-weight:700}
+.fl-bar select{border:1px solid #cfd9e2;border-radius:6px;padding:3px 7px;font-size:13px;background:#fff}
 .fl-pg{display:flex;gap:5px;flex-wrap:wrap;justify-content:center;margin:18px 0 4px;font-size:13px}
 .fl-pg a,.fl-pg span{display:inline-block;min-width:32px;text-align:center;padding:5px 8px;
   border:1px solid #dfe6ec;border-radius:6px;background:#fff;color:#345;text-decoration:none}
 .fl-pg a:hover{background:#f4f7fa}
 .fl-pg .cur{background:#12406b;border-color:#12406b;color:#fff;font-weight:700}
 .fl-pg .gap{border:0;background:transparent;color:#9ab;min-width:16px}
+/* ── 문서층 (옛 패턴분석에서 옮겨 온 그릇) ── */
+.bx-flow{display:flex;flex-direction:column;gap:6px;font-size:13px;margin:10px 0 4px}
+.bx-fr{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.bx-fb{border:1px solid #dfe6ec;border-radius:8px;padding:5px 10px;background:#fff;white-space:nowrap}
+.bx-fa{color:#9ab}.bx-fk{font-weight:700}
+.bx-no{color:#c62828;font-size:12.5px}
+.bx-cs-ok{background:#e6f4ea;color:#1e7e34}.bx-cs-bad{background:#fdecea;color:#c62828}
+details.card>summary{cursor:pointer;font-size:14px;font-weight:700;color:#12406b;list-style:none}
+details.card>summary::before{content:"▸ ";color:#9ab}
+details.card[open]>summary::before{content:"▾ "}
+table.bx-doc{border-collapse:collapse;width:100%;margin:8px 0 4px;font-size:12.8px}
+table.bx-doc th,table.bx-doc td{border:1px solid #e3eaf0;padding:6px 10px;text-align:right;white-space:nowrap}
+table.bx-doc th{background:#f4f7fa}
+table.bx-doc td:first-child,table.bx-doc th:first-child{text-align:left}
 </style>';
 
-    $url = function (array $ov) use ($kind, $sort, $noLim, $pg) {
-        $q = ['mode' => 'flame', 'k' => $kind, 's' => $sort, 'nl' => $noLim ? '1' : '', 'p' => $pg];
+    $url = function (array $ov) use ($d, $src, $gr, $fl, $bx, $k, $sort, $pg, $gid) {
+        $q = ['mode' => 'boxbrk', 'd' => $d, 'src' => $src, 'gr' => $gr, 'fl' => $fl, 'bx' => $bx,
+              'k' => $k, 's' => $sort, 'p' => $pg, 'g' => $gid ?: ''];
         foreach ($ov as $k2 => $v) $q[$k2] = $v;
         $q = array_filter($q, fn($v) => $v !== '' && $v !== null);
         return '/stock/index.php?' . http_build_query($q);
     };
+    $chip = function (string $key, string $val, string $label, int $n) use ($url, $d, $src, $gr, $fl, $bx, $k) {
+        $cur = ['src' => $src, 'gr' => $gr, 'fl' => $fl, 'bx' => $bx, 'k' => $k][$key] ?? '';
+        return '<a href="' . pf_h($url([$key => $val, 'p' => 1])) . '"'
+             . ($cur === $val ? ' class="on"' : '') . '>' . $label
+             . ($n >= 0 ? ' ' . number_format($n) : '') . '</a>';
+    };
 
-    echo '<div class="pf-head"><div><h1>패턴분석 (불꽃형)</h1>'
-       . '<div class="sub">최근 1년 <b>불꽃형</b> 신호 <b>' . number_format((int)$agg['n']) . '건</b>을'
-       . ' <b>고르지 않고 전부</b> 차트로 — ' . pf_h((string)$agg['a']) . ' ~ ' . pf_h((string)$agg['b']) . '.'
-       . ' 신호 = 직전 119거래일 최고 거래대금 · 거래대금 100억↑ · <b>20평비 20배↑</b>.<br>'
-       . '<span class="muted">패턴분석(1)은 손으로 고른 사례 11개이고 여기는 <b>전수</b>입니다 —'
-       . ' 통계가 「중앙 −5.72%」라고 말할 때 그 안이 실제로 어떻게 생겼는지 눈으로 보는 자리입니다.</span></div></div></div>';
+    echo '<div class="pf-head"><div><h1>패턴분석 <span class="muted">(박스 상향돌파)</span></h1>'
+       . '<div class="sub">직접 고르신 <b>' . number_format((int)$agg['pick']) . '건</b>이 이 패턴의'
+       . ' <b>정의 원본</b>이고, 그것을 되맞춘 점수로 <b>매일 마감 뒤</b> 같은 패턴을 찾아 쌓습니다.'
+       . ' <span class="muted">(사전 피처 11축 · 교차검증 AUC 0.750 · 판정 단일본'
+       . ' <code>stock/lib/boxbrk.php</code> · 적재 <code>cron/bx_scan.php</code> 매일 16:20)</span><br>'
+       . '<span class="muted">★<b>「출처」를 반드시 갈라 보세요</b> — 직접 고른 것은 «고른 것»이라'
+       . ' 승률이 55.9%인데, 자동 수집분은 8년 재측정(2026-08-10 · 최종 5조건)에서도 기준선과 사실상'
+       . ' 같습니다(비용 뒤 +0.01% vs −0.20% · 승률 41.7 vs 41.4% · 중앙은 더 나쁨 —'
+       . ' <a href="/stock/index.php?mode=quantstat">검증 탭 ⑨</a>).'
+       . ' 섞어서 세면 「이 패턴 승률 좋네」로 잘못 읽힙니다.</span></div></div></div>';
 
-    echo '<div class="card" style="padding:10px 14px">'
-       . '<div class="fl-bar"><b style="font-size:12.5px;color:#556">결과</b>'
-       . '<a href="' . $url(['k' => '', 'p' => 1]) . '"' . ($kind === '' ? ' class="on"' : '') . '>전체 '
-       . number_format((int)$agg['n']) . '</a>'
-       . '<a href="' . $url(['k' => 'tp', 'p' => 1]) . '"' . ($kind === 'tp' ? ' class="on"' : '') . '>익절 '
-       . number_format((int)$agg['tp']) . '</a>'
-       . '<a href="' . $url(['k' => 'sl', 'p' => 1]) . '"' . ($kind === 'sl' ? ' class="on"' : '') . '>손절 '
-       . number_format((int)$agg['sl']) . '</a>'
-       . '<a href="' . $url(['k' => 'non', 'p' => 1]) . '"' . ($kind === 'non' ? ' class="on"' : '') . '>미도달 '
-       . number_format((int)$agg['non']) . '</a>'
-       . '<a href="' . $url(['k' => 'amb', 'p' => 1]) . '"' . ($kind === 'amb' ? ' class="on"' : '') . '>모호 '
-       . number_format((int)$agg['amb']) . '</a>'
-       . '<a href="' . $url(['k' => 'wait', 'p' => 1]) . '"' . ($kind === 'wait' ? ' class="on"' : '') . '>사후 미완 '
-       . number_format((int)$agg['wait']) . '</a>'
-       . '<a href="' . $url(['k' => 'bad', 'p' => 1]) . '"' . ($kind === 'bad' ? ' class="on"' : '') . '>'
-       . '원장 결측 ' . number_format((int)$agg['bad']) . '</a>'
-       . '<a href="' . $url(['k' => 'halt', 'p' => 1]) . '"' . ($kind === 'halt' ? ' class="on"' : '') . '>'
-       . '거래정지 낀 것 ' . number_format((int)$agg['halt']) . '</a>'
-       . '</div><div class="fl-bar"><b style="font-size:12.5px;color:#556">정렬</b>'
-       . '<a href="' . $url(['s' => 'new', 'p' => 1]) . '"' . ($sort === 'new' ? ' class="on"' : '') . '>최신순</a>'
-       . '<a href="' . $url(['s' => 'old', 'p' => 1]) . '"' . ($sort === 'old' ? ' class="on"' : '') . '>오래된순</a>'
-       . '<a href="' . $url(['nl' => $noLim ? '' : '1', 'p' => 1]) . '"' . ($noLim ? ' class="on"' : '') . '>'
-       . '상한가 제외</a></div>'
-       . '<div class="q-note">브래킷 판정 = 신호일 <b>종가</b>에 사서 <b>5거래일</b> 안에 '
-       . '<b>+' . rtrim(rtrim(sprintf('%.1f', (float)$agg['btp']), '0'), '.') . '%</b> 익절 / '
-       . '<b>−' . rtrim(rtrim(sprintf('%.1f', (float)$agg['bsl']), '0'), '.') . '%</b> 손절, 안 닿으면 D+5 종가.'
-       . ' <b>모호</b>는 같은 날 둘 다 닿아 일봉으로는 순서를 모르는 건입니다.'
-       . ' 분봉이 있는 건 ' . number_format((int)$agg['hm']) . '건(급등 이벤트와 겹치는 것만).'
-       . ' 차트는 신호일 <b>앞뒤 55거래일</b>이고, 노란 박스가 판정 구간(신호일~D+5)입니다.<br>'
-       /* ★지표 이름·색은 원본(chart_indicator)에서 읽는다 — 손으로 적으면 지표를 고칠 때 거짓이 된다 */
-       . ($flInd
-          ? '차트에 조건지표 <b>' . pf_h((string)$flInd['name']) . '</b>(변수_봉수 <b>'
-            . $INDBARS . '</b>)을 얹었습니다 — 직전 ' . $INDBARS . '봉 최고 거래대금을 «넘어선» 날의'
-            . ' <span style="color:#d33131;font-weight:700">고가</span>·'
-            . '<span style="color:#1565c0;font-weight:700">저가</span>를 계단으로 잇고, 지나간 단계는'
-            . ' 옅은 연장선으로 남깁니다. 그 계단이 곧 지지·저항 자리입니다.<br>'
+    /* ── 패턴 지도 — 판정 순서 그대로 (옛 패턴분석의 「패턴 지도」를 잇는다 · 2026-08-10) ──
+     * ★임계를 손으로 적지 않는다 — 전부 BoxBrk 상수에서 보간한다. 상수를 고치면 지도가 따라온다. */
+    $pcFmt = fn(float $v) => rtrim(rtrim(sprintf('%.1f', $v), '0'), '.');
+    echo '<div class="card"><h2>패턴 지도 — 판정 순서</h2><div class="bx-flow">'
+       . '<div class="bx-fr"><span class="bx-fb bx-fk">최고 거래대금 신호</span>'
+       .   '<span class="bx-fa">거래대금이 직전 ' . (BoxBrk::WIN - 1) . '거래일 최고 & '
+       .   number_format(BoxBrk::MINAMT / 1e8) . '억↑ → 그 날 고가 H·저가 L = 새 «박스»'
+       .   ' (우선주·ETF·스팩·ETN 제외)</span></div>'
+       . '<div class="bx-fr"><span class="bx-fa">①</span><span class="bx-fb">이전에 '
+       .   number_format(BoxBrk::PRIOR_BOX_AMT / 1e8) . '억↑ 박스가 있나?</span>'
+       .   '<span class="bx-no">없으면 제외 — 뚫을 박스가 없으면 「돌파」가 성립하지 않는다 (첫 폭발)</span></div>'
+       . '<div class="bx-fr"><span class="bx-fa">②</span><span class="bx-fb">등락 +'
+       .   $pcFmt(BoxBrk::CHG_MAX) . '%↑ (상한가 근처)?</span>'
+       .   '<span class="bx-no">예: 제외 — 종가에 실제로 살 수 없는 날</span></div>'
+       . '<div class="bx-fr"><span class="bx-fa">③</span><span class="bx-fb">새 박스가 기존 박스에 붙어 있나?</span>'
+       .   '<span class="bx-fa">새 L ≤ 기존 H +' . round(BoxBrk::BOX_GAP_MAX * 100) . '% ·</span>'
+       .   '<span class="bx-no">멀리 뜬 것은 제외 — 돌파가 아니라 «다른 자리에서 새로 생긴 것»</span></div>'
+       . '<div class="bx-fr"><span class="bx-fa">④</span><span class="bx-fb">새 박스가 직전 '
+       .   BoxBrk::ABOVE_LAST_N_BOX . '개 박스보다 «위»인가?</span>'
+       .   '<span class="bx-fa">L 은 직전 박스와, H 는 ' . BoxBrk::ABOVE_LAST_N_BOX . '개 전부와 ·</span>'
+       .   '<span class="bx-no">내려선 것은 제외 — 「상향」이 아니다</span></div>'
+       . '<div class="bx-fr"><span class="bx-fa">⑤</span><span class="bx-fb">그 날 시가→종가 +'
+       .   $pcFmt(BoxBrk::OC_MIN) . '%↑?</span>'
+       .   '<span class="bx-no">아니오: 제외 — 갭으로 뜬 뒤 흘러내린 봉은 밀어올린 돌파가 아니다</span></div>'
+       . '<div class="bx-fr"><span class="bx-fb bx-fk">✔ 후보로 담는다</span>'
+       .   '<span class="bx-fa">매일 16:20 적재 · 등급(A~D)은 «닮음» 점수라 담는 기준이 아니다 ·'
+       .   ' B↑ 새 후보는 Pushover 알림</span></div>'
+       . '</div><div class="q-note">★이 다섯 조건이 정의의 전부입니다 — 점수 컷은 없습니다.'
+       . ' 그리고 <b>이 패턴에 측정된 성과 우위는 아직 없습니다</b> — 근거와 8년 실측은'
+       . ' <a href="/stock/index.php?mode=quantstat">검증 탭 ⑨</a>.</div></div>';
+
+    /* ── 특징·실측 — 필터와 무관한 «전체» 집계. 출처를 갈라 세는 것이 이 표의 존재 이유다 ── */
+    $dsRow = function (string $key, string $label, string $tip) use ($docStat) {
+        $r = $docStat[$key] ?? null;
+        if (!$r) return '';
+        $nj = (int)$r['nj'];
+        return '<tr><td title="' . pf_h($tip) . '">' . $label . '</td>'
+             . '<td>' . number_format((int)$r['n']) . '</td>'
+             . '<td>' . number_format((int)$r['tp']) . '</td>'
+             . '<td>' . number_format((int)$r['sl']) . '</td>'
+             . '<td>' . number_format((int)$r['non']) . '</td>'
+             . '<td>' . number_format((int)$r['amb']) . '</td>'
+             . '<td>' . ($nj ? sprintf('%.1f%%', (int)$r['win'] / $nj * 100) : '—') . '</td>'
+             . '<td>' . ($r['avg'] !== null ? sprintf('%+.2f%%', $r['avg']) : '—') . '</td>'
+             . '<td>' . ($r['med'] !== null ? sprintf('%+.2f%%', $r['med']) : '—') . '</td></tr>';
+    };
+    echo '<div class="card"><h2>특징 — 지금까지 쌓인 것의 실측</h2>'
+       . '<table class="bx-doc"><tr><th>출처</th><th>전체</th><th>익절</th><th>손절</th><th>미도달</th>'
+       . '<th>모호</th><th>승률</th><th>평균</th><th>중앙</th></tr>'
+       . $dsRow('pick', '★직접 고른 것 (정의 원본)',
+                '패턴분석(불꽃형) 갤러리에서 결과 배지와 함께 보며 담은 표본입니다')
+       . $dsRow('auto', '자동 수집 (이 패턴의 정직한 성적)',
+                '5조건 판정만으로 매일 자동으로 담긴 것 — 결과를 본 사람이 없습니다')
+       . '</table>'
+       . '<div class="q-note">브래킷 = 신호일 종가 매수 → 5거래일 +15%/−10% · 모호는 −10%(비관)로 셌고,'
+       . ' 사후 미완·판정불가는 분모에서 뺐습니다.<br>'
+       . '★<b>직접 고른 것의 우위는 「눈」이 아니라 「결과」에서 왔습니다</b> — 옛 갤러리 카드가'
+       . ' 사후 55거래일 차트와 결과 배지를 함께 띄웠고, 모양이 가장 «안» 닮은 무리에서 담은 것이'
+       . ' 가장 좋았습니다(세 갈래 검정 · <a href="/stock/index.php?mode=quantstat">검증 탭 ⑨</a>).'
+       . ' 그래서 이 표는 두 줄을 절대 합치지 않습니다.</div></div>';
+
+    /* ── 실제 사례 — 성공·실패 극단 대표. <b>닫힌 채로 시작</b>한다(매일 쓰는 목록을 밀어내지 않게).
+     *   카드는 목록과 «같은 렌더러»(pf_bx_card)다 — 열면 그때 차트가 로드된다(IntersectionObserver). */
+    if ($caseOk || $caseBad) {
+        echo '<details class="card"><summary>실제 사례 — 성공 ' . count($caseOk) . ' · 실패 '
+           . count($caseBad) . ' (자동 수집분의 극단 대표 · 눌러 펼치기)</summary>'
+           . '<div class="q-note" style="margin-top:8px">★<b>극단을 골랐습니다</b> — D+5 수익률 상·하위'
+           . ' 3건씩이고, 전형적인 결과는 위 표의 <b>중앙값</b>입니다. 직접 고른 것(pick)은 결과를 보고'
+           . ' 담은 표본이라 사례에서 뺐습니다 — 넣으면 그 오염을 화면이 되풀이합니다.</div>'
+           . '<div class="fl-grid">';
+        foreach ($caseOk as $r) {
+            $cc = pf_bx_card($r, $axes, $favMember, $MSPAN, 'cs', ['성공 사례', 'bx-cs-ok']);
+            echo $cc['html'];
+            $cards[] = $cc['card'];
+        }
+        foreach ($caseBad as $r) {
+            $cc = pf_bx_card($r, $axes, $favMember, $MSPAN, 'cs', ['실패 사례', 'bx-cs-bad']);
+            echo $cc['html'];
+            $cards[] = $cc['card'];
+        }
+        echo '</div></details>';
+    }
+
+    echo '<div class="card" style="padding:10px 14px">';
+
+    /* ① 정렬 — 그리고 «날짜로 들어왔을 때만» 그것을 풀 수 있는 칩.
+     * ★셀렉트는 걷어냈다(2026-08-09 사용자 지시) — 목록이 최신순이라 스크롤로 충분하고,
+     *   250개짜리 드롭다운은 고를 값어치가 없었다.
+     * ★그래도 `d` 파라미터는 <b>살려 둔다</b> — 알림 링크가 `?mode=boxbrk&d=…` 로 들어온다.
+     *   그때 풀 길이 없으면 그 날에 «갇힌» 화면이 된다. */
+    echo '<div class="fl-bar"><b>정렬</b>'
+       . '<a href="' . pf_h($url(['s' => 'new', 'p' => 1])) . '"' . ($sort === 'new' ? ' class="on"' : '') . '>최신순</a>'
+       . '<a href="' . pf_h($url(['s' => 'old', 'p' => 1])) . '"' . ($sort === 'old' ? ' class="on"' : '') . '>오래된순</a>'
+       . ($d !== ''
+          ? '<b style="margin-left:10px">날짜</b>'
+            . '<a class="on" href="' . pf_h($url(['d' => '', 'p' => 1])) . '"'
+            . ' title="이 날짜만 보고 있습니다 — 누르면 전체로 돌아갑니다">'
+            . pf_h($d) . ' ✕</a>'
           : '')
-       . '<b>거래정지 낀 것</b>은 사후 5일 안에 거래가 멈춘 날이 있어 <b>그 날을 건너뛰고</b> 판정한'
-       . ' 건입니다 — 그 날은 체결이 불가능했습니다. 판정은 나머지 날로 했으므로 익절·손절 안에도'
-       . ' 섞여 있습니다. <b>원장 결측</b>은 거래는 있었는데 고가·저가가 원장에 없어 판정을'
-       . ' <b>하지 않은</b> 건입니다.</div></div>';
+       . '</div>';
+
+    /* ② 출처 — ★이 화면에서 가장 중요한 축 */
+    echo '<div class="fl-bar"><b>출처</b>'
+       . $chip('src', '', '전체', (int)$agg['n'])
+       . $chip('src', 'pick', '★직접 고른 것', (int)$agg['pick'])
+       . $chip('src', 'auto', '자동 수집', (int)$agg['auto'])
+       . '</div>';
+
+    /* ③ 등급 · ④ 유형 */
+    echo '<div class="fl-bar"><b>등급</b>'
+       . $chip('gr', '', '전체', -1)
+       . $chip('gr', 'A', 'A ' . boxbrk_grade(BoxBrk::Z_Q95)[1], (int)$agg['gA'])
+       . $chip('gr', 'B', 'B ' . boxbrk_grade(BoxBrk::Z_Q90)[1], (int)$agg['gB'])
+       . $chip('gr', 'C', 'C ' . boxbrk_grade(BoxBrk::Z_Q75)[1], (int)$agg['gC'])
+       /* ★D 는 「상위 25%에 못 든 것」이다 — 컷이 없어졌으므로 «걸러진 것»이 아니라 그냥 한 등급이다.
+        *   이 칩이 없으면 A+B+C 가 전체와 안 맞아 조용히 거짓말하는 화면이 된다. */
+       . $chip('gr', 'D', 'D 그 밖', (int)$agg['gD'])
+       . '<b style="margin-left:10px">유형</b>'
+       . $chip('fl', '', '전체', -1)
+       . $chip('fl', '1', '불꽃형', (int)$agg['fl1'])
+       . $chip('fl', '0', '그 밖', (int)$agg['fl0'])
+       /* ★「박스」 = 차트에 계단이 몇 «벌» 그려지나(신호일 + 옛 단계 최대 3). 창과 무관하다. */
+       . '<b style="margin-left:10px">박스</b>'
+       . $chip('bx', '', '전체', -1)
+       . ((int)$agg['bx1'] > 0 ? $chip('bx', '1', '1벌(뚫을 박스 없음)', (int)$agg['bx1']) : '')
+       . $chip('bx', '2', '2벌', (int)$agg['bx2'])
+       . $chip('bx', '3', '3벌', (int)$agg['bx3'])
+       . $chip('bx', '4', '4벌↑', (int)$agg['bx4'])
+       . '</div>';
+
+    /* ⑤ 결과 */
+    echo '<div class="fl-bar"><b>결과</b>'
+       . $chip('k', '', '전체', -1)
+       . $chip('k', 'tp', '익절', (int)$agg['tp'])
+       . $chip('k', 'sl', '손절', (int)$agg['sl'])
+       . $chip('k', 'non', '미도달', (int)$agg['non'])
+       . $chip('k', 'amb', '모호', (int)$agg['amb'])
+       . $chip('k', 'wait', '사후 미완', (int)$agg['wait'])
+       . $chip('k', 'bad', '판정불가', (int)$agg['bad'])
+       . '</div>';
+
+    /* ★다섯 조건의 서술은 위 «패턴 지도» 카드로 옮겼다(2026-08-10) — 두 곳에 적으면
+     *   상수를 고칠 때 한쪽이 조용히 거짓이 된다. 여기는 브래킷·등급·축 설명만 남긴다. */
+    echo '<div class="q-note">신호의 <b>다섯 조건</b>은 위 «패턴 지도»가 정의합니다 —'
+       . ' <b>점수 컷은 없습니다</b>(등급은 표시·정렬·알림용).'
+       . ' <span class="muted">불꽃형의 「20평비 20배↑」는 <b>안 걸었습니다</b> — 담기 취향은 오히려'
+       . ' 20평비가 «낮은» 쪽이라 유형은 배지로만 구분합니다.</span><br>'
+       . '브래킷 = 신호일 <b>종가</b>에 사서 <b>5거래일</b> 안에 <b>+15%</b> 익절 / <b>−10%</b> 손절,'
+       . ' 안 닿으면 D+5 종가. <b>사후 미완</b>은 아직 5거래일이 안 찬 <b>최근</b> 신호입니다 —'
+       . ' 그래서 <b>오늘 것을 보고 담으면 결과를 못 본 채 고르게 됩니다</b>.<br>'
+       . '★<b>등급(z)은 「오를까」가 아니라 「내가 담은 것과 얼마나 닮았나」입니다</b> —'
+       . ' 불꽃형 1,225건 중 담으신 348건을 되맞춘 로지스틱 점수입니다.'
+       . ' <span class="muted">직접 고르신 ' . number_format((int)$agg['pick']) . '건 중 상위 25%(C)에'
+       . ' 드는 것은 <b>' . number_format((int)$agg['pickHit']) . '건('
+       . ((int)$agg['pick'] > 0 ? round(100 * (int)$agg['pickHit'] / (int)$agg['pick'], 1) : 0)
+       . '%)</b>뿐입니다 — 학습은 «불꽃형 안에서» 했는데 지금 모집단은 박스 조건으로 걸러진 다른'
+       . ' 무리라서입니다. 그래서 2026-08-09 에 <b>적재 컷을 없앴습니다</b>(같은 종목의 비슷한 돌파가'
+       . ' 하나만 나오던 문제 — 씨어랩 189330 05-29 vs 07-09).</span><br>'
+       . '점수 축(11개 중 카드에 적는 5개) — '
+       . implode(' · ', array_map(function ($kk) use ($axes) {
+             return '<b>' . pf_h($axes[$kk]['n']) . '</b>' . ($axes[$kk]['dir'] > 0 ? '↑' : '↓');
+         }, ['vola20', 'brkHi120', 'dYHigh', 'posPrev60', 'stepsAbove']))
+       . '</div>'
+       . pf_flame_fav_bar($url, $favGroups, $gid)
+       . '</div>';
 
     if (!$rows) {
-        echo '<div class="card"><div class="q-note">해당하는 신호가 없습니다.'
-           . ($tot === 0 && (int)$agg['n'] === 0
-              ? ' <b>표가 비어 있습니다 — 크론 <code>job=flamefill</code> 을 먼저 돌립니다.</b>' : '')
+        echo '<div class="card"><div class="q-note">이 조건에 맞는 것이 없습니다.'
+           . ($gid > 0 ? ' 이 <b>관심차트 그룹이 비어</b> 있거나 필터와 겹치는 것이 없습니다.' : '')
            . '</div></div>';
-        pf_foot();
-        return;
-    }
+    } else {
+        echo '<div class="fl-grid">';
+        foreach ($rows as $r) {
+            $cc = pf_bx_card($r, $axes, $favMember, $MSPAN);
+            echo $cc['html'];
+            $cards[] = $cc['card'];
+        }
+        echo '</div>';
 
-    $KB = ['tp' => ['익절', 'fl-tp'], 'sl' => ['손절', 'fl-sl'], 'non' => ['미도달', 'fl-non'],
-           'amb' => ['모호', 'fl-amb']];
-    $cards = [];
-    echo '<div class="fl-grid">';
-    foreach ($rows as $r) {
-        $id = pf_h($r['code'] . '_' . str_replace('-', '', $r['d']));
-        [$kl, $kc] = $KB[$r['brk_kind']]
-            ?? ((int)$r['q_ohlc'] === 1 ? ['원장 결측', 'fl-amb'] : ['사후 미완', 'fl-wait']);
-        $ret = $r['brk_ret'] === null ? '' :
-            ' <b style="color:' . ((float)$r['brk_ret'] >= 0 ? '#1e7e34' : '#c62828') . '">'
-            . sprintf('%+.2f%%', (float)$r['brk_ret']) . '</b>';
-        echo '<div class="fl-card"><div class="fl-hd">'
-           . '<span class="fl-b ' . $kc . '">' . $kl . '</span>' . $ret
-           . ' <b>' . pf_h($r['name'] !== '' ? $r['name'] : $r['code']) . '</b>'
-           . '<span class="code">' . pf_h($r['code']) . '</span>'
-           . ((float)$r['chg_pct'] >= 29 ? '<span class="fl-b fl-lim">상한가</span>' : '')
-           /* ★차트에는 정지일이 «평평한 봉»으로 보인다 — 판정이 그 날을 건너뛴 것을 알려야
-            *   보는 사람이 「왜 저기서 안 걸렸지」로 헤매지 않는다. */
-           . ((int)($r['q_halt'] ?? 0) === 1
-              ? '<span class="fl-b fl-halt" title="사후 5일 안에 거래가 멈춘 날이 있어 그 날을 빼고 판정했습니다">'
-                . '거래정지 건너뜀</span>' : '')
-           . '<span class="fl-warn" id="fw_' . $id . '">가격기준 어긋남</span>'
-           . '<span class="dt">' . pf_h($r['d']) . '</span></div>'
-           . '<div class="fl-meta">'
-           . '<span>등락 <b>' . sprintf('%+.2f%%', (float)$r['chg_pct']) . '</b></span>'
-           . '<span>20평비 <b>' . number_format((float)$r['amt_mult'], 1) . '배</b></span>'
-           . '<span>거래대금 <b>' . number_format((int)$r['amt'] / 1e8) . '억</b></span>'
-           . '<span>종가 <b>' . number_format((int)$r['close_prc']) . '</b></span>'
-           . ($r['f_max5'] !== null
-              ? '<span>5일 최고 <b style="color:#1e7e34">' . sprintf('%+.2f%%', (float)$r['f_max5'])
-                . '</b>(D+' . (int)$r['f_max5_day'] . ')</span>'
-                . '<span>최저 <b style="color:#c62828">' . sprintf('%+.2f%%', (float)$r['f_min5'])
-                . '</b>(D+' . (int)$r['f_min5_day'] . ')</span>'
-                . '<span>D+5 <b>' . sprintf('%+.2f%%', (float)$r['f_d5']) . '</b></span>'
-              : ((int)$r['q_ohlc'] === 1
-                 ? '<span class="muted">사후 창에 <b>거래는 있었는데 고가·저가가 원장에 없는 날</b>이 있어'
-                   . ' 판정하지 않았습니다'
-                   . ($r['f_d5'] !== null ? ' (D+5 종가는 ' . sprintf('%+.2f%%', (float)$r['f_d5']) . ')' : '')
-                   . '</span>'
-                 : '<span class="muted">사후 5거래일이 아직 안 찼습니다</span>'))
-           . ($r['has_min'] ? '<span class="muted">분봉 있음</span>' : '')
-           . '</div>'
-           . '<div id="flc_' . $id . '" class="fl-chart"><span class="fl-loading">차트 불러오는 중…</span></div>'
-           . '</div>';
-        $cards[] = ['id' => $id, 'code' => $r['code'], 'sig' => $r['d'],
-                    'c' => (int)$r['close_prc'], 'tp' => (float)$r['brk_tp'], 'sl' => (float)$r['brk_sl']];
-    }
-    echo '</div>';
-
-    /* ── 페이지 번호 — 앞뒤 2개씩 + 처음/끝 (151페이지를 다 뿌리지 않는다) ── */
+    /* ── 페이지 번호 — 앞뒤 2개씩 + 처음/끝 ── */
     $pgLink = function (int $i) use ($url, $pg) {
         return $i === $pg ? '<span class="cur">' . $i . '</span>'
-                          : '<a href="' . $url(['p' => $i]) . '">' . $i . '</a>';
+                          : '<a href="' . pf_h($url(['p' => $i])) . '">' . $i . '</a>';
     };
     echo '<div class="fl-pg">';
-    if ($pg > 1) echo '<a href="' . $url(['p' => $pg - 1]) . '">‹ 이전</a>';
+    if ($pg > 1) echo '<a href="' . pf_h($url(['p' => $pg - 1])) . '">‹ 이전</a>';
     $shown = [];
     foreach (array_merge([1, 2], range(max(1, $pg - 2), min($pages, $pg + 2)), [$pages - 1, $pages]) as $i) {
         if ($i >= 1 && $i <= $pages) $shown[$i] = true;
@@ -12290,48 +12476,47 @@ function pf_page_flame(PDO $pdo, Pf $pf): void
         echo $pgLink($i);
         $prev = $i;
     }
-    if ($pg < $pages) echo '<a href="' . $url(['p' => $pg + 1]) . '">다음 ›</a>';
+    if ($pg < $pages) echo '<a href="' . pf_h($url(['p' => $pg + 1])) . '">다음 ›</a>';
     echo '</div>';
     echo '<div class="q-note" style="text-align:center">' . number_format($tot) . '건 중 '
        . number_format($off + 1) . '~' . number_format($off + count($rows)) . '번째 · '
        . $pg . ' / ' . $pages . ' 페이지</div>';
+    }   // ← 목록·페이지 번호는 결과가 있을 때만. 아래 스크립트는 «항상» — 사례 카드가 쓴다.
 
-    /* ── 차트 — 패턴분석(1)과 같은 공용모듈·같은 지연 로드 방식 ── */
-    echo '<script src="/style/dailychart.js?v=50"></script>';
+    echo '<script src="/style/dailychart.js?v=53"></script>';
     echo '<script>const FL_CARDS=' . json_encode($cards, JSON_UNESCAPED_UNICODE) . ';</script>';
     echo '<script>const FL_IND=' . json_encode(
-        $flInd ? [['def' => $flInd, 'vars' => ['변수_봉수' => $INDBARS]]] : [],
-        JSON_UNESCAPED_UNICODE) . ';</script>';
+        $flInd ? [['def' => $flInd, 'vars' => ['변수_봉수' => $INDBARS]]] : [], JSON_UNESCAPED_UNICODE)
+       . ', FL_SPAN=' . (int)$SPAN . ';</script>';   // ★「박스」 필터와 «같은 창»을 쓴다
+    $favIds = [];
+    foreach ($favMember as $kk => $gs) $favIds[$kk] = array_map(fn($x) => (int)$x['id'], $gs);
+    echo '<script>const FL_GROUPS=' . json_encode($favGroups, JSON_UNESCAPED_UNICODE)
+       . ', FL_GID=' . $gid
+       . ', FL_MEMBER=' . json_encode((object)$favIds, JSON_UNESCAPED_UNICODE) . ';</script>';
+
     echo <<<'JS'
 <script>
 DailyChart.load().then(function () {
+  /* ── 좌: 일봉 — 옛 패턴분석과 «같은 로직»이다 (사용자 지시로 그대로 옮겼다) ── */
   function render(c) {
     var host = document.getElementById('flc_' + c.id);
     if (!host) return Promise.resolve();
     var dc = DailyChart.create('flc_' + c.id, { theme: 'light' });
     if (!dc) { host.textContent = '차트 라이브러리를 불러오지 못했습니다.'; return Promise.resolve(); }
-    /* ★480 봉을 받는다 — 신호는 최근 365일(≈245거래일)에 걸쳐 있고 앞뒤 55거래일을 보여 주므로
-       245+55 를 덮어야 «가장 오래된 신호»에도 앞 여백이 생긴다(FL_SPAN 을 늘리면 여기도 본다).
-       ★API 는 days 를 160/240/480/1000 «넷 중 하나»로만 받는다(그 밖의 값은 조용히 깎인다) —
-       260 이라 적었던 것이 실제로는 240 으로 깎여, 오래된 카드에 앞 여백이 아예 없었다. */
+    /* ★API 는 days 를 160/240/480/1000 «넷 중 하나»만 받는다(그 밖의 값은 조용히 깎인다) */
     return DailyChart.fetchDaily(c.code, 480).then(function (rows) {
       if (!rows.length) { host.textContent = '일봉 데이터를 가져오지 못했습니다.'; return; }
       var ld = host.querySelector('.fl-loading'); if (ld) ld.remove();
-      /* ★신호일이 받아 온 구간보다 «앞»이면 그릴 수 없다 — 첫 봉에 마커를 붙이면
-         「신호가 여기였다」는 거짓말이 된다. 그럴 땐 왜 못 그리는지 적는다. */
       if (rows[0].time > c.sig) {
         host.textContent = '신호일(' + c.sig + ')이 받아 온 일봉 구간(' + rows[0].time + '~)보다 앞이라 그리지 않습니다.';
         return;
       }
       dc.setData(rows);
-      var last = rows[rows.length - 1].time;
-      function snap(d) { for (var i = 0; i < rows.length; i++) if (rows[i].time >= d) return rows[i].time; return last; }
       var iSig = rows.findIndex(function (r) { return r.time >= c.sig; });
       if (iSig < 0) iSig = rows.length - 1;
       var sig = rows[iSig].time;
 
-      /* ★가격기준 대조 — 차트는 네이버 «수정주가», 우리 값은 KRX «그 날 값»이다.
-         분할·증자가 끼면 상수배로 어긋나는데, 전수라 사람이 확인할 수 없으므로 여기서 잡아 알린다. */
+      /* ★가격기준 대조 — 차트는 네이버 «수정주가», 우리 값은 KRX «그 날 값»이다 */
       var barC = rows[iSig].close;
       if (c.c > 0 && barC > 0 && Math.abs(barC / c.c - 1) > 0.005) {
         var w = document.getElementById('fw_' + c.id);
@@ -12339,7 +12524,7 @@ DailyChart.load().then(function () {
           'KRX 종가 ' + c.c.toLocaleString() + ' vs 차트(수정주가) ' + Math.round(barC).toLocaleString()
           + ' — 분할·증자로 기준이 다릅니다. 위 % 값은 KRX 기준이라 맞고, 차트의 익절·손절선만 어긋납니다.'; }
       }
-      /* 익절·손절선은 «차트가 쓰는 기준»으로 그린다 — 그래야 캔들과 선이 같은 자에 놓인다 */
+      /* 익절·손절선은 «차트가 쓰는 기준»으로 그린다 — 선과 캔들이 같은 자에 놓이도록 */
       var base = barC;
       var iEnd = Math.min(rows.length - 1, iSig + 5);
       dc.addLine({ color: '#1e7e34', width: 1, style: 'dashed' })
@@ -12353,24 +12538,110 @@ DailyChart.load().then(function () {
                      topColor: 'rgba(30,126,52,0.0)', bottomColor: 'rgba(198,40,40,0.0)',
                      sideColor: '#c9b37e' }]);
       dc.setMarkers([{ time: sig, text: '신호' }]);
-      /* 조건지표 「최고_거래대금선」 — H·L 계단선과 옛 단계 연장선. 정의는 서버가 준 그대로 쓴다.
-         ★지표선은 가격축 스케일에서 빠진다(모듈 규칙) — 멀리 있는 옛 레벨이 캔들을 눌러선 안 된다.
-         ★setMarkers «뒤»에 부른다 — setIndicators 가 마커를 다시 합치기 때문이다. */
+      /* ★setMarkers «뒤»에 부른다 — setIndicators 가 마커를 다시 합친다 */
       if (FL_IND.length) dc.setIndicators(FL_IND);
-      /* 보는 구간 = 신호일 «앞뒤 55거래일»(2026-08-07 사용자 지시). 끝에 닿으면 거기서 멎는다 —
-         최근 신호는 뒤가, 아주 오래된 신호는 앞이 짧아진다. 없는 봉을 만들어 채우지 않는다. */
-      var FL_SPAN = 55;
+      /* ★보는 구간은 서버가 심는다(FL_SPAN) — 「박스 1개/2개↑」 필터가 이 창으로 세기 때문이다.
+         여기 55 를 따로 적으면 필터와 그림이 조용히 어긋난다. */
       dc.zoomRange(rows[Math.max(0, iSig - FL_SPAN)].time,
                    rows[Math.min(rows.length - 1, iSig + FL_SPAN)].time,
                    { minBars: 40, pad: 2 });
     }).catch(function () { host.textContent = '차트를 불러오지 못했습니다.'; });
   }
-  /* 지연 로드 + 동시 2개 — 한 페이지 10개가 네이버를 한꺼번에 때리지 않게 (패턴분석과 같은 방식) */
+
+  /* ── 우: 1분봉 — `qm_bar`. 기준가는 «신호일 마지막 분봉 종가»다 ── */
+  function renderMin(c) {
+    var host = document.getElementById('flm_' + c.id);
+    if (!host || !c.hm) return Promise.resolve();
+    return fetch('/stock/api.php?module=qm&action=bars&code=' + encodeURIComponent(c.code)
+                 + '&d=' + encodeURIComponent(c.sig) + '&span=' + c.span,
+                 { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (raw) {
+        var rows = (Array.isArray(raw) ? raw : []).map(function (x) {
+          return {   // KST 벽시계를 UTC 로 취급 — dailychart 의 분봉과 같은 'Z' 트릭
+            time: Math.floor(Date.parse(x.t.replace(' ', 'T') + 'Z') / 1000),
+            open: x.o, high: x.h, low: x.l, close: x.c, vol: x.v
+          };
+        });
+        if (!rows.length) {
+          host.innerHTML = '<span class="fl-loading">분봉을 가져오지 못했습니다.</span>'; return;
+        }
+        var ld = host.querySelector('.fl-loading'); if (ld) ld.remove();
+        var dc = DailyChart.create('flm_' + c.id,
+                                   { theme: 'dark', kind: 'minute', multiDay: true,
+                                     screen: '', resize: false });
+        if (!dc) { host.innerHTML = '<span class="fl-loading">차트 라이브러리 오류</span>'; return; }
+        dc.setData(rows);
+
+        var byDay = {}, days = [];
+        rows.forEach(function (b) {
+          var k = new Date(b.time * 1000).toISOString().slice(0, 10);
+          if (!byDay[k]) { byDay[k] = []; days.push(k); }
+          byDay[k].push(b);
+        });
+        days.sort();
+        /* ★실린 구간을 제목에 적는다 — 「앞뒤 며칠」이라 못 박으면 그때그때 거짓이 된다 */
+        var tit = document.getElementById('flmt_' + c.id);
+        if (tit) {
+          var bf = days.filter(function (k) { return k < c.sig; }).length;
+          var af = days.filter(function (k) { return k > c.sig; }).length;
+          tit.textContent = days[0] + ' ~ ' + days[days.length - 1]
+                          + ' (' + days.length + '거래일 · 전 ' + bf + ' / 후 ' + af + ')';
+        }
+        var sigBars = byDay[c.sig];
+        if (!sigBars) {   /* 신호일 봉이 없으면 선을 긋지 않는다 — 기준가가 없다 */
+          dc.zoomRange(rows[0].time, rows[rows.length - 1].time, { minBars: 60, pad: 2 });
+          return;
+        }
+        var base   = sigBars[sigBars.length - 1].close;
+        var sigEnd = sigBars[sigBars.length - 1].time;
+        var post   = days.filter(function (k) { return k > c.sig; }).slice(0, 5);
+        var endT   = post.length ? byDay[post[post.length - 1]].slice(-1)[0].time
+                                 : rows[rows.length - 1].time;
+        try {
+          dc.addLine({ color: '#31c48d', width: 1, style: 'dashed' })
+            .setData([{ time: sigEnd, value: base * (1 + c.tp / 100) },
+                      { time: endT,   value: base * (1 + c.tp / 100) }]);
+          dc.addLine({ color: '#ff6b6b', width: 1, style: 'dashed' })
+            .setData([{ time: sigEnd, value: base * (1 - c.sl / 100) },
+                      { time: endT,   value: base * (1 - c.sl / 100) }]);
+          dc.setBoxes([{ from: sigEnd, to: endT, top: base * (1 + c.tp / 100),
+                         bottom: base * (1 - c.sl / 100), fill: 'rgba(240,165,0,0.06)',
+                         topColor: 'rgba(49,196,141,0.0)', bottomColor: 'rgba(255,107,107,0.0)',
+                         sideColor: '#8a7a4e' }]);
+          dc.setMarkers([{ time: sigEnd, text: '신호 종가' }]);
+        } catch (e) {}
+
+        var zoom = {
+          all:  [rows[0].time, rows[rows.length - 1].time],
+          sig:  [sigBars[0].time, sigEnd],
+          post: [sigBars[0].time, endT]
+        };
+        var bar = document.getElementById('flz_' + c.id);
+        if (bar) {
+          bar.addEventListener('click', function (e) {
+            var b = e.target.closest('button'); if (!b) return;
+            var z = zoom[b.dataset.z]; if (!z) return;
+            bar.querySelectorAll('button').forEach(function (x) { x.classList.remove('on'); });
+            b.classList.add('on');
+            dc.zoomRange(z[0], z[1], { minBars: 30, pad: 2 });
+          });
+        }
+        dc.zoomRange(zoom.all[0], zoom.all[1], { minBars: 60, pad: 2 });
+      })
+      .catch(function () {
+        host.innerHTML = '<span class="fl-loading">분봉을 불러오지 못했습니다.</span>';
+      });
+  }
+
+  /* 지연 로드 + 동시 2개 · 한 카드 안에서는 일봉 «다음» 분봉 (옛 화면과 같은 방식) */
   var active = 0, q = [];
   function kick(c) {
     if (active >= 2) { q.push(c); return; }
     active++;
-    render(c).then(function () { active--; if (q.length) kick(q.shift()); });
+    render(c)
+      .then(function () { return renderMin(c); })
+      .then(function () { active--; if (q.length) kick(q.shift()); });
   }
   var pending = {};
   FL_CARDS.forEach(function (c) { pending[c.id] = c; });
@@ -12378,26 +12649,207 @@ DailyChart.load().then(function () {
     var io = new IntersectionObserver(function (es) {
       es.forEach(function (en) {
         if (!en.isIntersecting) return;
-        var id = en.target.id.slice(4);
-        var c = pending[id];
+        var id = en.target.id.slice(4), c = pending[id];
         if (!c) return;
-        delete pending[id];
-        io.unobserve(en.target);
-        kick(c);
+        delete pending[id]; io.unobserve(en.target); kick(c);
       });
     }, { rootMargin: '400px 0px' });
     FL_CARDS.forEach(function (c) {
       var h = document.getElementById('flc_' + c.id);
       if (h) io.observe(h); else delete pending[c.id];
     });
-  } else {
-    FL_CARDS.forEach(kick);
-  }
+  } else { FL_CARDS.forEach(kick); }
 }).catch(function () {});
 </script>
 JS;
 
+    pf_flame_fav_js('boxbrk');
     pf_foot();
+}
+
+/**
+ * 관심차트 동작 — 고르기 · 담기 · 그룹 관리 (2026-08-07)
+ *
+ * ★그룹 목록의 «단일본»은 서버 응답이다 — 담기·삭제·이름변경이 전부 groups 를 통째로 돌려주고
+ *   renderGroups() 가 세 곳(필터·담기 셀렉트·관리 표)을 함께 다시 그린다.
+ *   한 곳만 손으로 고치면 새 그룹을 만든 뒤 다른 곳이 옛 목록을 말한다.
+ * ★카드가 0건인 화면(빈 그룹)에서도 실어야 한다 — 안 그러면 필터를 되돌릴 길이 없다.
+ *   앞서 FL_CARDS · FL_GROUPS · FL_GID 가 심어져 있어야 한다.
+ *
+ * @param string $src 담을 곳 (`ChartFav::SRCS`) — 'flame' 패턴분석 · 'boxbrk' 오늘의 후보(결과 가림).
+ *   ★두 화면이 이 함수를 나눠 쓴다. src 를 밖에서 받는 이유는 <b>그룹이 출처별로 갈려야</b> 하기
+ *     때문이다 — 결과를 보고 담은 것과 안 보고 담은 것을 한 그룹에 섞으면 표본이 다시 오염된다.
+ */
+function pf_flame_fav_js(string $src = 'flame'): void
+{
+    $srcJs = json_encode($src);
+    echo "<script>const FL_SRC={$srcJs};</script>";
+    echo <<<'JS'
+<script>
+(function () {
+  var groups = FL_GROUPS.slice();
+  var member = FL_MEMBER || {};               // 'code|d' => [그룹 id, …]
+  var byKey = {};                             // 'code|d' => 카드 id (배지를 다시 그리려고)
+  FL_CARDS.forEach(function (c) { byKey[c.code + '|' + c.sig] = c.id; });
+
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (m) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]; }); }
+  function target() { return +(document.getElementById('flGadd') || {}).value || 0; }
+
+  /* ★체크칸 = 「담을 그룹」에 들어 있나. 화면이 기억하지 않고 member 를 다시 읽어 그린다 —
+     그래야 담을 그룹을 바꾸면 체크가 그 그룹의 것으로 «갈아 끼워진다». */
+  function paintChecks() {
+    var g = target(), n = 0, all = document.querySelectorAll('.fl-ck');
+    all.forEach(function (el) {
+      var k = el.dataset.key;
+      var on = g > 0 && (member[k] || []).indexOf(g) >= 0;
+      el.checked = on; if (on) n++;
+      var card = document.getElementById('flcard_' + byKey[k]);
+      if (card) card.classList.toggle('sel', on);
+    });
+    var chk = document.getElementById('flAll');
+    if (chk) chk.checked = (all.length > 0 && n === all.length);
+    var lab = document.getElementById('flSelN');
+    if (lab) lab.textContent = all.length ? ('이 페이지 ' + all.length + '건 중 ' + n + '건 담김') : '';
+  }
+  window.flTargetChange = paintChecks;
+
+  /* 담긴 그룹 배지 + member 를 서버가 준 것으로 갈아 준다 */
+  function applyMember(m, touched) {
+    if (!m) return;
+    touched.forEach(function (k) {
+      var gs = m[k] || [];
+      member[k] = gs.map(function (g) { return +g.id; });
+      var box = document.getElementById('fg_' + byKey[k]);
+      if (box) box.innerHTML = gs.map(function (g) {
+        return '<span class="fl-g">' + esc(g.name) + '</span> '; }).join('');
+    });
+  }
+
+  /* ★체크하는 순간 저장한다 — 「담기」 버튼이 없다(2026-08-07 사용자 지시).
+     실패하면 체크를 «되돌린다» — 화면이 저장된 척하면 안 된다. */
+  function save(want, ks, els) {
+    if (!ks.length) return;
+    var g = target();
+    if (!g) {
+      els.forEach(function (el) { el.checked = !want; });
+      pfToast('먼저 ⚙ 그룹 관리에서 그룹을 만들고 「담을 그룹」을 고르세요.', true);
+      return;
+    }
+    els.forEach(function (el) { el.disabled = true; });
+    post(want ? 'add' : 'remove', { fav_id: g, keys: ks.join(',') }).then(function (j) {
+      els.forEach(function (el) { el.disabled = false; });
+      if (!j.ok) { pfToast(j.message || '저장하지 못했습니다.', true); paintChecks(); return; }
+      groups = j.groups; renderGroups(); applyMember(j.member, ks); paintChecks();
+      var n = want ? j.added : j.removed;
+      pfToast(want ? (n + '건을 담았습니다.')
+                   : (n + '건을 뺐습니다.'
+                      + (FL_GID === g ? ' 새로고침하면 이 목록에서도 사라집니다.' : '')));
+    }).catch(function () {
+      els.forEach(function (el) { el.disabled = false; });
+      pfToast('저장에 실패했습니다.', true); paintChecks();
+    });
+  }
+
+  window.flCheck = function (el) { save(el.checked, [el.dataset.key], [el]); };
+  window.flCheckAll = function (on) {
+    /* ★한 번에 보낸다 — 5건이면 5콜이 아니라 1콜이다 */
+    var els = [], ks = [], g = target();
+    document.querySelectorAll('.fl-ck').forEach(function (el) {
+      var has = g > 0 && (member[el.dataset.key] || []).indexOf(g) >= 0;
+      if (has === on) return;                 // 이미 그 상태면 보내지 않는다
+      el.checked = on; els.push(el); ks.push(el.dataset.key);
+    });
+    if (!ks.length) { paintChecks(); return; }
+    save(on, ks, els);
+  };
+  window.flGo = function (v) {
+    var u = new URL(location.href);
+    if (+v > 0) u.searchParams.set('g', v); else u.searchParams.delete('g');
+    u.searchParams.set('p', '1');
+    location.href = u.toString();
+  };
+
+  function renderGroups() {
+    /* 담을 그룹 셀렉트 — 고른 값을 지키며 다시 그린다.
+       ★그룹을 «보고 있을 때»는 그 그룹이 기본 대상이다 — 체크를 풀면 보고 있는 그 목록에서 빠진다. */
+    var add = document.getElementById('flGadd'), keep = add.value || (FL_GID > 0 ? String(FL_GID) : '');
+    add.innerHTML = groups.length
+      ? groups.map(function (g) {
+          return '<option value="' + g.id + '">' + esc(g.name) + ' (' + g.n + ')</option>'; }).join('')
+      : '<option value="0">그룹이 없습니다 — ⚙ 에서 만드세요</option>';
+    if (keep && add.querySelector('option[value="' + keep + '"]')) add.value = keep;
+
+    /* 필터 셀렉트 — 지금 보고 있는 그룹은 그대로 둔다 */
+    var gf = document.getElementById('flGf');
+    if (gf) {
+      gf.innerHTML = '<option value="0">전체 (관심차트 아님)</option>'
+        + groups.map(function (g) {
+            return '<option value="' + g.id + '"' + (g.id == FL_GID ? ' selected' : '') + '>'
+                 + esc(g.name) + ' (' + g.n + ')</option>'; }).join('');
+    }
+
+    var tb = document.querySelector('#flGmT tbody');
+    tb.innerHTML = groups.length
+      ? groups.map(function (g) {
+          return '<tr data-id="' + g.id + '">'
+            + '<td><input type="text" value="' + esc(g.name) + '" maxlength="60"></td>'
+            + '<td style="width:70px;text-align:right;color:#8496a6">' + g.n + '건</td>'
+            + '<td style="width:150px;text-align:right">'
+            + '<button type="button" onclick="flGroupSave(' + g.id + ')">이름 저장</button> '
+            + '<button type="button" class="del" onclick="flGroupDel(' + g.id + ',this)">삭제</button>'
+            + '</td></tr>'; }).join('')
+      : '<tr><td class="muted">아직 그룹이 없습니다.</td></tr>';
+  }
+
+  function post(action, extra) {
+    var body = new URLSearchParams();
+    body.set('module', 'fav'); body.set('action', action); body.set('src', FL_SRC);
+    Object.keys(extra || {}).forEach(function (k) { body.set(k, extra[k]); });
+    return fetch('/stock/api.php', { method: 'POST', credentials: 'same-origin', body: body })
+      .then(function (r) { return r.json(); });
+  }
+
+  window.flGmToggle = function () {
+    var el = document.getElementById('flGm');
+    el.style.display = (el.style.display === 'none') ? 'block' : 'none';
+  };
+
+  window.flGroupSave = function (id) {
+    var name;
+    if (id > 0) {
+      var tr = document.querySelector('#flGmT tr[data-id="' + id + '"]');
+      name = tr ? tr.querySelector('input').value : '';
+    } else {
+      name = document.getElementById('flGnew').value;
+    }
+    if (!String(name).trim()) { pfToast('그룹 이름을 적으세요.', true); return; }
+    post('group_save', { id: id, name: name }).then(function (j) {
+      if (!j.ok) { pfToast(j.message || '저장하지 못했습니다.', true); return; }
+      groups = j.groups; renderGroups();
+      if (id === 0) {
+        document.getElementById('flGnew').value = '';
+        document.getElementById('flGadd').value = j.id;   // 방금 만든 그룹을 담기 대상으로
+      }
+      pfToast(id > 0 ? '이름을 바꿨습니다.' : '그룹을 만들었습니다.');
+    }).catch(function () { pfToast('저장에 실패했습니다.', true); });
+  };
+
+  window.flGroupDel = function (id, btn) {
+    var tr = btn.closest('tr'), nm = tr ? tr.querySelector('input').value : '';
+    if (!confirm('「' + nm + '」 그룹을 지웁니다.\n담아 둔 목록만 사라지고 신호 자체는 그대로입니다.')) return;
+    post('group_del', { id: id }).then(function (j) {
+      groups = j.groups; renderGroups();
+      pfToast('그룹을 지웠습니다.');
+      if (FL_GID === id) window.flGo(0);      // 보고 있던 그룹이 사라졌으면 전체로
+    }).catch(function () { pfToast('삭제에 실패했습니다.', true); });
+  };
+
+  renderGroups();
+  paintChecks();
+})();
+</script>
+JS;
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -12468,7 +12920,7 @@ table.sg code{background:#f2f6fa;border-radius:4px;padding:1px 4px;font-size:11.
     echo '<div class="pf-head"><div><h1>신호분석</h1>'
        . '<div class="sub">화면 곳곳에 뜨는 배지·신호 <b>전체의 판정 기준</b>을 한 자리에 —'
        . ' 임계값은 전부 백테스트 실측이며 근거 전문은 <a href="/stock/index.php?mode=quantstat">검증 탭</a>,'
-       . ' 패턴별 실제 차트는 <a href="/stock/index.php?mode=pattern">패턴분석</a>에 있습니다.</div></div></div>';
+       . ' 패턴의 정의·실제 사례는 <a href="/stock/index.php?mode=boxbrk">패턴분석 (박스 상향돌파)</a>에 있습니다.</div></div></div>';
 
     /* ── 0-1. 용어 정의 — 화면마다 다른 이름으로 부르던 것을 하나로 못 박는다 (2026-08-02 사용자 정의).
      * ★ 여기가 <b>용어의 단일 원천</b>이다. 열 이름·문구를 새로 쓸 때 여기 없는 말을 만들지 않는다. */
@@ -12481,7 +12933,7 @@ table.sg code{background:#f2f6fa;border-radius:4px;padding:1px 4px;font-size:11.
        .   '<td>퀀트 목록·관심종목의 <b>「퀀트신호」 열</b> · 단타 목록. 정의는 아래 <b>2-a</b>.</td></tr>'
        . '<tr><td><b>최고 거래대금 박스</b><br><span class="bx bx-lad">계단지지 1단</span></td>'
        .   '<td>그 신호일의 <b>고가 H(저항)·저가 L(지지)</b>가 만드는 박스와, 그 뒤 가격이 걸어간 <b>경로</b>.</td>'
-       .   '<td>퀀트 목록·매집형 박스 추적·관심종목·어닝의 <b>「최고 거래대금 박스」 열</b>. 정의는 아래 <b>2-b</b>.</td></tr>'
+       .   '<td>퀀트 목록·📦추적 카드·관심종목·어닝의 <b>「최고 거래대금 박스」 열</b> — ★박스 상향돌파(5조건) 박스에만 붙습니다(2026-08-10 재정의). 정의는 아래 <b>2-b</b>.</td></tr>'
        . '<tr><td><b>신호일</b></td><td>그 퀀트신호가 발생한 날 (박스가 만들어진 날).</td><td>추적 카드의 「신호일」 열 · 배지 툴팁.</td></tr>'
        . '<tr><td><b>신호</b> <span class="sig-pill k-buy">매수</span></td>'
        .   '<td>퀀트신호와 <b>다릅니다</b> — 룰셋 차수표가 내는 <b>오늘의 행동</b>(매수·잔여매수·매도·대기).</td>'
@@ -12653,15 +13105,23 @@ table.sg code{background:#f2f6fa;border-radius:4px;padding:1px 4px;font-size:11.
        . ' 거래대금이 터지든 주가가 터지든 <b>과열되어 터진 하루</b>라는 성격이 같고 처방도 하나(돌파해도 매수 금지)라'
        . ' 배지를 둘로 나눠 둘 이유가 없었습니다. <b>합친 것은 이름이지 측정이 아닙니다</b> — 위 실측을 조건별로 남긴 것은'
        . ' 두 조건의 모집단이 서로 겹쳐서, 합친 수치는 잰 적이 없기 때문입니다.'
-       . ' 실사례는 패턴분석의 <b>패턴4 「마지막 불꽃」</b>(등락 +20%↑)·<b>패턴5 「소문난 잔치」</b>(20배↑)에 갈라 두었습니다.</div>'
+       . ' 두 조건의 돌파 매수 실측은 <a href="/stock/index.php?mode=quantstat">검증 탭 ③·④</a>에 갈라 남겼습니다'
+       . ' <span class="muted">(두 조건에 「마지막 불꽃」·「소문난 잔치」 실사례 차트를 달아 두던 옛 패턴분석'
+       . ' 화면은 2026-08-10 에 「패턴분석 (박스 상향돌파)」로 흡수·삭제됐습니다).</span></div>'
        . '<div class="sg-note">★ 예전에 이 자리에 있던 <b>급등⚠</b> 는 <b>1-a 시장</b>으로 옮겼습니다(2026-08-02) —'
        . ' 재는 것이 거래대금이 아니라 <b>가격의 최근 움직임</b>이라 시장지표와 같은 계열이고,'
        . ' 하루치 「<span class="mkt t-up">+16.2%</span>」와 <b>기간만 다르기</b> 때문입니다.'
        . ' 지금은 창별로 <span class="mkt t-up">20일 +112%</span> <span class="mkt t-up">40일 +139%</span> 처럼 따로 뜹니다.</div>'
 
-       . '<h3 style="font-size:13.5px;margin:18px 0 2px;color:#12406b">2-b. <b>퀀트 경로</b> — 신호일 <b>이후</b> 가격이 걸어간 길 <span style="font-weight:600;color:#9aa7b4">(= 「최고 거래대금 박스」)</span> <span style="font-weight:600;color:#9aa7b4">(퀀트 목록·매집형 박스 추적·관심종목·어닝의 「최고 거래대금 박스」 열)</span></h3>'
+       . '<h3 style="font-size:13.5px;margin:18px 0 2px;color:#12406b">2-b. <b>퀀트 경로</b> — 신호일 <b>이후</b> 가격이 걸어간 길 <span style="font-weight:600;color:#9aa7b4">(= 「최고 거래대금 박스」)</span> <span style="font-weight:600;color:#9aa7b4">(퀀트 목록·📦추적 카드·관심종목·어닝의 「최고 거래대금 박스」 열)</span></h3>'
        . '<div class="sg-note" style="margin:2px 0 6px">신호일 고가 <b>H = 저항</b> · 저가 <b>L = 지지</b>가 박스입니다. 종가가 H를 넘으면 돌파, L을 깨면 붕괴 —'
        . ' 붕괴해도 아래 계단(현재 L 아래 레벨을 주는 최근 박스 2개의 H·L)이 <b>74.9%</b> 받아줍니다. 판정은 전부 <b>종가</b> 기준·계단 터치는 ±2%.</div>'
+       . '<div class="sg-note" style="margin:2px 0 8px;background:#f4f8ff;border:1px solid #dbe7f5;border-radius:8px;padding:8px 11px">'
+       . '★★<b>2026-08-10 전면 재정의</b> — 아래 경로 배지(新박스·박스안·돌파✓·계단지지…)는 이제'
+       . ' <b>「박스 상향돌파」(2-d · 5조건) 박스에만</b> 붙습니다. 그 밖의 최고 거래대금 신호는 경로 칸이'
+       . ' <b>-</b> 입니다. 판정 «로직»은 그대로고 <b>대상 박스</b>만 좁힌 것입니다(단일본 boxStatusMany 의 게이트'
+       . ' — 퀀트 목록·관심종목·어닝·알림 크론이 한 곳으로 같이 바뀝니다). 당일 박스는 16:20 적재 뒤에 판정됩니다.'
+       . ' <b>유일한 예외 = ④ 계단관통↓ 경보</b>(편입 시 기준 박스는 기록·안전장치).</div>'
        . '<table class="sg"><tr><th>최고 거래대금 박스</th><th>뜻</th><th>어떻게 읽나</th></tr>'
        . '<tr><td><span class="bx bx-new">新박스</span></td><td>박스가 오늘 막 생김</td><td>아직 경로 없음 — 돌파/지지 확인 전이므로 관망. 당일 잠정치(고가·저가 미확정)는 배지 없이 빈 칸이며 다음날 13:05 KRX 확정값이 오면 박스가 생깁니다.</td></tr>'
        . '<tr><td><span class="bx bx-in">박스안 H+3.2%</span></td><td>박스 안 체류 중 (숫자 = 저항까지 거리)</td>'
@@ -12687,14 +13147,16 @@ table.sg code{background:#f2f6fa;border-radius:4px;padding:1px 4px;font-size:11.
        . '<tr><td><span class="bx bx-lad">계단지지 N단</span></td><td>붕괴 후 N번째 계단에서 저가가 닿고 종가가 버팀</td>'
        .   '<td>🟢매집형 ∧ <b>아래층 박스(floors) 3개 이상</b>이면 <b>매수 규칙 ②</b>(+2.40%·58.5%). floors 1~2는 실측 음수(−2.47%·45%)라 <b>⚠가 붙고 관망</b>. 지지가 다시 깨지면 다음 계단으로 내려가며 갱신됩니다.</td></tr>'
        . '<tr><td><span class="bx bx-dn">지지이탈↓</span></td><td>알려진 계단을 <b>전부</b> 종가로 뚫고 내려감</td><td>지지 구조 소멸 — 붕괴의 2.5%뿐인 드문 사건이라 더 무겁게 읽습니다. 보유종목이면 ④의 계단관통↓ 경보로 이어집니다.</td></tr>'
-       . '<tr><td><span class="bx bx-dn">붕괴·표류</span></td><td>붕괴했는데 닿을 계단이 없음 (첫 박스 등)</td><td>받아줄 곳이 없는 상태 — 패턴분석의 「첫 폭발」이 이 경로의 전형입니다.</td></tr></table>'
+       . '<tr><td><span class="bx bx-dn">붕괴·표류</span></td><td>붕괴했는데 닿을 계단이 없음 (첫 박스 등)</td><td>받아줄 곳이 없는 상태 — 「첫 폭발」(계단 없는 첫 박스)이 이 경로의 전형입니다. 박스 상향돌파도 조건 ①(이전 박스 존재)로 이것을 거릅니다.</td></tr></table>'
 
        /* ── 2-c. 퀀트 매수원칙 — 2026-08-02 사용자가 ③ 행동에서 옮겨 온 절.
         *   트리거는 룰셋이 내는 「오늘의 행동」이 아니라 <b>2-a × 2-b 의 조합</b>이라 여기가 제자리다. */
        . '<h3 style="font-size:13.5px;margin:18px 0 2px;color:#12406b">2-c. <b>퀀트 매수원칙</b> — <b>2-a × 2-b</b> 가 겹치는 두 자리만 산다 <span style="font-weight:600;color:#9aa7b4">(관심종목의 「트리거」 열)</span></h3>'
        . '<div class="sg-note" style="margin:2px 0 6px">백테스트로 <b>검증된 매수규칙은 둘뿐</b>입니다 — 퀀트신호와 경로의'
        . ' <b>특정 조합</b>에서만 실측 우위가 있었습니다. 그 밖은 전부 관망이고, 매도 규칙도 진입한 규칙마다 다릅니다.'
-       . ' 근거 전문은 <a href="/stock/index.php?mode=quantstat">검증 탭 ④~⑥</a>.</div>'
+       . ' 근거 전문은 <a href="/stock/index.php?mode=quantstat">검증 탭 ④~⑥</a>.'
+       . ' ★<b>2026-08-10 재정의 이후 트리거는 박스 상향돌파 박스에서만 뜹니다</b>(2-b 게이트) — 위 실측치는'
+       . ' 전체 모집단 기준의 기록이라 새 기준에서는 <b>참고치</b>입니다(5조건 부분집합의 트리거 성적은 잰 적 없음).</div>'
        . '<table class="sg"><tr><th>트리거</th><th>조건 (2-a × 2-b)</th><th>실측 · 매도 규칙</th></tr>'
        . '<tr><td><span class="wl-go">🟢 돌파확인</span></td>'
        .   '<td class="crit"><span class="qb qb-acc">매집형</span> × <span class="bx bx-brk">돌파✓</span>'
@@ -12711,6 +13173,32 @@ table.sg code{background:#f2f6fa;border-radius:4px;padding:1px 4px;font-size:11.
        .   '<td><b>관망이 비어 보여도 그것이 답입니다.</b> 검증된 두 규칙 밖은 실측 우위가 없습니다.</td></tr></table>'
        . '<div class="sg-note">★ 트리거는 <b>③ 행동의 「신호」와 다릅니다</b> — 신호는 <b>룰셋 차수표</b>가 내는 오늘의 행동이고,'
        . ' 트리거는 <b>퀀트 조합</b>이 「지금이 그 두 자리 중 하나」라고 알리는 것입니다. 그래서 이 절이 ② 퀀트에 있습니다.</div>'
+
+       /* ── 2-d. 박스 상향돌파 — 사용자 정의 패턴 (2026-08-10 신설). 알림까지 쏘는 신호인데
+        *   이 레지스트리에 없으면 「어디서 온 알림인가」에 답할 곳이 없다. 정본은 stock/lib/boxbrk.php. */
+       . '<h3 style="font-size:13.5px;margin:18px 0 2px;color:#12406b">2-d. <b>박스 상향돌파</b> —'
+       . ' 직접 고른 관심차트에서 되맞춘 패턴 <span style="font-weight:600;color:#9aa7b4">'
+       . '(패턴분석 화면 · 매일 16:20 적재 · Pushover 알림)</span></h3>'
+       . '<table class="sg"><tr><th>무엇</th><th>판정 기준</th><th>어떻게 읽나</th></tr>'
+       . '<tr><td><b>후보</b></td>'
+       .   '<td class="crit">다섯 조건 — ①이전 100억↑ 박스 존재 ②그 날 박스 신설(직전 119거래일 최고 &amp; 100억↑)'
+       .   ' ③기존 박스에 붙음(+10% 이내) ④직전 3개 박스보다 위 ⑤시가→종가 +7%↑'
+       .   ' <span class="muted">(판정 순서 그림은 <a href="/stock/index.php?mode=boxbrk">패턴분석</a>의 「패턴 지도」)</span></td>'
+       .   '<td>2-a 퀀트신호와 <b>같은 모집단</b>(최고 거래대금 신호)에서 다른 자로 거른 것 — 직접 담으신'
+       .   ' 관심차트 그룹을 되맞춘 정의입니다(사전 피처 11축 로지스틱 · AUC 0.750).</td></tr>'
+       . '<tr><td><b>등급 A~D</b></td>'
+       .   '<td class="crit">닮음 점수(z)의 8년 백분위 — A 상위 5% · B 10% · C 25% · D 그 밖. <b>담는 컷이 아닙니다</b></td>'
+       .   '<td>「그 날이었다면 담으셨을 확률」이지 <b>「오를 확률」이 아닙니다</b> — 8년 실측에서 등급 A 도'
+       .   ' 승률 45.2%·중앙 −2.63%로 판을 못 뒤집습니다(검증 탭 ⑨).</td></tr>'
+       . '<tr><td><b>출처</b></td>'
+       .   '<td class="crit">★내가 고름(pick) = 정의 원본 · 자동(auto) = 매일 5조건 판정</td>'
+       .   '<td><b>섞어 세지 않습니다</b> — pick 은 결과를 보고 담은 표본(룩어헤드)이라 승률 우위가'
+       .   ' 「눈」이 아니라 「결과」에서 왔음이 실측됐습니다. 이 패턴의 정직한 성적은 auto 쪽입니다.</td></tr>'
+       . '<tr><td><b>알림</b></td>'
+       .   '<td class="crit">매일 16:20 크론 끝에 <b>새로 뜬 등급 B↑</b> 후보만 Pushover · 중복키 = (종목, 날짜)</td>'
+       .   '<td>본문 끝의 「※성과 우위 미검증」은 측정 결과입니다 — 8년 재측정(2026-08-10)에서 기준선과'
+       .   ' 사실상 같았습니다(비용 뒤 +0.01% vs −0.20% · <a href="/stock/index.php?mode=quantstat">검증 탭 ⑨</a>).'
+       .   ' <b>매수 신호가 아니라 판단 소집</b>이라 2-c 매수원칙에 들어가지 않습니다.</td></tr></table>'
        . '</div>';
 
     /* ── 3. 행동 신호 ── */
@@ -12835,19 +13323,30 @@ table.sg code{background:#f2f6fa;border-radius:4px;padding:1px 4px;font-size:11.
                    . ' + 20·40거래일 모멘텀 칩(「20일 +112%」). ★2026-08-04 이전에는 모멘텀 칩뿐이었습니다')
        .   $ox(true, 'SUE 값 (최신 분기) — 어닝 탭과 같은 계산')
        .   $ox(true, '매집형 · 중립 · 불꽃형 — 최근 신호일 기준')
-       .   $ox(true, '박스안 H+5.2% · 돌파✓ · 계단지지 N단 · 지지이탈↓')
-       .   $ox(true, '🟢 돌파확인 · 🟢 계단지지 — 검증된 매수규칙 둘만. 그 외는 관망')
+       .   $ox(true, '박스안 H+5.2% · 돌파✓ · 계단지지 N단 · 지지이탈↓ — ★박스 상향돌파(5조건) 박스에 한함(그 밖은 -)')
+       .   $ox(true, '🟢 돌파확인 · 🟢 계단지지 — 검증된 매수규칙 둘만. 그 외는 관망. ★박스 상향돌파 박스에서만 뜸(2026-08-10 재정의)')
        .   $ox(false) . $ox(false)
        .   '<td>담아 둔 것 중 오늘 살 자리가 왔나 (관제탑)</td></tr>'
 
        . '<tr><td><a href="/stock/index.php?mode=quant">퀀트 목록</a></td>'
        .   $ox(true, '20·40거래일 모멘텀 칩(「20일 +112%」)만 — 하루치 지표(역배열·RSI 등)는 pf_daily 가 보유·관심 종목만 담아 여기엔 없습니다')
        .   $ox(false)
-       .   $ox(true, '매집형 · 중립 · 불꽃형 — 셋 다 배지로 뜹니다')
-       .   $ox(true, '新박스 · 박스안 · 돌파✓ · 계단지지 N단 · 지지이탈↓ · 붕괴·표류')
+       .   $ox(true, '매집형 · 중립 · 불꽃형 — 셋 다 배지로 뜹니다 + 📦박스돌파(5조건 통과 · bx_cand 읽기 —'
+                   . ' 16:20 적재라 오늘 것은 마감 뒤 · 「📦 박스 상향돌파만」 칩으로 압축 가능)')
+       .   $ox(true, '新박스 · 박스안 · 돌파✓ · 계단지지 N단 · 지지이탈↓ · 붕괴·표류 — ★박스 상향돌파(5조건) 박스에 한함(그 밖은 -)')
        .   $ox(false)
        .   $ox(false) . $ox(false)
        .   '<td>오늘 새로 발견할 것이 있나</td></tr>'
+
+       /* ★2026-08-10 신설 행 — 이 화면의 배지(출처·등급·결과·불꽃형)는 대부분 «자기 층»(2-d)이라
+        *   이 표의 열에는 불꽃형 유형 배지 하나만 걸린다. O/X 는 pf_bx_card() 에서 확인한 것. */
+       . '<tr><td><a href="/stock/index.php?mode=boxbrk">패턴분석 <span class="muted">(박스 상향돌파)</span></a></td>'
+       .   $ox(false) . $ox(false)
+       .   $ox(true, '불꽃형 배지만 — 20평비 20배↑ 유형 표시(매집형·중립 배지는 없습니다). 그 밖의 배지'
+                   . '(★내가 고름/자동 · 등급 A~D · 익절/손절 · 상한가)는 이 화면 전용 — 2-d 절')
+       .   $ox(false) . $ox(false)
+       .   $ox(false) . $ox(false)
+       .   '<td>내가 고르던 그 패턴이 오늘 또 나왔나 <span class="muted">(등급 = 닮음 · 성과 우위 미검증)</span></td></tr>'
 
        . '<tr><td><a href="/stock/index.php?mode=fund">재무 스크리너</a></td>'
        .   $ox(false)
@@ -12861,7 +13360,7 @@ table.sg code{background:#f2f6fa;border-radius:4px;padding:1px 4px;font-size:11.
        .   $ox(false)
        .   $ox(true, 'SUE · 규칙 충족 여부')
        .   $ox(false)
-       .   $ox(true, '박스 열 — 실적으로 고르고 수급(박스)으로 타이밍을 보는 다리')
+       .   $ox(true, '박스 열 — 실적으로 고르고 수급(박스)으로 타이밍을 보는 다리. ★박스 상향돌파 박스에 한함(그 밖은 -)')
        .   $ox(false)
        .   $ox(false) . $ox(false)
        .   '<td>공시가 난 것 중 살 만한 게 있나</td></tr>'
@@ -12870,7 +13369,7 @@ table.sg code{background:#f2f6fa;border-radius:4px;padding:1px 4px;font-size:11.
        .   $ox(true, '20·40거래일 모멘텀 칩(「20일 +112%」)만 — 하루치 지표(역배열·RSI 등)는 pf_daily 가 보유·관심 종목만 담아 여기엔 없습니다')
        .   $ox(false)
        .   $ox(true, '🟢매집형 · 중립 · 불꽃형 — 오늘 최고 거래대금을 넘긴 종목만(장중 잠정)')
-       .   $ox(true, '최근 신호 박스의 현재 상태')
+       .   $ox(true, '최근 신호 박스의 현재 상태 — ★박스 상향돌파(5조건) 박스에 한함(그 밖은 칩 없음)')
        .   $ox(false)
        .   $ox(false) . $ox(false)
        .   '<td>오늘 오르는 것 중 구조가 좋은 게 있나</td></tr></table>'
@@ -13295,7 +13794,7 @@ CSS;
     }
     echo '</main></div><div id="dtToast"></div>';
 
-    echo '<script src="/style/dailychart.js?v=50"></script>';
+    echo '<script src="/style/dailychart.js?v=53"></script>';
     // 목록 배지(ETF 편입 수·퀀트) — 그리기·색의 단일본(사이트 공통 모듈)
     echo '<script src="/style/quantbadge.js?v=1"></script>';
     pf_acnav_js();                                        // 종목 추가 검색창의 ↓/↑ 이동
@@ -13996,6 +14495,9 @@ CSS;
     if (!main || !state.code) return;
     var code = state.code;
     $('dtNote').textContent = '불러오는 중…';
+    /* 종목을 모듈에 알린다 — 사용자 수평선(지지·저항)이 이 종목 것으로 붙는다.
+     * SUE 공시 마커는 분봉 축에선 모듈이 스스로 건너뛴다(공시일은 날짜 단위라 뜻이 없다). */
+    main.setCode(code);
     if (!state.owned) {
       todaySeries(code).then(function(rows){
         if (code !== state.code) return;          // 그 사이 다른 종목을 골랐다
@@ -14036,6 +14538,7 @@ CSS;
     if (!sub || !state.code) return;
     var u = subUnitOf(MAIN_UNIT);
     $('dtSubU').textContent = u + '분';
+    sub.setCode(state.code);       // 수평선은 «종목»의 것이다 — 세 패널이 같은 선을 본다
     /* 보조 패널은 «맥락»(10거래일)이라 원장이 없으면 만들 수 없다 — 네이버는 당일치뿐이다.
        비워 두되 «왜 비었는지»를 적는다(빈 패널은 고장으로 읽힌다). */
     if (!state.owned) {

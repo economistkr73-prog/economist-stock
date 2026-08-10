@@ -215,6 +215,41 @@
       '.dc-bx{position:absolute;box-sizing:border-box;border-radius:2px}' +
       '.dc-bx .bx-lb{position:absolute;top:1px;left:4px;font-size:10px;font-weight:700;white-space:nowrap;' +
         'font-family:Pretendard,-apple-system,sans-serif}' +
+      /* ── 수평선 (사용자가 긋는 지지·저항선) ──
+       * 라이브러리의 priceLine 은 «잡을» 수가 없다(히트 판정도 커서도 없다) → 박스와 같은 HTML 층.
+       * 덤으로 가격축 autoscale 에서도 빠진다 — 멀리 그은 선 하나가 캔들을 납작하게 만들지 않는다.
+       * 층은 pointer-events:none 이고 선만 auto 다(차트 끌기·휠을 막지 않는다).
+       * 「그리는 중」일 때만 층 전체가 클릭을 받는다 — 그래야 캔버스가 대신 끌리지 않는다. */
+      '.dc-hl-layer{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:3}' +
+      '.dc-hl-layer.draw{pointer-events:auto;cursor:crosshair}' +
+      '.dc-hl{position:absolute;left:0;right:0;height:11px;margin-top:-5px;pointer-events:auto;' +
+        'cursor:ns-resize;touch-action:none}' +
+      '.dc-hl i{position:absolute;left:0;right:0;top:5px;display:block;border-top-width:2px;border-top-style:solid}' +
+      '.dc-hl .hl-t{position:absolute;right:2px;top:-8px;padding:1px 7px;border-radius:4px;color:#fff;' +
+        'font-size:10.5px;font-weight:800;line-height:1.5;white-space:nowrap;font-variant-numeric:tabular-nums;' +
+        'font-family:Pretendard,-apple-system,sans-serif;box-shadow:0 1px 3px rgba(10,25,45,.28)}' +
+      '.dc-hl .hl-x{position:absolute;left:3px;top:-8px;width:17px;height:17px;line-height:16px;text-align:center;' +
+        'border-radius:50%;font-size:11px;font-weight:800;color:#fff;background:rgba(20,28,44,.78);' +
+        'cursor:pointer;opacity:0;transition:opacity .12s;font-family:Pretendard,-apple-system,sans-serif}' +
+      '.dc-hl:hover .hl-x,.dc-hl.on .hl-x{opacity:1}' +
+      '.dc-hl.on i{border-top-style:solid}' +
+      /* 그리는 중 따라다니는 미리보기 — 아직 «선»이 아니라 옅은 점선이다 */
+      '.dc-hl-prev{position:absolute;left:0;right:0;height:0;border-top:1px dashed #f59e0b;opacity:.85;' +
+        'pointer-events:none}' +
+      '.dc-hl-prev span{position:absolute;right:2px;top:-17px;padding:1px 7px;border-radius:4px;' +
+        'background:#f59e0b;color:#20160a;font-size:10.5px;font-weight:800;white-space:nowrap;' +
+        'font-variant-numeric:tabular-nums;font-family:Pretendard,-apple-system,sans-serif}' +
+      /* 차트 안 도구 — 기간 바가 없는 화면(단타 분봉)에서도 그을 수 있어야 해서 차트가 직접 든다.
+       * 평소에도 옅게 «보인다» — 손잡이(.dc-rsz)에서 배운 것: 안 보이면 있는 줄을 모른다. */
+      '.dc-tools{position:absolute;left:6px;top:6px;z-index:6;display:flex;flex-direction:column;gap:4px}' +
+      '.dc-tools button{width:25px;height:25px;padding:0;border-radius:6px;cursor:pointer;font-size:13px;' +
+        'line-height:1;font-family:inherit;font-weight:800;opacity:.5;transition:opacity .12s}' +
+      '.dc-tools button:hover,.dc-tools button.on{opacity:1}' +
+      '.dc-tools.light button{background:rgba(255,255,255,.94);border:1px solid #d3dde6;color:#5b6c7d}' +
+      '.dc-tools.light button.on{background:#22303f;border-color:#22303f;color:#fff}' +
+      '.dc-tools.dark button{background:rgba(27,35,53,.92);border:1px solid var(--line,#26304a);' +
+        'color:var(--ink-dim,#8893ab)}' +
+      '.dc-tools.dark button.on{background:var(--accent,#d9a441);border-color:var(--accent,#d9a441);color:#0b1020}' +
       '.dc-mk{position:absolute;transform:translateX(-50%);white-space:nowrap;' +
         'font-size:11px;font-weight:800;line-height:1.35;color:#fff;padding:2px 6px;border-radius:5px;' +
         'font-variant-numeric:tabular-nums;box-shadow:0 1px 3px rgba(10,25,45,.28);' +
@@ -284,11 +319,20 @@
       '.dc-leg-dark .dc-ilg{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:700;' +
         'color:var(--ink,#dfe6f2);margin-left:10px}' +
       '.dc-leg-dark .dc-ilg i{width:9px;height:3px;border-radius:2px;display:inline-block}' +
-      '.dc-leg-dark .dc-ilg b{font-variant-numeric:tabular-nums}' +
+      /* ★숫자 색을 반드시 덮는다 — 페이지에 `.cl-item b{color:#22303f}`(짙은 남색)가 있어서
+         다크 패널에서는 «이름은 보이는데 숫자만 배경에 묻혔다»(사용자 지적 2026-08-07).
+         선택자를 둘(.dc-leg-dark .dc-ilg b)로 두어 페이지 규칙보다 특정도를 높인다.
+         이름(--ink)보다 숫자를 흰색으로 — 범례에서 눈이 먼저 가야 하는 것은 값이다. */
+      '.dc-leg-dark .dc-ilg b{font-variant-numeric:tabular-nums;color:#fff}' +
       /* 라이트 화면 — 기존 .cl-item 스타일을 쓰되 없을 때를 대비한 최소 규칙 */
       '.dc-ilg{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600}' +
       '.dc-ilg i{width:12px;height:3px;border-radius:2px;display:inline-block}' +
       '.dc-ilg b{font-variant-numeric:tabular-nums}' +
+      /* 십자선이 짚은 «시각» — 숫자가 지금 값이 아님을 이 한 조각이 말한다.
+         옅게 두는 이유: 알려 주되 값보다 먼저 눈에 들어오면 안 된다 */
+      '.dc-lgt{font-size:11px;font-weight:700;opacity:.62;font-variant-numeric:tabular-nums;' +
+        'padding:0 2px;white-space:nowrap}' +
+      '.dc-leg-dark .dc-lgt{color:var(--ink-dim,#8893ab);opacity:.9}' +
       /* 지표 칩 = 클릭하면 변수 수정 모달 (✕ 는 제거) */
       '.dc-ichip{cursor:pointer}' +
       /* ── 도구모음 미리보기 (차트설정 > 구성) — 진짜 바와 같은 클래스를 쓰고 배치만 여기서 ── */
@@ -1002,6 +1046,8 @@
       _sueMarks: [],        // SUE 공시 마커 — 모듈이 스스로 받아 얹는 층 (setCode 참조)
       _sueOn: true, _sueCode: '', _sueRaw: [], _sueFit: 0,   // _sueFit = 실린 봉 안에 «자리가 있는» 공시 수
       _mkLayer: null, _mkVisible: 0,
+      /* 수평선 — 종목의 것이라 화면·축과 무관하다(표 chart_hline). 층은 HTML 이라 가격축에 안 잡힌다 */
+      _code: '', _hlines: [], _hlLayer: null, _hlDraw: false, _hlTools: null,
       _th: null,            // 당일전고선 상태 {obj, show}
       _curPriceOn: false,
       _inds: [],            // 적용된 사용자 지표 [{def, vars}]
@@ -1318,30 +1364,90 @@
     /* ── 사용자 지표 렌더 — 선은 시리즈로, 점은 _indMarks 로 (applyMarkers 가 병합) ── */
     /* 지표 값 범례 — 화면의 가격선 범례(누적단가·자동매도가…) 옆에 지표별 마지막 값을 붙인다.
      * opts.legend 로 컨테이너를 주면 모듈이 그 안의 자기 영역만 갱신한다(기존 항목은 건드리지 않는다). */
-    var legendBox = null;
-    function updateIndLegend() {
+    /* ★「십자선 값 표시」를 켠 지표만 마우스를 따라간다 (2026-08-07 · `chart_indicator.hover`).
+     *   계단선(최고거래량 H/L)은 «지나간 단계가 얼마였나»를 묻는 선이라 켤 값어치가 있지만,
+     *   이동평균처럼 최근값만 보는 선까지 따라가면 숫자가 흔들리기만 한다 —
+     *   그래서 «차트의 성질»이 아니라 «지표의 성질»로 뒀다(사용자 판단).
+     * ★선 위에 숫자를 띄우지 않는다(「그래프에 보이면 혼란스럽다」) — 캔들과 겹쳐 오히려 안 읽힌다.
+     *   이미 값이 사는 자리(범례)를 그 시각의 값으로 바꾼다.
+     * ★언제 것인지 반드시 적는다 — 날짜 없이 숫자만 바뀌면 「지금 값」으로 읽혀 거짓이 된다. */
+    var legendBox = null, legendSig = '';
+    function crossLabel(t) {
+      var p = function (n) { return (n < 10 ? '0' : '') + n; };
+      if (typeof t === 'number') {
+        // 분봉 time 은 KST 벽시계를 UTC 로 담은 초 — 그래서 getUTC* 로 읽는다
+        var d = new Date(t * 1000);
+        return p(d.getUTCMonth() + 1) + '/' + p(d.getUTCDate()) + ' '
+             + p(d.getUTCHours()) + ':' + p(d.getUTCMinutes());
+      }
+      var v = ymd(t);
+      return v ? (p(v[1]) + '/' + p(v[2])) : String(t);
+    }
+    function updateIndLegend(cross) {
       if (!opts.legend) return;
       var host2 = (typeof opts.legend === 'string') ? document.getElementById(opts.legend) : opts.legend;
       if (!host2) return;
+      var at = (cross && cross.time !== undefined && cross.seriesData) ? cross.seriesData : null;
+      // 그릴 것을 먼저 만든다 — 십자선은 픽셀마다 오므로 «달라졌을 때만» DOM 을 건드린다
+      var items = [], follow = false;
+      self._indLast.forEach(function (L) {
+        var v = L.last, hov = false;
+        if (at && L.hover && L.series) {         // ★이 지표가 「십자선 값 표시」를 켰을 때만
+          var d = at.get(L.series);
+          v = (d && d.value !== undefined && d.value !== null) ? d.value : null;
+          hov = true;
+          follow = true;
+        }
+        // 짚은 자리에 값이 없으면(계단이 아직 안 생긴 구간) 항목을 지우지 말고 «없음»으로 —
+        // 사라졌다 나타나면 옆 항목들이 밀려 눈이 따라가지 못한다
+        if (v === null || v === undefined || !isFinite(v)) {
+          if (!hov) return;                      // 마지막 값이 없는 항목은 평소에 안 그린다
+          items.push({ name: L.name, color: L.color, text: '—' });
+        } else {
+          items.push({ name: L.name, color: L.color, text: Math.round(v).toLocaleString() });
+        }
+      });
+      // 따라가는 지표가 하나도 없으면 시각도 안 적는다 — 안 그러면 「멈춘 숫자 옆에 흐르는 날짜」가 된다
+      var sig = follow ? ('@' + crossLabel(cross.time)) : '';
+      items.forEach(function (it) { sig += '|' + it.name + it.text + it.color; });
+      if (sig === legendSig && legendBox) return;
+      legendSig = sig;
+
       if (!legendBox) {
         legendBox = document.createElement('span');
         legendBox.className = 'dc-ind-legend';
         host2.appendChild(legendBox);
       }
       legendBox.textContent = '';
-      self._indLast.forEach(function (L) {
-        if (L.last === null || L.last === undefined) return;
+      if (follow && items.length) {
+        var tm = document.createElement('span');
+        tm.className = 'dc-lgt';
+        tm.textContent = crossLabel(cross.time);
+        legendBox.appendChild(tm);
+      }
+      items.forEach(function (it) {
         var el = document.createElement('span');
         el.className = 'cl-item dc-ilg';
         var i = document.createElement('i');
-        i.style.background = L.color;
+        i.style.background = it.color;
         el.appendChild(i);
-        el.appendChild(document.createTextNode(L.name + ' '));
+        el.appendChild(document.createTextNode(it.name + ' '));
         var b = document.createElement('b');
-        b.textContent = Math.round(L.last).toLocaleString();
+        b.textContent = it.text;
         el.appendChild(b);
         legendBox.appendChild(el);
       });
+    }
+    /* 십자선을 따라간다. 차트 밖으로 나가면 «마지막 값»으로 돌아온다 —
+     * 짚지 않았는데 옛 값이 남아 있으면 그것이 곧 「다른 말」이다. */
+    if (opts.legend) {
+      /* ★가드는 «point 가 있나»가 아니라 «seriesData 가 있나»다 — 마우스 없이 놓는 십자선
+       * (linkCrosshair 가 옆 패널에 setCrosshairPosition 하는 경우)에는 point 가 없다.
+       * point 로 걸러 두면 그 경우 범례가 안 따라온다(테스트가 잡았다). */
+      chart.subscribeCrosshairMove(function (p) {
+        updateIndLegend((p && p.time !== undefined && p.seriesData) ? p : null);
+      });
+      host.addEventListener('mouseleave', function () { updateIndLegend(null); });
     }
 
     /* ── 옛 단계 오른쪽 연장 (계단선 전용) ──
@@ -1406,11 +1512,15 @@
           for (var li = vals.length - 1; li >= 0; li--) {
             if (vals[li] !== null && vals[li] !== undefined && isFinite(vals[li])) { lastV = vals[li]; break; }
           }
-          self._indLast.push({
+          /* 범례 항목. series 는 아래에서 채운다 — 십자선이 짚은 봉의 값을 그 시리즈에서 읽는다
+           * (점 지표는 시리즈가 없어 series 가 null 로 남고, 그때는 마지막 값 그대로 보인다). */
+          var leg = {
             // 이름의 #토큰 → 지금 축의 변수 값 (예: 'H선(#1)' → 'H선(120)')
             name: indLabel(pt.name || ap.def.name, ap.def, ap.vars, self._tf),
-            color: pt.color, last: lastV
-          });
+            color: pt.color, last: lastV, series: null,
+            hover: !!+(ap.def.hover || 0)        // 「십자선 값 표시」를 켠 지표인가 (지표 관리에서 정한다)
+          };
+          self._indLast.push(leg);
           if (ap.def.draw === 'point') {
             for (var i = 0; i < fb.length; i++) {
               var v = vals[i];
@@ -1436,6 +1546,7 @@
             // 캔들도 전체가 실려 있으므로 지표도 전체 — 스크롤로 과거를 봐도 선이 이어진다
             s.setData(pairs);
             self._indSeries.push(s);
+            leg.series = s;                     // 십자선이 이 시리즈에서 그 봉의 값을 읽는다
             if (pt.ext > 0) drawStepExtends(pt, vals, fb);
           }
         });
@@ -1600,6 +1711,294 @@
       });
     }
 
+    /* ── 수평선 — 사용자가 긋는 지지·저항선 (별첨1 HTS) ─────────────────────
+     * ★주인은 «종목»이다. 「62,400 이 저항이다」는 그 종목의 사실이라 축·기간·화면에 매이지 않는다
+     *   (표 chart_hline · 한 종목을 보는 차트가 여럿이면 «같은 배열»을 나눠 쓴다 — 아래 hlShare).
+     * ★라이브러리 priceLine 을 안 쓰는 이유: 잡을 수도 끌 수도 없다(히트 판정이 없다).
+     *   HTML 층이라 덤으로 가격축 autoscale 에서도 빠진다 — 멀리 그은 선이 캔들을 누르지 않는다.
+     * ★가격은 호가 단위로 스냅한다 — 없으면 62,412 처럼 «있을 수 없는 값»에 선이 선다. */
+    function hlSnap(p) {
+      var t = p < 2000 ? 1 : p < 5000 ? 5 : p < 20000 ? 10 : p < 50000 ? 50
+            : p < 200000 ? 100 : p < 500000 ? 500 : 1000;
+      return Math.round(p / t) * t;
+    }
+    function hlFmt(p) {
+      if (!isFinite(p)) return '';
+      return (Math.abs(p) >= 100 ? Math.round(p) : Math.round(p * 100) / 100).toLocaleString();
+    }
+    function hlLabel(L) { return hlFmt(L.price) + (L.memo ? ' · ' + L.memo : ''); }
+    function hlYToPrice(y) {
+      if (!self._main) return null;
+      var p = self._main.coordinateToPrice(y);
+      return (p === null || p === undefined || !(p > 0)) ? null : hlSnap(p);
+    }
+    function hlLayer() {
+      if (self._hlLayer) return self._hlLayer;
+      anchorHost();
+      var lay = document.createElement('div');
+      lay.className = 'dc-hl-layer';
+      host.appendChild(lay);
+      self._hlLayer = lay;
+      /* 그리는 중에만 층이 클릭을 받는다(.draw) — 아니면 캔버스가 대신 끌린다 */
+      lay.addEventListener('mousemove', function (e) {
+        if (self._hlDraw) hlPreview(e.clientY - host.getBoundingClientRect().top);
+      });
+      lay.addEventListener('mouseleave', hlPreviewOff);
+      lay.addEventListener('click', function (e) {
+        if (!self._hlDraw) return;
+        var price = hlYToPrice(e.clientY - host.getBoundingClientRect().top);
+        self.hlineMode(false);
+        if (price === null) return;
+        var L = { id: 0, price: price, color: HL_COLOR, width: 2, style: 'solid', memo: '' };
+        self._hlines.push(L);
+        hlPersist(L);
+      });
+      return lay;
+    }
+    function hlPreview(y) {
+      var lay = hlLayer(), el = lay.querySelector('.dc-hl-prev');
+      var price = hlYToPrice(y);
+      if (price === null) return hlPreviewOff();
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'dc-hl-prev';
+        el.appendChild(document.createElement('span'));
+        lay.appendChild(el);
+      }
+      el.style.top = y + 'px';
+      el.firstChild.textContent = hlFmt(price);
+    }
+    function hlPreviewOff() {
+      if (!self._hlLayer) return;
+      var el = self._hlLayer.querySelector('.dc-hl-prev');
+      if (el) el.parentNode.removeChild(el);
+    }
+    /* 선 하나 그리기 — 끌어서 옮기고 · ✕ 로 지우고 · 두 번 누르면 색·굵기·메모 */
+    function hlEl(L, y) {
+      var el = document.createElement('div');
+      el.className = 'dc-hl';
+      el.style.top = y + 'px';
+      var ln = document.createElement('i');
+      ln.style.borderTopColor = L.color;
+      ln.style.borderTopWidth = (L.width || 2) + 'px';
+      ln.style.borderTopStyle = (L.style === 'dashed' || L.style === 'dotted') ? L.style : 'solid';
+      el.appendChild(ln);
+      var tag = document.createElement('span');
+      tag.className = 'hl-t';
+      tag.style.background = L.color;
+      tag.style.color = inkOn(L.color);
+      tag.textContent = hlLabel(L);
+      el.appendChild(tag);
+      var x = document.createElement('b');
+      x.className = 'hl-x';
+      x.textContent = '✕';
+      x.title = '이 수평선 지우기';
+      x.onclick = function (e) { e.stopPropagation(); hlRemove(L); };
+      el.appendChild(x);
+
+      /* 끌어서 옮기기. ★포인터 캡처를 «선»에 건다 — 드래그 중에는 다시 그리지 않으므로
+       * 이 요소가 DOM 에서 떨어질 일이 없다(선물 화면에서 겪은 캡처 유실의 반대 조건). */
+      var drag = null;
+      el.addEventListener('pointerdown', function (e) {
+        if (self._hlDraw || e.target === x) return;
+        drag = { y0: e.clientY, top: parseFloat(el.style.top) || 0, moved: false };
+        try { el.setPointerCapture(e.pointerId); } catch (err) { /* 캡처는 있으면 좋은 것뿐 */ }
+        el.classList.add('on');
+        e.preventDefault();
+        e.stopPropagation();
+      });
+      el.addEventListener('pointermove', function (e) {
+        if (!drag) return;
+        var ny = drag.top + (e.clientY - drag.y0);
+        if (Math.abs(e.clientY - drag.y0) > 2) drag.moved = true;
+        el.style.top = ny + 'px';
+        var p = hlYToPrice(ny);
+        if (p !== null) tag.textContent = hlFmt(p) + (L.memo ? ' · ' + L.memo : '');
+      });
+      function endDrag() {
+        if (!drag) return;
+        var moved = drag.moved;
+        drag = null;
+        el.classList.remove('on');
+        if (!moved) return;
+        var p = hlYToPrice(parseFloat(el.style.top) || 0);
+        if (p === null) { hlDraw(); return; }      // 축 밖으로 끌었으면 없던 일로
+        L.price = p;
+        hlPersist(L);
+      }
+      el.addEventListener('pointerup', endDrag);
+      el.addEventListener('pointercancel', endDrag);
+      el.addEventListener('dblclick', function (e) { e.stopPropagation(); hlEdit(L); });
+      return el;
+    }
+    function hlDraw() {
+      if (!self._hlLayer && !(self._hlines || []).length) return;
+      var lay = hlLayer();
+      var prev = lay.querySelector('.dc-hl-prev');    // 미리보기는 «그리는 중»의 것이라 살려 둔다
+      lay.textContent = '';
+      if (prev) lay.appendChild(prev);
+      if (!self._main) return;
+      var hh = host.clientHeight;
+      (self._hlines || []).forEach(function (L) {
+        var y = self._main.priceToCoordinate(L.price);
+        if (y === null || y === undefined) return;    // 지금 가격축 밖 — 조용히 생략
+        if (y < -2 || y > hh + 2) return;
+        lay.appendChild(hlEl(L, y));
+      });
+    }
+    self._hlRedraw = hlDraw;   // 같은 종목을 보는 다른 차트가 바꿨을 때 hlShare 가 부른다
+
+    /* 저장 — 화면이 먼저 그리고(손을 기다리게 하지 않는다) 서버 응답으로 «원본»을 덮는다.
+     * 실패는 조용히 넘기지 않는다: 되받아 읽어 화면을 서버와 맞추고 사람에게 말한다. */
+    function hlPersist(L) {
+      hlSortShare(self._code, self._hlines);
+      hlBroadcast(self._code);
+      if (!self._code) return;
+      apiPost('hline_save', {
+        id: String(L.id || 0), code: self._code, price: String(L.price),
+        color: L.color, width: String(L.width || 2), style: L.style || 'solid', memo: L.memo || ''
+      }).then(function (d) {
+        if (!d || !d.line) throw new Error('save');
+        L.id = d.line.id; L.price = d.line.price; L.color = d.line.color;
+        L.width = d.line.width; L.style = d.line.style; L.memo = d.line.memo;
+        hlSortShare(self._code, self._hlines);
+        hlBroadcast(self._code);
+      }).catch(function () { hlFail('수평선을 저장하지 못했습니다.'); });
+    }
+    function hlRemove(L) {
+      var i = self._hlines.indexOf(L);
+      if (i >= 0) self._hlines.splice(i, 1);
+      hlBroadcast(self._code);
+      if (!L.id) return;
+      apiPost('hline_del', { id: String(L.id) })
+        .then(function (d) { if (!d || !d.ok) throw new Error('del'); })
+        .catch(function () { hlFail('수평선을 지우지 못했습니다.'); });
+    }
+    /* 서버와 어긋났을 때 — 사람에게 말하고 서버 값으로 되맞춘다.
+     * (지표 렌더의 «조용한 실패»를 걷어낸 것과 같은 이유. 다만 여기서 조용하면 더 나쁘다:
+     *  화면엔 선이 있는데 다음에 열면 없다 = 「저장이 안 된다」로 한참 헤맨다.) */
+    function hlFail(msg) {
+      hlReload(self._code, true).then(function () { hlBroadcast(self._code); });
+      openModal({
+        theme: opts.theme, title: '수평선',
+        build: function (bd) { modalNote(bd, msg + ' 화면을 서버 값으로 되돌렸습니다.'); },
+        buttons: [{ label: '확인', kind: 'pri' }]
+      });
+    }
+    /* 색·굵기·선종류·가격·메모 — 칩 모달과 같은 결(모듈이 통째로 그린다) */
+    function hlEdit(L) {
+      var pIn, mIn, wSel, sSel, cur = L.color;
+      openModal({
+        theme: opts.theme, title: '수평선', sub: hlFmt(L.price),
+        build: function (bd) {
+          function row(label, node) {
+            var r = document.createElement('div');
+            r.className = 'dc-mrow plain';
+            var b = document.createElement('b');
+            b.textContent = label;
+            b.style.minWidth = '52px';
+            r.appendChild(b);
+            r.appendChild(node);
+            bd.appendChild(r);
+            return r;
+          }
+          pIn = document.createElement('input');
+          pIn.type = 'text';
+          pIn.value = hlFmt(L.price);
+          pIn.style.cssText = 'width:96px;text-align:right;font-family:inherit;font-size:12px;' +
+                              'border-radius:6px;padding:3px 6px';
+          row('가격', pIn);
+
+          var pal = document.createElement('div');
+          pal.style.cssText = 'display:flex;gap:5px;flex-wrap:wrap';
+          HL_PALETTE.forEach(function (c) {
+            var sw = document.createElement('button');
+            sw.type = 'button';
+            sw.style.cssText = 'width:20px;height:20px;border-radius:5px;cursor:pointer;background:' + c +
+                               ';border:2px solid ' + (c === cur ? '#22303f' : 'transparent');
+            sw.onclick = function () {
+              cur = c;
+              Array.prototype.forEach.call(pal.children, function (o) { o.style.borderColor = 'transparent'; });
+              sw.style.borderColor = '#22303f';
+            };
+            pal.appendChild(sw);
+          });
+          row('색', pal);
+
+          wSel = document.createElement('select');
+          [1, 2, 3, 4, 5].forEach(function (w) {
+            var o = document.createElement('option');
+            o.value = String(w); o.textContent = w + 'pt';
+            if (w === (L.width || 2)) o.selected = true;
+            wSel.appendChild(o);
+          });
+          row('굵기', wSel);
+
+          sSel = document.createElement('select');
+          [['solid', '실선'], ['dashed', '파선'], ['dotted', '점선']].forEach(function (s) {
+            var o = document.createElement('option');
+            o.value = s[0]; o.textContent = s[1];
+            if (s[0] === (L.style || 'solid')) o.selected = true;
+            sSel.appendChild(o);
+          });
+          row('종류', sSel);
+
+          mIn = document.createElement('input');
+          mIn.type = 'text';
+          mIn.maxLength = 20;
+          mIn.value = L.memo || '';
+          mIn.placeholder = '예) 1차 저항';
+          mIn.style.cssText = 'width:150px;font-family:inherit;font-size:12px;border-radius:6px;padding:3px 6px';
+          row('메모', mIn);
+          modalNote(bd, '이 선은 종목에 붙습니다 — 다른 차트에서도 같은 자리에 보입니다.');
+        },
+        buttons: [
+          { label: '지우기', kind: 'del', onClick: function (close) { hlRemove(L); close(); } },
+          { label: '취소' },
+          { label: '저장', kind: 'pri', onClick: function (close) {
+              var p = parseFloat(String(pIn.value).replace(/,/g, ''));
+              if (isFinite(p) && p > 0) L.price = hlSnap(p);
+              L.color = cur;
+              L.width = +wSel.value || 2;
+              L.style = sSel.value;
+              L.memo  = mIn.value.trim();
+              hlPersist(L);
+              close();
+            } }
+        ]
+      });
+    }
+    /* 차트 안 도구 — 기간 바가 없는 화면(단타 분봉 패널)에서도 그을 수 있어야 한다.
+     * 별첨1 의 HTS 도 도구를 차트 안에 둔다. 종목이 없으면 저장할 곳이 없으므로 달지 않는다. */
+    function hlTools() {
+      if (self._hlTools || !feats('draw.hline') || opts.draw === false) return;
+      anchorHost();
+      var box = document.createElement('div');
+      box.className = 'dc-tools ' + (opts.theme === 'dark' ? 'dark' : 'light');
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = '─';
+      b.title = '수평선 긋기 — 누른 뒤 원하는 높이를 클릭 (ESC 취소)\n'
+              + '선을 끌면 옮기고 · ✕ 로 지우고 · 두 번 누르면 색·굵기·메모';
+      b.onclick = function (e) { e.stopPropagation(); self.hlineMode(); };
+      box.appendChild(b);
+      host.appendChild(box);
+      self._hlTools = { box: box, btn: b };
+    }
+    /* 그리기 모드 — 켜면 층이 클릭을 받고 커서가 십자가 된다.
+     * ★선 하나를 놓으면 스스로 꺼진다. 계속 켜 두면 차트를 끌 수 없어 «갇힌» 느낌이 든다. */
+    self.hlineMode = function (on) {
+      var want = (on === undefined) ? !self._hlDraw : !!on;
+      self._hlDraw = want;
+      hlLayer().classList.toggle('draw', want);
+      if (self._hlTools) self._hlTools.btn.classList.toggle('on', want);
+      if (!want) hlPreviewOff();
+      return self;
+    };
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && self._hlDraw) self.hlineMode(false);
+    });
+
     /* ── 오버레이 통합 리프레시 (스크롤·줌·리사이즈 추종) ── */
     function overlaysSoon() {
       if (rafId) return;
@@ -1607,6 +2006,7 @@
         rafId = 0;
         drawMarkChips();
         drawBoxes();
+        hlDraw();
       });
     }
     chart.timeScale().subscribeVisibleLogicalRangeChange(overlaysSoon);
@@ -1912,14 +2312,32 @@
       bar._sueBtn.style.display = n ? '' : 'none';
     }
     self.setSue = function (on) { self._sueOn = !!on; sueSnap(); return self; };
-    /* 이 차트가 보고 있는 종목. 기능이 꺼져 있으면 부르지도 않는다(=조회 0회). */
+    /* 이 차트가 보고 있는 종목. 기능이 꺼져 있으면 부르지도 않는다(=조회 0회).
+     * 층이 둘 붙는다 — SUE 공시 마커(위)와 사용자 수평선(아래). 둘은 서로를 모른다. */
     self.setCode = function (code) {
       code = String(code || '');
       if (code === self._sueCode) return self;
+
+      /* ── 수평선 층 — 종목이 바뀌면 그 종목의 «공유 배열»로 갈아탄다 ── */
+      self._code = code;
+      self._hlines = hlShare(code);
+      if (self._hlDraw) self.hlineMode(false);      // 그리다 만 상태를 다른 종목으로 끌고 가지 않는다
+      if (code && feats('draw.hline')) {
+        hlTools();
+        hlDraw();
+        hlReload(code).then(function () { if (self._code === code) hlDraw(); });
+      } else {
+        hlDraw();                                   // 목록이 비었으니 층도 비운다
+      }
+
       self._sueCode = code;
       self._sueRaw = [];
       self._sueMarks = [];
-      if (!code || !feats('overlay.sue_markers')) { applyMarkers(); return self; }
+      /* ★분봉 축에는 SUE 를 얹지 않는다(2026-08-07). 공시일은 «날짜»라 스냅이 성립하지 않는다 —
+       * 분봉의 time 은 초 단위 숫자여서 'YYYY-MM-DD' 와 비교하면 어느 쪽도 참이 되지 않고,
+       * 결국 «모든 공시가 마지막 봉에» 붙는다(수평선을 넣으며 분봉에도 setCode 를 부르게 되어 드러났다).
+       * 지표의 「보여 줄 축」과 같은 규칙이다: 뜻이 없는 축에는 아예 안 나온다. */
+      if (!code || self._tf === 'min' || !feats('overlay.sue_markers')) { applyMarkers(); return self; }
       sueLoad(code).then(function (d) {
         if (self._sueCode !== code) return;          // 그 사이 다른 종목으로 바뀌었으면 버린다
         self._sueRaw = d.marks || [];
@@ -2089,7 +2507,13 @@
       return self;
     };
 
-    // opts.code — 이 차트가 보는 종목. 주면 SUE 공시 마커를 모듈이 알아서 얹는다
+    /* 같은 종목을 보는 차트끼리 수평선을 나눠 쓰기 위한 등록 (hlBroadcast 참조).
+     * host 가 문서에서 사라진 차트는 방송할 때 목록에서 빠진다. */
+    self._hlHost = host;
+    _hlCharts.push(self);
+    self.hlines = function () { return (self._hlines || []).slice(); };
+
+    // opts.code — 이 차트가 보는 종목. 주면 SUE 공시 마커·사용자 수평선을 모듈이 알아서 얹는다
     if (opts.code) self.setCode(opts.code);
 
     /* 라이브러리 객체를 꺼내 쓰는 통로 — 모듈이 감싸지 못한 일(차트 간 crosshair 연동 등)에만.
@@ -2456,6 +2880,7 @@
     if (on('overlay.trade_markers'))  layers.push('체결 마커');
     if (on('overlay.sue_markers'))    layers.push('SUE 공시 마커');
     if (on('overlay.intraday_ref'))   layers.push('당일전고선·현재가선');
+    if (on('draw.hline'))             layers.push('수평선 도구(왼쪽 위 ─)');
     if (on('overlay.box_ladder'))     layers.push('박스 후보선·선택 지지선');
     if (on('panel.minute'))           layers.push('분봉 보조 차트');
     var note = document.createElement('div');
@@ -2525,6 +2950,53 @@
 
   /* ── SUE 공시 마커 — 종목당 한 번만 받아 캐시 (단타처럼 종목을 갈아 끼우는 화면 대비) ── */
   var _sueCache = {};
+  /* ── 수평선 저장소 — 종목 하나에 배열 하나 ──────────────────────────────
+   * 같은 종목을 보는 차트들이 «그 배열»을 나눠 쓴다(단타는 한 종목을 세 패널로 본다 —
+   * 분봉에 그은 선이 일봉에도 그 자리에 서야 한다). 그래서 배열을 갈아끼우지 않고
+   * 내용만 바꾼다(splice) — 참조가 갈리는 순간 화면끼리 다른 말을 하기 시작한다. */
+  var HL_COLOR   = '#f59e0b';
+  var HL_PALETTE = ['#f59e0b', '#ef4444', '#3b82f6', '#22c55e', '#a855f7', '#64748b'];
+  var _hlStore = {}, _hlLoaded = {}, _hlCharts = [];
+  function hlShare(code) {
+    if (!code) return [];
+    if (!_hlStore[code]) _hlStore[code] = [];
+    return _hlStore[code];
+  }
+  function hlSortShare(code, arr) {
+    arr.sort(function (a, b) { return b.price - a.price; });   // 위에서 아래로 (서버 정렬과 같은 순서)
+  }
+  /* 바꾼 쪽이 나머지에게 알린다. 죽은 차트(화면이 갈아치운 host)는 이 김에 목록에서 뺀다 */
+  function hlBroadcast(code) {
+    for (var i = _hlCharts.length - 1; i >= 0; i--) {
+      var dc = _hlCharts[i];
+      if (!dc._hlHost || !document.body.contains(dc._hlHost)) { _hlCharts.splice(i, 1); continue; }
+      if (dc._code === code && dc._hlRedraw) dc._hlRedraw();
+    }
+  }
+  function hlReload(code, force) {
+    if (!code) return Promise.resolve([]);
+    var arr = hlShare(code);
+    if (_hlLoaded[code] && !force) return Promise.resolve(arr);
+    _hlLoaded[code] = true;
+    return fetch(API + '?module=ind&action=hline&code=' + encodeURIComponent(code),
+                 { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        arr.splice(0, arr.length);                     // ★내용만 바꾼다 — 참조는 그대로
+        (d && d.lines ? d.lines : []).forEach(function (L) { arr.push(L); });
+        return arr;
+      })
+      .catch(function () { return arr; });             // 선 하나 때문에 화면이 죽지 않는다
+  }
+  /* 배경색 위에서 읽히는 글자색 — 밝은 주황 위의 흰 글씨는 안 보인다 */
+  function inkOn(hex) {
+    var m = /^#([0-9a-f]{6})$/i.exec(String(hex || ''));
+    if (!m) return '#fff';
+    var n = parseInt(m[1], 16);
+    var l = 0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255);
+    return l > 168 ? '#20160a' : '#fff';
+  }
+
   function sueLoad(code) {
     if (_sueCache[code]) return _sueCache[code];
     _sueCache[code] = fetch(API + '?module=sue&action=marks&code=' + encodeURIComponent(code),

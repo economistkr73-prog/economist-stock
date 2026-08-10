@@ -61,7 +61,9 @@ function quant_badge_many(PDO $pdo, array $items): array
             $bxAll = (new KrxAmt($pdo))->boxStatusMany($sigs);
             foreach ($sigs as $s) {
                 $b = $bxAll[$s['code'] . '|' . $s['d']] ?? null;
-                if ($b) $bx[$s['code']] = ['st' => $b['st'], 'txt' => $b['txt'],
+                /* ★'bx-na' = 박스 상향돌파(5조건) 박스가 아님(2026-08-10 재정의 게이트) —
+                 *   좁은 목록(단타 사이드바)에 '-' 칩을 늘어놓지 않고 조용히 생략한다 */
+                if ($b && $b['st'] !== 'bx-na') $bx[$s['code']] = ['st' => $b['st'], 'txt' => $b['txt'],
                     'tip' => '최고 거래대금 신호일 ' . $s['d'] . ' — ' . $b['tip']];
             }
         }

@@ -46,6 +46,11 @@ class ChartIndicator
          * ★NULL(빈 값) = 전 축. 그래서 옛 지표는 손대지 않아도 지금까지처럼 모든 축에 나온다.
          *   네 축을 다 켜도 NULL 로 되돌린다 — 같은 뜻을 두 모양으로 저장하면 축이 늘 때 갈린다. */
         $this->pdo->exec("ALTER TABLE chart_indicator ADD COLUMN IF NOT EXISTS tfs_json VARCHAR(60) NULL AFTER vars_json");
+        /* 「십자선 값 표시」 — 마우스가 짚은 봉의 값을 범례에 보여 줄지 (2026-08-07).
+         * ★지표의 성질이지 차트의 성질이 아니다: 계단선(최고거래량 H/L)은 «지나간 단계가 얼마였나»를
+         *   묻는 선이라 켤 값어치가 있지만, 이동평균처럼 늘 최근값만 보는 선은 숫자가 흔들리기만 한다.
+         * ★기본 0 — 옛 지표의 범례가 어느 날 갑자기 마우스를 따라다니면 그것이 곧 「다른 말」이다. */
+        $this->pdo->exec("ALTER TABLE chart_indicator ADD COLUMN IF NOT EXISTS hover TINYINT NOT NULL DEFAULT 0 AFTER tfs_json");
 
         /* 차트틀 = 이름 붙인 지표 세트 (키움 「차트틀 적용/관리」).
          * 틀 하나가 일/주/월 세트를 각각 들고 있어 축을 바꿔도 그 축의 구성으로 따라간다. */
@@ -75,6 +80,26 @@ class ChartIndicator
          *   화면 행 `fund`      : {"h":420}  차트 높이 (축과 무관 — 사용자가 끌어서 정한다)
          *   축 행   `fund_day`  : 기간(index·bars) 자리 — 화면마다 폭이 달라 기간도 달라야 한다 */
         $this->pdo->exec("ALTER TABLE chart_pref ADD COLUMN IF NOT EXISTS view_json TEXT NULL AFTER features_json");
+
+        /* ── 사용자가 그은 수평선 (지지·저항) — 2026-08-07 ──
+         * ★주인은 «종목»이지 «화면»도 «축»도 아니다. 「62,400 이 저항이다」는 그 종목의 사실이라,
+         *   재무분석에서 그은 선이 단타 분봉에서도 같은 자리에 있어야 한다.
+         *   그래서 chart_pref(화면×축) 계열에 얹지 않고 code 를 키로 하는 별도 표로 둔다.
+         * ★가격은 DECIMAL 이다 — 우선주·ETF 에 소수 호가가 있고, FLOAT 로 담으면
+         *   「내가 62,400 에 그은 선」이 62,399.9998 로 되살아난다. */
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS chart_hline (
+                id     INT AUTO_INCREMENT PRIMARY KEY,
+                code   VARCHAR(10)   NOT NULL,
+                price  DECIMAL(18,4) NOT NULL,
+                color  VARCHAR(20)   NOT NULL DEFAULT '#f59e0b',
+                width  TINYINT       NOT NULL DEFAULT 2,
+                style  VARCHAR(10)   NOT NULL DEFAULT 'solid',
+                memo   VARCHAR(60)   NOT NULL DEFAULT '',
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                KEY k_code (code)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
     }
 
     /** 지표 세트 정규화 — [{id, vars:{}, exts:{수식칸위치:연장수}?}] */
@@ -360,10 +385,11 @@ class ChartIndicator
     public function list(): array
     {
         $rows = $this->pdo->query(
-            "SELECT id, name, draw, expr, lines_json, vars_json, tfs_json, color, note FROM chart_indicator ORDER BY name"
+            "SELECT id, name, draw, expr, lines_json, vars_json, tfs_json, hover, color, note FROM chart_indicator ORDER BY name"
         )->fetchAll(PDO::FETCH_ASSOC);
         foreach ($rows as &$r) {
             $r['id']    = (int)$r['id'];
+            $r['hover'] = (int)$r['hover'];
             $r['vars']  = json_decode($r['vars_json'], true) ?: new stdClass();
             $lines      = $r['lines_json'] ? json_decode($r['lines_json'], true) : null;
             $r['lines'] = is_array($lines) ? $lines : [];   // 빈 배열이면 프론트가 expr(구형)로 폴백
@@ -423,18 +449,21 @@ class ChartIndicator
         $tfs     = self::cleanTfs($d['tfs'] ?? null);
         $tfsJson = $tfs ? json_encode($tfs) : null;
 
+        // 십자선 값 표시 (기본 끔) — 칸을 안 보내는 구형 화면·API 는 끈 것으로 본다
+        $hover = empty($d['hover']) ? 0 : 1;
+
         $id = (int)($d['id'] ?? 0);
         if ($id > 0) {
             $st = $this->pdo->prepare(
-                "UPDATE chart_indicator SET name=?, draw=?, expr=?, lines_json=?, vars_json=?, tfs_json=?, color=?, note=? WHERE id=?"
+                "UPDATE chart_indicator SET name=?, draw=?, expr=?, lines_json=?, vars_json=?, tfs_json=?, hover=?, color=?, note=? WHERE id=?"
             );
-            $st->execute([$name, $draw, $expr, $linesJson, $varsJson, $tfsJson, $color, $note, $id]);
+            $st->execute([$name, $draw, $expr, $linesJson, $varsJson, $tfsJson, $hover, $color, $note, $id]);
             return $id;
         }
         $st = $this->pdo->prepare(
-            "INSERT INTO chart_indicator (name, draw, expr, lines_json, vars_json, tfs_json, color, note) VALUES (?,?,?,?,?,?,?,?)"
+            "INSERT INTO chart_indicator (name, draw, expr, lines_json, vars_json, tfs_json, hover, color, note) VALUES (?,?,?,?,?,?,?,?,?)"
         );
-        $st->execute([$name, $draw, $expr, $linesJson, $varsJson, $tfsJson, $color, $note]);
+        $st->execute([$name, $draw, $expr, $linesJson, $varsJson, $tfsJson, $hover, $color, $note]);
         return (int)$this->pdo->lastInsertId();
     }
 
@@ -442,6 +471,76 @@ class ChartIndicator
     {
         $st = $this->pdo->prepare("DELETE FROM chart_indicator WHERE id=?");
         $st->execute([$id]);
+    }
+
+    /* ══ 수평선 (chart_hline) ═══════════════════════════════════════════════
+     * 화면은 «긋고·끌고·지울» 뿐이고 «무엇이 올바른 값인가»는 여기서 정한다
+     * (색·굵기·선종류 화이트리스트). 화면이 보내는 값을 그대로 믿지 않는다 —
+     * 지표의 cleanLines 가 exw·st 를 클램프하는 것과 같은 결이다. */
+
+    /** 선 종류 — style/dailychart.js 의 STYLE_MAP 과 이름이 같아야 그려진다 */
+    public const HL_STYLES = ['solid', 'dashed', 'dotted'];
+    /** 기본색 = 주황. 캔들(빨강·파랑)·직전고가선(순빨강)·현재가선(금색)과 겹치지 않는 자리 */
+    public const HL_COLOR = '#f59e0b';
+
+    /** 이 종목에 그어 둔 수평선 — 위에서 아래로(차트에서 보이는 순서) */
+    public function hlines(string $code): array
+    {
+        $code = trim($code);
+        if ($code === '') return [];
+        $st = $this->pdo->prepare(
+            "SELECT id, price, color, width, style, memo FROM chart_hline WHERE code=? ORDER BY price DESC"
+        );
+        $st->execute([$code]);
+        $out = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $out[] = [
+                'id'    => (int)$r['id'],
+                'price' => (float)$r['price'],
+                'color' => (string)$r['color'],
+                'width' => (int)$r['width'],
+                'style' => (string)$r['style'],
+                'memo'  => (string)$r['memo'],
+            ];
+        }
+        return $out;
+    }
+
+    /** 긋기·옮기기·고치기 (id 가 있으면 그 선). 반환 = 저장된 그대로 — 화면이 이 값으로 다시 그린다 */
+    public function hlineSave(array $d): array
+    {
+        $code  = trim((string)($d['code'] ?? ''));
+        $price = (float)($d['price'] ?? 0);
+        if ($code === '')   throw new InvalidArgumentException('종목코드가 없습니다');
+        if (!($price > 0))  throw new InvalidArgumentException('가격이 올바르지 않습니다');
+
+        $color = (string)($d['color'] ?? self::HL_COLOR);
+        if (!preg_match('/^#[0-9a-fA-F]{6}$/', $color)) $color = self::HL_COLOR;
+        $width = max(1, min(5, (int)($d['width'] ?? 2)));
+        $style = in_array((string)($d['style'] ?? ''), self::HL_STYLES, true) ? (string)$d['style'] : 'solid';
+        $memo  = trim((string)($d['memo'] ?? ''));
+        $memo  = function_exists('mb_substr') ? mb_substr($memo, 0, 20) : substr($memo, 0, 60);
+
+        $id = (int)($d['id'] ?? 0);
+        if ($id > 0) {
+            $st = $this->pdo->prepare(
+                "UPDATE chart_hline SET code=?, price=?, color=?, width=?, style=?, memo=? WHERE id=?"
+            );
+            $st->execute([$code, $price, $color, $width, $style, $memo, $id]);
+        } else {
+            $st = $this->pdo->prepare(
+                "INSERT INTO chart_hline (code, price, color, width, style, memo) VALUES (?,?,?,?,?,?)"
+            );
+            $st->execute([$code, $price, $color, $width, $style, $memo]);
+            $id = (int)$this->pdo->lastInsertId();
+        }
+        return ['id' => $id, 'price' => $price, 'color' => $color,
+                'width' => $width, 'style' => $style, 'memo' => $memo];
+    }
+
+    public function hlineDelete(int $id): void
+    {
+        $this->pdo->prepare("DELETE FROM chart_hline WHERE id=?")->execute([$id]);
     }
 }
 ?>

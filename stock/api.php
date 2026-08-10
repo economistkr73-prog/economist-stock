@@ -33,6 +33,8 @@ try {
         case 'watch':    api_watch($action, $pdo, $pf);    break;
         case 'preset':   api_preset($action, $pdo, $pf);   break;
         case 'dt':       api_dt($action, $pdo);            break;
+        case 'qm':       api_qm($action, $pdo);            break;
+        case 'fav':      api_fav($action, $pdo);           break;
         default:         pf_api_fail('알 수 없는 module 입니다.');
     }
 } catch (Throwable $e) {
@@ -1343,6 +1345,139 @@ function api_dt(string $action, PDO $pdo): void
         http_response_code(500);
         echo json_encode(['error' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
         exit;
+    }
+}
+
+// ══ 급등주 아카이브 분봉 (qm_bar) ═══════════════════════════════════════
+/**
+ * module=qm — 급등주 분봉 아카이브를 «읽기만» 한다. 전부 JSON.
+ *
+ * ★단타(`module=dt`)와 표가 다르다 — `dt_min` 은 최근 10거래일만 두고 매일 지우는 표라
+ *   1년 전 신호에는 쓸 수 없다. 아카이브(`qm_bar`)는 급등일 «전후 10거래일»을 지우지 않고 담는다.
+ *   그래서 길을 따로 낸다(급등주 규칙 §1 「qm_* 는 dt_* 와 조인하지 않는다」와 같은 결).
+ *
+ * ★수집·판정은 여기서 하지 않는다 — 이 파일은 이미 쌓인 봉을 꺼내 줄 뿐이다.
+ *   (키움을 부르는 자리는 `cron/qm_collect.php` 하나다.)
+ */
+function api_qm(string $action, PDO $pdo): void
+{
+    header('Content-Type: application/json; charset=utf-8');
+    $out = function ($v, int $code = 200) {
+        http_response_code($code);
+        echo json_encode($v, JSON_UNESCAPED_UNICODE);
+        exit;
+    };
+
+    try {
+        switch ($action) {
+            /**
+             * action=bars&code=&d=&span=10 — 신호일 앞뒤 span 거래일의 1분봉.
+             *
+             * ★구간의 «거래일»은 `krx_amt` 로 센다 — 휴장일 표를 새로 만들지 않는다
+             *   (단타 규칙 2 · 퀀트 · 포트폴리오가 전부 같은 원장을 본다).
+             *   달력 날짜로 ±14일 하면 연휴가 낀 구간만 조용히 짧아진다.
+             * ★없으면 빈 배열 + 200 이다 — 「이 신호는 아카이브에 없다」는 오류가 아니다.
+             */
+            case 'bars': {
+                $code = preg_replace('/[^0-9A-Za-z]/', '', (string)($_GET['code'] ?? ''));
+                $d    = (string)($_GET['d'] ?? '');
+                if (strlen($code) !== 6 || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $d)) $out([]);
+                $span = max(1, min(30, (int)($_GET['span'] ?? 10)));
+
+                $st = $pdo->prepare("SELECT d FROM krx_amt WHERE code=? AND d<=? ORDER BY d DESC LIMIT " . ($span + 1));
+                $st->execute([$code, $d]);
+                $back = $st->fetchAll(PDO::FETCH_COLUMN);
+                $from = $back ? end($back) : $d;
+
+                $st = $pdo->prepare("SELECT d FROM krx_amt WHERE code=? AND d>? ORDER BY d ASC LIMIT " . $span);
+                $st->execute([$code, $d]);
+                $fwd = $st->fetchAll(PDO::FETCH_COLUMN);
+                $to  = $fwd ? end($fwd) : $d;
+
+                $st = $pdo->prepare(
+                    "SELECT ts, o, h, l, c, v FROM qm_bar
+                      WHERE code=? AND ts >= ? AND ts < ? + INTERVAL 1 DAY ORDER BY ts");
+                $st->execute([$code, $from, $to]);
+                $rows = [];
+                foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $b) {
+                    $rows[] = ['t' => substr($b['ts'], 0, 16), 'o' => (int)$b['o'], 'h' => (int)$b['h'],
+                               'l' => (int)$b['l'], 'c' => (int)$b['c'], 'v' => (int)$b['v']];
+                }
+                $out($rows);
+            }
+
+            default:
+                $out(['error' => '알 수 없는 action 입니다.'], 200);
+        }
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+}
+
+// ══ 관심차트 그룹 ═══════════════════════════════════════════════════════
+/**
+ * module=fav — 「보다가 괜찮은 차트를 그룹으로 묶는다」. 전부 JSON.
+ * DB 는 `classes/ChartFav.class` 가 전담한다(이 함수는 받아 넘기고 결과만 적는다).
+ */
+function api_fav(string $action, PDO $pdo): void
+{
+    header('Content-Type: application/json; charset=utf-8');
+    $out = function ($v, int $code = 200) {
+        http_response_code($code);
+        echo json_encode($v, JSON_UNESCAPED_UNICODE);
+        exit;
+    };
+
+    try {
+        $fav = new ChartFav($pdo);
+        $src = (string)($_REQUEST['src'] ?? 'flame');
+        if (!isset(ChartFav::SRCS[$src])) $src = 'flame';
+        /* 담을 것들은 'code|d' 배열로 온다 — 키 하나가 «신호 한 건»이다 */
+        $keys = $_REQUEST['keys'] ?? [];
+        if (is_string($keys)) $keys = array_filter(explode(',', $keys));
+        if (!is_array($keys)) $keys = [];
+
+        switch ($action) {
+            case 'list':
+                $out(['groups' => $fav->groups($src)]);
+
+            /* 새 그룹이면 id=0 · 이름만 바꿀 때도 같은 자리 */
+            case 'group_save': {
+                $id = $fav->groupSave((int)($_REQUEST['id'] ?? 0),
+                                      (string)($_REQUEST['name'] ?? ''),
+                                      (string)($_REQUEST['memo'] ?? ''));
+                /* ★그룹을 만들면서 «바로 담는» 길 — 「새 그룹에 담기」가 두 번 왕복하지 않게 */
+                $n = $keys ? $fav->add($id, $src, $keys) : 0;
+                $out(['ok' => true, 'id' => $id, 'added' => $n, 'groups' => $fav->groups($src)]);
+            }
+
+            case 'group_del':
+                $fav->groupDelete((int)($_REQUEST['id'] ?? 0));
+                $out(['ok' => true, 'groups' => $fav->groups($src)]);
+
+            case 'add': {
+                $id = (int)($_REQUEST['fav_id'] ?? 0);
+                if ($id <= 0 || !$fav->group($id)) $out(['ok' => false, 'message' => '그룹을 고르세요.']);
+                $n = $fav->add($id, $src, $keys);
+                $out(['ok' => true, 'added' => $n, 'groups' => $fav->groups($src),
+                      'member' => $fav->memberOf($src, $keys)]);
+            }
+
+            case 'remove': {
+                $id = (int)($_REQUEST['fav_id'] ?? 0);
+                if ($id <= 0) $out(['ok' => false, 'message' => '그룹을 고르세요.']);
+                $n = $fav->remove($id, $src, $keys);
+                $out(['ok' => true, 'removed' => $n, 'groups' => $fav->groups($src),
+                      'member' => $fav->memberOf($src, $keys)]);
+            }
+
+            default:
+                $out(['ok' => false, 'message' => '알 수 없는 action 입니다.']);
+        }
+    } catch (Throwable $e) {
+        $out(['ok' => false, 'message' => $e->getMessage()]);
     }
 }
 ?>

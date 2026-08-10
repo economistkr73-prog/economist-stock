@@ -2906,169 +2906,19 @@ case 'dbrk': {
     say('  통계적 사실만 적는다. 투자 판단·매매 규칙은 여기서 만들지 않는다.');
     break;
 }
-
 // ══════════════════════════════════════════════════════════════════════════
-//  job=flamefill days=365 tp=15 sl=10 — 불꽃형 신호를 «표로» 남긴다. API 콜 0 · 멱등
+//  ⛔ job=flamefill 은 2026-08-09 에 <b>삭제됐다</b> — 표 `qm_flame` 도 함께 DROP.
 //
-//  화면(퀀트 > 패턴분석(불꽃형))이 페이지마다 8년 원장을 훑을 수는 없다.
-//  ★결과(브래킷 판정·5일 최고/최저)까지 «여기서» 계산해 담는다 —
-//    화면이 판정을 다시 하면 잡과 화면이 다른 말을 하게 된다(Thr·ChartFeat 와 같은 패턴).
+//  왜 — 그 화면(퀀트 > 패턴분석(불꽃형))은 「불꽃형 전수 1,528건을 훑는」 자리였는데,
+//  다 훑고 나면 할 일이 없고 새 신호도 안 쌓였다(1회성 스냅샷이었다). 사용자가 거기서
+//  담은 관심차트 365건을 «정의»로 삼아 <b>매일 쌓는 화면</b>으로 합치라고 정했다.
+//
+//  후신 — 표 `bx_cand` · 판정 `stock/lib/boxbrk.php` · 적재 `cron/bx_scan.php` ·
+//         화면 `?mode=boxbrk`(패턴분석 (박스 상향돌파)). 담긴 365건은 src='pick' 으로 옮겼다.
+//
+//  ★이 파일의 8년 분석 잡들(dbrk·mbrk·dp5·dbo…)은 `qm_flame` 을 읽지 않는다 —
+//    `krx_amt`·`qm_bar` 를 직접 훑으므로 이 삭제에 영향받지 않는다(2026-08-09 전수 확인).
 // ══════════════════════════════════════════════════════════════════════════
-case 'flamefill': {
-    $DAYS_BACK = max(30, (int)($_GET['days'] ?? 365));
-    $TP = (float)($_GET['tp'] ?? 15);
-    $SL = (float)($_GET['sl'] ?? 10);
-    $HOLD = 5;
-    $WIN = 120; $MINAMT = 10000000000; $MULT = 20;
-
-    $pdo->exec("CREATE TABLE IF NOT EXISTS qm_flame (
-        code CHAR(6) NOT NULL, d DATE NOT NULL,
-        name VARCHAR(64) NOT NULL DEFAULT '', mkt CHAR(1) NOT NULL DEFAULT '',
-        amt BIGINT UNSIGNED NOT NULL, amt_mult DECIMAL(8,3) NOT NULL COMMENT '거래대금/직전 20일 평균',
-        chg_pct DECIMAL(6,2) NOT NULL, close_prc INT UNSIGNED NOT NULL, prev_prc INT UNSIGNED NOT NULL,
-        f_max5 DECIMAL(6,2) NULL COMMENT 'D+1~D+5 최고가/신호일 종가-1',
-        f_min5 DECIMAL(6,2) NULL, f_d5 DECIMAL(6,2) NULL,
-        f_max5_day TINYINT NULL, f_min5_day TINYINT NULL,
-        brk_kind CHAR(3) NULL COMMENT 'tp 익절 · sl 손절 · amb 모호 · non 미도달',
-        brk_ret DECIMAL(6,2) NULL, brk_tp DECIMAL(5,1) NULL, brk_sl DECIMAL(5,1) NULL,
-        q_ohlc TINYINT NOT NULL DEFAULT 0 COMMENT '★사후 창에 진짜 결측(거래는 있는데 o/h/l 없음) — 판정 불가',
-        q_halt TINYINT NOT NULL DEFAULT 0 COMMENT '★사후 창에 거래정지일 — 그 날은 건너뛰고 판정했다',
-        has_min TINYINT NOT NULL DEFAULT 0 COMMENT '분봉이 있나(급등 이벤트와 겹치나)',
-        made_at DATETIME NOT NULL,
-        PRIMARY KEY (code, d), KEY ix_d (d), KEY ix_kind (brk_kind)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-    /* ★표가 이미 있으면 CREATE IF NOT EXISTS 는 건너뛴다 — 컬럼 추가는 «prepare 전에» 따로 해야 한다
-     *   (2026-08-06: prepare 뒤에 뒀다가 Unknown column 으로 잡이 죽었다). */
-    foreach (['q_ohlc', 'q_halt'] as $qc) {
-        try { $pdo->exec("ALTER TABLE qm_flame ADD COLUMN IF NOT EXISTS {$qc} TINYINT NOT NULL DEFAULT 0"); }
-        catch (Throwable $e) { say('  (' . $qc . ' 추가 실패: ' . $e->getMessage() . ')'); }
-    }
-
-    $from = $pdo->query("SELECT DATE_SUB(MAX(d), INTERVAL {$DAYS_BACK} DAY) FROM krx_amt")->fetchColumn();
-    say('불꽃형 신호 적재 — ' . $from . ' 이후 · API 콜 0');
-    say(sprintf('신호: 직전 %d거래일 최고 거래대금 & %s억↑ & 20평비 %d배↑ · 브래킷 +%.0f%%/−%.0f%% %d일',
-        $WIN - 1, number_format($MINAMT / 1e8), $MULT, $TP, $SL, $HOLD));
-
-    $etf = qm_etf_codes($pdo);
-    $names = [];
-    foreach ($pdo->query("SELECT stock_code, stock_name FROM all_stock_info")->fetchAll(PDO::FETCH_ASSOC)
-             as $r) $names[$r['stock_code']] = $r['stock_name'];
-    try {
-        foreach ($pdo->query("SELECT stock_code, MAX(stock_name) nm FROM krx_daily GROUP BY stock_code")
-                     ->fetchAll(PDO::FETCH_ASSOC) as $r) {
-            if (!isset($names[$r['stock_code']]) && $r['nm'] !== '') $names[$r['stock_code']] = $r['nm'];
-        }
-    } catch (Throwable $e) {}
-
-    $sel = $pdo->prepare("SELECT d,o,h,l,c,vol,amt,list_shrs,mkt FROM krx_amt WHERE code=? AND c>0 ORDER BY d");
-    $ins = $pdo->prepare("INSERT INTO qm_flame
-        (code,d,name,mkt,amt,amt_mult,chg_pct,close_prc,prev_prc,
-         f_max5,f_min5,f_d5,f_max5_day,f_min5_day,brk_kind,brk_ret,brk_tp,brk_sl,q_ohlc,q_halt,has_min,made_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NOW())
-        ON DUPLICATE KEY UPDATE name=VALUES(name), f_max5=VALUES(f_max5), f_min5=VALUES(f_min5),
-            f_d5=VALUES(f_d5), f_max5_day=VALUES(f_max5_day), f_min5_day=VALUES(f_min5_day),
-            brk_kind=VALUES(brk_kind), brk_ret=VALUES(brk_ret), brk_tp=VALUES(brk_tp),
-            brk_sl=VALUES(brk_sl), q_ohlc=VALUES(q_ohlc), q_halt=VALUES(q_halt), made_at=NOW()");
-
-    $codes = $pdo->query("SELECT DISTINCT code FROM krx_amt ORDER BY code")->fetchAll(PDO::FETCH_COLUMN);
-    $n = 0;
-    $pdo->beginTransaction();
-    foreach ($codes as $ci => $code) {
-        if (substr($code, -1) !== '0' || isset($etf[$code])) continue;
-        $nm = (string)($names[$code] ?? '');
-        if ($nm !== '' && (mb_strpos($nm, '스팩') !== false || stripos($nm, 'ETN') !== false)) continue;
-        $sel->execute([$code]);
-        $s = $sel->fetchAll(PDO::FETCH_ASSOC);
-        $cnt = count($s);
-        if ($cnt < $WIN + 2) continue;
-
-        for ($i = $WIN; $i < $cnt; $i++) {
-            if ($s[$i]['d'] < $from) continue;
-            $amt = (float)$s[$i]['amt'];
-            if ($amt < $MINAMT) continue;
-            $mx = 0.0;
-            for ($k = $i - ($WIN - 1); $k < $i; $k++) $mx = max($mx, (float)$s[$k]['amt']);
-            if ($amt <= $mx) continue;
-            $a20 = 0.0;
-            for ($k = $i - 20; $k < $i; $k++) $a20 += (float)$s[$k]['amt'];
-            $a20 /= 20;
-            if ($a20 <= 0 || $amt / $a20 < $MULT) continue;
-
-            $base = (float)$s[$i]['c']; $prev = (float)$s[$i - 1]['c'];
-            if ($base <= 0 || $prev <= 0) continue;
-
-            /* ★사후가 아직 안 찬 건도 «담는다» — 최근 신호를 화면에서 빼면 「요즘 것」을 못 본다.
-             *   대신 결과 칸은 NULL 로 두고 화면이 「아직」이라고 적는다. */
-            $post = [];
-            for ($j = 1; $j <= $HOLD && isset($s[$i + $j]); $j++) $post[] = $s[$i + $j];
-            $max5 = $min5 = $d5 = $maxD = $minD = null; $kind = null; $ret = null;
-            /* ★사후 창의 날을 «가른 뒤» 판정한다 (qm_day_kind 주석 — 2026-08-07 전수 실측)
-             *   halt 거래정지 → 그 날은 체결이 불가능했다. «건너뛰고» 다음 날로 간다.
-             *                   신호를 통째로 빼지 않는다 — 그러면 정지된 적 있는 종목이 사라진다(생존편향).
-             *   gap  진짜 결측 → 고·저를 모르니 브래킷을 판정하지 않는다(종가는 멀쩡해 D+5 만 남긴다). */
-            $ohlcBad = 0; $haltPost = 0; $ok = [];      // $ok: [창에서 몇 번째(1-base) => 그 날 행]
-            foreach ($post as $j => $p) {
-                $dk = qm_day_kind($p);
-                if ($dk === 'gap')  { $ohlcBad = 1; break; }
-                if ($dk === 'halt') { $haltPost = 1; continue; }
-                $ok[$j + 1] = $p;
-            }
-            $full = count($post) === $HOLD;             // 사후 5일이 «다 찼나» (안 찬 최근 신호는 결과 NULL)
-            if ($ohlcBad) {
-                /* 종가는 멀쩡하므로 D+5 수익률만 남긴다 — 나머지는 «모른다»로 둔다 */
-                if ($full) $d5 = ((float)end($post)['c'] / $base - 1) * 100;
-            } elseif ($full && $ok) {
-                foreach ($ok as $j => $p) {
-                    $hp = ((float)$p['h'] / $base - 1) * 100;
-                    $lp = ((float)$p['l'] / $base - 1) * 100;
-                    if ($max5 === null || $hp > $max5) { $max5 = $hp; $maxD = $j; }
-                    if ($min5 === null || $lp < $min5) { $min5 = $lp; $minD = $j; }
-                }
-                /* ★청산은 «마지막 거래 가능일» 종가 — D+5 가 정지면 그 종가는 직전가를 이월한
-                 *   값이라 «팔 수 없던 값»이다. */
-                $d5 = ((float)end($ok)['c'] / $base - 1) * 100;
-                $kind = 'non'; $ret = $d5;
-                foreach ($ok as $p) {
-                    $op = ((float)$p['o'] / $base - 1) * 100;
-                    $hp = ((float)$p['h'] / $base - 1) * 100;
-                    $lp = ((float)$p['l'] / $base - 1) * 100;
-                    if ($op >= $TP)  { $kind = 'tp'; $ret = $op; break; }
-                    if ($op <= -$SL) { $kind = 'sl'; $ret = $op; break; }
-                    if ($hp >= $TP && $lp <= -$SL) { $kind = 'amb'; $ret = null; break; }
-                    if ($hp >= $TP)  { $kind = 'tp'; $ret = $TP;  break; }
-                    if ($lp <= -$SL) { $kind = 'sl'; $ret = -$SL; break; }
-                }
-            }
-            $r2 = fn($x) => $x === null ? null : round($x, 2);
-            $ins->execute([$code, $s[$i]['d'], $nm, (string)$s[$i]['mkt'], (int)$amt,
-                round($amt / $a20, 3), round(($base / $prev - 1) * 100, 2), (int)$base, (int)$prev,
-                $r2($max5), $r2($min5), $r2($d5), $maxD, $minD, $kind, $r2($ret), $TP, $SL,
-                $ohlcBad, $haltPost]);
-            $n++;
-        }
-        if ($ci % 400 === 0) { $pdo->commit(); $pdo->beginTransaction(); }
-    }
-    $pdo->commit();
-
-    /* 분봉이 있는지 = 그 날이 급등(+10%) 이벤트이기도 한가 (qm_bar 는 그것만 담는다) */
-    $pdo->exec("UPDATE qm_flame f SET has_min =
-                  EXISTS(SELECT 1 FROM qm_event e WHERE e.code=f.code AND e.d=f.d)");
-
-    $tot = (int)$pdo->query("SELECT COUNT(*) FROM qm_flame")->fetchColumn();
-    say('  담은 신호 ' . number_format($n) . ' · 표 전체 ' . number_format($tot) . '건');
-    $r = $pdo->query("SELECT COALESCE(brk_kind,'(판정불가)') k, COUNT(*) n FROM qm_flame
-                       GROUP BY k ORDER BY n DESC")->fetchAll(PDO::FETCH_KEY_PAIR);
-    say('  브래킷 판정: ' . json_encode($r, JSON_UNESCAPED_UNICODE));
-    say('  ★그중 진짜 결측(거래는 있었는데 o/h/l 이 없는 날이 사후 창에): '
-        . number_format((int)$pdo->query("SELECT COUNT(*) FROM qm_flame WHERE q_ohlc=1")->fetchColumn())
-        . '건 — 0 으로 메우지 않고 «판정 안 함»으로 둔다');
-    say('  ★사후 창에 거래정지일이 있어 «건너뛰며» 판정한 것: '
-        . number_format((int)$pdo->query("SELECT COUNT(*) FROM qm_flame WHERE q_halt=1")->fetchColumn())
-        . '건 — 그 날은 체결이 불가능했다(신호는 살려 둔다)');
-    say('  분봉 있는 건: ' . number_format((int)$pdo->query("SELECT COUNT(*) FROM qm_flame WHERE has_min=1")
-        ->fetchColumn()));
-    break;
-}
 
 // ══════════════════════════════════════════════════════════════════════════
 //  job=mbrk tp=15 sl=10 days=5 — 브래킷을 «분봉»으로 다시 판정한다. API 콜 0

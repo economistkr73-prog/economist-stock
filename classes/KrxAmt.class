@@ -730,12 +730,51 @@ class KrxAmt
      *   붕괴   = 종가 < L 이 먼저  →  계단(직전 2개 신호의 H·L)이 73.8% 받아준다 · 관통은 3.1%뿐
      *   계단지지 = 붕괴 후 계단 레벨(±2%)에 저가가 닿고 종가가 버팀 → 매집형이면 +1.41%·55.1%
      *
+     * ★★<b>2026-08-10 전면 재정의(사용자 지시)</b> — 경로 판정(新박스·박스안·돌파✓·계단지지…)은
+     *   <b>「박스 상향돌파」(5조건 · bx_cand) 박스에만</b> 단다. 그 밖의 최고 거래대금 신호는
+     *   'bx-na'('-')로 돌려보낸다. 판정 «로직»은 그대로고 <b>대상 박스</b>만 좁힌 것이다.
+     *   - 이 함수가 경로의 단일본이라 여기 한 곳으로 퀀트 목록·관심종목(트리거 포함)·어닝·
+     *     알림 크론(dart_collect)이 전부 같은 기준이 된다.
+     *   - ⚠따라서 트리거(돌파확인·계단지지)도 박스 상향돌파 박스에서만 뜬다 — 옛 실측(+2.26/+2.40%)은
+     *     전체 모집단 기준의 기록이라 <b>참고치</b>가 된다(검증 탭 ④~⑥ 주석).
+     *   - ★유일한 예외 = <b>포트폴리오 계단관통↓ 경보</b>(pf_stair_alert_map · $bxOnly=false) —
+     *     편입 시 못박은 기준 박스는 «기록»이고, 지지 구조 소멸을 놓치면 포지션이 다친다.
+     *   - bx_cand 는 16:20 크론이 채우므로 <b>당일 박스는 적재 전까지 'bx-na'</b>다(잠정치는
+     *     어차피 OHLC 가 없어 판정 불가 — 아래 「집계중 삭제」 주석과 같은 자리).
+     *
      * @param array $sigs [['code'=>, 'd'=>], …] — 신호들
+     * @param bool  $bxOnly false = 옛 동작(전체 박스 판정) — 포트폴리오 경보 전용
      * @return array "code|d" => ['st'=>클래스, 'txt'=>, 'tip'=>, 'h'=>, 'l'=>]
      */
-    public function boxStatusMany(array $sigs): array
+    public function boxStatusMany(array $sigs, bool $bxOnly = true): array
     {
         if (!$sigs) return [];
+
+        $na = [];
+        if ($bxOnly) {
+            $mem = [];
+            try {
+                $ph0 = implode(',', array_fill(0, count($sigs), '(?,?)'));
+                $a0 = [];
+                foreach ($sigs as $s) { $a0[] = $s['code']; $a0[] = $s['d']; }
+                $q0 = $this->pdo->prepare("SELECT code, d FROM bx_cand WHERE (code, d) IN ($ph0)");
+                $q0->execute($a0);
+                foreach ($q0->fetchAll(PDO::FETCH_ASSOC) as $r0) $mem[$r0['code'] . '|' . $r0['d']] = 1;
+            } catch (Throwable $e) { $mem = null; }   // 표가 없는 환경 — 게이트 없이 옛 동작
+            if ($mem !== null) {
+                $keep = [];
+                foreach ($sigs as $s) {
+                    $k0 = $s['code'] . '|' . $s['d'];
+                    if (isset($mem[$k0])) { $keep[] = $s; continue; }
+                    $na[$k0] = ['st' => 'bx-na', 'txt' => '-',
+                        'tip' => '박스 상향돌파(5조건) 박스가 아닙니다 — 경로 판정은 그 박스에만 답니다'
+                               . '(2026-08-10 재정의 · 당일 박스는 16:20 적재 뒤 판정)',
+                        'h' => 0, 'l' => 0];
+                }
+                $sigs = $keep;
+                if (!$sigs) return $na;
+            }
+        }
         $pairs = []; $codes = []; $minD = null;
         foreach ($sigs as $s) {
             $pairs[] = [$s['code'], $s['d']];
@@ -923,7 +962,7 @@ class KrxAmt
                 $out[$key]['levels'] = $lv;      // 내림차순 최대 4개 (매매용 계단)
             }
         }
-        return $out;
+        return $out + $na;   // 게이트에 걸린 것은 'bx-na'('-') 로 — 키가 없는 것(잠정치)과 구별된다
     }
 
     /* ── 퀀트 사다리 후보 (2026-08-02) — 편입 시 「그 종목의 실제 지지선」을 고르기 위한 목록 ──

@@ -1,0 +1,187 @@
+<?php
+/**
+ * ChartFav — 관심차트 그룹 (DB 전담)
+ *
+ * 「보다가 괜찮은 차트를 그룹으로 묶어 두고, 나중에 그 그룹만 따로 불러 본다」 (2026-08-07 사용자 요청).
+ *
+ * ★담는 단위는 «종목»이 아니라 «신호 한 건»(종목 + 날짜)이다.
+ *   같은 종목이 여러 날 신호를 냈을 때 「한울반도체」로 담으면 어느 날의 그림인지 잃는다.
+ *
+ * ★스냅샷을 뜨지 않는다 — `chart_fav_item` 은 (src, code, d) «참조»만 갖는다.
+ *   판정(brk_kind·수익률)이 잡을 다시 돌려 바뀌면 관심차트도 함께 바뀌어야 한다.
+ *   여기에 값을 복사해 두면 원본이 고쳐진 뒤 «따로 노는» 옛 판정이 남는다
+ *   (gift_item 이 스냅샷인 것과 반대다 — 저쪽은 «확정된 회차»라 불변이어야 했다).
+ *
+ * ★`src` 로 «어느 화면에서 담았나»를 남긴다. 지금은 'flame' 하나뿐이지만,
+ *   나중에 다른 화면에서 담아도 같은 그룹에 섞이지 않는다(같은 code·d 라도 뜻이 다르다).
+ *
+ * 표 이름이 `chart_` 인 이유 — 이것은 «차트»를 모으는 물건이라 `chart_pref`·`chart_indicator`·
+ * `chart_hline` 과 한 계열이다. `qm_`(급등주 아카이브)에 넣으면 불꽃형 전용처럼 읽힌다.
+ */
+class ChartFav
+{
+    /**
+     * 담을 수 있는 곳 — 화면이 늘면 여기 한 줄. 화면·API 는 이 목록만 본다.
+     *
+     * ★2026-08-09: 옛 'flame'(패턴분석 불꽃형)은 'boxbrk' 로 <b>합쳐졌다</b> — 화면 둘을 하나로
+     *   묶으면서 담긴 365건의 `src` 도 UPDATE 했다(`cron/bx_scan.php job=migrate`).
+     *   'flame' 을 여기 남겨 두지 않는다 — 목록에 있으면 API 가 그 값을 받아들여
+     *   <b>새 행이 옛 출처로 들어가고</b> 화면에서 영영 안 보이게 된다.
+     */
+    public const SRCS = ['boxbrk' => '패턴분석 (박스 상향돌파)'];
+
+    private PDO $pdo;
+
+    public function __construct(PDO $pdo)
+    {
+        $this->pdo = $pdo;
+        $this->ensureTables();
+    }
+
+    public function ensureTables(): void
+    {
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS chart_fav (
+                id      INT AUTO_INCREMENT PRIMARY KEY,
+                name    VARCHAR(60)  NOT NULL,
+                memo    VARCHAR(255) NOT NULL DEFAULT '',
+                sort_no INT          NOT NULL DEFAULT 0,
+                made_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uniq_name (name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
+        /* ★FK CASCADE — 그룹을 지우면 담긴 것도 함께 간다.
+         *   (gift_group 의 SET NULL 과 다른 선택이다: 저긴 «고객»이 그룹 없이도 살아야 했지만,
+         *    여기 행은 그룹에 담겼다는 사실 «그 자체»라 그룹이 없으면 뜻이 없다.) */
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS chart_fav_item (
+                fav_id  INT          NOT NULL,
+                src     VARCHAR(16)  NOT NULL DEFAULT 'flame',
+                code    CHAR(6)      NOT NULL,
+                d       DATE         NOT NULL,
+                memo    VARCHAR(255) NOT NULL DEFAULT '',
+                made_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (fav_id, src, code, d),
+                KEY ix_src_code (src, code, d),
+                CONSTRAINT fk_chart_fav FOREIGN KEY (fav_id)
+                    REFERENCES chart_fav(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
+    }
+
+    // ══ 그룹 ════════════════════════════════════════════════════════════
+    /** 그룹 목록 + 담긴 건수. 화면의 셀렉트·관리 패널이 같은 것을 본다. */
+    public function groups(string $src = ''): array
+    {
+        $sql = "SELECT g.id, g.name, g.memo, g.sort_no,
+                       (SELECT COUNT(*) FROM chart_fav_item i
+                         WHERE i.fav_id = g.id" . ($src !== '' ? " AND i.src = :s" : "") . ") n
+                  FROM chart_fav g ORDER BY g.sort_no, g.id";
+        $st = $this->pdo->prepare($sql);
+        if ($src !== '') $st->bindValue(':s', $src);
+        $st->execute();
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    public function group(int $id): ?array
+    {
+        $st = $this->pdo->prepare("SELECT id, name, memo, sort_no FROM chart_fav WHERE id=?");
+        $st->execute([$id]);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    /** 새 그룹이면 id=0. 이름은 중복 불가(같은 이름이 둘이면 「그 그룹」이 어느 것인지 못 가린다). */
+    public function groupSave(int $id, string $name, string $memo = ''): int
+    {
+        $name = trim(mb_substr($name, 0, 60));
+        if ($name === '') throw new RuntimeException('그룹 이름을 적으세요.');
+        $memo = trim(mb_substr($memo, 0, 255));
+
+        $st = $this->pdo->prepare("SELECT id FROM chart_fav WHERE name=? AND id<>?");
+        $st->execute([$name, $id]);
+        if ($st->fetchColumn()) throw new RuntimeException('같은 이름의 그룹이 이미 있습니다.');
+
+        if ($id > 0) {
+            $this->pdo->prepare("UPDATE chart_fav SET name=?, memo=? WHERE id=?")
+                      ->execute([$name, $memo, $id]);
+            return $id;
+        }
+        $next = (int)$this->pdo->query("SELECT COALESCE(MAX(sort_no),0)+1 FROM chart_fav")->fetchColumn();
+        $this->pdo->prepare("INSERT INTO chart_fav (name, memo, sort_no) VALUES (?,?,?)")
+                  ->execute([$name, $memo, $next]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public function groupDelete(int $id): void
+    {
+        $this->pdo->prepare("DELETE FROM chart_fav WHERE id=?")->execute([$id]);
+    }
+
+    // ══ 담긴 차트 ════════════════════════════════════════════════════════
+    /**
+     * 담기. $keys 는 ['005930|2026-01-05', …] 꼴.
+     * ★이미 담긴 것은 조용히 넘어간다(INSERT IGNORE) — 「이미 있다」는 실패가 아니다.
+     */
+    public function add(int $favId, string $src, array $keys): int
+    {
+        $ins = $this->pdo->prepare(
+            "INSERT IGNORE INTO chart_fav_item (fav_id, src, code, d) VALUES (?,?,?,?)");
+        $n = 0;
+        foreach (self::parseKeys($keys) as [$code, $d]) {
+            $ins->execute([$favId, $src, $code, $d]);
+            $n += $ins->rowCount();
+        }
+        return $n;
+    }
+
+    public function remove(int $favId, string $src, array $keys): int
+    {
+        $del = $this->pdo->prepare(
+            "DELETE FROM chart_fav_item WHERE fav_id=? AND src=? AND code=? AND d=?");
+        $n = 0;
+        foreach (self::parseKeys($keys) as [$code, $d]) {
+            $del->execute([$favId, $src, $code, $d]);
+            $n += $del->rowCount();
+        }
+        return $n;
+    }
+
+    /**
+     * 지금 보고 있는 카드들이 «어느 그룹에» 담겼나 — 'code|d' => [['id'=>,'name'=>], …]
+     * 카드마다 따로 물으면 15번 질의가 되므로 한 번에 받는다.
+     */
+    public function memberOf(string $src, array $keys): array
+    {
+        $pairs = self::parseKeys($keys);
+        if (!$pairs) return [];
+        $ph = implode(',', array_fill(0, count($pairs), '(?,?)'));
+        $args = [$src];
+        foreach ($pairs as [$code, $d]) { $args[] = $code; $args[] = $d; }
+        $st = $this->pdo->prepare(
+            "SELECT i.code, i.d, g.id, g.name
+               FROM chart_fav_item i JOIN chart_fav g ON g.id = i.fav_id
+              WHERE i.src = ? AND (i.code, i.d) IN ({$ph})
+              ORDER BY g.sort_no, g.id");
+        $st->execute($args);
+        $out = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $out[$r['code'] . '|' . $r['d']][] = ['id' => (int)$r['id'], 'name' => $r['name']];
+        }
+        return $out;
+    }
+
+    /** 'code|d' 문자열들을 [[code, d], …] 로. 모양이 틀린 것은 조용히 버린다. */
+    private static function parseKeys(array $keys): array
+    {
+        $out = [];
+        foreach ($keys as $k) {
+            if (!is_string($k) || strpos($k, '|') === false) continue;
+            [$code, $d] = explode('|', $k, 2);
+            $code = preg_replace('/[^0-9A-Za-z]/', '', $code);
+            if (strlen($code) !== 6 || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $d)) continue;
+            $out[$code . '|' . $d] = [$code, $d];       // 같은 키가 두 번 와도 한 번만
+        }
+        return array_values($out);
+    }
+}
+?>
