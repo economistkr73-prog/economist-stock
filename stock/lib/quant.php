@@ -20,7 +20,7 @@
  * 종목별 퀀트 배지(q)를 한 번에 만든다 — 종목 수와 무관하게 쿼리 2회.
  *
  * @param array $items [code => ['price'=>현재가, 'rate'=>등락률(%), 'amtEok'=>오늘 거래대금(억)]]
- * @return array [code => q|null]   q = ['t','cls','tip','hot','mom'=>[…],'bx'=>…]
+ * @return array [code => q|null]   q = ['t','cls','tip','hot','mom'=>[…],'bx'=>…,'sue'=>…]
  *
  *   t/cls/tip : 오늘 거래대금이 직전 120거래일 최고를 넘었을 때만 — 유형 판정
  *               (임계·어휘 = stock/index.php pf_surge_badge 와 동일:
@@ -96,12 +96,33 @@ function quant_badge_many(PDO $pdo, array $items): array
         }
     } catch (Throwable $e) { /* 잠정 배지 없이 계속 — 곁들이는 것이라 목록을 죽이지 않는다 */ }
 
+    /* ── ③ SUE — 최신 분기가 ±1 밖일 때만 (2026-08-12 사용자 「단타에 SUE 붙여줘」) ────────
+     * ★판정 단일본은 stock/lib/sue.php 의 pf_sue_stock — 어닝 탭·관심종목·pf_sue_badge_map 과
+     *   같은 계산·같은 문턱(Thr::SUE_HIT/SUE_SHOCK · 「이례만 배지가 된다」)이다.
+     * ★값·분기·방향만 보낸다 — 어휘(어닝서프라이즈/어닝쇼크)·색은 quantbadge.js 가 그린다.
+     * 실측 1~2ms/종목 × 목록 수십 종목 — 10초 tick 에도 부담 없는 크기다. */
+    $sue = [];
+    try {
+        require_once __DIR__ . '/sue.php';
+        foreach ($codes as $c) {
+            $sq = pf_sue_stock($pdo, $c);
+            if (!$sq) continue;
+            $qk = array_key_last($sq);
+            $v  = (float)$sq[$qk];
+            if ($v > Thr::SUE_SHOCK && $v < Thr::SUE_HIT) continue;   // ±1 안은 침묵
+            $sy = intdiv($qk - 1, 4); $sqn = $qk - $sy * 4;
+            $sue[$c] = ['v' => round($v, 1), 'q' => ($sy % 100) . '.' . $sqn . 'Q',
+                        'up' => $v >= Thr::SUE_HIT ? 1 : 0];
+        }
+    } catch (Throwable $e) { /* 재무 미구축 환경 — SUE 없이 계속 */ }
+
     $out = [];
     foreach ($items as $code => $it) {
         $code = (string)$code;
         $h = $hist[$code] ?? [];
         $n = count($h);
-        $q = ['t' => '', 'cls' => '', 'tip' => '', 'hot' => 0, 'mom' => [], 'bx' => $bx[$code] ?? null];
+        $q = ['t' => '', 'cls' => '', 'tip' => '', 'hot' => 0, 'mom' => [],
+              'bx' => $bx[$code] ?? null, 'sue' => $sue[$code] ?? null];
 
         /* 20·40거래일 모멘텀 — 오늘 현재가 vs 20/40거래일 전 종가 (퀀트 momMany 와 같은 임계).
          * ★ 창별·방향별로 나눠 보낸다(2026-08-02) — 화면은 「20일 +112%」처럼 기간+부호%로 그린다.
@@ -151,7 +172,7 @@ function quant_badge_many(PDO $pdo, array $items): array
                     . ' — ' . $why . ' (장중엔 잠정 · 마감 후 확정)';
             }
         }
-        $out[$code] = ($q['t'] === '' && !$q['hot'] && $q['bx'] === null) ? null : $q;
+        $out[$code] = ($q['t'] === '' && !$q['hot'] && $q['bx'] === null && $q['sue'] === null) ? null : $q;
     }
     return $out;
 }

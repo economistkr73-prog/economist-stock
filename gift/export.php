@@ -4,6 +4,7 @@
  *
  *   ?id=<회차>&type=vendor  → ① 업체 발송용 (택배 건만 · 배송 라벨 기준)
  *   ?id=<회차>&type=full    → ② 전체 내역   (발송구분별 시트 분리 + 합계 행)
+ *   ?id=<회차>&type=print   → ③ 큰 글씨 인쇄용 HTML (연락처·주소·물품 없이 종이로 보는 명단)
  *
  * ★ 이 서버에는 composer/PhpSpreadsheet 가 없다. nw/report.php 가 쓰는 순수 PHP
  *   OOXML 라이터를 그대로 가져왔다(gx_ 접두어). ZipArchive 가 없으면 SpreadsheetML(.xls)로 폴백.
@@ -13,7 +14,8 @@ require_once $_SERVER['DOCUMENT_ROOT'] . '/env/auth_fnc.php';
 require_login();
 
 $batchId = (int)($_GET['id'] ?? 0);
-$type    = ($_GET['type'] ?? 'vendor') === 'full' ? 'full' : 'vendor';
+$typeIn  = (string)($_GET['type'] ?? 'vendor');
+$type    = in_array($typeIn, ['full', 'print'], true) ? $typeIn : 'vendor';
 
 $gift = new Gift($pdo);
 $gift->ensureTable();
@@ -26,6 +28,13 @@ if (!$batch) {
     exit;
 }
 $items = $gift->items($batchId);
+
+// ── ③ 큰 글씨 인쇄용 — 엑셀이 아니라 HTML. 브라우저 인쇄(Ctrl+P)로 종이에 뽑는다.
+//    연로하신 분이 종이로 보는 명단이라 우편번호·연락처·주소·물품을 뺐다(2026-08-30 사용자 지시).
+if ($type === 'print') {
+    gx_print_html($batch, $items);
+    exit;
+}
 
 // 셀 모델: ['t'=>'s'|'n', 'v'=>값, 'st'=>스타일키] · 스타일키 H/C/L/N/FN/FL
 $H  = fn($v) => ['t' => 's', 'v' => $v, 'st' => 'H'];
@@ -119,6 +128,87 @@ if (class_exists('ZipArchive')) {
     gx_stream_spreadsheetml($sheets, $fname . '.xls');
 }
 exit;
+
+// ==========================================================
+// 큰 글씨 인쇄용 HTML
+// ==========================================================
+function gx_print_html(array $batch, array $items): void
+{
+    $h = fn($v) => htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+
+    // 한 사람 = 셀 4칸. 한 행에 두 사람을 나란히 — 왼단 1..절반, 오른단 절반+1.. (신문 단 조판)
+    $cells = function (?array $it, int $no) use ($h): string {
+        if ($it === null) return '<td class="c"></td><td></td><td></td><td></td>';
+        return '<td class="c">' . $no . '</td>'
+             . '<td class="nm">' . $h($it['customer_name']) . '</td>'
+             . '<td class="memo">' . $h($it['customer_memo']) . '</td>'
+             . '<td class="c">' . (int)$it['total_qty'] . '</td>';
+    };
+
+    // 발송구분별로 페이지를 가른다 — 구분은 절 제목이 말하므로 칸에서는 뺐다. 번호는 구분마다 1부터.
+    $groups = [];
+    foreach (Gift::DELIVERY as $dt) {
+        $sub = array_values(array_filter($items, fn($it) => $it['delivery_type'] === $dt));
+        if ($sub) $groups[] = [$dt, $sub];
+    }
+    $etc = array_values(array_filter($items, fn($it) => !in_array($it['delivery_type'], Gift::DELIVERY, true)));
+    if ($etc) $groups[] = ['기타', $etc];
+
+    $thHalf = '<th>No</th><th>고객명</th><th>추가정보</th><th>수량</th>';
+    $colHalf = '<col class="w-no"><col class="w-nm"><col class="w-memo"><col class="w-q">';
+
+    $sectHtml = '';
+    foreach ($groups as [$dt, $list]) {
+        $n    = count($list);
+        $half = (int)ceil($n / 2);
+        $rowsHtml = '';
+        for ($i = 0; $i < $half; $i++) {
+            $right = $list[$i + $half] ?? null;
+            $rowsHtml .= '<tr>' . $cells($list[$i], $i + 1)
+                       . '<td class="gap"></td>'
+                       . $cells($right, $i + $half + 1)
+                       . "</tr>\n";
+        }
+        $sectHtml .= '<div class="sect">'
+            . '<h2>' . $h($dt) . ' <span>· ' . $n . '명</span></h2>'
+            . '<table>'
+            . '<colgroup>' . $colHalf . '<col style="width:8px">' . $colHalf . '</colgroup>'
+            . '<thead><tr>' . $thHalf . '<th class="gap"></th>' . $thHalf . "</tr></thead><tbody>\n"
+            . $rowsHtml
+            . "</tbody></table></div>\n";
+    }
+
+    $title = $h($batch['title']);
+
+    header('Content-Type: text/html; charset=UTF-8');
+    echo '<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8">'
+       . '<meta name="viewport" content="width=device-width, initial-scale=1">'
+       . '<title>' . $title . ' 명단 인쇄</title>'
+       . '<style>'
+       . '@page{size:A4 portrait;margin:10mm}'
+       . "body{font-family:'맑은 고딕','Malgun Gothic',sans-serif;color:#000;margin:0;padding:20px}"
+       . '.sect+.sect{page-break-before:always}'
+       . 'h2{font-size:17pt;margin:0 0 8px}'
+       . 'h2 span{font-size:12pt;font-weight:400;color:#333}'
+       . 'table{width:100%;border-collapse:collapse;font-size:13pt;table-layout:fixed}'
+       . 'th,td{border:1.2px solid #444;padding:3px 6px;vertical-align:middle;word-break:break-all}'
+       . 'thead th{background:#eee;font-size:11pt;text-align:center;padding:4px 6px}'
+       . 'td.c{text-align:center}'
+       . 'td.nm{font-weight:700;font-size:15pt}'
+       . 'td.memo{font-size:9.5pt;color:#333}'
+       . 'th.gap,td.gap{border:0;background:none;width:8px;padding:0}'
+       . 'col.w-no{width:6%}col.w-nm{width:22%}col.w-memo{width:14%}col.w-q{width:7%}'
+       . '.noprint{margin:0 0 14px}'
+       . '.noprint button{font-size:14pt;padding:8px 22px;cursor:pointer;margin-right:8px}'
+       . '@media print{.noprint{display:none}body{padding:0}}'
+       . '</style></head><body>'
+       . '<div class="noprint">'
+       . '<button onclick="window.print()">🖨 인쇄</button>'
+       . '<button onclick="window.close()">닫기</button>'
+       . '</div>'
+       . $sectHtml
+       . '</body></html>';
+}
 
 // ==========================================================
 // 직렬화 (원본: nw/report.php)

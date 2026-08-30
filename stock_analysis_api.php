@@ -1,6 +1,7 @@
 <?php
 // stock_analysis_api.php — 시세·차트 공용 데이터 API (module=stock)
 //   action=top30   상승률/시총 상위 30 → [{code,name,price,rate,tradeEok,q:퀀트배지|null}, ...]
+//   action=watch   관심종목(pf_watchlist) → top30 과 같은 행 모양 · 상승률 순 · 페이징 없음
 //   action=news    종목 뉴스       → [{title,url,date}, ...]   (?code=005930)
 //   action=daily   일봉            → [{t:"YYYY-MM-DD",o,h,l,c,v}, ...]  (?code=&days=)
 //   action=minute  당일 1분봉      → [{t:"YYYY-MM-DD HH:MM",o,h,l,c,v}, ...] (?code=)
@@ -105,6 +106,53 @@ function api_stock(string $action, PDO $pdo): void
                 ];
             }, $rows);
             // 퀀트 배지(q) — krx_amt/krx_surge 원장 판정. 원장 미구축 환경이면 배지 없이 목록만.
+            try { quant_augment($pdo, $out); } catch (Throwable $e) { /* 배지는 부가정보 */ }
+            echo json_encode($out, JSON_UNESCAPED_UNICODE);
+            return;
+        }
+
+        // ── 관심종목 (pf_watchlist · 2026-08-20 단타 탐색 패널용) ──
+        //   행 모양을 top30 과 똑같이 맞춘다 — 소비자(단타 renderTop)가 두 목록을 한 렌더러로 그린다.
+        //   시세·이름은 Pf::watchList() 와 같은 조인(all_stock_info 우선 · DART 이름 폴백).
+        //   정렬은 상승률 순(같은 날 사용자 지시 — 담은 순에서 바꿈) · 동률은 최근 담은 것 위.
+        //   시세가 아직 없는 종목(rate=0)은 그 값 그대로 줄을 선다 — 없는 값을 지어내지 않는다.
+        //   ★판정을 여기서 새로 내리지 않는다 — 배지는 top30 과 같은 quant_augment 단일본이다.
+        //   ★보유 종목은 뺀다(2026-08-26 사용자 지시) — 오른쪽 「보유」 탭이 이미 그 종목들을 보여 주므로
+        //     탐색 목록에 겹치면 자리만 먹는다. 보유 판정은 Dt::heldCodes() 단일본(수집 대상과 같은 기준).
+        case 'watch': {
+            $held = [];
+            try { $held = array_flip((new Dt($pdo))->heldCodes()); } catch (Throwable $e) { /* 판정 실패 시 전체 표시 */ }
+            $rows = $pdo->query("
+                SELECT w.stock_code AS code,
+                       COALESCE(NULLIF(s.stock_name,''), c.corp_name, w.stock_code) AS name,
+                       COALESCE(s.stock_price, 0)   AS price,
+                       COALESCE(s.stock_rate, 0)    AS rate,
+                       COALESCE(s.stock_cap, 0)     AS cap,
+                       COALESCE(s.stock_vol_cap, 0) AS tradeEok,
+                       COALESCE(sh.top_rank_count, 0) AS etfTop,
+                       COALESCE(sh.etf_count, 0)      AS etfCnt
+                  FROM pf_watchlist w
+                  LEFT JOIN all_stock_info s           ON s.stock_code  = w.stock_code
+                  LEFT JOIN dart_corp_code c           ON c.stock_code  = w.stock_code
+                  LEFT JOIN all_stock_holdings_info sh ON sh.stock_code = w.stock_code
+                 ORDER BY rate DESC, w.added_at DESC
+            ")->fetchAll(PDO::FETCH_ASSOC);
+
+            $out = [];
+            foreach ($rows as $r) {
+                if (isset($held[$r['code']])) continue;   // 보유 종목 제외 (위 주석)
+                $out[] = [
+                    'code'     => (string) $r['code'],
+                    'name'     => (string) $r['name'],
+                    'price'    => (float)  $r['price'],
+                    'rate'     => (float)  $r['rate'],
+                    'cap'      => (float)  $r['cap'],
+                    'tradeEok' => (float)  $r['tradeEok'],
+                    'kind'     => 'stock',              // 관심종목은 주식만 담긴다 (ETF 는 pf_watchlist 대상 아님)
+                    'etfTop'   => (int)    $r['etfTop'],
+                    'etfCnt'   => (int)    $r['etfCnt'],
+                ];
+            }
             try { quant_augment($pdo, $out); } catch (Throwable $e) { /* 배지는 부가정보 */ }
             echo json_encode($out, JSON_UNESCAPED_UNICODE);
             return;

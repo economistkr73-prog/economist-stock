@@ -90,7 +90,16 @@ class ChartFeat
         ],
         'overlay.trade_markers' => [
             'g' => 'module', 'label' => '체결 마커', 'dep' => 'fills', 'def' => 0, 'ui' => 'layer',
-            'desc' => '매수/매도 화살표 + 차수·그날 시장상태',
+            'desc' => '매수/매도 화살표 + 차수·그날 시장상태 — 기간 바의 「체결 N」 으로 잠시 끌 수 있다',
+        ],
+        /* ★2026-08-12 — 차수 사다리의 «이론가»를 수평선으로(사용자 요청). 기본은 감춤 —
+         *   기간 바의 「차수가격 N」 토글로 켠다(SUE 공시와 같은 자리·같은 방식).
+         *   ★가격축에는 안 잡힌다(지표선과 같은 규칙 · 같은 날 2차 사용자 판단) — 켤 때 축이
+         *   마지막 차수까지 늘어나면 정작 캔들이 안 보인다. 범위 밖의 차수선은 안 그려진다.
+         *   색·굵기·종류는 기간 바 ⚙ 모달 → chart_pref.view_json 의 ref 칸(화면의 취향). */
+        'overlay.step_lines' => [
+            'g' => 'module', 'label' => '차수가격(이론) 선', 'dep' => 'position', 'def' => 0, 'ui' => 'btn',
+            'desc' => '차수 사다리의 이론 매수가 수평선 + 기간 바 「차수가격 N」 토글(기본 감춤) · ⚙ 로 색·굵기·종류 — 차트에 보이는 범위 안의 선만 그려진다',
         ],
         /* ★2026-08-04 — 시뮬레이터의 «계획» 체결 위에 «내가 실제로 낸 주문»을 겹친다.
          * 성과가 갈릴 때 「룰셋이 나쁜 건가, 내가 계획을 안 지킨 건가」를 가르는 유일한 그림이다.
@@ -182,7 +191,7 @@ class ChartFeat
             'label' => '보유종목 → 종목 상세', 'pref' => 'position', 'style' => 2,
             'url' => '/stock/index.php?mode=all',
             'data' => ['position', 'fills'], 'lock' => [],
-            'on' => ['overlay.position_lines', 'overlay.trade_markers'], 'off' => [],
+            'on' => ['overlay.position_lines', 'overlay.trade_markers', 'overlay.step_lines'], 'off' => [],
             'note' => '★이미 산 종목을 보는 자리 — 오늘의 퀀트 판정은 여기 세우지 않는다(요건 §1)',
         ],
         'boxladder' => [

@@ -10,10 +10,13 @@ require_once $_SERVER['DOCUMENT_ROOT'] . '/env/auth_fnc.php';
 require_once __DIR__ . '/lib/calc.php';
 require_once __DIR__ . '/lib/entry.php';   // M4 — 편입 스냅샷 조립 (index.php 와 함께 쓴다)
 require_once __DIR__ . '/lib/quant.php';   // 목록 퀀트 배지 판정 (상위 종목 목록과 같은 단일본)
+require_once __DIR__ . '/lib/slowlog.php'; // 느린 렌더 계측 — index.php 와 같은 임계·같은 파일
 require_login();
+pf_slowlog_boot();
 
 $pf = new Pf($pdo);
 $pf->ensureTables();
+pf_slowlog_mark('ddl');   // 10초 폴링(단타)도 매번 이 DDL 을 지난다 — 잠금 대기 용의 구간
 
 $module = $_GET['module'] ?? $_POST['module'] ?? '';
 $action = $_GET['action'] ?? $_POST['action'] ?? '';
@@ -31,11 +34,13 @@ try {
         case 'dart':     api_dart($action, $pdo, $pf);     break;
         case 'krx':      api_krx($action, $pdo, $pf);      break;
         case 'watch':    api_watch($action, $pdo, $pf);    break;
+        case 'note':     api_note($action, $pdo);          break;
         case 'preset':   api_preset($action, $pdo, $pf);   break;
         case 'dt':       api_dt($action, $pdo);            break;
         case 'qm':       api_qm($action, $pdo);            break;
         case 'fav':      api_fav($action, $pdo);           break;
         case 'bx':       api_bx($action, $pdo);            break;
+        case 'badge':    api_badge($action, $pdo);         break;
         default:         pf_api_fail('알 수 없는 module 입니다.');
     }
 } catch (Throwable $e) {
@@ -1038,6 +1043,28 @@ function api_krx(string $action, PDO $pdo, Pf $pf): void
 // ══ 관심종목 ════════════════════════════════════════════════════════════
 // 재무분석에서 눈에 띈 종목을 가볍게 담아 둔다. 포트폴리오·룰셋은 정하지 않는다 —
 // 그건 실제로 사기로 마음먹었을 때 「포트폴리오에 담기」로 넘어가서 정한다.
+/**
+ * 종목 개요·태그 저장 (2026-08-30 · 단일본 stock/lib/note.php).
+ * 상세화면 「종목 개요」 카드의 폼 POST 하나가 개요와 태그를 함께 담는다.
+ */
+function api_note(string $action, PDO $pdo): void
+{
+    require_once __DIR__ . '/lib/note.php';
+    $back = $_POST['back'] ?? $_SERVER['HTTP_REFERER'] ?? '/stock/index.php?mode=fund';
+    $back = preg_replace('/[?&]msg=[^&]*/', '', $back);
+
+    if ($action !== 'save') pf_api_fail('알 수 없는 action 입니다.');
+
+    // 우선주 라우터와 같은 규칙 — 상세가 이미 본주로 옮겨 온 뒤라 본주 코드가 온다
+    $code = strtoupper(preg_replace('/[^0-9A-Za-z]/', '', (string)($_POST['code'] ?? '')));
+    if (!preg_match('/^[0-9]{5}[0-9A-Z]$/', $code)) pf_api_done($back, 'err', '종목코드가 올바르지 않습니다.');
+
+    // 저장 + 히스토리 한 입구 — 내용이 바뀌었으면 옛 판이 stock_note_hist 에 먼저 남는다
+    pf_note_save_with_hist($pdo, $code, (string)($_POST['headline'] ?? ''), (string)($_POST['summary'] ?? ''),
+        pf_tag_parse((string)($_POST['tags'] ?? '')));
+    pf_api_done($back, 'ok', '종목 개요를 저장했습니다.');
+}
+
 function api_watch(string $action, PDO $pdo, Pf $pf): void
 {
     $back = $_POST['back'] ?? $_SERVER['HTTP_REFERER'] ?? '/stock/index.php?mode=watch';
@@ -1545,6 +1572,51 @@ function api_fav(string $action, PDO $pdo): void
 
             default:
                 $out(['ok' => false, 'message' => '알 수 없는 action 입니다.']);
+        }
+    } catch (Throwable $e) {
+        $out(['ok' => false, 'message' => $e->getMessage()]);
+    }
+}
+
+// ══ badge 모듈 — 목록 배지 표시 설정 ═══════════════════════════════════════
+/**
+ * 카탈로그·차분 저장의 단일본은 classes/BadgeFeat.class 다. 화면은 «설정 > 신호분석 설정».
+ * ★체크칸이 곧 저장이다(버튼 없음 — 관심차트 담기와 같은 규칙). 실패하면 화면이 체크를 되돌린다.
+ * ★끄는 것은 «그리기»뿐 — 판정은 이 설정과 무관하게 그대로 돈다.
+ */
+function api_badge(string $action, PDO $pdo): void
+{
+    header('Content-Type: application/json; charset=utf-8');
+    $out = function ($v, int $code = 200) {
+        http_response_code($code);
+        echo json_encode($v, JSON_UNESCAPED_UNICODE);
+        exit;
+    };
+
+    try {
+        switch ($action) {
+            // action=save — screen + vals(JSON {badge:0|1}) 한 화면치 통째로 → 차분만 저장
+            case 'save': {
+                $screen = (string)($_POST['screen'] ?? '');
+                if (!isset(BadgeFeat::SCREENS[$screen])) {
+                    $out(['ok' => false, 'message' => '모르는 화면입니다: ' . $screen], 400);
+                }
+                $vals = $_POST['vals'] ?? '{}';
+                if (is_string($vals)) $vals = json_decode($vals, true);
+                if (!is_array($vals)) $vals = [];
+                $out(['ok' => true, 'values' => BadgeFeat::save($screen, $vals, $pdo)]);
+            }
+
+            case 'reset': {   // 그 화면을 기본값(전부 표시)으로 — 차분이 비어 NULL 로 저장된다
+                $screen = (string)($_POST['screen'] ?? '');
+                if (!isset(BadgeFeat::SCREENS[$screen])) {
+                    $out(['ok' => false, 'message' => '모르는 화면입니다: ' . $screen], 400);
+                }
+                $out(['ok' => true, 'values' => BadgeFeat::save($screen, BadgeFeat::defaults($screen), $pdo)]);
+            }
+
+            default:
+                $out(['ok' => false, 'message' => '알 수 없는 action 입니다: ' . $action], 400);
         }
     } catch (Throwable $e) {
         $out(['ok' => false, 'message' => $e->getMessage()]);

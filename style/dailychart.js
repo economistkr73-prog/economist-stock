@@ -266,6 +266,10 @@
       '.dc-mk .mk-l1{display:block}' +
       '.dc-mk .mk-l2{display:block;font-size:10px;font-weight:700;opacity:.82;margin-top:1px;' +
         'border-top:1px solid rgba(255,255,255,.35);padding-top:1px}' +
+      /* 열리는 칩(SUE 공시 → 재무분석) — 층은 pointer-events:none 이고 이 칩만 auto 다(.dc-hl 과 같은 결).
+       * hover 테가 「눌린다」를 말한다 — 링크처럼 보이지 않으면 문이 있는 줄을 모른다. */
+      '.dc-mk.lk{pointer-events:auto;cursor:pointer}' +
+      '.dc-mk.lk:hover{box-shadow:0 0 0 2px rgba(255,255,255,.65),0 1px 3px rgba(10,25,45,.28)}' +
       /* 기간 바 — [일봉|주봉 ┃ 160일 240일 480일 전체] 를 한 박스로 감싼 세그먼트 */
       '.dc-pbar{display:inline-flex;align-items:center;border-radius:8px;padding:3px;gap:2px;vertical-align:middle}' +
       '.dc-pbar button{border:0;cursor:pointer;font-weight:700;font-size:12px;padding:4px 10px;' +
@@ -1043,6 +1047,12 @@
       _plineObjs: [],
       _extra: [],           // 추가 선 [{opt, raw, series}]
       _marks: [],           // [{time,sell,text,state}] — 화면이 얹는 마커(체결 등)
+      _marksOn: true,       // 체결 마커 토글 (기간 바 「체결 N」 — opts.markers.toggle 인 화면만 버튼이 생긴다)
+      _mkTotal: 0,          // 화면이 얹은 마커 수 — 토글 버튼 라벨용 (꺼도 안 변한다)
+      /* 참조선 — 화면이 주는 수평선 묶음(차수가격(이론) 등). 기본 «꺼짐»이고 기간 바 토글로 켠다.
+       * ★가격축에는 안 잡힌다(지표선과 같은 규칙 · 2026-08-12 사용자 판단) — 보이는 범위 밖의
+       *   선은 안 그려진다. 색·굵기·종류는 ⚙ 모달 → view_json.ref (화면의 취향). */
+      _ref: { lines: [], on: false, objs: [], label: '', title: '' },
       _sueMarks: [],        // SUE 공시 마커 — 모듈이 스스로 받아 얹는 층 (setCode 참조)
       _sueOn: true, _sueCode: '', _sueRaw: [], _sueFit: 0,   // _sueFit = 실린 봉 안에 «자리가 있는» 공시 수
       _mkLayer: null, _mkVisible: 0,
@@ -1100,6 +1110,9 @@
         if (self._pv.val > T) T = self._pv.val * (1 + PAD / 2);
         if (self._pv.val < B) B = self._pv.val * (1 - PAD / 2);
       }
+      /* ⊗참조선(차수가격)은 켜도 축에 «안» 잡는다 — 처음엔 직전고가선처럼 「켰을 때만 포함」으로
+       * 냈다가 2026-08-12 사용자 판단으로 뺐다: 7차 이론가처럼 봉에서 먼 레벨까지 축이 늘어나면
+       * 정작 캔들이 안 보인다. 보이는 범위 밖의 차수선은 그리지 않는 쪽을 택했다(지표선과 같은 규칙). */
       /* 라이브러리는 여기서 돌려준 범위에 scaleMargins(비율 여백)를 «또» 더해서 그린다.
        * 그대로 두면 +10% 가 +12%,+15% 로 불어난다 — 여백만큼 미리 빼서 돌려준다.
        * 그러면 화면 위·아래 끝이 정확히 최고가+10% · 최저가−10% 가 된다. */
@@ -1139,6 +1152,7 @@
       }
       self._mainIsCandle = wantCandle;
       self._plineObjs = [];          // 시리즈가 바뀌면 가격선도 다시 그려야 한다
+      if (self._ref) self._ref.objs = [];  // 참조선(차수가격)도 — priceLine 은 시리즈와 함께 죽는다
       if (self._th) self._th.obj = null;   // 시리즈가 바뀌면 당일전고선도 다시 그린다
       if (self._pv) self._pv.obj = null;   // 직전고가선도 마찬가지
     }
@@ -1242,6 +1256,32 @@
       });
     }
 
+    /* ── 참조선 — 화면이 주는 수평선 묶음 (차수가격(이론) 등) ──
+     * 가격선(setPriceLines)과 다른 층인 이유: 기본이 «꺼짐»이고 기간 바 토글이 켜며,
+     * ★가격축에는 안 잡힌다(지표선과 같은 규칙 · 2026-08-12 사용자 판단) — 그래서 보이는
+     *   가격 범위 밖의 선은 그냥 안 그려진다(축을 늘려 캔들을 누르는 것보다 낫다).
+     *   축이 안 변하니 토글에 rescale 도 필요 없다. 축 라벨도 기본은 안 띄운다 —
+     *   일곱 선이 라벨을 다 달면 가격축이 그 라벨로 뒤덮인다.
+     * 색·굵기·종류는 «화면의 취향»이다 — 기간 바 ⚙ 모달로 고르고 chart_pref.view_json 의
+     * ref 칸에 저장된다(높이 h 와 같은 자리). 선 하나가 L.color 등으로 따로 정할 수도 있다. */
+    function applyRefLines() {
+      var R = self._ref;
+      if (!R || !self._main) return;
+      R.objs.forEach(function (o) { try { self._main.removePriceLine(o); } catch (e) {} });
+      R.objs = [];
+      if (!R.on) return;
+      var st = (window.DC_VIEW && window.DC_VIEW.ref) || {};
+      var c = st.c || REF_COLOR, w = st.w || 2, sty = STYLE_MAP[st.s] ? st.s : 'dashed';
+      R.lines.forEach(function (L) {
+        R.objs.push(self._main.createPriceLine({
+          price: L.price, color: L.color || c, lineWidth: L.width || w,
+          lineStyle: STYLE_MAP[L.style || sty],
+          axisLabelVisible: L.axisLabel === true
+        }));
+      });
+    }
+    self._refApply = applyRefLines;   // ⚙ 모달이 «같은 바의 차트 전부»를 다시 그릴 때 부른다
+
     /* host 를 «위치 기준»으로 못박는다.
      * 이 아래 층들(마커 칩·박스·높이 손잡이)은 전부 position:absolute + inset:0 이라, host 가
      * static 이면 기준이 «더 바깥의 positioned 조상»으로 새 나간다 — 그러면 층의 overflow:hidden 도
@@ -1292,6 +1332,12 @@
           l2.className = 'mk-l2'; l2.textContent = m.state;
           el.appendChild(l2);
         }
+        if (m.fund) {
+          // ★같은 이름의 창을 재사용한다 — 보던 차트를 잃지 않고, 배지를 연달아 눌러도 창이 안 쌓인다
+          el.classList.add('lk');
+          el.title = '재무분석 상세 열기';
+          el.onclick = function (ev) { ev.stopPropagation(); window.open(m.fund, 'dcFund'); };
+        }
         self._mkLayer.appendChild(el);
       });
     }
@@ -1300,11 +1346,13 @@
       if (!self._main) return;
       var fb = fullBars();   // 데이터 전체가 실려 있으므로 마커도 전체 — 스크롤로 과거를 봐도 체결이 보인다
       // 화면이 얹은 마커 + SUE 공시 층. 층이 여럿이어도 라이브러리엔 시간순 한 목록으로 넘긴다
+      // 토글(「체결 N」)이 끄는 것은 «화면 층»뿐이다 — SUE 공시는 제 버튼이 따로 있다
+      var own = self._marksOn === false ? [] : self._marks;
       var marks = self._sueMarks.length            // 칩 겹침 회피가 시간순을 전제로 한다 → 합치면 다시 정렬
-        ? self._marks.concat(self._sueMarks).sort(function (a, b) {
+        ? own.concat(self._sueMarks).sort(function (a, b) {
             return a.time < b.time ? -1 : a.time > b.time ? 1 : 0;
           })
-        : self._marks;
+        : own;
       if (!fb.length || (!marks.length && !self._indMarks.length)) {
         self._main.setMarkers([]);
         self._mkChipData = [];
@@ -1338,6 +1386,7 @@
         var b = byTime[t];
         if (useChip && b && b.high !== undefined) {
           chipData.push({ time: t, text: m.text, state: m.state || '', sell: m.sell,
+                          fund: m.fund || '',    // SUE 배지만 갖는다 — 클릭하면 재무분석 상세
                           hi: b.high === null ? b.close : b.high,
                           lo: b.low  === null ? b.close : b.low });
         }
@@ -2068,7 +2117,9 @@
         saveT = setTimeout(function () {
           if (!window.DC_VIEW) window.DC_VIEW = {};
           window.DC_VIEW.h = h;
-          apiPost('view_save', { chart_key: hkey, view: JSON.stringify({ h: h }) })
+          /* ★통째로 보낸다 — view_json 은 서버가 병합 없이 갈아끼우므로 {h}만 보내면
+           * 같은 칸의 기간 기억·참조선 취향이 지워진다(2026-08-12 발견·수정) */
+          apiPost('view_save', { chart_key: hkey, view: JSON.stringify(window.DC_VIEW) })
             .catch(function () {});
         }, 400);                         // 끌던 손이 멎은 뒤 한 번만 (드래그마다 쏘지 않는다)
       }
@@ -2101,7 +2152,9 @@
         applyHeight(baseH, true);
         if (hkey) {
           if (window.DC_VIEW) delete window.DC_VIEW.h;
-          apiPost('view_save', { chart_key: hkey, view: JSON.stringify({}) }).catch(function () {});
+          // h 만 지우고 나머지(기간·참조선 취향)는 남긴다 — 통째로 보내는 이유는 위 saveSoon 참조
+          apiPost('view_save', { chart_key: hkey, view: JSON.stringify(window.DC_VIEW || {}) })
+            .catch(function () {});
         }
       });
     }
@@ -2168,6 +2221,7 @@
       }
       self._extra.forEach(function (ex) { renderExtra(ex); });
       applyPriceLines();
+      applyRefLines();      // rescale 불필요 — 방금 setData 가 축을 다시 쟀다
       renderIndicators();   // applyMarkers 전에 — 지표 점을 마커 목록에 넣는다
       applyMarkers();
       applyTodayHigh();
@@ -2247,9 +2301,27 @@
       self._marks = (list || []).slice().sort(function (a, b) {
         return a.time < b.time ? -1 : a.time > b.time ? 1 : 0;
       });
+      self._mkTotal = self._marks.length;
       applyMarkers();
+      markButton();   // 기간 바가 이미 있으면 「체결 N」 라벨을 맞춘다 (없으면 붙을 때 온다)
       return self;
     };
+    // 체결 마커 토글 — 끄는 것은 «그리기»뿐이다. _marks 는 그대로라 다시 켜면 그대로 돌아온다
+    self.setMarksOn = function (on) { self._marksOn = !!on; applyMarkers(); return self; };
+    /* 참조선 묶음 — [{price,color,style,width,axisLabel}] + {label, title, on}
+     * label 은 기간 바 토글 버튼의 이름이 된다 (예: 「차수가격 7」) */
+    self.setRefLines = function (list, cfg) {
+      cfg = cfg || {};
+      var R = self._ref;
+      R.lines = (list || []).filter(function (L) { return L && isFinite(+L.price) && +L.price > 0; });
+      if (cfg.label !== undefined) R.label = cfg.label;
+      if (cfg.title !== undefined) R.title = cfg.title;
+      if (cfg.on !== undefined) R.on = !!cfg.on;
+      applyRefLines();
+      refButton();
+      return self;
+    };
+    self.setRefOn = function (on) { self._ref.on = !!on; applyRefLines(); return self; };
     // 화면이 얹은 마커 중 보이는 수 (SUE 층·지표 점은 빼고 — 「체결 마커 N개」 문구용)
     self.markerCount = function () { return self._mkVisible; };
 
@@ -2265,6 +2337,13 @@
       var raw = self._sueRaw || [], bars = self._bars;
       if (!raw.length || !bars.length) { self._sueFit = 0; self._sueMarks = []; applyMarkers(); return; }
       var first = bars[0].time, last = bars[bars.length - 1].time, fit = [];
+      /* ★배지는 «그 공시»로 가는 문이다(2026-08-15) — 클릭하면 재무분석 상세(mode=fund)가 열린다.
+       *   전문(공시 원문·SUE 표)이 사는 자리가 거기라, 배지의 툴팁으로는 다 못 싣는다.
+       *   재무분석 상세에서 «같은 종목»을 보고 있을 때는 안 단다 — 제자리로 가는 문은 소음이다. */
+      var fund = self._sueCode
+              && !(/[?&]mode=fund(&|$)/.test(location.search)
+                   && location.search.indexOf(self._sueCode) >= 0)
+        ? '/stock/index.php?mode=fund&code=' + self._sueCode : '';
       raw.forEach(function (m) {
         if (m.d < first) return;                 // 불러온 구간 이전의 공시 — 찍을 자리가 없다
         var t = null;
@@ -2272,7 +2351,7 @@
         var shock = m.sue <= (self._sueShock === undefined ? -1 : self._sueShock);
         // chip:true — 화면이 「라이브러리 글자」를 쓰더라도(시뮬레이터) 이 배지만은 칩으로.
         // 같은 사실을 화면마다 다른 모양으로 보여 주면 그것이 곧 「다른 말」이 된다.
-        fit.push({ time: t || last, sell: shock, chip: true,
+        fit.push({ time: t || last, sell: shock, chip: true, fund: fund,
                    text: shock ? '어닝쇼크' : '어닝서프라이즈',
                    state: m.q + ' SUE ' + m.sue });
       });
@@ -2312,6 +2391,149 @@
       bar._sueBtn.style.display = n ? '' : 'none';
     }
     self.setSue = function (on) { self._sueOn = !!on; sueSnap(); return self; };
+
+    /* ── 참조선(차수가격 등) 토글 버튼 — SUE 공시와 같은 자리·같은 규칙 ──
+     * 기본은 «꺼짐»이라 버튼도 꺼진 모습으로 태어난다(누르면 보인다 — 사용자 요청 2026-08-12). */
+    function refButton() {
+      var pb = self._pbar;
+      if (!pb || !pb.el) return;
+      var bar = pb.el;
+      if (!bar._refDcs) bar._refDcs = [];
+      if (bar._refDcs.indexOf(self) < 0) bar._refDcs.push(self);
+      var n = 0, label = '', title = '';
+      bar._refDcs.forEach(function (dc) {
+        var r = dc._ref;
+        if (r && r.lines.length > n) { n = r.lines.length; label = r.label; title = r.title; }
+      });
+      if (!bar._refBtn) {
+        var b = document.createElement('button');
+        b.type = 'button';                       // 'on' 없이 태어난다 — 기본 비표시
+        b.onclick = function () {
+          var on = !b.classList.contains('on');
+          b.classList.toggle('on', on);
+          bar._refDcs.forEach(function (dc) { dc.setRefOn(on); });
+        };
+        bar.appendChild(b);
+        bar._refBtn = b;
+        // ⚙ — 선 모양(색·굵기·종류). 토글과 딴 버튼인 이유: 클릭 하나에 뜻이 둘이면 못 쓴다
+        var g = document.createElement('button');
+        g.type = 'button';
+        g.textContent = '⚙';
+        g.title = (label || '참조선') + ' 선 모양 — 색·굵기·종류 (이 화면에 저장)';
+        g.onclick = function () { refStyleModal(); };
+        bar.appendChild(g);
+        bar._refCfgBtn = g;
+      }
+      bar._refBtn.textContent = (label || '참조선') + ' ' + n;
+      bar._refBtn.title = title || '화면이 준 참조 수평선 — 차트에 보이는 가격 범위 안의 선만 그려진다';
+      bar._refBtn.style.display = n ? '' : 'none';
+      bar._refCfgBtn.style.display = n ? '' : 'none';
+    }
+    self._refSyncBtn = refButton;
+
+    /* 참조선 «모양» 모달 — 수평선 편집 모달과 같은 문법(팔레트·굵기·종류).
+     * 취향의 주인은 «화면»이다(chart_pref.view_json 의 ref · 높이 h 와 같은 칸) —
+     * 종목이 바뀌어도 이 화면의 차수선은 같은 모양이어야 한다. */
+    function refStyleModal() {
+      var bar = self._pbar && self._pbar.el;
+      var st = (window.DC_VIEW && window.DC_VIEW.ref) || {};
+      var cur = st.c || REF_COLOR, wSel, sSel;
+      openModal({
+        theme: opts.theme, title: (self._ref.label || '참조선') + ' 선 모양',
+        build: function (bd) {
+          function row(label, node) {
+            var r = document.createElement('div');
+            r.className = 'dc-mrow plain';
+            var b = document.createElement('b');
+            b.textContent = label;
+            b.style.minWidth = '52px';
+            r.appendChild(b);
+            r.appendChild(node);
+            bd.appendChild(r);
+          }
+          var pal = document.createElement('div');
+          pal.style.cssText = 'display:flex;gap:5px;flex-wrap:wrap';
+          [REF_COLOR].concat(HL_PALETTE).forEach(function (c) {
+            var sw = document.createElement('button');
+            sw.type = 'button';
+            sw.style.cssText = 'width:20px;height:20px;border-radius:5px;cursor:pointer;background:' + c +
+                               ';border:2px solid ' + (c === cur ? '#22303f' : 'transparent');
+            sw.onclick = function () {
+              cur = c;
+              Array.prototype.forEach.call(pal.children, function (o) { o.style.borderColor = 'transparent'; });
+              sw.style.borderColor = '#22303f';
+            };
+            pal.appendChild(sw);
+          });
+          row('색', pal);
+
+          wSel = document.createElement('select');
+          [1, 2, 3, 4, 5].forEach(function (w) {
+            var o = document.createElement('option');
+            o.value = String(w); o.textContent = w + 'pt';
+            if (w === (st.w || 2)) o.selected = true;
+            wSel.appendChild(o);
+          });
+          row('굵기', wSel);
+
+          sSel = document.createElement('select');
+          [['solid', '실선'], ['dashed', '파선'], ['dotted', '점선']].forEach(function (s) {
+            var o = document.createElement('option');
+            o.value = s[0]; o.textContent = s[1];
+            if (s[0] === (st.s || 'dashed')) o.selected = true;
+            sSel.appendChild(o);
+          });
+          row('종류', sSel);
+          modalNote(bd, '차트에 보이는 가격 범위 안의 선만 그려집니다. 모양은 이 화면에 저장됩니다.');
+        },
+        buttons: [
+          { label: '기본값', onClick: function (close) { save(null); close(); } },
+          { label: '취소' },
+          { label: '적용', kind: 'pri', onClick: function (close) {
+              save({ c: cur, w: +wSel.value || 2, s: sSel.value });
+              close();
+            } }
+        ]
+      });
+      function save(v) {
+        var m = window.DC_VIEW || (window.DC_VIEW = {});
+        if (v) m.ref = v; else delete m.ref;
+        if (bar && bar._refDcs) bar._refDcs.forEach(function (dc) { if (dc._refApply) dc._refApply(); });
+        else applyRefLines();
+        // 통째로 보낸다 — 높이·기간과 같은 칸(view_json)이라 부분만 보내면 서로를 지운다
+        if (hkey) apiPost('view_save', { chart_key: hkey, view: JSON.stringify(m) }).catch(function () {});
+      }
+    }
+
+    /* ── 체결 마커 토글 버튼 — opts.markers.toggle 인 화면만 (기본 켜짐) ──
+     * 모든 화면에 자동으로 달지 않는 이유: 마커가 «체결»이 아닌 화면(어닝 매수/매도 시점 등)에서
+     * 「체결 N」 라벨이 거짓이 된다. 쓰려는 화면이 한 단어(toggle:true)로 연다. */
+    function markButton() {
+      if (!(opts.markers && opts.markers.toggle)) return;
+      var pb = self._pbar;
+      if (!pb || !pb.el) return;
+      var bar = pb.el;
+      if (!bar._mkDcs) bar._mkDcs = [];
+      if (bar._mkDcs.indexOf(self) < 0) bar._mkDcs.push(self);
+      var n = 0;
+      bar._mkDcs.forEach(function (dc) { n = Math.max(n, dc._mkTotal || 0); });
+      if (!bar._mkBtn) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'on';                      // 지금까지 늘 보이던 층이라 기본은 켜짐
+        b.onclick = function () {
+          var on = !b.classList.contains('on');
+          b.classList.toggle('on', on);
+          bar._mkDcs.forEach(function (dc) { dc.setMarksOn(on); });
+        };
+        bar.appendChild(b);
+        bar._mkBtn = b;
+      }
+      bar._mkBtn.textContent = '체결 ' + n;
+      bar._mkBtn.title = '매수/매도 체결 마커 — 끄면 화살표와 말풍선 배지가 함께 숨는다 (SUE 공시는 제 버튼이 따로)';
+      bar._mkBtn.style.display = n ? '' : 'none';
+    }
+    self._mkSyncBtn = markButton;
     /* 이 차트가 보고 있는 종목. 기능이 꺼져 있으면 부르지도 않는다(=조회 0회).
      * 층이 둘 붙는다 — SUE 공시 마커(위)와 사용자 수평선(아래). 둘은 서로를 모른다. */
     self.setCode = function (code) {
@@ -2741,6 +2963,8 @@
     list.forEach(function (dc) {
       dc._pbar = ctl;
       if (dc._sueSyncBtn) dc._sueSyncBtn();   // 마커가 바보다 먼저 도착했으면 이제 버튼을 단다
+      if (dc._mkSyncBtn)  dc._mkSyncBtn();    // 체결 토글도 마찬가지 (setMarkers 가 바보다 먼저일 수 있다)
+      if (dc._refSyncBtn) dc._refSyncBtn();   // 참조선(차수가격) 토글도
     });
     apply();
     return ctl;
@@ -2831,6 +3055,8 @@
       if (on('fullscreen')) { div(pb); btn(pb, '⛶', false); }
       // SUE 공시 토글도 이 바에 산다 (모듈이 붙인다 — 공시가 있는 종목에서만 보인다)
       if (on('overlay.sue_markers')) btn(pb, 'SUE 공시 ' + (cfg.sueCount || 6), true);
+      // 차수가격(이론) 토글 — 기본이 «꺼짐»이라 미리보기도 꺼진 모습
+      if (on('overlay.step_lines')) btn(pb, '차수가격 7', false);
       r1.appendChild(pb);
     }
     // 지표 바
@@ -2877,7 +3103,8 @@
     // 도구모음에 자리를 갖지 않는 것들 — 차트 위에 얹히는 층
     var layers = [];
     if (on('overlay.position_lines')) layers.push('가격선 3종');
-    if (on('overlay.trade_markers'))  layers.push('체결 마커');
+    if (on('overlay.step_lines'))     layers.push('차수가격(이론) 선 — 토글로 켰을 때');
+    if (on('overlay.trade_markers'))  layers.push('체결 마커 — 「체결 N」 으로 끌 수 있다');
     if (on('overlay.sue_markers'))    layers.push('SUE 공시 마커');
     if (on('overlay.intraday_ref'))   layers.push('당일전고선·현재가선');
     if (on('draw.hline'))             layers.push('수평선 도구(왼쪽 위 ─)');
@@ -2956,6 +3183,7 @@
    * 내용만 바꾼다(splice) — 참조가 갈리는 순간 화면끼리 다른 말을 하기 시작한다. */
   var HL_COLOR   = '#f59e0b';
   var HL_PALETTE = ['#f59e0b', '#ef4444', '#3b82f6', '#22c55e', '#a855f7', '#64748b'];
+  var REF_COLOR  = '#7f9db9';   // 참조선(차수가격) 기본색 — ⚙ 모달 팔레트의 첫 칸이기도 하다
   var _hlStore = {}, _hlLoaded = {}, _hlCharts = [];
   function hlShare(code) {
     if (!code) return [];

@@ -1,0 +1,355 @@
+<?php
+/**
+ * classes/Agoda.class — 아고다 호텔 가격 추적 (DB 전담 + 아고다 내부 API 클라이언트)
+ *
+ * ★비공식 API 다 (2026-08-19 실호출로 확정 · 근거는 memory/session_아고다호텔가격추적.md):
+ *   GET https://www.agoda.com/api/cronos/property/BelowFoldParams/GetSecondaryData
+ *       ?finalPriceView=1&hotel_id=…&checkIn=YYYY-MM-DD&los=1&adults=2&childs=0&rooms=1
+ *   - 로그인 불필요. 쿠키 없이도 응답하지만 워밍업(아무 페이지 1회 GET → 쿠키 확보) 후가 안전
+ *     → 한 실행(프로세스)에 1회만 한다.
+ *   - 자녀 파라미터는 <b>childs</b> 다 — 페이지 URL 의 children 과 <b>다르다</b>.
+ *   - 가격 위치: roomGridData.masterRooms[].rooms[].pricing.displayPrice — <b>1박 · 세전</b>.
+ *   - ★★통화는 <b>USD 고정</b> — currencyCode 파라미터·가격 쿠키·헤더 등 10가지 시도가 전부
+ *     실패했다(같은 세션의 «페이지»는 KRW 로 나오는데 «API»만 USD). KRW 로 적으려 하지 말 것.
+ *   - 비공식이라 구조가 언제든 바뀐다 — 파싱 실패는 «실패»로 돌려주고 예외로 죽지 않는다.
+ *
+ * 층이 둘이다 (설계 확정 2026-08-20):
+ *   ① 롤링(기본층)  — 호텔만 등록하면 크론이 매일 「오늘+ROLL_DAYS · 1박 · 성인2」를 찍는다.
+ *                     «그 호텔의 30일 뒤 시세가 요즘 얼마인가» 추세용. ag_price.track_id=0.
+ *   ② 특정일 추적   — 날짜를 지정해 등록(ag_track). 크론이 매일 <b>같은 날짜</b>를 다시 물어
+ *                     «한 날짜의 가격이 시간에 따라 어떻게 움직이나»를 쌓는다.
+ *                     목표가 알림은 이 층에만 있다(내가 실제로 갈 날짜니까).
+ *                     체크인이 지나면 크론이 active=0 으로 내린다(자동 종료).
+ *
+ * ★「받아 온 방이 0」 ≠ 「호출 실패」 — HTTP/JSON 실패는 fail, 응답이 정상인데 방이 없으면
+ *   soldout(매진·판매중지) 으로 가른다. dt/qm 의 「빈 목록」 교훈과 같은 자리.
+ *
+ * 표 3개 (economist73 은 127+ 표 공유 스키마 — 접두어 ag_):
+ *   ag_hotel  마스터 (agoda_id·이름·URL)
+ *   ag_track  특정일 추적 (checkin·nights·adults·목표가)
+ *   ag_price  일별 가격 로그 (track_id=0 = 롤링 · UNIQUE (hotel,track,checkin,잰날) — 하루 여러 바퀴는 덮어쓴다)
+ */
+class Agoda
+{
+    /** 롤링(기본층) 기준 — 오늘+30일 · 1박 · 성인 2 (2026-08-20 확정) */
+    public const ROLL_DAYS  = 30;
+    public const DEF_NIGHTS = 1;
+    public const DEF_ADULTS = 2;
+
+    private const API = 'https://www.agoda.com/api/cronos/property/BelowFoldParams/GetSecondaryData';
+    private const UA  = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
+    private PDO $pdo;
+    private static bool $warm = false;
+
+    public function __construct(PDO $pdo)
+    {
+        $this->pdo = $pdo;
+    }
+
+    /* ══════════════════════ 스키마 ══════════════════════
+     * ★매 요청 DDL 금지(재무분석 느린 렌더의 교훈 — 메타데이터 잠금 대기) —
+     *   부르는 곳은 크론(daily 첫머리)과 job=schema 뿐이다. 화면·API 는 표가 있다고 믿는다. */
+    public function ensureTables(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS ag_hotel (
+              id         INT AUTO_INCREMENT PRIMARY KEY,
+              agoda_id   BIGINT       NOT NULL,
+              name       VARCHAR(200) NOT NULL DEFAULT '',
+              url        VARCHAR(500) NOT NULL DEFAULT '',
+              active     TINYINT      NOT NULL DEFAULT 1,
+              created_at DATETIME     NOT NULL,
+              UNIQUE KEY uk_agoda (agoda_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS ag_track (
+              id         INT AUTO_INCREMENT PRIMARY KEY,
+              hotel_id   INT          NOT NULL,
+              checkin    DATE         NOT NULL,
+              nights     TINYINT      NOT NULL DEFAULT 1,
+              adults     TINYINT      NOT NULL DEFAULT 2,
+              target_usd DECIMAL(8,2) NULL,
+              active     TINYINT      NOT NULL DEFAULT 1,
+              created_at DATETIME     NOT NULL,
+              UNIQUE KEY uk_track (hotel_id, checkin, nights, adults),
+              KEY idx_active (active, checkin)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS ag_price (
+              id         INT AUTO_INCREMENT PRIMARY KEY,
+              hotel_id   INT          NOT NULL,
+              track_id   INT          NOT NULL DEFAULT 0,
+              checkin    DATE         NOT NULL,
+              d          DATE         NOT NULL,
+              min_usd    DECIMAL(8,2) NULL,
+              room       VARCHAR(200) NOT NULL DEFAULT '',
+              soldout    TINYINT      NOT NULL DEFAULT 0,
+              created_at DATETIME     NOT NULL,
+              UNIQUE KEY uk_sample (hotel_id, track_id, checkin, d),
+              KEY idx_track (track_id, d)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    }
+
+    /* ══════════════════════ 아고다 HTTP ══════════════════════ */
+
+    private static function jar(): string
+    {
+        return sys_get_temp_dir() . '/agoda_cookie.txt';
+    }
+
+    /** @return array{0:int,1:string} [HTTP 상태, 본문] */
+    private static function http(string $url, int $timeout = 20): array
+    {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS      => 4,
+            CURLOPT_TIMEOUT        => $timeout,
+            CURLOPT_CONNECTTIMEOUT => 8,
+            CURLOPT_USERAGENT      => self::UA,
+            CURLOPT_COOKIEJAR      => self::jar(),
+            CURLOPT_COOKIEFILE     => self::jar(),
+            CURLOPT_ENCODING       => '',
+            CURLOPT_HTTPHEADER     => ['Accept: */*', 'Accept-Language: en-US,en;q=0.9'],
+        ]);
+        $body = curl_exec($ch);
+        $st   = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+        return [$st, is_string($body) ? $body : ''];
+    }
+
+    /** 워밍업 — 페이지 1회 GET 으로 쿠키를 받아 둔다. 프로세스당 1회. */
+    public static function warmup(): void
+    {
+        if (self::$warm) return;
+        self::$warm = true;
+        self::http('https://www.agoda.com/', 12);
+    }
+
+    /**
+     * 한 (호텔, 날짜, 인원) 조합의 객실별 가격.
+     * @return array{ok:bool, rooms:array, min:?float, minRoom:string, soldout:bool, msg:string}
+     *         rooms = [['name','price','occ','cxl'], …] · price 는 1박·세전 USD
+     */
+    public static function fetch(int $agodaId, string $checkin, int $nights = self::DEF_NIGHTS, int $adults = self::DEF_ADULTS): array
+    {
+        self::warmup();
+        $q = http_build_query([
+            'finalPriceView' => 1,
+            'hotel_id'       => $agodaId,
+            'checkIn'        => $checkin,
+            'los'            => max(1, $nights),
+            'adults'         => max(1, $adults),
+            'childs'         => 0,          // ★children 아님
+            'rooms'          => 1,
+        ]);
+        [$st, $body] = self::http(self::API . '?' . $q);
+        if ($st !== 200 || $body === '') {
+            return ['ok' => false, 'rooms' => [], 'min' => null, 'minRoom' => '', 'soldout' => false, 'msg' => "HTTP {$st}"];
+        }
+        $j = json_decode($body, true);
+        if (!is_array($j)) {
+            return ['ok' => false, 'rooms' => [], 'min' => null, 'minRoom' => '', 'soldout' => false, 'msg' => 'JSON 파싱 실패'];
+        }
+
+        $rooms = [];
+        $min = null;
+        $minRoom = '';
+        foreach (($j['roomGridData']['masterRooms'] ?? []) as $mr) {
+            foreach (($mr['rooms'] ?? []) as $r) {
+                $p = $r['pricing']['displayPrice'] ?? null;
+                if (is_array($p)) $p = $p['value'] ?? ($p['amount'] ?? null);   // 구조 변경 방어
+                $p = is_numeric($p) ? (float)$p : null;
+                $name = (string)($r['name'] ?? ($mr['name'] ?? ''));
+                $rooms[] = [
+                    'name'  => $name,
+                    'price' => $p,
+                    'occ'   => (int)($r['maxOccupancy'] ?? 0),
+                    'cxl'   => (string)($r['cancellation']['title'] ?? ''),
+                ];
+                if ($p !== null && $p > 0 && ($min === null || $p < $min)) { $min = $p; $minRoom = $name; }
+            }
+        }
+        return ['ok' => true, 'rooms' => $rooms, 'min' => $min, 'minRoom' => $minRoom,
+                'soldout' => ($min === null), 'msg' => ''];
+    }
+
+    /**
+     * 아고다 URL → hotel_id·이름·(있으면) 날짜·인원.
+     * URL 쿼리에 id 가 없으면 페이지 HTML 에서 찾는다 — hotel_id=|hotelId:|propertyId: 세 표기가 다 있다.
+     * @return array{ok:bool, agoda_id:int, name:string, checkin:string, nights:int, adults:int, msg:string}
+     */
+    public static function extract(string $url): array
+    {
+        $fail = fn(string $m) => ['ok' => false, 'agoda_id' => 0, 'name' => '', 'checkin' => '', 'nights' => 1, 'adults' => 2, 'msg' => $m];
+        $url = trim($url);
+        if (!preg_match('#^https?://[^/]*agoda\.com/#i', $url)) return $fail('아고다 URL 이 아닙니다.');
+
+        $q = [];
+        parse_str((string)parse_url($url, PHP_URL_QUERY), $q);
+        $checkin = (string)($q['checkIn'] ?? $q['checkin'] ?? '');
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $checkin)) $checkin = '';
+        $nights = max(1, (int)($q['los'] ?? 1));
+        $adults = max(1, (int)($q['adults'] ?? self::DEF_ADULTS));
+
+        $id = 0;
+        foreach (['hotel_id', 'hotelId', 'propertyId', 'hid'] as $k) {
+            if (!empty($q[$k]) && ctype_digit((string)$q[$k])) { $id = (int)$q[$k]; break; }
+        }
+
+        $name = '';
+        self::warmup();
+        [$st, $html] = self::http($url);
+        if ($st === 200 && $html !== '') {
+            if (!$id && preg_match('/(?:hotel_id=|hotelId["\']?\s*[:=]\s*["\']?|propertyId["\']?\s*[:=]\s*["\']?)(\d{4,})/', $html, $m)) {
+                $id = (int)$m[1];
+            }
+            if (preg_match('#<title>(.*?)</title>#si', $html, $m)) {
+                $t = trim(html_entity_decode($m[1], ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+                $name = trim((string)strtok($t, '|'));     // "이름, 도시 | 최저가 보장, 아고다" → 앞부분만
+            }
+        }
+        if (!$id) return $fail('페이지에서 hotel_id 를 찾지 못했습니다. (아고다 «호텔 상세» 페이지 URL 인지 확인)');
+
+        return ['ok' => true, 'agoda_id' => $id, 'name' => $name, 'checkin' => $checkin,
+                'nights' => $nights, 'adults' => $adults, 'msg' => ''];
+    }
+
+    /* ══════════════════════ 호텔 마스터 ══════════════════════ */
+
+    /** 이미 있으면(같은 agoda_id) 그 행을 되살리고 id 를 돌려준다 */
+    public function hotelAdd(int $agodaId, string $name, string $url): int
+    {
+        $st = $this->pdo->prepare("SELECT id FROM ag_hotel WHERE agoda_id = ?");
+        $st->execute([$agodaId]);
+        $id = (int)$st->fetchColumn();
+        if ($id) {
+            $this->pdo->prepare("UPDATE ag_hotel SET active = 1, url = ?, name = IF(? = '', name, ?) WHERE id = ?")
+                      ->execute([$url, $name, $name, $id]);
+            return $id;
+        }
+        $this->pdo->prepare("INSERT INTO ag_hotel (agoda_id, name, url, active, created_at) VALUES (?,?,?,1,NOW())")
+                  ->execute([$agodaId, mb_substr($name, 0, 200), mb_substr($url, 0, 500)]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public function hotelGet(int $id): ?array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM ag_hotel WHERE id = ?");
+        $st->execute([$id]);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    public function hotelList(): array
+    {
+        return $this->pdo->query("
+            SELECT h.*,
+                   (SELECT COUNT(*) FROM ag_track t WHERE t.hotel_id = h.id AND t.active = 1) AS trk_n
+              FROM ag_hotel h
+             WHERE h.active = 1
+             ORDER BY h.id")->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 호텔과 딸린 추적·가격 이력을 함께 지운다 (되돌릴 수 없음 — 화면이 confirm 을 받는다) */
+    public function hotelDel(int $id): void
+    {
+        $this->pdo->prepare("DELETE FROM ag_price WHERE hotel_id = ?")->execute([$id]);
+        $this->pdo->prepare("DELETE FROM ag_track WHERE hotel_id = ?")->execute([$id]);
+        $this->pdo->prepare("DELETE FROM ag_hotel WHERE id = ?")->execute([$id]);
+    }
+
+    /* ══════════════════════ 특정일 추적 ══════════════════════ */
+
+    /** 같은 (호텔·날짜·박·인원)이 있으면 되살리고 목표가만 갱신한다 */
+    public function trackAdd(int $hotelId, string $checkin, int $nights, int $adults, ?float $target): int
+    {
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $checkin)) throw new InvalidArgumentException('체크인 날짜 형식이 틀렸습니다.');
+        if ($checkin < date('Y-m-d')) throw new InvalidArgumentException('지나간 날짜는 추적할 수 없습니다.');
+        $nights = max(1, min(30, $nights));
+        $adults = max(1, min(9, $adults));
+
+        $st = $this->pdo->prepare("SELECT id FROM ag_track WHERE hotel_id=? AND checkin=? AND nights=? AND adults=?");
+        $st->execute([$hotelId, $checkin, $nights, $adults]);
+        $id = (int)$st->fetchColumn();
+        if ($id) {
+            $this->pdo->prepare("UPDATE ag_track SET active=1, target_usd=? WHERE id=?")->execute([$target, $id]);
+            return $id;
+        }
+        $this->pdo->prepare("INSERT INTO ag_track (hotel_id, checkin, nights, adults, target_usd, active, created_at)
+                             VALUES (?,?,?,?,?,1,NOW())")
+                  ->execute([$hotelId, $checkin, $nights, $adults, $target]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public function trackDel(int $id): void
+    {
+        // 가격 이력은 남긴다 — 다시 등록하면 이어 보인다 (지우고 싶으면 호텔 삭제)
+        $this->pdo->prepare("DELETE FROM ag_track WHERE id = ?")->execute([$id]);
+    }
+
+    public function trackTarget(int $id, ?float $target): void
+    {
+        $this->pdo->prepare("UPDATE ag_track SET target_usd = ? WHERE id = ?")->execute([$target, $id]);
+    }
+
+    /** 살아있는 추적 전부 (+최신 표본) — 크론·화면 공용 */
+    public function trackList(?int $hotelId = null): array
+    {
+        $w = $hotelId ? 'AND t.hotel_id = ' . (int)$hotelId : '';
+        return $this->pdo->query("
+            SELECT t.*, h.agoda_id, h.name AS hotel_name,
+                   (SELECT p.min_usd FROM ag_price p WHERE p.track_id = t.id ORDER BY p.d DESC LIMIT 1) AS last_usd,
+                   (SELECT p.d       FROM ag_price p WHERE p.track_id = t.id ORDER BY p.d DESC LIMIT 1) AS last_d,
+                   (SELECT p.soldout FROM ag_price p WHERE p.track_id = t.id ORDER BY p.d DESC LIMIT 1) AS last_soldout
+              FROM ag_track t
+              JOIN ag_hotel h ON h.id = t.hotel_id
+             WHERE t.active = 1 {$w}
+             ORDER BY t.checkin, t.id")->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 체크인이 지난 추적을 내린다 — 자동 종료 */
+    public function expireTracks(): int
+    {
+        $st = $this->pdo->prepare("UPDATE ag_track SET active = 0 WHERE active = 1 AND checkin < CURDATE()");
+        $st->execute();
+        return $st->rowCount();
+    }
+
+    /* ══════════════════════ 가격 로그 ══════════════════════ */
+
+    /** 하루 여러 바퀴 돌면 같은 (호텔·추적·체크인·잰날)을 마지막 값으로 덮는다 */
+    public function savePrice(int $hotelId, int $trackId, string $checkin, ?float $min, string $room, bool $soldout): void
+    {
+        $this->pdo->prepare("
+            INSERT INTO ag_price (hotel_id, track_id, checkin, d, min_usd, room, soldout, created_at)
+            VALUES (?,?,?,CURDATE(),?,?,?,NOW())
+            ON DUPLICATE KEY UPDATE min_usd = VALUES(min_usd), room = VALUES(room),
+                                    soldout = VALUES(soldout), created_at = VALUES(created_at)")
+            ->execute([$hotelId, $trackId, $checkin, $min, mb_substr($room, 0, 200), $soldout ? 1 : 0]);
+    }
+
+    /** 롤링(기본층) 이력 — 잰 날 내림차순 */
+    public function rollSeries(int $hotelId, int $n = 14): array
+    {
+        $st = $this->pdo->prepare("
+            SELECT d, checkin, min_usd, room, soldout FROM ag_price
+             WHERE hotel_id = ? AND track_id = 0
+             ORDER BY d DESC LIMIT " . max(1, min(120, $n)));
+        $st->execute([$hotelId]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 특정일 추적 이력 — 잰 날 내림차순 */
+    public function trackSeries(int $trackId, int $n = 60): array
+    {
+        $st = $this->pdo->prepare("
+            SELECT d, min_usd, room, soldout FROM ag_price
+             WHERE track_id = ?
+             ORDER BY d DESC LIMIT " . max(1, min(365, $n)));
+        $st->execute([$trackId]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+}
+?>

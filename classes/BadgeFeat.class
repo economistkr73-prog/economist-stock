@@ -1,0 +1,224 @@
+<?php
+/**
+ * classes/BadgeFeat.class — 종목 «목록» 배지 표시 카탈로그 + 화면별 켬/끔 (2026-08-12)
+ *
+ * 왜 있나
+ *   탐색 목록(퀀트·관심종목·어닝·단타)에 배지가 늘며 「사이트내 종목리스트가 많아
+ *   어수선하다」(사용자) — 화면마다 어떤 배지를 그릴지 고를 수 있어야 한다.
+ *   ChartFeat(차트 화면별 구성)와 같은 패턴: 카탈로그 한 벌 + 화면별 «차분»만 저장.
+ *
+ * ★★ 끄는 것은 «그리기»뿐이다 — 판정(pf_surge_badge·boxStatusMany·quant_badge_many…)은
+ *    이 클래스와 무관하게 그대로 돈다. 배지를 껐다고 판정이 달라지면 화면끼리 다른 말을 한다.
+ * ★★ ③행동 신호·④포트폴리오 경보(장기물림·N차 지연·계단관통↓)는 여기 없다 —
+ *    경보를 끄는 스위치는 두지 않는다(소집을 놓치면 포지션이 다친다). FIXED 절 참조.
+ * ★  「보유/편입됨」은 전 화면 잠금이다 — 숨기면 이미 가진 종목을 또 담는 실수를 부른다
+ *    (단타 pool 은 FIFO 라 그 실수가 남의 종목 봉을 지운다).
+ *
+ * 소비처
+ *   설정 화면  /stock/index.php?mode=signal  (설정 > 신호분석 설정 — 체크칸 매트릭스)
+ *   저장 API   /stock/api.php?module=badge&action=save
+ *   PHP 화면   pf_page_quant / pf_page_watch / pf_page_earn — vals() 로 게이트
+ *   단타 JS    BadgeFeat::script() 가 var BADGE_FEATS 를 심고 renderTop/listRow 가 본다
+ */
+class BadgeFeat
+{
+    /** 층 — 신호분석 탭의 분류(①상태 ②퀀트)와 같은 어휘. 보조는 판정이 아닌 정보 표시 */
+    const GROUPS = [
+        'state' => ['label' => '① 상태',  'desc' => '종목 자체의 사실 — 시장·실적'],
+        'quant' => ['label' => '② 퀀트',  'desc' => '최고 거래대금 신호·경로와 그 위의 판정'],
+        'aux'   => ['label' => '보조 정보', 'desc' => '판정이 아니라 참고 정보'],
+    ];
+
+    /**
+     * 배지 카탈로그 — label 은 화면 어휘 그대로(신호분석 용어 정의가 정본).
+     * src = 판정 단일본 · 그리기 단일본 (설정 화면이 「어디서 오나」로 그대로 보여 준다).
+     * ★여기 없는 배지를 화면이 새로 달지 않는다 — 달려면 여기 한 줄부터.
+     */
+    const BADGES = [
+        'mkt' => ['g' => 'state', 'label' => '시장 배지',
+            'desc' => '역배열 · 과매도 RSI · 급등락 ±15% · 52주 최저권 · 거래량 N배 — 하루치 시장 상태(최대 3개)',
+            'src'  => '판정 pf_market_signals()+Thr · 그리기 pf_mkt_badges()'],
+        'mom' => ['g' => 'state', 'label' => '모멘텀 칩',
+            'desc' => '「20일 +112%」·「40일 −52%」 — 20·40거래일 등락. 급등(빨강)은 실측 근거, 급락(파랑)은 참고',
+            'src'  => '판정 KrxAmt::momMany(신호일)/momNow(오늘) · 그리기 pf_mom_chips() / QuantBadge'],
+        'sue' => ['g' => 'state', 'label' => 'SUE 칩',
+            'desc' => '어닝서프라이즈 · 어닝쇼크 — 최신 분기 이익 서프라이즈(±1 경계는 Thr::SUE_*)',
+            'src'  => '판정 stock/lib/sue.php · 그리기 pf_sue_badge_map() / QuantBadge'],
+        'qsig' => ['g' => 'quant', 'label' => '퀀트신호',
+            'desc' => '매집형 · 중립 · 불꽃형 — 최근 최고 거래대금 신호일 하루의 성격',
+            'src'  => '판정 pf_surge_badge() / quant_badge_many() · 그리기 화면 / QuantBadge'],
+        'bxgrade' => ['g' => 'quant', 'label' => '📦 박스돌파 등급',
+            'desc' => '박스 상향돌파 5조건 통과 + 등급 A~D(닮음 점수 — 오를 확률이 아님) — bx_cand 읽기(16:20 적재)',
+            'src'  => '판정 stock/lib/boxbrk.php(크론) · 그리기 퀀트 목록'],
+        'qpath' => ['g' => 'quant', 'label' => '퀀트 경로 (박스)',
+            'desc' => '新박스 · 박스안 · 돌파✓ · 계단지지 · 지지이탈↓ … + 단타의 ⚡신박스(장중 잠정) — ★박스 상향돌파(5조건) 박스에 한함',
+            'src'  => '판정 KrxAmt::boxStatusMany() / boxbrk_live() · 그리기 화면 / QuantBadge'],
+        'trigger' => ['g' => 'quant', 'label' => '트리거',
+            'desc' => '🟢 돌파확인 · 🟢 계단지지 — 검증된 매수 두 자리. 관심종목(관제탑)의 존재 이유라 끌 수 없다',
+            'src'  => '판정 pf_page_watch 인라인(2-a×2-b) · 그리기 .wl-go'],
+        'etf' => ['g' => 'aux', 'label' => 'ETF 편입 수',
+            'desc' => '이 종목을 상위 편입한 ETF 수 — 20/50/100 티어, 100↑ 💎',
+            'src'  => 'all_stock_holdings_info.top_rank_count · 그리기 QuantBadge.etf()'],
+        'cap' => ['g' => 'aux', 'label' => '시총 · 회전율',
+            'desc' => '시가총액(억/조) · 회전율(거래대금÷시총 — 파생값이라 저장하지 않는다)',
+            'src'  => 'all_stock_info · 그리기 QuantBadge.eok()'],
+        'tag' => ['g' => 'aux', 'label' => '종목 태그',
+            'desc' => '#HBM · #반도체 — 종목 상세 「종목 개요」에서 단 태그. 누르면 재무 스크리너를 그 태그로 거른다',
+            'src'  => 'stock_tag·stock_tag_map · 그리기 pf_tag_chips() (stock/lib/note.php)'],
+        'held' => ['g' => 'aux', 'label' => '보유 / 편입됨',
+            'desc' => '포트폴리오에 이미 자리가 있는 종목 — ★전 화면 잠금(숨기면 또 담는 실수를 부른다)',
+            'src'  => '판정 pf_held_map() / Dt · 그리기 pf_held_badge() / 단타 인라인'],
+    ];
+
+    /**
+     * 설정 대상 화면 — badges 는 그 화면에 실제로 뜨는 것만(코드에서 확인 · 추측 금지),
+     * lock 은 끌 수 없는 것. ★화면에 배지를 더하거나 빼면 여기부터 고친다 —
+     * 신호분석 설정 화면의 매트릭스가 이 표에서 나온다(수동 동기화 금지).
+     */
+    const SCREENS = [
+        'quant' => ['label' => '퀀트 목록', 'url' => '/stock/index.php?mode=quant',
+            'badges' => ['qsig', 'bxgrade', 'qpath', 'mom', 'held'], 'lock' => ['held'],
+            'note' => '신호·경로 열은 담긴 배지를 전부 끄면 열째로 사라집니다'],
+        'watch' => ['label' => '관심종목', 'url' => '/stock/index.php?mode=watch',
+            'badges' => ['mkt', 'sue', 'qsig', 'qpath', 'trigger', 'mom', 'held', 'tag'], 'lock' => ['trigger', 'held'],
+            'note' => '트리거는 이 화면(관제탑)의 존재 이유라 잠금'],
+        'earn' => ['label' => '어닝 서프라이즈', 'url' => '/stock/index.php?mode=earn',
+            'badges' => ['sue', 'qpath', 'held', 'tag'], 'lock' => ['sue', 'held'],
+            'note' => 'SUE 는 이 화면의 알맹이라 잠금 — 끌 수 있는 것은 박스 열뿐'],
+        'short' => ['label' => '단타 (상위·내 목록·보유)', 'url' => '/stock/index.php?mode=short',
+            'badges' => ['etf', 'qsig', 'qpath', 'mom', 'sue', 'cap', 'held'], 'lock' => ['held'],
+            'note' => '세 목록이 같은 스위치를 본다 — 수집상태 배지(받는 중·구멍 N)는 기능 표시라 설정 대상이 아님'],
+    ];
+
+    /** 설정 대상이 아닌 화면 — 지도에서 «안 빠지게» 남긴다 (ChartFeat::BARELESS 와 같은 자리) */
+    const FIXED = [
+        ['현황 · 보유종목 · 종목 상세', '행동 신호(매수·매도·대기·신뢰도) · 장기물림 · N차 지연 · 계단관통↓ · 시장 · SUE',
+         '③행동·④포트폴리오 경보는 끄는 스위치를 두지 않는다 — 경보를 놓치면 포지션이 다친다'],
+        ['재무 스크리너', 'SUE 값 열 · 보유/편입됨',
+         'SUE 는 배지가 아니라 데이터 열이라 설정 대상이 아니다'],
+        ['매매히스토리', '잘 담았음 · 이르게 팔았음 · 재진입 상태',
+         '지난 행동의 채점 — 이 화면의 존재 이유'],
+        ['패턴분석 (박스 상향돌파)', '★내가 고름/자동 · 등급 A~D · 익절/손절 · 불꽃형 · 상한가',
+         '카드 전용 배지(2-d 층) — 카드의 존재 이유라 끌 수 없다'],
+    ];
+
+    /** 그 화면에 이 배지가 뜨나 */
+    public static function has(string $screen, string $badge): bool
+    {
+        $s = self::SCREENS[$screen] ?? null;
+        return $s !== null && isset(self::BADGES[$badge]) && in_array($badge, $s['badges'], true);
+    }
+
+    /** 잠금 = 끌 수 없음 */
+    public static function locked(string $screen, string $badge): bool
+    {
+        $s = self::SCREENS[$screen] ?? null;
+        return $s !== null && in_array($badge, $s['lock'], true);
+    }
+
+    /** 카탈로그 기본값 — 그 화면에 뜨는 배지는 전부 1(현행 유지), 안 뜨는 것은 0 */
+    public static function defaults(string $screen): array
+    {
+        $out = [];
+        foreach (array_keys(self::BADGES) as $k) {
+            $out[$k] = self::has($screen, $k) ? 1 : 0;
+        }
+        return $out;
+    }
+
+    /** 기본값 + 저장된 차분 → 최종 구성. 잠금·미노출은 저장값이 있어도 무시 */
+    public static function merge(string $screen, $over): array
+    {
+        $out = self::defaults($screen);
+        if (is_string($over)) $over = json_decode($over, true);
+        if (is_array($over)) {
+            foreach ($over as $k => $v) {
+                if (!isset($out[$k])) continue;
+                if (!self::has($screen, $k) || self::locked($screen, $k)) continue;
+                $out[$k] = $v ? 1 : 0;
+            }
+        }
+        return $out;
+    }
+
+    /** 저장할 차분만 — 기본값과 같은 항목은 버린다(카탈로그를 고치면 따라오게) */
+    public static function diff(string $screen, array $vals): array
+    {
+        $def = self::defaults($screen);
+        $out = [];
+        foreach ($vals as $k => $v) {
+            if (!isset($def[$k])) continue;
+            if (!self::has($screen, $k) || self::locked($screen, $k)) continue;
+            $v = $v ? 1 : 0;
+            if ($v !== $def[$k]) $out[$k] = $v;
+        }
+        return $out;
+    }
+
+    /**
+     * 화면이 쓸 최종 구성 — 페이지 렌더의 유일한 진입점.
+     * 표가 아직 없어도(첫 배포) 카탈로그 기본값(전부 켬)으로 살아난다 —
+     * 설정 하나 때문에 목록이 죽으면 안 된다 (ChartFeat::vals 와 같은 규칙).
+     */
+    private static array $cache = [];
+
+    public static function vals(string $screen, ?PDO $pdo = null): array
+    {
+        if (isset(self::$cache[$screen])) return self::$cache[$screen];
+        if (!$pdo instanceof PDO) $pdo = $GLOBALS['pdo'] ?? null;
+        $over = null;
+        if ($pdo instanceof PDO) {
+            try {
+                $st = $pdo->prepare("SELECT features_json FROM badge_pref WHERE screen=?");
+                $st->execute([$screen]);
+                $over = $st->fetchColumn() ?: null;
+            } catch (Throwable $e) {
+                $over = null;
+            }
+        }
+        return self::$cache[$screen] = self::merge($screen, $over);
+    }
+
+    /** 그 구성을 JS 로 넘기는 한 줄 — 단타 renderTop/listRow 와 QuantBadge.quant(q, o) 가 읽는다 */
+    public static function script(array $vals): string
+    {
+        return '<script>var BADGE_FEATS=' . json_encode($vals, JSON_UNESCAPED_UNICODE) . ';</script>';
+    }
+
+    /**
+     * 저장 — 차분만 담는다(전부 기본값이면 NULL). 표는 여기서 처음 만든다
+     * (설정을 한 번도 안 만졌으면 표 자체가 없어도 된다 — vals() 가 기본값으로 산다).
+     */
+    public static function save(string $screen, array $vals, ?PDO $pdo = null): array
+    {
+        if (!$pdo instanceof PDO) $pdo = $GLOBALS['pdo'] ?? null;
+        if (!isset(self::SCREENS[$screen]) || !$pdo instanceof PDO) return self::defaults($screen);
+
+        $pdo->exec("CREATE TABLE IF NOT EXISTS badge_pref (
+            screen        VARCHAR(32)  NOT NULL PRIMARY KEY COMMENT '화면 키 (BadgeFeat::SCREENS)',
+            features_json TEXT         NULL COMMENT '기본값과 다른 것만 {badge:0|1} — NULL=전부 기본값',
+            upd           DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='목록 배지 표시 설정 (classes/BadgeFeat.class)'");
+
+        $diff = self::diff($screen, $vals);
+        $json = $diff ? json_encode($diff, JSON_UNESCAPED_UNICODE) : null;
+        $st = $pdo->prepare("INSERT INTO badge_pref (screen, features_json) VALUES (?, ?)
+                             ON DUPLICATE KEY UPDATE features_json = VALUES(features_json)");
+        $st->execute([$screen, $json]);
+
+        unset(self::$cache[$screen]);
+        return self::vals($screen, $pdo);
+    }
+
+    /** 설정 화면에 심을 카탈로그 한 벌 */
+    public static function catalog(): array
+    {
+        return [
+            'groups'  => self::GROUPS,
+            'badges'  => self::BADGES,
+            'screens' => self::SCREENS,
+            'fixed'   => self::FIXED,
+        ];
+    }
+}
+?>

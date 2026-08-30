@@ -253,6 +253,7 @@ function gift_page_batch(Gift $gift): void
     echo '<button class="gf-btn gf-ok" onclick="gfConfirm()">회차 확정 저장</button>';
     echo '<a class="gf-btn" href="/gift/export.php?id=' . $bid . '&type=vendor">업체 발송용 엑셀</a>';
     echo '<a class="gf-btn" href="/gift/export.php?id=' . $bid . '&type=full">전체 내역 엑셀</a>';
+    echo '<a class="gf-btn" href="/gift/export.php?id=' . $bid . '&type=print" target="_blank">큰 글씨 인쇄</a>';
     echo '</div>';
     echo '</div>';
 
@@ -683,6 +684,7 @@ function gift_page_histv(Gift $gift): void
     echo '<div class="gf-noprint">';
     echo '<a class="gf-btn gf-primary" href="/gift/export.php?id=' . $id . '&type=vendor">업체 발송용 엑셀</a> ';
     echo '<a class="gf-btn" href="/gift/export.php?id=' . $id . '&type=full">전체 내역 엑셀</a> ';
+    echo '<a class="gf-btn" href="/gift/export.php?id=' . $id . '&type=print" target="_blank">큰 글씨 인쇄</a> ';
     echo '<button class="gf-btn" onclick="window.print()">인쇄</button> ';
     echo '<a class="gf-btn" href="/gift/index.php?mode=hist">목록</a>';
     echo '</div></div>';

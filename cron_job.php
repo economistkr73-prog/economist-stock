@@ -95,10 +95,14 @@ const TASKS = [
         'get'  => ['ssk' => KWC_KEY, 'mode' => 'daily_summary'],
         'desc' => '당일 일정 요약 1건 발송',
     ],
+    /* ★하루 두 번(08:05·17:05)이다(2026-08-11 — 크론 사이트의 «기존 잡» 스케줄에 17시를 더했다).
+     * DART 재무제표 API(fnlttMultiAcnt)는 공시 접수보다 늦어(실측: 08-10 접수분이 08-11 08:05 엔
+     * 46종목, 17:00 엔 66종목) 아침 한 번이면 실적 알림이 공시 다다음 날로 밀리는 종목이 생긴다.
+     * 오후 fire 가 그 지연분과 당일 공시를 따라잡는다. 알림 중복은 pf_alert_log 가 막는다. */
     'dart_fresh' => [
-        'file' => 'cron/dart_collect.php', 'bg' => true, 'cron' => '5 8 * * 1-5',
+        'file' => 'cron/dart_collect.php', 'bg' => true, 'cron' => '5 8,17 * * 1-5',
         'get'  => ['key' => DART_KEY, 'job' => 'fresh'],
-        'desc' => 'DART 최신 5슬롯 재무제표 재수집 (78초 · bg 필수)',
+        'desc' => 'DART 최신 5슬롯 재무제표 재수집 + 실적 알림 (하루 2회 · ~150초 · bg 필수)',
     ],
     'market' => [
         'file' => 'market/crawl.php', 'bg' => false, 'cron' => '10 8 * * 1-6',
@@ -182,6 +186,17 @@ const TASKS = [
         'file' => 'cron/bx_scan.php', 'bg' => false, 'cron' => '20 16 * * 1-5',
         'get'  => ['key' => 'econ-bx', 'job' => 'daily', 'ag' => 'B', 'mincalls' => '400'],
         'desc' => '박스 상향돌파 — 적재 → 결과 판정 → 1분봉 수집 → 새 후보 알림 (패턴분석 화면의 원장)',
+    ],
+
+    /* ★아고다 비공식 API — 콜은 하루 1바퀴만(서버 IP 가 네이버 크롤링과 같다). 호텔당 ~2초라
+     *   대상이 15개만 넘어도 30초 벽을 넘는다 → bg 필수.
+     * ★job 을 레지스트리에 넣지 않는다 — &job=schema/status/check 를 URL 로 골라 부르기 위함
+     *   (qm 과 같은 패턴 · 기본은 파일 쪽 job=daily).
+     * ★08:40 인 이유 — 08:05(dart_fresh)·08:10(market) 뒤 빈 자리. 호텔 가격은 시각 제약이 없다. */
+    'agoda' => [
+        'file' => 'cron/agoda_track.php', 'bg' => true, 'cron' => '40 8 * * *',
+        'get'  => ['key' => 'econ-agoda'],
+        'desc' => '아고다 호텔 가격 — 롤링(D+30)·특정일 추적 수집 + 목표가 알림 (호텔당 ~2초 · bg 필수)',
     ],
 
     // ── 매월 도는 것 ────────────────────────────────────────────────────
