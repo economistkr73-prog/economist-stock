@@ -84,6 +84,12 @@ class Thr
     /** 연속 상승·하락 일수 */
     public const STREAK         = 3;
 
+    /* ★ 마감 «변동 요약» 알림 문턱 (2026-08-31 사용자 요청 · 지정값). 사건 판정(신호)이 아니라
+     *   「오늘 내가 보는 종목(관심·단타·보유) 중 크게 움직인 것을 한 건으로 묶어 보내는」 요약의 문턱이라
+     *   급등락 배지(CHG_ABS 15%)보다 낮게 둔다 — 15% 면 한 달에 몇 번 안 오고, 요약은 자주 와야 값어치가 있다.
+     *   소비자: stock/lib/alert.php pf_alert_move() (dart_eod 15:50 끝). 바꾸면 여기 한 곳만. */
+    public const EOD_MOVE_PCT   = 0.05;
+
     /* ★★ 52주 위치는 <b>용도마다 임계가 다르다</b> — 보고서 §5.3 이 짚은 D4 의 실증 사례다.
      *   배지(사건 표시)는 5%/95% 로 좁게, 신뢰도(계획 보정)는 10%/90% 로 넓게 본다.
      *   같은 지표라고 한 값으로 합치면 <b>둘 중 하나가 틀린다</b> — 그래서 키를 나눠 둔다. */
@@ -164,6 +170,8 @@ class Thr
             'market.rsi_overbought' => $R(self::RSI_OVERBOUGHT, '', 'assumed', 'RSI 70 이상 = 과매수'),
             'market.disp20'       => $R(self::DISP20, '비율', 'assumed', '20일선 이격 ±10%'),
             'market.streak'       => $R(self::STREAK, '일', 'assumed', '연속 상승·하락 3일'),
+            'alert.eod_move_pct'  => $R(self::EOD_MOVE_PCT, '비율', 'assumed',
+                '마감 변동 요약(Pushover · 15:50) — 관심·단타·보유 종목의 |등락률| ≥ 5% 를 한 건으로. 2026-08-31 지정값(신호가 아니라 요약 문턱)'),
 
             'market.pos52_low.badge'  => $R(self::POS52_LOW_BADGE, '비율', 'assumed',
                 '52주 최저권 배지 — 하단 5%. ★신뢰도와 임계가 다르다(같은 지표·다른 용도)'),

@@ -201,10 +201,124 @@ function pf_sue_marks(PDO $pdo, string $code): array
         // 문턱은 Thr 단일 원본 — 여기에 1.0 을 또 적으면 그것이 여섯 번째 사본이 된다
         if ($v === null || ($v < Thr::SUE_HIT && $v > Thr::SUE_SHOCK)) continue;
         $y = intdiv($qk - 1, 4);                   // qk = 연도*4 + 분기(1~4) 의 역산
-        $out[] = ['d' => $dt, 'q' => ($y % 100) . '.' . ($qk - $y * 4) . 'Q', 'sue' => round($v, 1)];
+        $out[] = ['d' => $dt, 'q' => ($y % 100) . '.' . ($qk - $y * 4) . 'Q', 'sue' => round($v, 1),
+                  'qk' => $qk];                    // 아래 valuation 이 쓰고 지운다 — 응답엔 안 나간다
     }
     usort($out, fn($a, $b) => strcmp($a['d'], $b['d']));
+    pf_sue_valuation($pdo, $code, $out);           // 배지 셋째 줄 «그때 PER·PBR» + 넷째 줄 «TTM 연속 횟수» (없으면 null)
     return $out;
+}
+
+/**
+ * TTM(최근 4분기 합) 시계열 + <b>연속 횟수</b> — 재무분석 「분기 추이」(표·소형 차트)와 SUE 배지 넷째 줄의 단일본.
+ *
+ * 입력은 Dart::quarterly() 결과(최근 분기 먼저). 반환은 같은 색인으로
+ *   [i => ['revenue'=>TTM|null, 'op_income'=>…, 'net_income'=>…, 'streak'=>['revenue'=>+N|-N|0|null, …]]]
+ *
+ * ★TTM 은 (연도·분기) 키로 넉 자리를 짚는다 — 배열 순서로 i…i+3 을 더하면 빠진 분기가 있을 때
+ *   조용히 다섯 분기 전을 더한다(밴드 차트가 실측으로 밟은 함정 · pf_sue_valuation 의 PER 과 같은 규칙).
+ *   넉 자리가 안 차면(상장 초기·미제출) null — 0 으로 두면 적자로 읽힌다.
+ * ★연속 횟수는 시간순으로 <b>직전 값</b>과 견준다 — +N = N분기 연속 상승 · −N = 연속 하락 · 같으면 0 ·
+ *   null 이 끼면 거기서 끊어 0 부터(빈 분기를 이어 세면 없는 추세가 생긴다). 이력 <b>전체</b>에서 센다 —
+ *   화면이 12분기만 그려도 첫 점의 숫자는 「그 앞이 어땠나」를 안다(창으로 세면 같은 분기가 화면마다 다른 수를 갖는다).
+ *   보합 임계는 없다 — 정확히 같을 때만 0(Thr 규칙과 같은 자리).
+ */
+function pf_ttm_series(array $qs): array
+{
+    $cols = ['revenue', 'op_income', 'net_income'];
+    $byQ = [];
+    foreach ($qs as $i => $q) $byQ[(int)$q['bsns_year'] * 4 + (int)$q['quarter']] = $i;
+
+    $out = [];
+    foreach ($qs as $i => $q) {
+        $qk = (int)$q['bsns_year'] * 4 + (int)$q['quarter'];
+        foreach ($cols as $col) {
+            $sum = 0.0; $ok = true;
+            for ($k = 0; $k < 4; $k++) {
+                $j = $byQ[$qk - $k] ?? null;
+                $v = $j === null ? null : ($qs[$j][$col] ?? null);
+                if ($v === null) { $ok = false; break; }
+                $sum += (float)$v;
+            }
+            $out[$i][$col] = $ok ? $sum : null;
+        }
+        $out[$i]['streak'] = array_fill_keys($cols, null);
+    }
+
+    // 시간순(오래된 것부터)으로 연속 횟수 — 배열이 최근순이라 뒤에서 앞으로 돈다
+    foreach ($cols as $col) {
+        $streak = 0; $prev = null;
+        for ($i = count($qs) - 1; $i >= 0; $i--) {
+            $v = $out[$i][$col];
+            if ($v === null) { $streak = 0; $prev = null; continue; }
+            $d = $prev === null ? 0 : ($v <=> $prev);
+            $streak = $d > 0 ? ($streak > 0 ? $streak + 1 : 1) : ($d < 0 ? ($streak < 0 ? $streak - 1 : -1) : 0);
+            $out[$i]['streak'][$col] = $streak;
+            $prev = $v;
+        }
+    }
+    return $out;
+}
+
+/**
+ * 마커에 «그때 PER·PBR» 를 붙인다 — 재무분석 상세 「분기 추이」 표의 PER·PBR 열과 같은 정의.
+ *
+ *   PER = 공시일 시총 ÷ 순이익 TTM(그 분기 포함 최근 4개 당분기 합)
+ *   PBR = 공시일 시총 ÷ 그 분기말 자본총계
+ *
+ * 분자가 «공시일» 시총이라 지금 PER 이 아니다 — 「그 실적이 알려진 날 시장이 매기던 배수」.
+ * 배지 하나가 곧 그 공시라, 배지를 눌러 여는 재무분석 표의 그 분기 행과 같은 값이어야 한다.
+ * 시총은 krx_amt 공시일(휴장이면 직전 10일 내 — pf_fund_filing_map 과 같은 규칙).
+ * 적자·자본잠식·재료 부족이면 null — 0 으로 채우면 「0배」로 읽힌다. JS 는 null 줄을 안 그린다.
+ */
+function pf_sue_valuation(PDO $pdo, string $code, array &$marks): void
+{
+    try {
+        if ($marks) {
+            // 밴드 차트(pf_band_series)와 같은 재료 — 누적(YTD) 원장을 Dart::quarterly 로 당분기화
+            $st = $pdo->prepare("SELECT * FROM stock_financial WHERE stock_code = ? ORDER BY bsns_year");
+            $st->execute([$code]);
+            $qs  = Dart::quarterly($st->fetchAll(PDO::FETCH_ASSOC));
+            $ttm = pf_ttm_series($qs);                 // 재무분석 「분기 추이」 소형 차트와 같은 배열
+            $byQ = []; $idxQ = [];
+            foreach ($qs as $i => $q) {
+                $qk = (int)$q['bsns_year'] * 4 + (int)$q['quarter'];
+                $byQ[$qk] = $q; $idxQ[$qk] = $i;
+            }
+            $capSt = $pdo->prepare("
+                SELECT mktcap FROM krx_amt
+                 WHERE code = ? AND d BETWEEN DATE_SUB(?, INTERVAL 10 DAY) AND ? AND mktcap > 0
+                 ORDER BY d DESC LIMIT 1");
+            foreach ($marks as &$m) {
+                $per = $pbr = null;
+                $capSt->execute([$code, $m['d'], $m['d']]);
+                $cap = (float)($capSt->fetchColumn() ?: 0);
+                if ($cap > 0 && isset($byQ[$m['qk']])) {
+                    /* TTM 은 (연도·분기) 키로 짚는다 — 배열 순서로 집으면 빠진 분기가 있을 때
+                     * 조용히 다섯 분기 전을 더한다(밴드 차트가 실측으로 밟은 함정). */
+                    $sum = 0.0; $ok = true;
+                    for ($k = 0; $k < 4; $k++) {
+                        $v = $byQ[$m['qk'] - $k]['net_income'] ?? null;
+                        if ($v === null) { $ok = false; break; }
+                        $sum += (float)$v;
+                    }
+                    if ($ok && $sum > 0) $per = round($cap / $sum, 1);
+                    $eq = $byQ[$m['qk']]['equity_total'] ?? null;
+                    if ($eq !== null && (float)$eq > 0) $pbr = round($cap / (float)$eq, 2);
+                }
+                $m['per'] = $per;
+                $m['pbr'] = $pbr;
+                /* 넷째 줄 «그때 TTM 연속 횟수»(2026-09-03 사용자 요청 「분기 추이 차트의 +5,+2,+2 를 배지에」).
+                 * 소형 차트의 원 안 숫자와 <b>같은 배열</b>에서 그 분기 것을 집는다 — 다시 세지 않는다.
+                 * 없는 분기(TTM 4분기 미만·원장 밖)는 null 로 두고 JS 가 그 항목만 안 적는다. */
+                $tr = isset($idxQ[$m['qk']]) ? $ttm[$idxQ[$m['qk']]]['streak'] : null;
+                $m['trend'] = $tr ? ['rev' => $tr['revenue'], 'op' => $tr['op_income'], 'net' => $tr['net_income']] : null;
+            }
+            unset($m);
+        }
+    } catch (Throwable $e) { /* 재무·시세 원장 없는 환경 — 마커는 PER·PBR 없이 그대로 나간다 */ }
+    foreach ($marks as &$m) unset($m['qk']);       // 내부 키 — 예외로 빠져나와도 응답엔 안 싣는다
+    unset($m);
 }
 
 /**

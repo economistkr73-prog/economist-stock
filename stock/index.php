@@ -2012,9 +2012,9 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
     $re     = pf_reentry_list($pf, 0, $reWait, null, new DateTimeImmutable('today'));
     foreach ($re as &$rx) {
         if ($rx['chk']['state'] !== 'ready' || $rx['need'] === null) continue;
-        $t = pf_fund_take($used, $stats, (int)$rx['portfolio_id'], (float)$rx['need']);
-        $rx['fund_ok']   = $t['ok'];
-        $rx['fund_left'] = $t['left'];
+        $tk = pf_fund_take($used, $stats, (int)$rx['portfolio_id'], (float)$rx['need']);
+        $rx['fund_ok']   = $tk['ok'];
+        $rx['fund_left'] = $tk['left'];
     }
     unset($rx);
 
@@ -2054,7 +2054,7 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
                                                  $tIncome != 0 ? '원금 + 이월·배당 − 매수 + 매도' : '원금 − 매수 + 매도'],
         ['총매입',   pf_n(round($t['cost'])),   '',                       '보유분 원가'],
         ['총평가',   pf_n(round($t['eval'])),   '',                       ''],
-        ['평가손익', pf_n(round($t['pl'])),     pf_updown($t['pl']),      ''],
+        ['평가손익', pf_n(round($t['pl'])),     pf_updown($t['pl']),      pf_eval_sub($t['pl'], $t['cost'])],
         ['실현손익', pf_n(round($tReal)),       pf_updown($tReal),
                                                  $tIncome != 0 ? '이월·배당 ' . pf_n(round($tIncome)) . ' 포함' : ''],
         ['추정자산', pf_n(round($tAsset)),      '',                       '예수금 + 현재가치'],
@@ -2080,10 +2080,12 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
     echo '<div class="tbl-scroll"><table class="pf"><thead><tr>';
     foreach ([
         ['포트폴리오', ''], ['원금', 'num'], ['예수금', 'num'], ['총매입', 'num'],
-        ['종목', 'num'], ['메모', ''], ['총평가', 'num'], ['평가손익', 'num'],
-        ['추정자산', 'num'], ['수익률', 'num'],
-    ] as [$label, $cls]) {
-        echo '<th class="' . $cls . '">' . pf_h($label) . '</th>';
+        ['종목', 'num'], ['메모', ''], ['총평가', 'num'], ['평가손익', 'num', '보유분 현재가치 − 매입원가'],
+        ['평가수익률', 'num', '평가손익 ÷ 총매입 — 지금 들고 있는 종목만의 성적'],
+        ['추정자산', 'num'], ['수익률', 'num', '추정자산 ÷ 원금 − 1 — 실현손익·예수금까지 든 계좌 전체의 성적'],
+    ] as $hc) {
+        [$label, $cls] = $hc;
+        echo '<th class="' . $cls . '"' . (isset($hc[2]) ? ' title="' . pf_h($hc[2]) . '"' : '') . '>' . pf_h($label) . '</th>';
     }
     echo '</tr></thead><tbody>';
 
@@ -2116,6 +2118,7 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
         echo '<td class="muted">' . pf_h($f['memo']) . '</td>';
         echo '<td class="num">' . pf_n(round($sub['eval'])) . '</td>';
         echo '<td class="num">' . pf_signed($sub['pl']) . '</td>';
+        echo '<td class="num">' . pf_signed_pct(pf_eval_rate($sub['pl'], $sub['cost'])) . '</td>';
         echo '<td class="num"><b>' . pf_n(round($sAsset)) . '</b></td>';
         echo '<td class="num">' . ($sRate === null ? '<span class="flat">-</span>' : pf_signed_pct($sRate)) . '</td>';
         echo '</tr>';
@@ -2130,6 +2133,7 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
     echo '<td></td>';
     echo '<td class="num">' . pf_n(round($t['eval'])) . '</td>';
     echo '<td class="num">' . pf_signed($t['pl']) . '</td>';
+    echo '<td class="num">' . pf_signed_pct(pf_eval_rate($t['pl'], $t['cost'])) . '</td>';
     echo '<td class="num">' . pf_n(round($tAsset)) . '</td>';
     echo '<td class="num">' . ($tRate === null ? '' : pf_signed_pct($tRate)) . '</td>';
     echo '</tr></tfoot></table></div>';
@@ -2239,13 +2243,17 @@ function pf_render_folio_detail(Pf $pf, int $fid, bool $showClosed): void
         ['예수금',   pf_n(round($sCash)),       $sCash < 0 ? 'down' : ''],
         ['총매입',   pf_n(round($sub['cost'])), ''],
         ['총평가',   pf_n(round($sub['eval'])), ''],
-        ['평가손익', pf_n(round($sub['pl'])),   pf_updown($sub['pl'])],
+        ['평가손익', pf_n(round($sub['pl'])),   pf_updown($sub['pl']), pf_eval_sub($sub['pl'], $sub['cost'])],
         ['실현손익', pf_n(round($sReal)),       pf_updown($sReal)],
         ['추정자산', pf_n(round($sAsset)),      ''],
         ['수익률',   $sRate === null ? '-' : pf_pct($sRate), pf_updown($sRate)],
-    ] as [$k, $v, $cls]) {
+    ] as $row) {
+        [$k, $v, $cls] = $row;
+        $s = $row[3] ?? '';
         echo '<div class="sum-box"><div class="k">' . pf_h($k) . '</div>';
-        echo '<div class="v ' . $cls . '">' . pf_h($v) . '</div></div>';
+        echo '<div class="v ' . $cls . '">' . pf_h($v) . '</div>';
+        if ($s !== '') echo '<div class="s">' . pf_h($s) . '</div>';
+        echo '</div>';
     }
     echo '</div>';
 
@@ -4215,7 +4223,7 @@ function pf_page_position(PDO $pdo, Pf $pf): void
     }
 
     // 차트는 공용 모듈(style/dailychart.js)이 그린다 — 라이브러리 로드도 모듈이 맡는다
-    echo '<script src="/style/dailychart.js?v=56"></script>';
+    echo '<script src="/style/dailychart.js?v=62"></script>';
     echo ChartFeat::boot('position', $pdo);   // DC_SCREEN·DC_FEATS·DC_VIEW (기능 구성 + 저장한 높이)
     echo '<script>';
     echo 'const PF_CODE=' . json_encode($pos['stock_code']) . ';';
@@ -4232,7 +4240,7 @@ function pf_page_position(PDO $pdo, Pf $pf): void
     if ($fStep) {
         foreach ($c['steps'] as $s) {
             if ($s['theory_price'] !== null && (float)$s['theory_price'] > 0) {
-                $stepLines[] = round((float)$s['theory_price']);
+                $stepLines[] = ['v' => round((float)$s['theory_price']), 'n' => (int)($s['step_no'] ?? 0)];   // n = 차수(왼쪽 배지 「3차」)
             }
         }
     }
@@ -4258,8 +4266,9 @@ DailyChart.load().then(function(){
   dc.setMarkers(PF_MARKS);
   // 차수가격(이론) 수평선 — 기본 감춤. 기간 바의 「차수가격 N」 토글이 켠다(SUE 공시와 같은 자리).
   // 색·굵기·종류는 여기 적지 않는다 — ⚙ 모달이 고르고 view_json.ref 에 저장된다(모듈 소유)
+  // 왼쪽 가격 배지(「3차 5,980」)는 모듈이 그린다 — 오른쪽 가격축은 현재가·체결 라벨로 붐벼 값이 안 읽혔다(2026-09-03)
   if (PF_STEP_PLINES.length) dc.setRefLines(PF_STEP_PLINES.map(function(v){
-    return { price: v };
+    return { price: v.v, title: v.n ? v.n + '차' : '' };
   }), { label: '차수가격',
         title: '차수 사다리의 이론 매수가 수평선 — 차트에 보이는 가격 범위 안의 선만 그려진다 (⚙ 색·굵기)' });
 
@@ -5937,7 +5946,7 @@ document.querySelector('form[action*="action=save"]').addEventListener('submit',
 });
 pfBoxToggle();
 </script>
-<script src="/style/dailychart.js?v=56"></script>
+<script src="/style/dailychart.js?v=62"></script>
 <style>
 .fld-fixed{padding:7px 10px;background:#f2f6fa;border:1px solid #e0e8f0;border-radius:6px;
   font-size:13px;font-weight:700;color:#22303f;min-width:120px}
@@ -7701,7 +7710,7 @@ tr.rs-row:hover{background:#f2f8fd}
 CSS;
 
     // 차트는 공용 모듈(style/dailychart.js)이 그린다 — 라이브러리 로드도 모듈이 맡는다
-    echo '<script src="/style/dailychart.js?v=56"></script>';
+    echo '<script src="/style/dailychart.js?v=62"></script>';
     echo ChartFeat::boot('sim');   // DC_SCREEN·DC_FEATS·DC_VIEW 를 한 줄에
     echo <<<'JS'
 <script>
@@ -8556,7 +8565,7 @@ function pf_page_earncase(PDO $pdo, Pf $pf): void
        . '· 오늘 시장의 신호는 같은 탭이 매 분기 자동으로 보여 준다 — 이 페이지는 그 배지를 <b>믿어도 되는 이유</b>다.</div></div>';
 
     /* ── 차트 — dailychart.js 재사용. 마커는 날짜 스냅뿐이라 수정주가 정합 문제가 없다 ── */
-    echo '<script src="/style/dailychart.js?v=56"></script>';
+    echo '<script src="/style/dailychart.js?v=62"></script>';
     echo '<script>const EC_CASES=' . json_encode($CASES, JSON_UNESCAPED_UNICODE) . ';</script>';
     echo <<<'JS'
 <script>
@@ -10064,12 +10073,14 @@ function pf_page_fund_detail(PDO $pdo, Dart $dart, string $code, ?Pf $pf = null)
        . '<th class="num" title="그 해 사업보고서의 DART 접수일 — 실적이 시장에 알려진 날입니다">공시일</th>'
        . '<th class="num" title="공시일 종가 기준 시가총액(억원) — 그 실적이 알려진 날 시장이 매기고 있던 값입니다. 시세 원장이 2019년부터라 그 이전 공시는 빈칸입니다">시총</th>'
        . '<th class="num" title="그 해 4분기 이익 서프라이즈 — (4분기 영업이익 − 전년 4분기) ÷ 자기 과거 2년 변동성. ≥+1 서프라이즈 · ≤−1 어닝쇼크">SUE</th>'
-       . '<th class="num">매출액</th><th class="num">매출 증감</th>'
-       . '<th class="num">영업이익</th><th class="num">영업이익 증감</th>'
+       . '<th class="num" title="아랫줄은 전년 대비 증감입니다">매출액</th>'
+       . '<th class="num" title="아랫줄은 전년 대비 증감입니다 — 부호가 뒤집히면 적자전환·흑자전환 따위로 적습니다">영업이익</th>'
        . '<th class="num">영업이익률</th><th class="num">순이익</th><th class="num">순이익률</th>'
        . '<th class="num">ROE</th><th class="num">자산총계</th><th class="num">부채총계</th>'
        . '<th class="num">자본총계</th><th class="num">부채비율</th><th class="num">유동비율</th>'
-       . '<th class="num">EPS</th><th class="num">BPS</th><th class="num">DPS</th>'
+       . '<th class="num" title="공시일 종가 기준 시총 ÷ 그 해 순이익 — 그 실적이 알려진 날의 PER 입니다(지금 PER 이 아닙니다). 적자면 빈칸">PER</th>'
+       . '<th class="num" title="공시일 종가 기준 시총 ÷ 그 해말 자본총계 — 그 실적이 알려진 날의 PBR 입니다(지금 PBR 이 아닙니다). 자본잠식이면 빈칸">PBR</th>'
+       . '<th class="num" title="주당배당금(DART 신고) — 아랫줄은 신고된 현금배당수익률(%)입니다">DPS</th>'
        . '<th class="num">기준</th></tr></thead><tbody>';
 
     // 성장률을 내려면 전년 값이 필요하다 — 연도 내림차순이라 다음 행이 전년이다
@@ -10088,12 +10099,12 @@ function pf_page_fund_detail(PDO $pdo, Dart $dart, string $code, ?Pf $pf = null)
         echo '<tr>';
         echo '<td class="num"><b>' . $y . '</b></td>';
         echo pf_fund_filing_cells($fq, ($y % 100) . '.4Q', true);
-        echo '<td class="num">' . pf_eok($r['revenue']) . '</td>';
-        // 증감은 화살표로 방향을 보이고, 비율 자체는 숫자만 (성격이 다른 값이라 표기도 가른다)
-        echo '<td class="num">' . pf_delta_pct($m['rev_growth']) . '</td>';
-        echo '<td class="num">' . pf_eok($r['op_income']) . '</td>';
+        // 증감은 값의 «아랫줄»이다 — 열로 따로 두면 표가 옆으로 넘쳐 스크롤바가 생긴다 (2026-09-02)
+        echo '<td class="num">' . pf_eok($r['revenue'])
+           . '<div style="font-size:11px;line-height:1.3">' . pf_delta_pct($m['rev_growth']) . '</div></td>';
         // 영업이익은 음수가 될 수 있어 백분율이 뜻을 잃는다 — 적자전환·흑자전환 따위로 말을 바꾼다
-        echo '<td class="num">' . pf_profit_delta($r['prev_op_income'] ?? null, $r['op_income']) . '</td>';
+        echo '<td class="num">' . pf_eok($r['op_income'])
+           . '<div style="font-size:11px;line-height:1.3">' . pf_profit_delta($r['prev_op_income'] ?? null, $r['op_income']) . '</div></td>';
         echo '<td class="num">' . pf_ratio_pct($m['op_margin']) . '</td>';
         echo '<td class="num">' . pf_eok($r['net_income']) . '</td>';
         echo '<td class="num">' . pf_ratio_pct($m['net_margin']) . '</td>';
@@ -10103,24 +10114,38 @@ function pf_page_fund_detail(PDO $pdo, Dart $dart, string $code, ?Pf $pf = null)
         echo '<td class="num">' . pf_eok($r['equity_total']) . '</td>';
         echo '<td class="num">' . ($m['debt_ratio'] === null ? '-' : pf_h(pf_pct0($m['debt_ratio'], 0))) . '</td>';
         echo '<td class="num">' . ($m['cur_ratio']  === null ? '-' : pf_h(pf_pct0($m['cur_ratio'], 0))) . '</td>';
-        /* EPS·BPS 는 계산값 — 순이익·자본총계 ÷ 지금 상장주식수. 전 종목에 있다.
+        /* PER·PBR — 「공시일 시총 ÷ 그 해 순이익 / 그 해말 자본총계」. 분기 추이의 「PER」·「PBR」과
+         * 같은 잣대라 두 표가 이어진다(연간은 그 자체가 12개월이라 TTM 이 필요 없다).
+         * EPS·BPS 는 이 비율의 재료일 뿐이라 열에서 내렸다 (2026-09-02 사용자 지시).
          * DPS(배당)만 DART 신고값이라 받아 둔 종목에서만 나온다. */
-        echo '<td class="num">' . pf_n($m['eps']) . '</td>';
-        echo '<td class="num">' . pf_n($m['bps']) . '</td>';
-        echo '<td class="num">' . pf_n($fd['adj_dps'] ?? null) . '</td>';
+        $capY = $fq['cap'] ?? null;
+        $niY  = $r['net_income']   !== null ? (float)$r['net_income']   : null;
+        $eqY  = $r['equity_total'] !== null ? (float)$r['equity_total'] : null;
+        if ($capY === null)                 echo '<td class="num muted" title="공시일 시총이 없어 계산할 수 없습니다">-</td>';
+        elseif ($niY === null || $niY <= 0) echo '<td class="num muted" title="순이익이 없거나 적자라 PER 이 뜻을 갖지 않습니다">-</td>';
+        else echo '<td class="num" style="color:#5f7183" title="' . pf_h('공시일 시총 ' . number_format($capY / 100000000) . '억 ÷ 순이익 ' . number_format($niY / 100000000) . '억') . '">' . number_format($capY / $niY, 1) . '</td>';
+        if ($capY === null)                 echo '<td class="num muted" title="공시일 시총이 없어 계산할 수 없습니다">-</td>';
+        elseif ($eqY === null || $eqY <= 0) echo '<td class="num muted" title="자본총계가 없거나 자본잠식이라 PBR 이 뜻을 갖지 않습니다">-</td>';
+        else echo '<td class="num" style="color:#5f7183" title="' . pf_h('공시일 시총 ' . number_format($capY / 100000000) . '억 ÷ 자본총계 ' . number_format($eqY / 100000000) . '억') . '">' . number_format($capY / $eqY, 2) . '</td>';
+        // DPS 아랫줄 = DART 신고 현금배당수익률(%) — 비율이라 액면 보정이 필요 없다 (2026-09-02)
+        // 무배당(0)은 아랫줄을 접는다 — 0.00% 줄이 전 종목에 서면 노이즈다
+        $dyY = $fd['div_yield'] ?? null;
+        echo '<td class="num">' . pf_n($fd['adj_dps'] ?? null)
+           . ($dyY !== null && (float)$dyY > 0 ? '<div style="font-size:11px;line-height:1.3;color:#5f7183">' . pf_h(number_format((float)$dyY, 2)) . '%</div>' : '')
+           . '</td>';
         echo '<td class="num muted" style="font-size:11px">' . ($r['fs_div'] === 'CFS' ? '연결' : '별도') . '</td>';
         echo '</tr>';
     }
     echo '</tbody></table></div>';
 
     echo '<p class="sub muted" style="margin:9px 0 0;font-size:12px">'
-       . '<b>EPS·BPS</b> 는 <b>순이익·자본총계 ÷ ' . pf_n($nowShrs ?: null) . '주(지금 상장주식수)</b> 로 계산한 값입니다. '
-       . '분모가 늘 지금 주식수라 <b>액면분할이 저절로 보정</b>됩니다 — 그 해 주식수로 나누면 분할 전 연도가 '
-       . '수십 배로 튀어 시계열이 끊깁니다. 재무분석 목록의 PER 도 같은 분모를 쓰므로 두 화면이 어긋나지 않습니다.<br>'
-       . 'DART 가 <b>신고한</b> EPS 와는 다를 수 있습니다 — 신고값은 <b>지배주주 순이익 ÷ 가중평균 유통주식수</b> 인데, '
-       . '여기는 <b>연결 당기순이익(비지배 포함) ÷ 상장주식수</b> 입니다.<br>'
-       . '<b>DPS</b>(주당배당금)만은 계산으로 낼 수 없어 DART 에서 따로 받아야 합니다 — '
-       . ($funds ? '이 종목은 받아 둔 상태입니다.' : '<b class="down">이 종목은 아직 받지 않았습니다</b> (보유·관심 종목만 받아 둔 상태).')
+       . '<b>PER·PBR</b> 은 <b>공시일 시총 ÷ 그 해 순이익 / 그 해말 자본총계</b> 입니다 — 그 실적이 알려진 날 '
+       . '시장이 매기던 배수라 <b>지금 값이 아닙니다</b>(지금 것은 분기 추이 위의 「현재 PER·PBR」 줄). '
+       . '분기 추이의 「PER」·「PBR」과 같은 잣대라 두 표가 이어집니다 — 4분기 행의 TTM 이 곧 연간이라 값도 같습니다. '
+       . '순이익은 연결 당기순이익(비지배 포함) 기준이라 지배주주 기준으로 적는 증권사 수치와 조금 다르고, '
+       . '적자·자본잠식·시세 원장(2019~) 이전 공시는 빈칸입니다.<br>'
+       . '<b>DPS</b>(주당배당금)와 그 아랫줄 <b>배당수익률</b>(신고 당시 %)만은 계산으로 낼 수 없어 DART 에서 따로 받아야 합니다 — '
+       . ($funds ? '이 종목은 받아 둔 상태입니다.' : '<b class="down">이 종목은 아직 받지 않았습니다</b> (전종목 백필이 진행 중이거나, 새 종목이라면 매일 크론이 곧 채웁니다).')
        . '<br><b>공시일</b>은 그 해 <b>사업보고서의 DART 접수일</b>입니다 — 결산이 끝나고 석 달쯤 뒤에 나오므로, '
        . '재무를 그 해 주가와 바로 견주면 <b>아직 아무도 몰랐던 숫자</b>로 보는 셈이 됩니다. '
        . '정정공시가 있으면 <b>원본(가장 이른) 접수일</b>을 씁니다. '
@@ -10254,7 +10279,7 @@ function pf_fund_detail_chart(PDO $pdo, string $code): void
     echo '</div>';
 
     // 차트는 공용 모듈(style/dailychart.js)이 그린다 — 라이브러리 로드도 모듈이 맡는다
-    echo '<script src="/style/dailychart.js?v=56"></script>';
+    echo '<script src="/style/dailychart.js?v=62"></script>';
     echo ChartFeat::boot('fund', $pdo);       // DC_SCREEN·DC_FEATS·DC_VIEW (기능 구성 + 저장한 높이)
     echo '<script>const FD_CODE=' . json_encode($code) . ';</script>';
     echo <<<'JS'
@@ -10382,6 +10407,179 @@ function pf_fund_detail_band(PDO $pdo, string $code): void
 }
 
 /**
+ * TTM 추세 소형 차트 셋(매출·영업이익·순이익) — 「추세가 살아 있나, 꺾였나」를 숫자가 아니라 <b>선의 모양</b>으로 본다.
+ *
+ * ★값은 표의 TTM 열과 <b>같은 배열</b>($ttm)이다 — 다시 계산하지 않아야 표와 차트가 다른 말을 안 한다.
+ * ★세 지표는 단위가 다르다(매출 2,000억 옆에 순이익 100억) — 한 축에 겹치면 아래 두 선이 바닥에 붙고,
+ *   지수화(시작=100)는 적자를 지나면 뜻을 잃는다. 그래서 <b>패널 셋을 각자 축</b>으로 둔다(small multiples).
+ * ★세로축은 그 패널의 최소·최대에 맞춰 늘린다 — 0 부터 그리면 ±4% 움직이는 매출선이 평평해져 꺾임이 안 보인다.
+ *   대신 위·아래에 그 값을 적어 「이 폭이 얼마인가」를 드러낸다(과장으로 읽히지 않게).
+ * ★영업이익·순이익은 선이 실제로 0 을 지날 때만 0 선을 긋는다 — 범위에 0 을 «넣지» 않는다(넣으면 위에 눌린다).
+ * ★판정 라벨(상승 지속/이탈…)은 만들지 않는다 — 임계값을 새로 적게 되고, 애초에 그림이 판정을 대신하는 자리다.
+ *   곁들이는 숫자는 「고점 대비 %」 하나뿐이다(꺾임의 크기).
+ * ★시간은 왼쪽이 과거다(표는 최신이 맨 위) — 차트는 늘 그렇게 읽히니 양끝에 분기 라벨만 적는다.
+ *
+ * ★★부호는 셋으로 나눠 실었다(2026-09-03 사용자 안을 다듬은 것):
+ *   ①<b>선분 색 = 전분기 대비 방향</b>(빨강 상승 · 파랑 하락 · 같으면 회색). 점이 아니라 선분에 입힌다 —
+ *     점만 칠하면 12개가 색종이처럼 섞이고, 선분이면 <b>같은 색이 이어진 길이가 곧 추세</b>다(끝에서 색이 바뀌면 꺾임).
+ *     점은 작게 두고 그 점에 닿는 선분 색을 따른다. 보합 임계값은 없다 — 정확히 같을 때만 회색(Thr 규칙).
+ *     적자 구간도 같은 말이다: −30 → −20 은 빨강(표의 「적자축소」가 빨강인 것과 같다).
+ *   ②<b>최고·최저 — 구간에 하나씩, 둥근 네모(20% 크게)</b>(큰 ▲▼ → 검정 테두리 → 큰 원 → 네모, 전부 2026-09-03 사용자 선택). 「갱신할 때마다 크게」는 계속 오르는 종목에서 12점이
+ *     전부 신고점이 되어 표시가 뜻을 잃는다(최신이 신고점인지는 머리글 「고점 갱신」이 말한다).
+ *     ▼가 앞이고 ▲가 뒤면 회복, 반대면 하락 — 둘의 순서와 거리가 곧 이야기다.
+ *   ③점마다 <b>연속 횟수가 든 원</b>(+N 빨강 · −N 파랑 · 0 은 회색 점) — 2026-09-03 사용자 요청(작은 ▲▼ → 원+숫자). 최신 링은 「필요없다」로 뺐다.
+ *   모서리의 「최대·최소」 글자도 같은 빨강·파랑 — 숫자와 도형이 이어져 눈이 왕복하지 않는다.
+ * 시세 차트가 아니라 재무 시계열이라 dailychart.js 규칙 밖이다 — 12점짜리 선은 인라인 SVG 로 충분하다(라이브러리 없음).
+ */
+function pf_fund_ttm_spark(array $qs, array $ttm): string
+{
+    static $css = false;
+    $out = '';
+    if (!$css) {
+        $css = true;
+        $out .= '<style>'
+              . '.ttm-sparks{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 6px}'
+              . '.ttm-spark{flex:1 1 220px;min-width:200px;border:1px solid #e3e9f0;border-radius:8px;padding:8px 10px 4px;background:#fff}'
+              . '.ttm-spark-h{font-size:12.5px;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
+              . '.ttm-spark-h b{color:#22303f}'
+              . '.ttm-spark svg{width:100%;height:auto;display:block}'
+              . '</style>';
+    }
+
+    $panels = [
+        ['revenue',    '매출 TTM',     false],
+        ['op_income',  '영업이익 TTM', true],
+        ['net_income', '순이익 TTM',   true],
+    ];
+    $fmt = function ($v): string {
+        $e = $v / 100000000;
+        return number_format($e, abs($e) < 100 ? 1 : 0);
+    };
+    $W = 300; $H = 124; $L = 12; $R = 12; $T = 36; $B = 24;
+    $pw = $W - $L - $R; $ph = $H - $T - $B;
+    // 방향색은 표의 .up/.down 과 같은 값 — 화면 어디서나 빨강=좋아짐·파랑=나빠짐
+    $cUp = '#d32f2f'; $cDown = '#1565c0'; $cFlat = '#9aa8b5';
+
+    $out .= '<div class="ttm-sparks">';
+    foreach ($panels as [$col, $title, $zero]) {
+        // 시간순(왼쪽=과거). 넉 자리가 안 찬 분기(상장 초기)는 null → 점을 비우고 선을 끊는다
+        $n = count($qs);
+        $pts = [];
+        for ($i = $n - 1; $i >= 0; $i--) $pts[] = ['label' => (string)$qs[$i]['label'], 'v' => $ttm[$i][$col] ?? null,
+                                                'streak' => $ttm[$i]['streak'][$col] ?? null];
+        $vals = array_values(array_filter(array_column($pts, 'v'), fn($v) => $v !== null));
+
+        $out .= '<div class="ttm-spark">';
+        if (count($vals) < 2) {
+            $out .= '<div class="ttm-spark-h"><b>' . pf_h($title) . '</b> <span class="muted">TTM 이 2분기 미만이라 추세를 그릴 수 없습니다</span></div></div>';
+            continue;
+        }
+
+        // 고점(최대)·저점(최소)·마지막. 같은 값이면 <b>나중 것</b>(마지막이 고점과 같으면 「고점 갱신」)
+        $last = null; $lastI = null; $peak = null; $peakI = null; $trough = null; $troughI = null;
+        foreach ($pts as $i => $p) {
+            if ($p['v'] === null) continue;
+            $last = $p['v']; $lastI = $i;
+            if ($peak === null || $p['v'] >= $peak)     { $peak = $p['v'];   $peakI = $i; }
+            if ($trough === null || $p['v'] <= $trough) { $trough = $p['v']; $troughI = $i; }
+        }
+        if ($peakI === $lastI) {
+            $vs = '<span class="up" style="font-weight:400">고점 갱신</span>';
+        } elseif ($peak > 0 && $last <= 0) {
+            // 흑자 고점 뒤 적자 — 「−200.7%」는 맞지만 읽히지 않는다(부호가 뒤집히면 백분율이 뜻을 잃는다 · pf_profit_delta 와 같은 규칙)
+            $vs = '<span class="down" style="font-weight:400">고점 뒤 적자 전환</span>'
+                . ' <span class="muted">(고점 ' . $fmt($peak) . ' · ' . pf_h($pts[$peakI]['label']) . ')</span>';
+        } elseif ($peak > 0) {
+            $pct = ($last / $peak - 1) * 100;
+            $vs = '<span class="' . ($pct < 0 ? 'down' : 'up') . '" style="font-weight:400">고점 대비 '
+                . ($pct < 0 ? '−' : '+') . number_format(abs($pct), 1) . '%</span>'
+                . ' <span class="muted">(고점 ' . $fmt($peak) . ' · ' . pf_h($pts[$peakI]['label']) . ')</span>';
+        } else {
+            // 고점 자체가 0 이하(내내 적자)면 비율이 뜻을 갖지 않는다 — 고점만 적는다
+            $vs = '<span class="muted">고점 ' . $fmt($peak) . '(' . pf_h($pts[$peakI]['label']) . ') · 내내 적자</span>';
+        }
+        $out .= '<div class="ttm-spark-h"><b>' . pf_h($title) . '</b> '
+              . '<span title="최신 ' . pf_h($pts[$lastI]['label']) . ' 기준 TTM(억원)">' . $fmt($last) . '억</span> · ' . $vs . '</div>';
+
+        // 세로축 = 이 패널의 최소·최대(+8% 여백). ★0 을 범위에 «넣지» 않는다 — 넣으면 108~142 로 움직이는 영업이익선이
+        //   위 4분의 1 에 눌려 꺾임이 안 보인다. 0 선은 선이 실제로 0 을 지날 때만(아래) 그린다
+        $hi = max($vals); $lo = min($vals);
+        $rawHi = $hi; $rawLo = $lo;
+        $span = $hi - $lo;
+        if ($span <= 0) { $span = max(1.0, abs($hi)) * 0.1; $hi += $span / 2; $lo -= $span / 2; }
+        $pad = $span * 0.08; $hi += $pad; $lo -= $pad;
+        $y = fn(float $v) => $T + $ph * (($hi - $v) / ($hi - $lo));
+        $m = count($pts);
+        $x = fn(int $i) => $L + ($m > 1 ? $pw * $i / ($m - 1) : $pw / 2);
+
+        $s = '<svg viewBox="0 0 ' . $W . ' ' . $H . '" role="img" aria-label="' . pf_h($title . ' 추세') . '" style="font-family:Pretendard,sans-serif">';
+        // 최대·최소 수준 가로 점선(빨강·파랑) — 2026-09-03 사용자 요청. 「지금이 고점에서 얼마나 내려왔나」를 선과 점선의 거리로 본다
+        $s .= '<line x1="' . $L . '" y1="' . round($y((float)$rawHi), 1) . '" x2="' . ($L + $pw) . '" y2="' . round($y((float)$rawHi), 1)
+            . '" stroke="' . $cUp . '" stroke-width="1" stroke-dasharray="4 3" opacity="0.8"/>';
+        $s .= '<line x1="' . $L . '" y1="' . round($y((float)$rawLo), 1) . '" x2="' . ($L + $pw) . '" y2="' . round($y((float)$rawLo), 1)
+            . '" stroke="' . $cDown . '" stroke-width="1" stroke-dasharray="4 3" opacity="0.8"/>';
+        // 0 선 (영업이익·순이익) — 선이 흑자·적자를 오갈 때만 긋는다(적자 구간이 있으면 선이 이 밑으로 내려간다)
+        if ($zero && $rawLo < 0 && $rawHi > 0) {
+            $s .= '<line x1="' . $L . '" y1="' . round($y(0.0), 1) . '" x2="' . ($L + $pw) . '" y2="' . round($y(0.0), 1)
+                . '" stroke="#b9c6d4" stroke-width="1" stroke-dasharray="3 3"/>';
+        }
+        // ① 선분 — 전분기 대비 방향색. null 이 끼면 거기서 끊는다(빈 분기를 이어 그리면 없는 추세가 생긴다)
+        $prev = null;
+        foreach ($pts as $i => $p) {
+            if ($p['v'] === null) { $prev = null; continue; }
+            if ($prev !== null) {
+                $d = $p['v'] <=> $pts[$prev]['v'];
+                $c = $d > 0 ? $cUp : ($d < 0 ? $cDown : $cFlat);
+                $s .= '<line x1="' . round($x($prev), 1) . '" y1="' . round($y((float)$pts[$prev]['v']), 1)
+                    . '" x2="' . round($x($i), 1) . '" y2="' . round($y((float)$p['v']), 1)
+                    . '" stroke="' . $c . '" stroke-width="3.4" stroke-linecap="round"/>';   // 원 사이 구간이 짧아 가늘면 점선처럼 보인다
+            }
+            $prev = $i;
+        }
+        // ② 점 — <b>연속 횟수가 든 원</b>(2026-09-03 사용자: 「도형을 원으로 하고 그 안에 숫자 · 플러스 빨간 원 +N · 마이너스 파란 원 −N」).
+        //   +N = N분기 연속 상승 · −N = N분기 연속 하락 · 같음/첫 점/끊긴 뒤 첫 점은 0 으로 되돌아가 작은 회색 원(숫자 없음).
+        //   최고·최저는 <b>둥근 네모(20% 크게)</b>다(2026-09-03 사용자 「별이나 네모로」 → 별은 안에 숫자가 안 읽혀 네모) — 숫자는 그대로 안에 둔다.
+        //   ★숫자는 pf_ttm_series() 의 'streak'(이력 <b>전체</b>에서 센 것)다 — 2026-09-03 SUE 배지 넷째 줄과 같은 값이어야 해서
+        //   창 안에서 다시 세지 않는다. 그래서 왼쪽 첫 점도 그 앞 이력이 있으면 숫자를 갖는다(창으로 세면 늘 회색이었다).
+        foreach ($pts as $i => $p) {
+            if ($p['v'] === null) continue;
+            $streak = (int)($p['streak'] ?? 0);
+            $cx = round($x($i), 1); $cy = round($y((float)$p['v']), 1);
+            $ext = ($i === $peakI && $peakI !== $troughI) ? ' (최고)' : (($i === $troughI && $peakI !== $troughI) ? ' (최저)' : '');
+            $big = $ext !== '';
+            if ($streak === 0) {
+                $s .= $big
+                    ? '<rect x="' . round($cx - 3.6, 1) . '" y="' . round($cy - 3.6, 1) . '" width="7.2" height="7.2" rx="1.5" fill="' . $cFlat . '"><title>' . pf_h($p['label'] . ' · ' . $fmt($p['v']) . '억') . $ext . '</title></rect>'
+                    : '<circle cx="' . $cx . '" cy="' . $cy . '" r="3" fill="' . $cFlat . '"><title>' . pf_h($p['label'] . ' · ' . $fmt($p['v']) . '억') . '</title></circle>';
+                continue;
+            }
+            $col = $streak > 0 ? $cUp : $cDown;
+            $txt = ($streak > 0 ? '+' : '−') . abs($streak);
+            $tip = pf_h($p['label'] . ' · ' . $fmt($p['v']) . '억 · ' . abs($streak) . '분기 연속 ' . ($streak > 0 ? '상승' : '하락')) . $ext;
+            $s .= '<g><title>' . $tip . '</title>'
+                . ($big
+                    ? '<rect x="' . round($cx - 9, 1) . '" y="' . round($cy - 9, 1) . '" width="18" height="18" rx="3.5" fill="' . $col . '"/>'
+                    : '<circle cx="' . $cx . '" cy="' . $cy . '" r="7.5" fill="' . $col . '"/>')
+                . '<text x="' . $cx . '" y="' . round($cy + ($big ? 3.5 : 3), 1) . '" text-anchor="middle" font-size="' . ($big ? 10 : 8.5) . '" font-weight="700" fill="#fff">' . $txt . '</text>'
+                . '</g>';
+        }
+        // 눈금 — 왼쪽 위 「최대」·「최소」 두 줄(점선과 같은 색)로 이 폭이 얼마인지 밝힌다 · 양끝 분기 라벨(왼쪽=과거)
+        $s .= '<text x="' . $L . '" y="12" font-size="10" fill="' . $cUp . '">최대 ' . $fmt($rawHi) . '</text>';
+        $s .= '<text x="' . $L . '" y="24" font-size="10" fill="' . $cDown . '">최소 ' . $fmt($rawLo) . '</text>';
+        $s .= '<text x="' . $L . '" y="' . ($H - 5) . '" font-size="10" fill="#8b9aa8">' . pf_h($pts[0]['label']) . '</text>';
+        $s .= '<text x="' . ($L + $pw) . '" y="' . ($H - 5) . '" text-anchor="end" font-size="10" fill="#8b9aa8">' . pf_h($pts[$m - 1]['label']) . '</text>';
+        $s .= '</svg>';
+        $out .= $s . '</div>';
+    }
+    $out .= '</div>';
+    $out .= '<p class="muted" style="font-size:11.5px;margin:0 0 10px">값은 아래 표의 TTM 열과 같습니다(최근 4분기 합 · 억원). '
+          . '선 색은 <b>전분기 대비</b>입니다 — <span style="color:#d32f2f">빨강</span> 상승 · <span style="color:#1565c0">파랑</span> 하락 · 같은 색이 이어진 길이가 곧 추세. '
+          . '원 안의 숫자는 <b>연속 횟수</b>입니다 — <span style="color:#d32f2f">빨간 원 +N</span> 은 N분기 연속 상승 · <span style="color:#1565c0">파란 원 −N</span> 은 N분기 연속 하락 · 회색 점은 같음/이력의 첫 분기(왼쪽 첫 점도 그 앞 분기부터 이어 센 값입니다). <b>네모</b>가 최고·최저이고 <span style="color:#d32f2f">빨간 점선</span>·<span style="color:#1565c0">파란 점선</span>이 그 수준입니다. '
+          . '세로축은 패널마다 최소·최대에 맞춰 늘려 그렸으니 꺾임의 <b>크기</b>는 「최대·최소」와 「고점 대비」로 읽습니다. 왼쪽이 과거입니다.</p>';
+    return $out;
+}
+
+/**
  * 분기 추이 — 저장된 누적(YTD)에서 <b>그 분기 3개월</b>을 만들어 보여 준다.
  *
  * 4분기는 보고서가 따로 없다. 사업보고서(12개월 누적)에서 3분기 누적을 뺀 것이 4분기다.
@@ -10412,17 +10610,38 @@ function pf_fund_detail_quarters(Dart $dart, string $code, array $fil = []): voi
      *
      * ★ 배열이 최근순이므로 i 행의 TTM 은 i…i+3 의 합이다. 넉 자리가 다 차지 않으면(상장 초기) null.
      * ★ 자르기 전에 계산해야 아랫줄도 제 값을 갖는다. */
-    $ttm = [];
-    foreach ($qs as $i => $q) {
-        foreach (['revenue', 'op_income'] as $col) {
-            $sum = 0.0; $ok = true;
-            for ($k = 0; $k < 4; $k++) {
-                if (!isset($qs[$i + $k]) || $qs[$i + $k][$col] === null) { $ok = false; break; }
-                $sum += (float)$qs[$i + $k][$col];
-            }
-            $ttm[$i][$col] = $ok ? $sum : null;
-        }
-    }
+    // 순이익 TTM 도 함께 — 아래 밴드 차트의 PER 분모(TTM 순이익)와 같은 값이라 두 자리가 이어진다.
+    // ★2026-09-03 단일본 pf_ttm_series()(stock/lib/sue.php) — SUE 배지 넷째 줄(연속 횟수)이 두 번째 소비자가 됐다.
+    //   (연도·분기) 키로 넉 자리를 짚으므로 빠진 분기가 있어도 다섯 분기 전을 더하지 않는다. 'streak' 칸은 소형 차트가 쓴다.
+    $ttm = pf_ttm_series($qs);
+
+    /* 현재 PER·PBR — 「지금 시총 ÷ 순이익 TTM(최신 분기)」·「지금 시총 ÷ 자본총계(최신 분기말)」.
+     * ★판정은 스크리너와 같은 Dart::ratio() 다 — 주가 고르기(네이버 → 묵으면 KRX)·주식수·적자/자본잠식 null 규칙을
+     *   여기서 다시 적지 않는다. 표의 「PER」(공시일 시총 기준)과 분모는 같고 분자만 «지금» 시총이다(밴드 차트 마지막 점과 같은 뜻).
+     * ★분기 행에는 shares_out 이 없어 ≤5% 규칙이 발동하지 않는다 — 늘 지금 상장주식수를 쓴다(주가가 지금 값이니 맞는 동작). */
+    $nowShrs = $dart->listedShares($code);
+    $qt = $dart->quoteOf($code);
+    $m0 = Dart::ratio([
+        'net_income'   => $ttm[0]['net_income'] ?? 0,
+        'equity_total' => $qs[0]['equity_total'] ?? 0,
+        'list_shrs'    => $nowShrs,
+    ] + $qt);
+    $q0  = $qs[0]['label'];
+    $ttm0 = $ttm[0]['net_income'] ?? null;
+    $eq0  = $qs[0]['equity_total'] ?? null;
+    $perTxt = $m0['per'] !== null ? '<b>' . number_format($m0['per'], 1) . '</b>'
+            : '<span class="muted">' . ($ttm0 === null ? '없음(TTM 4분기 미만)' : '없음(TTM 적자)') . '</span>';
+    $pbrTxt = $m0['pbr'] !== null ? '<b>' . number_format($m0['pbr'], 2) . '</b>'
+            : '<span class="muted">' . (($eq0 === null || $eq0 <= 0) ? '없음(자본잠식)' : '없음(주가·주식수 없음)') . '</span>';
+    echo '<p class="sub" style="margin:-4px 0 10px;font-size:13px">현재 PER ' . $perTxt . ' · PBR ' . $pbrTxt
+       . ' <span class="muted" style="font-size:12px">— '
+       . ($m0['price'] > 0
+            ? '현재가 ' . number_format($m0['price']) . '원('
+              . ($m0['price_src'] === 'naver' ? '네이버 ' . pf_h((string)($qt['nav_at'] ?? '')) : 'KRX 종가 · 네이버 시세가 묵어 폴백')
+              . ') × 상장주식수 ' . number_format($nowShrs) . '주 = 시총 ' . pf_eok($m0['mktcap']) . '억'
+            : '시세 없음')
+       . ' ÷ 순이익 TTM ' . pf_eok($ttm0) . '억(' . pf_h($q0) . ' 기준) / 자본총계 ' . pf_eok($eq0) . '억(' . pf_h($q0) . ' 말). '
+       . '표의 「PER」·「PBR」(공시일 시총 기준)과 분모가 같고 분자만 지금 시총입니다.</span></p>';
 
     /* 직전 분기 — 1분기의 앞은 <b>전년 4분기</b>다.
      * 배열이 최근순이라 "다음 원소"를 집으면 될 것 같지만, 중간에 빠진 분기가 있으면
@@ -10437,17 +10656,24 @@ function pf_fund_detail_quarters(Dart $dart, string $code, array $fil = []): voi
     // 최근 12분기(3년)면 추세를 보기에 넉넉하다
     $qs = array_slice($qs, 0, 12);
 
+    // TTM 추세 소형 차트 셋 — 표와 <b>같은 $ttm</b> 을 그린다(자른 12분기와 색인이 같다: $ttm 은 0 부터 쌓였다)
+    echo pf_fund_ttm_spark($qs, $ttm);
+
     echo '<div class="tbl-scroll"><table class="pf"><thead><tr>';
     // 증감은 <b>직전 분기</b> 대비 (연도별 표가 직전 연도와 견주는 것과 같은 결)
     echo '<th class="num">분기</th>'
        . '<th class="num" title="그 분기 보고서의 DART 접수일 — 실적이 시장에 알려진 날입니다 (4분기는 사업보고서)">공시일</th>'
        . '<th class="num" title="공시일 종가 기준 시가총액(억원) — 그 실적이 알려진 날 시장이 매기고 있던 값입니다. 시세 원장이 2019년부터라 그 이전 공시는 빈칸입니다">시총</th>'
        . '<th class="num" title="이익 서프라이즈 — (당분기 영업이익 − 전년동기) ÷ 자기 과거 2년 변동성. ≥+1 서프라이즈 · ≤−1 어닝쇼크">SUE</th>'
-       . '<th class="num">매출액</th><th class="num">매출 증감</th>'
+       . '<th class="num" title="아랫줄은 직전 분기 대비 증감입니다 (1분기는 전년 4분기가 상대)">매출액</th>'
        . '<th class="num">매출 TTM</th>'
-       . '<th class="num">영업이익</th><th class="num">영업이익 증감</th>'
+       . '<th class="num" title="아랫줄은 직전 분기 대비 증감입니다 — 부호가 뒤집히면 적자전환·흑자전환 따위로 적습니다">영업이익</th>'
        . '<th class="num">영업이익 TTM</th>'
-       . '<th class="num">영업이익률</th><th class="num">순이익</th><th class="num">순이익률</th>'
+       . '<th class="num">영업이익률</th><th class="num">순이익</th>'
+       . '<th class="num" title="최근 4분기 순이익 합 — 아래 PER 밴드 차트의 PER 이 이 값을 분모로 씁니다">순이익 TTM</th>'
+       . '<th class="num" title="공시일 종가 기준 시총 ÷ 순이익 TTM — 그 실적이 알려진 날 시장이 매기던 PER 입니다(지금 PER 이 아닙니다). 적자면 빈칸">PER</th>'
+       . '<th class="num" title="공시일 종가 기준 시총 ÷ 그 분기말 자본총계 — 그 실적이 알려진 날의 PBR 입니다(지금 PBR 이 아닙니다). 자본잠식이면 빈칸">PBR</th>'
+       . '<th class="num">순이익률</th>'
        . '<th class="num">자산총계</th><th class="num">부채총계</th><th class="num">자본총계</th>'
        . '<th class="num">부채비율</th><th class="num">기준</th></tr></thead><tbody>';
 
@@ -10464,15 +10690,30 @@ function pf_fund_detail_quarters(Dart $dart, string $code, array $fil = []): voi
         // 행이 곧 분기라 배지에 분기를 되풀이하지 않는다 (연도별 표는 4분기 값이라 밝힌다)
         echo pf_fund_filing_cells($fil[(int)$q['bsns_year'] * 4 + (int)$q['quarter']] ?? null,
                                   (string)$q['label'], false);
-        echo '<td class="num">' . pf_eok($q['revenue']) . '</td>';
-        echo '<td class="num">' . pf_delta_pct($m['rev_growth']) . '</td>';
+        // 증감은 값의 «아랫줄»이다 — 연도별 표와 같은 이유(가로 스크롤바)로 열을 접었다 (2026-09-02)
+        echo '<td class="num">' . pf_eok($q['revenue'])
+           . '<div style="font-size:11px;line-height:1.3">' . pf_delta_pct($m['rev_growth']) . '</div></td>';
         // TTM — 분기 하나가 튀어도 12개월치는 흐름을 보여 준다. 스크리너의 「매출액 TTM」과 같은 값
         echo '<td class="num" style="color:#5f7183">' . pf_eok($ttm[$i]['revenue'] ?? null) . '</td>';
-        echo '<td class="num">' . pf_eok($q['op_income']) . '</td>';
-        echo '<td class="num">' . pf_profit_delta($pv['op_income'] ?? null, $q['op_income']) . '</td>';
+        echo '<td class="num">' . pf_eok($q['op_income'])
+           . '<div style="font-size:11px;line-height:1.3">' . pf_profit_delta($pv['op_income'] ?? null, $q['op_income']) . '</div></td>';
         echo '<td class="num" style="color:#5f7183">' . pf_eok($ttm[$i]['op_income'] ?? null) . '</td>';
         echo '<td class="num">' . pf_ratio_pct($m['op_margin']) . '</td>';
         echo '<td class="num">' . pf_eok($q['net_income']) . '</td>';
+        // 순이익 TTM — 밴드 차트 PER 의 분모와 같은 값(일회성 손익으로 한 분기가 튀어도 12개월치로 본다)
+        echo '<td class="num" style="color:#5f7183">' . pf_eok($ttm[$i]['net_income'] ?? null) . '</td>';
+        // 그때 PER — 공시일 시총(원) ÷ 순이익 TTM(원). 분자가 «그 날» 값이라 지금 PER 이 아니다(지금 것은 아래 밴드 차트의 마지막 점)
+        $capF = $fil[(int)$q['bsns_year'] * 4 + (int)$q['quarter']]['cap'] ?? null;
+        $ttmN = $ttm[$i]['net_income'] ?? null;
+        if ($capF === null)      echo '<td class="num muted" title="공시일 시총이 없어 계산할 수 없습니다">-</td>';
+        elseif ($ttmN === null) echo '<td class="num muted" title="순이익 TTM 이 없어(4분기 미만) 계산할 수 없습니다">-</td>';
+        elseif ($ttmN <= 0)     echo '<td class="num muted" title="TTM 순이익이 적자라 PER 이 뜻을 갖지 않습니다">-</td>';
+        else echo '<td class="num" style="color:#5f7183" title="' . pf_h('공시일 시총 ' . number_format($capF / 100000000) . '억 ÷ 순이익 TTM ' . number_format($ttmN / 100000000) . '억') . '">' . number_format($capF / $ttmN, 1) . '</td>';
+        // PBR — 같은 공시일 시총 ÷ 그 분기말 자본총계 (BS 는 시점값이라 TTM 이 없다)
+        $eqQ = $q['equity_total'] !== null ? (float)$q['equity_total'] : null;
+        if ($capF === null)                 echo '<td class="num muted" title="공시일 시총이 없어 계산할 수 없습니다">-</td>';
+        elseif ($eqQ === null || $eqQ <= 0) echo '<td class="num muted" title="자본총계가 없거나 자본잠식이라 PBR 이 뜻을 갖지 않습니다">-</td>';
+        else echo '<td class="num" style="color:#5f7183" title="' . pf_h('공시일 시총 ' . number_format($capF / 100000000) . '억 ÷ 자본총계 ' . number_format($eqQ / 100000000) . '억') . '">' . number_format($capF / $eqQ, 2) . '</td>';
         echo '<td class="num">' . pf_ratio_pct($m['net_margin']) . '</td>';
         echo '<td class="num muted">' . pf_eok($q['asset_total']) . '</td>';
         echo '<td class="num muted">' . pf_eok($q['debt_total']) . '</td>';
@@ -10486,14 +10727,18 @@ function pf_fund_detail_quarters(Dart $dart, string $code, array $fil = []): voi
     echo '<p class="sub muted" style="margin:9px 0 0;font-size:12px">'
        . 'DART 는 분기보고서에 <b>누적</b>으로 신고합니다. 위 값은 거기서 앞 분기를 빼 만든 '
        . '<b>그 분기 3개월</b>입니다 — <b>4분기</b>는 보고서가 없어 <b>사업보고서 － 3분기 누적</b>으로 계산했습니다. '
-       . '「매출 증감」·「영업이익 증감」은 <b>직전 분기</b>와 견준 것입니다 '
+       . '매출액·영업이익 <b>아랫줄의 증감</b>은 <b>직전 분기</b>와 견준 것입니다 '
        . '(1분기는 전년 4분기가 상대). 영업이익은 부호가 뒤집히면 백분율이 뜻을 잃으므로 '
        . '<b>적자전환·흑자전환·적자확대·적자축소</b>로 적습니다.<br>'
        . '★ <b>분기 하나만 보면 속기 쉽습니다.</b> 수주를 몰아 인식하는 업종은 매출이 분기마다 널뜁니다 — '
        . '실측(동아엘텍) 265 → 2,105 → 1,064 → 2,390 → 409억이라 직전분기 대비가 '
        . '<b>+694%</b> 였다가 <b>−82.9%</b> 로 나옵니다. 그래서 <b>TTM(최근 4분기 합)</b> 을 나란히 뒀습니다 — '
        . '같은 구간의 TTM 은 1,710 → 3,145 → 3,961 → 5,824 → 5,968억으로 <b>계속 늘고 있었습니다</b>. '
-       . '재무분석 목록의 「매출액 TTM」과 같은 값이라, 거기서 본 성장률과 여기가 이어집니다.<br>'
+       . '재무분석 목록의 「매출액 TTM」과 같은 값이라, 거기서 본 성장률과 여기가 이어집니다. '
+       . '<b>순이익 TTM</b> 은 아래 <b>PER 밴드 차트의 PER 분모</b>와 같은 값이고, <b>PER</b> 열은 <b>공시일 시총 ÷ 순이익 TTM</b> 입니다 — '
+       . '그 실적이 알려진 날 시장이 매기던 배수라 <b>지금 PER 이 아닙니다</b>(지금 것은 밴드 차트의 마지막 점). '
+       . '<b>PBR</b> 열도 <b>같은 공시일 시총 ÷ 그 분기말 자본총계</b> 입니다. '
+       . '순이익은 연결 당기순이익(비지배 포함) 기준이라 지배주주 기준으로 적는 증권사 PER 과는 수치가 조금 다릅니다.<br>'
        . '자산·부채·자본은 흐름이 아니라 <b>그 분기말 시점</b>값이라 뺄셈하지 않았습니다. '
        . '회사가 중간에 회계 기준을 바꾸거나 중단영업을 재분류하면 누적끼리 어긋나 분기 값이 음수로 나올 수 있습니다 '
        . '(2024년 실측 전종목의 약 1%).<br>'
@@ -13044,7 +13289,7 @@ table.bx-doc td:first-child,table.bx-doc th:first-child{text-align:left}
        . $pg . ' / ' . $pages . ' 페이지</div>';
     }   // ← 목록·페이지 번호는 결과가 있을 때만. 아래 스크립트는 «항상» — 사례 카드가 쓴다.
 
-    echo '<script src="/style/dailychart.js?v=56"></script>';
+    echo '<script src="/style/dailychart.js?v=62"></script>';
     echo '<script>const FL_CARDS=' . json_encode($cards, JSON_UNESCAPED_UNICODE) . ';</script>';
     echo '<script>const FL_IND=' . json_encode(
         $flInd ? [['def' => $flInd, 'vars' => ['변수_봉수' => $INDBARS]]] : [], JSON_UNESCAPED_UNICODE)
@@ -14596,7 +14841,7 @@ CSS;
     }
     echo '</main></div><div id="dtToast"></div>';
 
-    echo '<script src="/style/dailychart.js?v=56"></script>';
+    echo '<script src="/style/dailychart.js?v=62"></script>';
     // 목록 배지(ETF 편입 수·퀀트) — 그리기·색의 단일본(사이트 공통 모듈)
     echo '<script src="/style/quantbadge.js?v=6"></script>';   // v6 = SUE 라벨 축약·종목명 옆 배치 (2026-08-12)
     pf_acnav_js();                                        // 종목 추가 검색창의 ↓/↑ 이동

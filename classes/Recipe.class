@@ -1,0 +1,407 @@
+<?php
+/**
+ * classes/Recipe.class — 요리 레시피 모음 (DB 전담 + 메타 수집 + AI 태그)
+ *
+ * 무엇인가 (2026-08-31 신설 · memory/session_레시피모음.md)
+ *   유튜브(쇼츠 포함)·웹 페이지를 보다가 <b>URL 하나만 붙여넣으면</b> 제목·채널·썸네일을 서버가
+ *   받아오고(oEmbed / og 태그), Haiku 가 태그를 붙여 주는 «모음» 화면. 모바일이 주 무대라
+ *   사람이 적는 칸은 URL 뿐이다 — 제목·태그는 나중에 고칠 수 있다.
+ *
+ * 규칙
+ *   1. 메타 수집은 «등록 시 1회»뿐이다. 유튜브는 oEmbed(키 불필요 · 0.2초), 그 밖은 og:title/og:image.
+ *      설명글(shortDescription)은 <b>있으면 보태고 없으면 그만</b> — 실패해도 등록은 된다.
+ *   2. ★AI 호출은 사용자가 누를 때만(등록·「태그 다시」) — 크론에 걸지 않는다(아덴트 비용 사고의 교훈).
+ *   3. ★태그가 흩어지지 않게 «있는 태그를 먼저 쓰게» 한다 — 프롬프트에 기존 태그를 종류별로 넣고
+ *      새 태그는 그때만 만들게 한다. 난이도는 LEVELS 셋 중 하나로 고정.
+ *   4. 같은 영상은 두 번 담지 않는다 — ukey(유튜브 = 영상 id · 웹 = host+path) UNIQUE.
+ *   5. 표는 rc_ 접두어 (economist73 은 127+ 표 공유 스키마). DDL 은 ensureTables() 한 곳 —
+ *      화면·API 의 매 요청에서 부르지 않는다(api action=schema 1회 · CLI).
+ */
+class Recipe
+{
+    /** 태그 축 — 화면의 칩 묶음 순서이자 프롬프트의 어휘 */
+    public const KINDS = [
+        'type'   => '요리종류',
+        'main'   => '주재료',
+        'method' => '조리법',
+        'level'  => '난이도',
+        'etc'    => '기타',
+    ];
+    /** 난이도는 이 셋뿐 */
+    public const LEVELS = ['초간단', '보통', '정성'];
+
+    private const MODEL = 'claude-haiku-4-5-20251001';
+    private const UA    = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
+    private PDO $pdo;
+
+    public function __construct(PDO $pdo)
+    {
+        $this->pdo = $pdo;
+    }
+
+    /* ══════════════════════ 스키마 ══════════════════════ */
+    public function ensureTables(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS rc_recipe (
+              id         INT AUTO_INCREMENT PRIMARY KEY,
+              src        VARCHAR(10)  NOT NULL DEFAULT 'web',
+              ukey       VARCHAR(190) NOT NULL,
+              url        VARCHAR(500) NOT NULL,
+              title      VARCHAR(300) NOT NULL DEFAULT '',
+              dish       VARCHAR(100) NOT NULL DEFAULT '',
+              channel    VARCHAR(100) NOT NULL DEFAULT '',
+              thumb      VARCHAR(500) NOT NULL DEFAULT '',
+              descr      TEXT         NULL,
+              memo       TEXT         NULL,
+              created_at DATETIME     NOT NULL,
+              updated_at DATETIME     NOT NULL,
+              UNIQUE KEY uk_key (ukey),
+              KEY idx_created (created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS rc_tag (
+              id   INT AUTO_INCREMENT PRIMARY KEY,
+              name VARCHAR(50) NOT NULL,
+              kind VARCHAR(10) NOT NULL DEFAULT 'etc',
+              UNIQUE KEY uk_name (name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS rc_recipe_tag (
+              recipe_id INT NOT NULL,
+              tag_id    INT NOT NULL,
+              PRIMARY KEY (recipe_id, tag_id),
+              KEY idx_tag (tag_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    }
+
+    /* ══════════════════════ URL 정규화 ══════════════════════ */
+
+    /** URL → ['src'=>'youtube'|'web', 'key'=>고유키, 'url'=>정리된 URL, 'vid'=>유튜브 id|''] */
+    public static function normalizeUrl(string $raw): array
+    {
+        $raw = trim($raw);
+        if ($raw === '') throw new InvalidArgumentException('URL 을 붙여넣으세요.');
+        if (!preg_match('~^https?://~i', $raw)) $raw = 'https://' . $raw;
+        $p = parse_url($raw);
+        if (!$p || empty($p['host'])) throw new InvalidArgumentException('URL 형식이 아닙니다.');
+        $host = strtolower($p['host']);
+        $path = $p['path'] ?? '/';
+        parse_str($p['query'] ?? '', $q);
+
+        $vid = '';
+        if (preg_match('/(^|\.)youtu\.be$/', $host)) {
+            $vid = trim($path, '/');
+        } elseif (preg_match('/(^|\.)youtube\.com$/', $host)) {
+            if (preg_match('~^/(shorts|embed|live|v)/([A-Za-z0-9_-]{11})~', $path, $m)) $vid = $m[2];
+            elseif (!empty($q['v'])) $vid = (string)$q['v'];
+        }
+        if ($vid !== '') {
+            if (!preg_match('/^[A-Za-z0-9_-]{11}$/', $vid)) throw new InvalidArgumentException('유튜브 영상 id 를 읽지 못했습니다.');
+            $isShort = (bool)preg_match('~^/shorts/~', $path);
+            return [
+                'src' => 'youtube', 'vid' => $vid, 'key' => 'yt:' . $vid,
+                'url' => $isShort ? "https://www.youtube.com/shorts/{$vid}" : "https://www.youtube.com/watch?v={$vid}",
+            ];
+        }
+        /* 웹: 추적 파라미터를 걷어내고 host+path(+남은 query) 로 키를 만든다 */
+        foreach (array_keys($q) as $k) {
+            if (preg_match('/^(utm_|fbclid|gclid|si$|ref$)/i', (string)$k)) unset($q[$k]);
+        }
+        $qs  = $q ? '?' . http_build_query($q) : '';
+        $url = 'https://' . $host . rtrim($path, '/') . $qs;
+        return ['src' => 'web', 'vid' => '', 'key' => 'web:' . substr($host . rtrim($path, '/') . $qs, 0, 185), 'url' => $url];
+    }
+
+    /* ══════════════════════ 메타 수집 ══════════════════════ */
+
+    private static function httpGet(string $url, int $timeout = 10, array $hdr = []): ?string
+    {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true, CURLOPT_MAXREDIRS => 5,
+            CURLOPT_TIMEOUT => $timeout, CURLOPT_CONNECTTIMEOUT => 6, CURLOPT_ENCODING => '',
+            CURLOPT_USERAGENT => self::UA, CURLOPT_HTTPHEADER => array_merge(['Accept-Language: ko,en;q=0.8'], $hdr),
+        ]);
+        $r = curl_exec($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        return ($r !== false && $code >= 200 && $code < 400) ? $r : null;
+    }
+
+    /** ['ok','title','channel','thumb','desc','msg'] — 실패해도 예외로 죽지 않는다(등록은 되어야 한다) */
+    public static function fetchMeta(array $n): array
+    {
+        $out = ['ok' => false, 'title' => '', 'channel' => '', 'thumb' => '', 'desc' => '', 'msg' => ''];
+        if ($n['src'] === 'youtube') {
+            $j = self::httpGet('https://www.youtube.com/oembed?url=' . rawurlencode('https://www.youtube.com/watch?v=' . $n['vid']) . '&format=json', 10);
+            $d = $j ? json_decode($j, true) : null;
+            if (is_array($d) && !empty($d['title'])) {
+                $out['ok']      = true;
+                $out['title']   = trim((string)$d['title']);
+                $out['channel'] = trim((string)($d['author_name'] ?? ''));
+                $out['thumb']   = (string)($d['thumbnail_url'] ?? '');
+            } else {
+                $out['msg'] = '유튜브가 제목을 주지 않았습니다(비공개·삭제·연령제한일 수 있음)';
+                $out['thumb'] = "https://i.ytimg.com/vi/{$n['vid']}/hqdefault.jpg";
+            }
+            /* 설명글 — 있으면 태그 힌트로 보탠다. 없거나 막혀도 그만. */
+            $html = self::httpGet('https://www.youtube.com/watch?v=' . $n['vid'], 8);
+            if ($html && preg_match('/"shortDescription":"((?:[^"\\\\]|\\\\.)*)"/', $html, $m)) {
+                $desc = json_decode('"' . $m[1] . '"', true);
+                if (is_string($desc)) $out['desc'] = mb_substr(trim($desc), 0, 1500);
+            }
+            return $out;
+        }
+        /* 웹 페이지: og 태그 → <title> */
+        $html = self::httpGet($n['url'], 12);
+        if (!$html) { $out['msg'] = '페이지를 읽지 못했습니다'; return $out; }
+        if (!mb_check_encoding($html, 'UTF-8')) {
+            $cs = preg_match('/charset=["\']?([\w-]+)/i', $html, $cm) ? $cm[1] : 'EUC-KR';
+            $conv = @mb_convert_encoding($html, 'UTF-8', $cs);
+            if ($conv !== false) $html = $conv;
+        }
+        $og = function (string $prop) use ($html): string {
+            $p = preg_quote($prop, '/');
+            if (preg_match('/<meta[^>]+(?:property|name)=["\']' . $p . '["\'][^>]+content=["\']([^"\']*)["\']/i', $html, $m)) return html_entity_decode($m[1], ENT_QUOTES | ENT_HTML5, 'UTF-8');
+            if (preg_match('/<meta[^>]+content=["\']([^"\']*)["\'][^>]+(?:property|name)=["\']' . $p . '["\']/i', $html, $m)) return html_entity_decode($m[1], ENT_QUOTES | ENT_HTML5, 'UTF-8');
+            return '';
+        };
+        $title = $og('og:title');
+        if ($title === '' && preg_match('/<title[^>]*>(.*?)<\/title>/is', $html, $m)) $title = html_entity_decode(trim(strip_tags($m[1])), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $out['title']   = mb_substr(trim(preg_replace('/\s+/', ' ', $title)), 0, 300);
+        $out['channel'] = mb_substr($og('og:site_name'), 0, 100);
+        $out['thumb']   = $og('og:image');
+        $out['desc']    = mb_substr($og('og:description'), 0, 1500);
+        $out['ok']      = $out['title'] !== '';
+        if (!$out['ok']) $out['msg'] = '페이지에서 제목을 찾지 못했습니다';
+        return $out;
+    }
+
+    /* ══════════════════════ AI 태그 ══════════════════════ */
+
+    /** 제목·채널·설명 → ['ok','dish','tags'=>[['name','kind'],…],'msg'] (Haiku · 등록/「태그 다시」에서만) */
+    public function tagSuggest(string $title, string $channel, string $desc): array
+    {
+        $inc = $_SERVER['DOCUMENT_ROOT'] . '/env/anthropic.inc';
+        if (file_exists($inc)) require_once $inc;
+        $apiKey = getenv('ANTHROPIC_API_KEY') ?: (defined('ANTHROPIC_API_KEY') ? ANTHROPIC_API_KEY : '');
+        if ($apiKey === '') return ['ok' => false, 'msg' => 'AI 키(ANTHROPIC_API_KEY)가 없어 태그를 못 붙였습니다.', 'dish' => '', 'tags' => []];
+
+        $existing = [];
+        foreach ($this->tagsAll() as $t) $existing[$t['kind']][] = $t['name'];
+        $vocab = '';
+        foreach (self::KINDS as $k => $label) {
+            if ($k === 'level') continue;
+            $vocab .= "- {$k}({$label}): " . (!empty($existing[$k]) ? implode(', ', array_slice($existing[$k], 0, 80)) : '(아직 없음)') . "\n";
+        }
+        $system =
+            "당신은 요리 레시피 모음의 태그 담당입니다. 영상/페이지의 제목·채널·설명을 보고 아래 JSON 객체 하나만 출력하세요. "
+          . "설명·마크다운·코드블록 없이 순수 JSON 만 출력합니다.\n\n"
+          . "{\n"
+          . "  \"dish\": \"요리명 한 단어~짧은 구(예: 갈비탕, 김치볶음밥). 요리가 아니면 빈 문자열\",\n"
+          . "  \"tags\": [ {\"name\": \"태그\", \"kind\": \"type|main|method|level|etc\"}, … ]\n"
+          . "}\n\n"
+          . "태그 축과 [이미 있는 태그] — ★있는 태그와 같은 뜻이면 반드시 그 표기를 그대로 쓰세요(새로 만들지 않기):\n"
+          . $vocab
+          . "- level(난이도): " . implode(', ', self::LEVELS) . " 중 정확히 하나만\n\n"
+          . "규칙:\n"
+          . "- 태그는 3~6개. kind 마다 최대 2개. 짧은 한국어 명사(조사·문장 금지, 이모지 금지).\n"
+          . "- type 은 국·찌개·탕/볶음/구이/조림/무침/면/밥/반찬/디저트/베이킹/음료/샐러드 같은 «요리 형태».\n"
+          . "- main 은 «주재료» 1~2개(소고기/돼지고기/닭/계란/두부/새우/감자…). 채널 이름을 태그로 쓰지 않습니다.\n"
+          . "- method 는 제목·설명에 드러날 때만(에어프라이어/전자레인지/오븐/원팬/무조리…). 모르면 넣지 않습니다.\n"
+          . "- level 은 «간단·N분·초간단·귀찮» 같은 단서면 초간단, «정성·오래·본격» 이면 정성, 단서 없으면 보통.\n"
+          . "- 요리와 무관한 내용이면 dish=\"\" 이고 tags 는 빈 배열.\n"
+          . "- 반드시 JSON 한 개만 출력.";
+
+        $user = "제목: {$title}\n채널/사이트: {$channel}\n" . ($desc !== '' ? "설명:\n" . mb_substr($desc, 0, 1200) : '설명: (없음)');
+        $payload = json_encode([
+            'model' => self::MODEL, 'max_tokens' => 300, 'system' => $system,
+            'messages' => [['role' => 'user', 'content' => $user]],
+        ], JSON_UNESCAPED_UNICODE);
+
+        $ch = curl_init('https://api.anthropic.com/v1/messages');
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true, CURLOPT_POSTFIELDS => $payload, CURLOPT_TIMEOUT => 30,
+            CURLOPT_HTTPHEADER => ['x-api-key: ' . $apiKey, 'anthropic-version: 2023-06-01', 'content-type: application/json'],
+        ]);
+        $resp = curl_exec($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $cerr = curl_error($ch);
+        curl_close($ch);
+        if ($resp === false) return ['ok' => false, 'msg' => 'AI 호출 실패: ' . $cerr, 'dish' => '', 'tags' => []];
+        $j = json_decode($resp, true);
+        if ($code !== 200 || !is_array($j)) return ['ok' => false, 'msg' => 'AI 오류: ' . ($j['error']['message'] ?? ('HTTP ' . $code)), 'dish' => '', 'tags' => []];
+        $out = '';
+        foreach (($j['content'] ?? []) as $b) { if (($b['type'] ?? '') === 'text') $out .= $b['text']; }
+        $out = trim($out);
+        if (preg_match('/\{.*\}/s', $out, $m)) $out = $m[0];
+        $p = json_decode($out, true);
+        if (!is_array($p)) return ['ok' => false, 'msg' => 'AI 응답을 읽지 못했습니다.', 'dish' => '', 'tags' => []];
+
+        $tags = [];
+        $seen = [];
+        $perKind = [];
+        foreach ((array)($p['tags'] ?? []) as $t) {
+            $name = self::cleanTag((string)($t['name'] ?? ''));
+            $kind = (string)($t['kind'] ?? 'etc');
+            if ($name === '' || isset($seen[$name])) continue;
+            if (!isset(self::KINDS[$kind])) $kind = 'etc';
+            if ($kind === 'level' && !in_array($name, self::LEVELS, true)) continue;
+            if (($perKind[$kind] ?? 0) >= 2) continue;
+            $seen[$name] = 1;
+            $perKind[$kind] = ($perKind[$kind] ?? 0) + 1;
+            $tags[] = ['name' => $name, 'kind' => $kind];
+        }
+        return ['ok' => true, 'dish' => mb_substr(trim((string)($p['dish'] ?? '')), 0, 100), 'tags' => $tags, 'msg' => ''];
+    }
+
+    public static function cleanTag(string $s): string
+    {
+        $s = trim(preg_replace('/\s+/u', ' ', str_replace(['#', ',', '/'], ' ', $s)));
+        return mb_substr($s, 0, 50);
+    }
+
+    /* ══════════════════════ 레시피 CRUD ══════════════════════ */
+
+    public function findByKey(string $key): ?array
+    {
+        $q = $this->pdo->prepare("SELECT * FROM rc_recipe WHERE ukey = ?");
+        $q->execute([$key]);
+        $r = $q->fetch(PDO::FETCH_ASSOC);
+        return $r ?: null;
+    }
+
+    public function get(int $id): ?array
+    {
+        $q = $this->pdo->prepare("SELECT * FROM rc_recipe WHERE id = ?");
+        $q->execute([$id]);
+        $r = $q->fetch(PDO::FETCH_ASSOC);
+        if (!$r) return null;
+        $r['tags'] = $this->tagsOf($id);
+        return $r;
+    }
+
+    public function add(array $n, array $meta, string $dish): int
+    {
+        $q = $this->pdo->prepare("INSERT INTO rc_recipe (src, ukey, url, title, dish, channel, thumb, descr, created_at, updated_at)
+                                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())");
+        $q->execute([$n['src'], $n['key'], $n['url'],
+            mb_substr($meta['title'] !== '' ? $meta['title'] : $n['url'], 0, 300), $dish,
+            mb_substr($meta['channel'], 0, 100), mb_substr($meta['thumb'], 0, 500), $meta['desc'] !== '' ? $meta['desc'] : null]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public function update(int $id, string $title, string $dish, string $memo): void
+    {
+        $q = $this->pdo->prepare("UPDATE rc_recipe SET title = ?, dish = ?, memo = ?, updated_at = NOW() WHERE id = ?");
+        $q->execute([mb_substr(trim($title), 0, 300), mb_substr(trim($dish), 0, 100), trim($memo) !== '' ? trim($memo) : null, $id]);
+    }
+
+    public function del(int $id): void
+    {
+        $this->pdo->prepare("DELETE FROM rc_recipe_tag WHERE recipe_id = ?")->execute([$id]);
+        $this->pdo->prepare("DELETE FROM rc_recipe WHERE id = ?")->execute([$id]);
+        $this->tagPrune();
+    }
+
+    /** 목록 — 태그(id)·검색어(제목/요리명/채널/메모/태그명)로 좁힌다. 태그는 배열로 붙여 준다. */
+    public function list(int $tagId = 0, string $q = ''): array
+    {
+        $where = [];
+        $args  = [];
+        if ($tagId > 0) { $where[] = "r.id IN (SELECT recipe_id FROM rc_recipe_tag WHERE tag_id = ?)"; $args[] = $tagId; }
+        if ($q !== '') {
+            $like = '%' . addcslashes($q, '%_\\') . '%';
+            $where[] = "(r.title LIKE ? OR r.dish LIKE ? OR r.channel LIKE ? OR r.memo LIKE ?
+                         OR r.id IN (SELECT rt.recipe_id FROM rc_recipe_tag rt JOIN rc_tag t ON t.id = rt.tag_id WHERE t.name LIKE ?))";
+            array_push($args, $like, $like, $like, $like, $like);
+        }
+        $sql = "SELECT r.* FROM rc_recipe r" . ($where ? " WHERE " . implode(' AND ', $where) : '') . " ORDER BY r.created_at DESC, r.id DESC";
+        $st = $this->pdo->prepare($sql);
+        $st->execute($args);
+        $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+        if (!$rows) return [];
+        $ids = array_column($rows, 'id');
+        $ph  = implode(',', array_fill(0, count($ids), '?'));
+        $tq  = $this->pdo->prepare("SELECT rt.recipe_id, t.id, t.name, t.kind FROM rc_recipe_tag rt JOIN rc_tag t ON t.id = rt.tag_id
+                                    WHERE rt.recipe_id IN ({$ph}) ORDER BY FIELD(t.kind, 'type','main','method','level','etc'), t.name");
+        $tq->execute($ids);
+        $by = [];
+        foreach ($tq->fetchAll(PDO::FETCH_ASSOC) as $t) $by[(int)$t['recipe_id']][] = $t;
+        foreach ($rows as &$r) $r['tags'] = $by[(int)$r['id']] ?? [];
+        unset($r);
+        return $rows;
+    }
+
+    public function count(): int
+    {
+        return (int)$this->pdo->query("SELECT COUNT(*) FROM rc_recipe")->fetchColumn();
+    }
+
+    /* ══════════════════════ 태그 ══════════════════════ */
+
+    public function tagsOf(int $recipeId): array
+    {
+        $q = $this->pdo->prepare("SELECT t.id, t.name, t.kind FROM rc_recipe_tag rt JOIN rc_tag t ON t.id = rt.tag_id
+                                  WHERE rt.recipe_id = ? ORDER BY FIELD(t.kind, 'type','main','method','level','etc'), t.name");
+        $q->execute([$recipeId]);
+        return $q->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 전체 태그 + 쓰인 수 (칩 필터용) — 종류 순·많이 쓰인 순 */
+    public function tagsAll(): array
+    {
+        return $this->pdo->query("SELECT t.id, t.name, t.kind, COUNT(rt.recipe_id) AS n
+                                  FROM rc_tag t LEFT JOIN rc_recipe_tag rt ON rt.tag_id = t.id
+                                  GROUP BY t.id ORDER BY FIELD(t.kind, 'type','main','method','level','etc'), n DESC, t.name")
+                         ->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 레시피의 태그를 통째로 바꾼다 — [['name','kind'],…]. 이름이 이미 있으면 그 태그(종류는 기존 것 유지). */
+    public function tagSet(int $recipeId, array $tags): void
+    {
+        $this->pdo->prepare("DELETE FROM rc_recipe_tag WHERE recipe_id = ?")->execute([$recipeId]);
+        $sel = $this->pdo->prepare("SELECT id FROM rc_tag WHERE name = ?");
+        $ins = $this->pdo->prepare("INSERT INTO rc_tag (name, kind) VALUES (?, ?)");
+        $lnk = $this->pdo->prepare("INSERT IGNORE INTO rc_recipe_tag (recipe_id, tag_id) VALUES (?, ?)");
+        foreach ($tags as $t) {
+            $name = self::cleanTag((string)($t['name'] ?? ''));
+            if ($name === '') continue;
+            $kind = (string)($t['kind'] ?? 'etc');
+            if (!isset(self::KINDS[$kind])) $kind = 'etc';
+            $sel->execute([$name]);
+            $tid = (int)$sel->fetchColumn();
+            if (!$tid) { $ins->execute([$name, $kind]); $tid = (int)$this->pdo->lastInsertId(); }
+            $lnk->execute([$recipeId, $tid]);
+        }
+        $this->tagPrune();
+    }
+
+    /** 아무 레시피에도 안 쓰이는 태그는 지운다 — 칩 줄에 빈 태그가 남지 않게 */
+    public function tagPrune(): void
+    {
+        $this->pdo->exec("DELETE FROM rc_tag WHERE id NOT IN (SELECT DISTINCT tag_id FROM rc_recipe_tag)");
+    }
+
+    /** 태그 이름·종류 고치기 — 같은 이름이 이미 있으면 그쪽으로 병합 */
+    public function tagRename(int $tagId, string $name, string $kind): void
+    {
+        $name = self::cleanTag($name);
+        if ($name === '') throw new InvalidArgumentException('태그 이름이 비었습니다.');
+        if (!isset(self::KINDS[$kind])) $kind = 'etc';
+        $q = $this->pdo->prepare("SELECT id FROM rc_tag WHERE name = ? AND id <> ?");
+        $q->execute([$name, $tagId]);
+        $dup = (int)$q->fetchColumn();
+        if ($dup) {
+            $this->pdo->prepare("INSERT IGNORE INTO rc_recipe_tag (recipe_id, tag_id) SELECT recipe_id, ? FROM rc_recipe_tag WHERE tag_id = ?")->execute([$dup, $tagId]);
+            $this->pdo->prepare("DELETE FROM rc_recipe_tag WHERE tag_id = ?")->execute([$tagId]);
+            $this->pdo->prepare("DELETE FROM rc_tag WHERE id = ?")->execute([$tagId]);
+            $this->pdo->prepare("UPDATE rc_tag SET kind = ? WHERE id = ?")->execute([$kind, $dup]);
+            return;
+        }
+        $this->pdo->prepare("UPDATE rc_tag SET name = ?, kind = ? WHERE id = ?")->execute([$name, $kind, $tagId]);
+    }
+}
+?>

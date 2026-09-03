@@ -251,8 +251,9 @@ function gift_page_batch(Gift $gift): void
     echo '<button class="gf-btn gf-primary" onclick="gfAddOpen()">대상 추가</button>';
     echo '<button class="gf-btn" onclick="gfSaveAll()">임시저장</button>';
     echo '<button class="gf-btn gf-ok" onclick="gfConfirm()">회차 확정 저장</button>';
-    echo '<a class="gf-btn" href="/gift/export.php?id=' . $bid . '&type=vendor">업체 발송용 엑셀</a>';
-    echo '<a class="gf-btn" href="/gift/export.php?id=' . $bid . '&type=full">전체 내역 엑셀</a>';
+    // 리스트 버튼은 미리보기 창(새 탭)을 연다 — 엑셀 내려받기는 그 안에서 (2026-08-31 사용자 지시 · 곧장 내려받는 버튼은 없다)
+    echo '<a class="gf-btn" href="/gift/export.php?id=' . $bid . '&type=vendor&preview=1" target="_blank" title="택배 건만 · 창 안에서 엑셀 내려받기">업체 발송용 리스트</a>';
+    echo '<a class="gf-btn" href="/gift/export.php?id=' . $bid . '&type=full&preview=1" target="_blank" title="발송구분별 시트 · 창 안에서 엑셀 내려받기">전체 내역 리스트</a>';
     echo '<a class="gf-btn" href="/gift/export.php?id=' . $bid . '&type=print" target="_blank">큰 글씨 인쇄</a>';
     echo '</div>';
     echo '</div>';
@@ -289,6 +290,7 @@ function gift_page_batch(Gift $gift): void
     if (!$items) {
         echo '<tr class="gf-noitem"><td colspan="15" class="gf-empty">발송 대상이 없습니다. 「대상 추가」로 고객을 넣으세요.</td></tr>';
     }
+    $gfNo = 0;   // No 는 보이는 순서(발송구분→이름) — 저장된 seq 는 넣은 순서라 여기선 쓰지 않는다
     foreach ($items as $it) {
         $id  = (int)$it['id'];
         $why = $bad[$id] ?? [];
@@ -297,7 +299,7 @@ function gift_page_batch(Gift $gift): void
            . ' data-addr="' . (trim((string)$it['address1']) !== '' ? 'y' : 'n') . '"'
            . ($why ? ' class="bad" title="' . gift_h(implode(' · ', $why)) . '"' : '') . '>';
         echo '<td class="chk"><input type="checkbox" class="gf-chk" onclick="gfCount()"></td>';
-        echo '<td class="no">' . (int)$it['seq'] . '</td>';
+        echo '<td class="no">' . (++$gfNo) . '</td>';
         echo '<td><input class="gf-in w-name" data-f="customer_name" value="' . gift_h($it['customer_name']) . '"></td>';
         echo '<td><input class="gf-in w-memo" data-f="customer_memo" value="' . gift_h($it['customer_memo']) . '"></td>';
         echo '<td><input class="gf-in w-phone" data-f="phone" value="' . gift_h($it['phone']) . '"></td>';
@@ -445,12 +447,12 @@ function gift_page_cust(Gift $gift): void
        . '<th class="chk"><input type="checkbox" id="gc-all" onclick="gfCustAllChk(this)"></th>'
        . '<th>' . gift_sort_th('고객명', 'name', 'namedesc', $f) . '</th>'
        . '<th>' . gift_sort_th('그룹', 'group', 'ungroup', $f) . '</th>'
-       . '<th>추가정보</th><th>연락처</th><th>우편번호</th>'
+       . '<th>추가정보</th><th class="r" title="회차에 넣을 때 「추가」 칸의 초기값">선물 추가</th><th>연락처</th><th>우편번호</th>'
        . '<th>' . gift_sort_th('주소', 'addr', 'noaddr', $f) . '</th>'
        . '<th>' . gift_sort_th('전달', 'ship', 'offline', $f) . '</th>'
        . '<th class="r">관리</th></tr></thead><tbody>';
     if (!$r['rows']) {
-        echo '<tr><td colspan="9" class="gf-empty">해당하는 고객이 없습니다.</td></tr>';
+        echo '<tr><td colspan="10" class="gf-empty">해당하는 고객이 없습니다.</td></tr>';
     }
     foreach ($r['rows'] as $c) {
         $addr = trim(trim((string)$c['address1']) . ' ' . trim((string)$c['address2']));
@@ -461,6 +463,9 @@ function gift_page_cust(Gift $gift): void
               ? '<span class="gf-badge grp">' . gift_h($c['group_name']) . '</span>'
               : '<span class="gf-dim">미분류</span>') . '</td>';
         echo '<td>' . gift_h($c['memo']) . '</td>';
+        echo '<td class="r">' . ((int)($c['extra_qty'] ?? 0) > 0
+              ? '<span class="gf-badge extra">+' . (int)$c['extra_qty'] . '</span>'
+              : '<span class="gf-dim">-</span>') . '</td>';
         echo '<td>' . gift_h($c['phone']) . '</td>';
         // 주소는 있는데 우편번호가 없으면 택배로 못 보낸다 — 눈에 띄게 둔다
         echo '<td>' . ($c['zipcode']
@@ -496,6 +501,8 @@ function gift_page_cust(Gift $gift): void
     echo '</select></label>';
     echo '<label>추가정보<input type="text" id="c-memo" placeholder="직함·관계 (예: 박회장, 서장님, 지인)"></label>';
     echo '<label>연락처<input type="text" id="c-phone" placeholder="010-0000-0000"></label>';
+    echo '<label>선물 추가 수량<span class="gf-row2"><input type="text" id="c-extra" class="gf-num" value="0" style="width:90px;text-align:right">'
+       . '<span class="gf-hint" style="margin:0">회차에 대상으로 넣을 때 「추가」 칸의 초기값 — 총지급 = 1 + 추가. 행에서 언제든 고칠 수 있습니다.</span></span></label>';
     echo '<label>주소<span class="gf-row2"><input type="text" id="c-zip" placeholder="우편번호" style="width:110px" readonly>';
     echo '<button class="gf-btn gf-sm" onclick="gfZipModal()">우편번호 검색</button></span></label>';
     echo '<label><input type="text" id="c-ad1" placeholder="기본주소" oninput="gfOffSync()"></label>';
@@ -583,7 +590,7 @@ function gift_page_prod(Gift $gift): void
     gift_note('물품은 삭제하지 않고 <b>비활성</b>으로만 내립니다 — 지난 회차의 이력을 지키기 위해서입니다.');
 
     echo '<div class="gf-scroll"><table class="gf-table"><thead><tr><th class="r">순서</th><th>물품명</th>'
-       . '<th class="r">단가</th><th>설명</th><th>사용여부</th><th class="r">관리</th></tr></thead><tbody>';
+       . '<th class="r">단가</th><th>설명</th><th>판매자</th><th>세금계산서</th><th>사용여부</th><th class="r">관리</th></tr></thead><tbody>';
     foreach ($rows as $p) {
         echo '<tr' . ((int)$p['is_active'] ? '' : ' class="off"') . '>';
         echo '<td class="r">' . (int)$p['sort_order'] . '</td>';
@@ -591,6 +598,14 @@ function gift_page_prod(Gift $gift): void
         echo '<td class="r">' . gift_won($p['unit_price']) . '원'
            . ((int)$p['unit_price'] === 0 ? ' <span class="gf-badge warn">단가0</span>' : '') . '</td>';
         echo '<td>' . gift_h($p['description']) . '</td>';
+        // 판매자 — 이름만 보이고, 누르면 상세 모달(연락처·주소·메모·세금계산서·이 판매자의 물품)
+        $vid = (int)($p['vendor_id'] ?? 0);
+        echo '<td>' . ($vid > 0
+              ? '<a href="#" class="gf-vlink" onclick="gfVendView(' . $vid . ');return false">' . gift_h($p['vendor_name']) . '</a>'
+              : '<span class="gf-dim">-</span>') . '</td>';
+        echo '<td>' . (!empty($p['tax_invoice'])
+              ? '<span class="gf-badge on">발행</span>'
+              : '<span class="gf-dim">-</span>') . '</td>';
         echo '<td>' . ((int)$p['is_active']
               ? '<span class="gf-badge on">사용</span>'
               : '<span class="gf-badge off">미사용</span>') . '</td>';
@@ -601,7 +616,9 @@ function gift_page_prod(Gift $gift): void
     }
     echo '</tbody></table></div>';
 
-    echo '<script>const GF_PRODS=' . json_encode($rows, JSON_UNESCAPED_UNICODE) . ';</script>';
+    $vendors = $gift->vendorList();
+    echo '<script>const GF_PRODS=' . json_encode($rows, JSON_UNESCAPED_UNICODE) . ';'
+       . 'const GF_VENDORS=' . json_encode($vendors, JSON_UNESCAPED_UNICODE) . ';</script>';
 
     echo '<div class="gf-modal" id="m-prod"><div class="gf-mbox">';
     echo '<div class="gf-mhead"><h3 id="prod-title">물품 추가</h3><button class="gf-x" onclick="gfClose(\'m-prod\')">✕</button></div>';
@@ -610,10 +627,34 @@ function gift_page_prod(Gift $gift): void
     echo '<label>단가(원)<input type="text" id="p-price" class="gf-num" value="0"></label>';
     echo '<label>설명<input type="text" id="p-desc"></label>';
     echo '<label>노출순서<input type="text" id="p-sort" value="0"></label>';
+    echo '<div class="gf-msep">판매자 <span class="gf-dim">— 주문할 때 보는 것. 발송 명단엔 안 들어갑니다</span></div>';
+    echo '<label>판매자<select id="p-vid" class="gf-fw" onchange="gfVendPick()"><option value="0">없음</option>';
+    foreach ($vendors as $v) {
+        echo '<option value="' . (int)$v['id'] . '">' . gift_h($v['name'])
+           . ($v['phone'] !== '' && $v['phone'] !== null ? ' · ' . gift_h($v['phone']) : '') . '</option>';
+    }
+    echo '<option value="-1">＋ 새 판매자 입력…</option></select></label>';
+    echo '<div id="p-vbox" style="display:none">';
+    echo '<label>판매자(업체)명 <span class="gf-req">*</span><input type="text" id="p-vname" placeholder="예: ○○농원, ○○식품"></label>';
+    echo '<label>연락처<input type="text" id="p-vphone" placeholder="010-0000-0000"></label>';
+    echo '<label>주소<input type="text" id="p-vaddr"></label>';
+    echo '<label>메모<input type="text" id="p-vmemo" placeholder="담당자·계좌·주문 방법·납기 등"></label>';
+    echo '<label class="gf-check"><input type="checkbox" id="p-tax"> <b>세금계산서 발행</b> <span class="gf-dim">— 이 판매자가 세금계산서를 끊어 줍니다</span></label>';
+    echo '<p class="gf-hint" id="p-vhint"></p>';
+    echo '</div>';
     echo '<p class="gf-hint">단가를 바꿔도 <b>확정된 회차는 변하지 않습니다.</b> 작업중 회차가 이 물품을 쓰고 있으면 저장할 때 반영 여부를 묻습니다.</p>';
     echo '</div>';
     echo '<div class="gf-mfoot"><button class="gf-btn" onclick="gfClose(\'m-prod\')">취소</button>';
     echo '<button class="gf-btn gf-primary" onclick="gfProdSave()">저장</button></div>';
+    echo '</div></div>';
+
+    // ── 판매자 상세 모달 (보기 전용 — 고치는 곳은 물품 모달의 판매자 칸)
+    echo '<div class="gf-modal" id="m-vend"><div class="gf-mbox">';
+    echo '<div class="gf-mhead"><h3 id="vend-title">판매자</h3><button class="gf-x" onclick="gfClose(\'m-vend\')">✕</button></div>';
+    echo '<div class="gf-mbody"><dl class="gf-kv" id="vend-body"></dl>';
+    echo '<p class="gf-hint">고치려면 이 판매자를 쓰는 물품의 「수정」에서 판매자 칸을 고치세요 — 같은 판매자를 쓰는 모든 물품에 적용됩니다.</p>';
+    echo '</div>';
+    echo '<div class="gf-mfoot"><button class="gf-btn" onclick="gfClose(\'m-vend\')">닫기</button></div>';
     echo '</div></div>';
 
     gift_foot();
@@ -682,8 +723,8 @@ function gift_page_histv(Gift $gift): void
         : ' <span class="gf-badge draft">작업중</span>';
     echo '</h2>';
     echo '<div class="gf-noprint">';
-    echo '<a class="gf-btn gf-primary" href="/gift/export.php?id=' . $id . '&type=vendor">업체 발송용 엑셀</a> ';
-    echo '<a class="gf-btn" href="/gift/export.php?id=' . $id . '&type=full">전체 내역 엑셀</a> ';
+    echo '<a class="gf-btn gf-primary" href="/gift/export.php?id=' . $id . '&type=vendor&preview=1" target="_blank" title="택배 건만 · 창 안에서 엑셀 내려받기">업체 발송용 리스트</a> ';
+    echo '<a class="gf-btn" href="/gift/export.php?id=' . $id . '&type=full&preview=1" target="_blank" title="발송구분별 시트 · 창 안에서 엑셀 내려받기">전체 내역 리스트</a> ';
     echo '<a class="gf-btn" href="/gift/export.php?id=' . $id . '&type=print" target="_blank">큰 글씨 인쇄</a> ';
     echo '<button class="gf-btn" onclick="window.print()">인쇄</button> ';
     echo '<a class="gf-btn" href="/gift/index.php?mode=hist">목록</a>';
@@ -723,10 +764,11 @@ function gift_page_histv(Gift $gift): void
        . '<th>연락처</th><th>우편번호</th><th>주소</th><th>발송구분</th><th>물품</th>'
        . '<th class="r">단가</th><th class="r">추가</th><th class="r">총지급</th><th class="r">금액</th><th>비고</th>'
        . '</tr></thead><tbody>';
+    $gfNo = 0;
     foreach ($items as $it) {
         $addr = trim(trim((string)$it['address1']) . ' ' . trim((string)$it['address2']));
         echo '<tr>';
-        echo '<td>' . (int)$it['seq'] . '</td>';
+        echo '<td>' . (++$gfNo) . '</td>';
         echo '<td><b>' . gift_h($it['customer_name']) . '</b></td>';
         echo '<td>' . gift_h($it['customer_memo']) . '</td>';
         echo '<td>' . gift_h($it['phone']) . '</td>';
@@ -1078,6 +1120,7 @@ h3{font-size:16px;margin:0 0 10px}
 .gf-badge.ok{background:#eafaf1;color:#1e8449}
 .gf-badge.on{background:#eafaf1;color:#1e8449}
 .gf-badge.off{background:#f4f6f7;color:#7f8c8d}
+.gf-badge.extra{background:#fdf2e9;color:#ca6f1e}
 .gf-badge.dir{background:#eaf2fb;color:#2471a3}
 .gf-badge.man{background:#f4f6f7;color:#616a6b}
 .gf-badge.warn{background:#fdecea;color:#c0392b}
@@ -1174,6 +1217,13 @@ h3{font-size:16px;margin:0 0 10px}
        padding:2px 6px;margin:-2px -6px;border-radius:4px;white-space:nowrap}
 .gf-th:hover{background:#e6ebf0;color:#2c3e50}
 .gf-th .gf-arrow{color:#3498db;font-size:10px}
+.gf-msep{margin:14px 0 8px;padding-top:10px;border-top:1px dashed #d5d8dc;font-weight:700;font-size:13px;color:#2c3e50}
+.gf-msep .gf-dim{font-weight:400;font-size:12px}
+.gf-vlink{color:#2c3e50;font-weight:700;text-decoration:none;border-bottom:1px dashed #95a5a6}
+.gf-vlink:hover{color:#2980b9;border-bottom-color:#2980b9}
+.gf-kv{display:grid;grid-template-columns:90px 1fr;gap:8px 12px;margin:0 0 6px;font-size:13.5px}
+.gf-kv dt{color:#7f8c8d;font-weight:600;font-size:12.5px;padding-top:1px}
+.gf-kv dd{margin:0;color:#2c3e50;word-break:break-all;line-height:1.5}
 .gf-row2{display:flex;gap:6px;align-items:center;margin-top:4px}
 .gf-row2 input{margin-top:0!important}
 .gf-mbody label.gf-check{display:flex;align-items:center;gap:7px;background:#f8f9fb;border:1px solid #e6e9ef;
@@ -1489,6 +1539,7 @@ async function gfAddSearch() {
              + '<span class="sub">' + gfEsc(c.memo || '') + (c.phone ? ' · ' + gfEsc(c.phone) : '')
              + (addr ? ' · ' + gfEsc(addr) : ' · <i>주소 없음</i>') + '</span>'
              + (c.group_name ? '<span class="gf-badge grp">' + gfEsc(c.group_name) + '</span>' : '')
+             + (Number(c.extra_qty) > 0 ? '<span class="gf-badge extra" title="기본 추가 수량">+' + Number(c.extra_qty) + '</span>' : '')
              + (Number(c.is_offline) === 1 ? '<span class="gf-badge off2">오프라인</span>' : '')
              + (dup ? '<span class="gf-badge off">이미 있음</span>' : '') + '</label>';
     }).join('') || '<p class="gf-empty">해당하는 고객이 없습니다.</p>';
@@ -1524,6 +1575,7 @@ async function gfAddPrev() {
 function gfCustOpen(id) {
     document.getElementById('cust-title').textContent = id ? '고객 수정' : '고객 추가';
     ['c-name', 'c-memo', 'c-phone', 'c-zip', 'c-ad1', 'c-ad2'].forEach(k => document.getElementById(k).value = '');
+    document.getElementById('c-extra').value = '0';
     document.getElementById('c-off').checked = false;
     document.getElementById('c-grp').value   = '0';
     document.getElementById('c-id').value = id || 0;
@@ -1537,6 +1589,7 @@ function gfCustOpen(id) {
         document.getElementById('c-name').value  = c.name || '';
         document.getElementById('c-memo').value  = c.memo || '';
         document.getElementById('c-phone').value = c.phone || '';
+        document.getElementById('c-extra').value = String(Number(c.extra_qty) || 0);
         document.getElementById('c-zip').value   = c.zipcode || '';
         document.getElementById('c-ad1').value   = c.address1 || '';
         document.getElementById('c-ad2').value   = c.address2 || '';
@@ -1579,6 +1632,7 @@ async function gfCustSave() {
         name,
         memo:     document.getElementById('c-memo').value,
         phone:    document.getElementById('c-phone').value,
+        extra_qty: gfInt(document.getElementById('c-extra').value),
         zipcode:  document.getElementById('c-zip').value,
         address1: document.getElementById('c-ad1').value,
         address2: document.getElementById('c-ad2').value,
@@ -1780,13 +1834,52 @@ function gfProdOpen(id) {
     document.getElementById('p-price').value = gfWon(p ? p.unit_price : 0);
     document.getElementById('p-desc').value  = p ? (p.description || '') : '';
     document.getElementById('p-sort').value  = p ? p.sort_order : 0;
+    document.getElementById('p-vid').value = String(p && p.vendor_id ? p.vendor_id : 0);
+    gfVendPick();
     gfOpen('m-prod');
+}
+/** 판매자 상세 보기 — GF_VENDORS 에서 찾고, 이 판매자를 쓰는 물품은 GF_PRODS 에서 센다 */
+function gfVendView(id) {
+    const v = (typeof GF_VENDORS !== 'undefined' ? GF_VENDORS : []).find(x => Number(x.id) === Number(id));
+    if (!v) return;
+    const prods = (typeof GF_PRODS !== 'undefined' ? GF_PRODS : []).filter(p => Number(p.vendor_id) === Number(id));
+    const row = (k, val, raw) => '<dt>' + k + '</dt><dd>' + (val ? (raw ? val : gfEsc(val)) : '<span class="gf-dim">-</span>') + '</dd>';
+    document.getElementById('vend-title').textContent = v.name || '판매자';
+    document.getElementById('vend-body').innerHTML =
+          row('연락처', v.phone ? '<a href="tel:' + gfEsc(v.phone) + '">' + gfEsc(v.phone) + '</a>' : '', true)
+        + row('주소', v.addr)
+        + row('메모', v.memo)
+        + row('세금계산서', Number(v.tax_invoice) === 1 ? '<span class="gf-badge on">발행</span>' : '<span class="gf-dim">안 함</span>', true)
+        + row('물품', prods.length
+              ? prods.map(p => gfEsc(p.name) + (Number(p.is_active) ? '' : ' <span class="gf-dim">(미사용)</span>')).join('<br>')
+              : '', true);
+    gfOpen('m-vend');
+}
+/** 판매자 셀렉트 → 칸 채우기. 기존 판매자면 그 값으로, 새 판매자면 빈 칸, 없음이면 접는다 */
+function gfVendPick() {
+    const vid  = Number(document.getElementById('p-vid').value);
+    const box  = document.getElementById('p-vbox');
+    const v    = vid > 0 ? (typeof GF_VENDORS !== 'undefined' ? GF_VENDORS : []).find(x => Number(x.id) === vid) : null;
+    box.style.display = vid === 0 ? 'none' : 'block';
+    document.getElementById('p-vname').value  = v ? (v.name  || '') : '';
+    document.getElementById('p-vphone').value = v ? (v.phone || '') : '';
+    document.getElementById('p-vaddr').value  = v ? (v.addr  || '') : '';
+    document.getElementById('p-vmemo').value  = v ? (v.memo  || '') : '';
+    document.getElementById('p-tax').checked  = v ? Number(v.tax_invoice) === 1 : false;
+    document.getElementById('p-vhint').innerHTML = v
+        ? '여기서 고치면 <b>「' + gfEsc(v.name) + '」을 쓰는 모든 물품</b>에 함께 적용됩니다.'
+        : '저장하면 판매자 목록에 들어가 다른 물품에서도 고를 수 있습니다.';
+    if (vid === -1) document.getElementById('p-vname').focus();
 }
 async function gfProdSave() {
     const id    = Number(document.getElementById('p-id').value);
     const name  = document.getElementById('p-name').value.trim();
     const price = gfInt(document.getElementById('p-price').value);
     if (!name) { alert('물품명을 입력하세요.'); return; }
+    const vid = Number(document.getElementById('p-vid').value);
+    if (vid !== 0 && !document.getElementById('p-vname').value.trim()) {
+        alert('판매자명을 입력하세요. (판매자를 안 두려면 「없음」을 고르세요)'); return;
+    }
 
     // 작업중 회차가 이 물품을 쓰고 있으면 단가 반영 여부를 묻는다 (확정 회차는 불변)
     let apply = 0;
@@ -1801,6 +1894,12 @@ async function gfProdSave() {
         id, name, unit_price: price,
         description: document.getElementById('p-desc').value,
         sort_order:  gfInt(document.getElementById('p-sort').value),
+        vendor_id:    vid,
+        vendor_name:  document.getElementById('p-vname').value,
+        vendor_phone: document.getElementById('p-vphone').value,
+        vendor_addr:  document.getElementById('p-vaddr').value,
+        vendor_memo:  document.getElementById('p-vmemo').value,
+        tax_invoice:  document.getElementById('p-tax').checked ? 1 : 0,
         apply_draft: apply
     });
     if (j.ok) location.reload();

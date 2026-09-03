@@ -220,6 +220,13 @@
        * 덤으로 가격축 autoscale 에서도 빠진다 — 멀리 그은 선 하나가 캔들을 납작하게 만들지 않는다.
        * 층은 pointer-events:none 이고 선만 auto 다(차트 끌기·휠을 막지 않는다).
        * 「그리는 중」일 때만 층 전체가 클릭을 받는다 — 그래야 캔버스가 대신 끌리지 않는다. */
+      /* 참조선(차수가격) 가격 배지 — 왼쪽 가장자리에 선 위로 얹는다(2026-09-03 사용자: 오른쪽 가격축은
+       * 현재가·체결 라벨로 붐벼 참조선 값이 안 읽힌다). 층은 클릭을 안 받는다(차트 끌기를 막지 않는다) */
+      '.dc-ref-layer{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:3}' +
+      '.dc-ref-lab{position:absolute;left:4px;transform:translateY(-50%);padding:1px 6px;border-radius:4px;color:#fff;' +
+        'font-size:10.5px;font-weight:800;line-height:1.5;white-space:nowrap;font-variant-numeric:tabular-nums;' +
+        'font-family:Pretendard,-apple-system,sans-serif;box-shadow:0 1px 3px rgba(10,25,45,.28)}' +
+      '.dc-ref-lab small{font-size:9px;font-weight:700;opacity:.85;margin-right:3px}' +
       '.dc-hl-layer{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:3}' +
       '.dc-hl-layer.draw{pointer-events:auto;cursor:crosshair}' +
       '.dc-hl{position:absolute;left:0;right:0;height:11px;margin-top:-5px;pointer-events:auto;' +
@@ -266,6 +273,15 @@
       '.dc-mk .mk-l1{display:block}' +
       '.dc-mk .mk-l2{display:block;font-size:10px;font-weight:700;opacity:.82;margin-top:1px;' +
         'border-top:1px solid rgba(255,255,255,.35);padding-top:1px}' +
+      /* 셋째 줄(그때 PER·PBR) — 어두운 띠 위에 «불투명» 흰 글자. 처음엔 opacity .68 로 죽였는데
+       * 빨강·파랑 원색 배경이라 안 보였다(사용자 지적) — 반투명 검정 띠가 어느 색 칩에서도 대비를 만든다 */
+      '.dc-mk .mk-l3{display:block;font-size:9px;font-weight:800;margin:2px -6px -2px;' +
+        'padding:1px 6px 2px;background:rgba(0,0,0,.32);border-radius:0 0 5px 5px}' +
+      '.dc-mk .mk-l3 b{font-size:11px;font-weight:800}' +   // 숫자만 11px (사용자 지정) — 라벨은 9px 그대로
+      /* 넷째 줄(그때 TTM 연속 횟수 · 매출/영익/순익 +N) — 셋째 줄과 같은 띠 안에서 이어진다(2026-09-03).
+       * 띠를 둘로 나누면 사이에 원색이 비쳐 줄이 셋으로 읽힌다 — 띠는 하나, 줄만 둘 */
+      '.dc-mk .mk-l3 .mk-v{display:block}' +
+      '.dc-mk .mk-l3 .mk-v+.mk-v{margin-top:1px;border-top:1px solid rgba(255,255,255,.22);padding-top:1px}' +
       /* 열리는 칩(SUE 공시 → 재무분석) — 층은 pointer-events:none 이고 이 칩만 auto 다(.dc-hl 과 같은 결).
        * hover 테가 「눌린다」를 말한다 — 링크처럼 보이지 않으면 문이 있는 줄을 모른다. */
       '.dc-mk.lk{pointer-events:auto;cursor:pointer}' +
@@ -1269,6 +1285,7 @@
       if (!R || !self._main) return;
       R.objs.forEach(function (o) { try { self._main.removePriceLine(o); } catch (e) {} });
       R.objs = [];
+      refDraw();               // ★끌 때도 배지를 지워야 하므로 아래 return «앞»에서 부른다(배지는 선 객체와 무관하다)
       if (!R.on) return;
       var st = (window.DC_VIEW && window.DC_VIEW.ref) || {};
       var c = st.c || REF_COLOR, w = st.w || 2, sty = STYLE_MAP[st.s] ? st.s : 'dashed';
@@ -1278,6 +1295,39 @@
           lineStyle: STYLE_MAP[L.style || sty],
           axisLabelVisible: L.axisLabel === true
         }));
+      });
+    }
+    /* 참조선 가격 배지 층 — 선(priceLine)은 라이브러리가 긋고 «값»은 HTML 로 왼쪽에 얹는다.
+     * 축 라벨(axisLabelVisible)을 켜지 않는 이유는 위와 같다 — 일곱 라벨이 가격축을 덮는다.
+     * 왼쪽인 이유: 오른쪽 가장자리는 현재가·체결 칩·가격축이 차지해 겹친다. 선 하나에 배지 하나(「3차 5,980」). */
+    function refLayer() {
+      if (self._refLayer) return self._refLayer;
+      anchorHost();
+      var lay = document.createElement('div');
+      lay.className = 'dc-ref-layer';
+      host.appendChild(lay);
+      self._refLayer = lay;
+      return lay;
+    }
+    function refDraw() {
+      var R = self._ref;
+      if (!self._refLayer && !(R && R.on && R.lines.length)) return;   // 참조선을 쓴 적 없는 차트엔 층도 없다
+      var lay = refLayer();
+      lay.textContent = '';
+      if (!R || !R.on || !self._main) return;
+      var st = (window.DC_VIEW && window.DC_VIEW.ref) || {};
+      var c = st.c || REF_COLOR, hh = host.clientHeight;
+      R.lines.forEach(function (L) {
+        var y = self._main.priceToCoordinate(L.price);
+        if (y === null || y === undefined || y < -2 || y > hh + 2) return;   // 보이는 범위 밖 — 선도 없다
+        var el = document.createElement('span');
+        el.className = 'dc-ref-lab';
+        el.style.top = y + 'px';
+        el.style.background = L.color || c;
+        el.style.color = inkOn(L.color || c);
+        if (L.title) { var t = document.createElement('small'); t.textContent = L.title; el.appendChild(t); }
+        el.appendChild(document.createTextNode(hlFmt(L.price)));
+        lay.appendChild(el);
       });
     }
     self._refApply = applyRefLines;   // ⚙ 모달이 «같은 바의 차트 전부»를 다시 그릴 때 부른다
@@ -1294,6 +1344,8 @@
 
     /* ── 체결 마커 (화살표 = 라이브러리 / 글자 = HTML 칩 + 충돌회피) ── */
     var rafId = 0;
+    /* 글자 폭(칸) — 한글은 라틴의 두 배로 센다. 「어닝서프라이즈」 7자를 7칸으로 재면 칩 절반이 판정 밖이라 겹친다 */
+    function vw(t) { t = t || ''; var w = 0; for (var i = 0; i < t.length; i++) w += t.charCodeAt(i) > 0x2e7f ? 2 : 1; return w; }
     function drawMarkChips() {
       if (!self._mkLayer) return;
       self._mkLayer.textContent = '';
@@ -1305,9 +1357,9 @@
         var x = ts.timeToCoordinate(m.time);
         var y = self._main.priceToCoordinate(m.sell ? m.hi : m.lo);
         if (x === null || y === null) return;
-        var wide = Math.max(m.text.length, (m.state || '').length);
+        var wide = Math.max(vw(m.text), vw(m.state), vw(m.sub), vw(m.sub2));
         var half = wide * 3.6 + 9;
-        var tall = m.state ? 30 : 19;
+        var tall = 19 + (m.state ? 11 : 0) + (m.sub ? 20 : 0) + (m.sub2 ? 14 : 0);   // 줄 수만큼 충돌 판정 높이도 큰다(셋째 줄은 11px 숫자+띠 여백 · 넷째 줄 +14)
         if (x + half < 0 || x - half > w) return;
         var side = m.sell ? 1 : 0;
         var step = m.sell ? -(tall + 6) : (tall + 6);
@@ -1332,10 +1384,36 @@
           l2.className = 'mk-l2'; l2.textContent = m.state;
           el.appendChild(l2);
         }
+        if (m.sub || m.sub2) {
+          // 라벨(PER·PBR·매출…)은 작게, 숫자는 크게 — 눈이 먼저 가야 하는 것은 값이다(다크 범례와 같은 원칙)
+          // 셋째 줄 = 그때 PER·PBR · 넷째 줄 = 그때 TTM 연속 횟수(+N/−N) — 한 띠 안의 두 줄
+          var l3 = document.createElement('span');
+          l3.className = 'mk-l3';
+          [m.sub, m.sub2].forEach(function (line) {
+            if (!line) return;
+            var lv = document.createElement('span');
+            lv.className = 'mk-v';
+            line.split(' ').forEach(function (tok, i) {
+              if (i) lv.appendChild(document.createTextNode(' '));
+              // \ud1a0\ud070 = [\ub77c\ubca8][\uc22b\uc790] \u2014 'PER' '6.8' \ucc98\ub7fc \uac08\ub77c\uc9c4 \uac83\ub3c4, '\ub9e4+5' \ucc98\ub7fc \ubd99\uc740 \uac83\ub3c4 \uc22b\uc790 \ubd80\ubd84\ub9cc \uad75\uac8c
+              var mm = /^([^+\-\u22120-9]*)([+\-\u2212]?[0-9][0-9.,]*)$/.exec(tok);
+              if (mm) {
+                if (mm[1]) lv.appendChild(document.createTextNode(mm[1]));
+                var bb = document.createElement('b');
+                bb.textContent = mm[2];
+                lv.appendChild(bb);
+              } else {
+                lv.appendChild(document.createTextNode(tok));
+              }
+            });
+            l3.appendChild(lv);
+          });
+          el.appendChild(l3);
+        }
         if (m.fund) {
           // ★같은 이름의 창을 재사용한다 — 보던 차트를 잃지 않고, 배지를 연달아 눌러도 창이 안 쌓인다
           el.classList.add('lk');
-          el.title = '재무분석 상세 열기';
+          el.title = '재무분석 상세 열기' + (m.tip ? '\n' + m.tip : '');
           el.onclick = function (ev) { ev.stopPropagation(); window.open(m.fund, 'dcFund'); };
         }
         self._mkLayer.appendChild(el);
@@ -1386,6 +1464,9 @@
         var b = byTime[t];
         if (useChip && b && b.high !== undefined) {
           chipData.push({ time: t, text: m.text, state: m.state || '', sell: m.sell,
+                          sub: m.sub || '',      // SUE 배지 셋째 줄 (그때 PER·PBR) — 체결 칩은 빈 값
+                          sub2: m.sub2 || '',    // SUE 배지 넷째 줄 (그때 TTM 연속 횟수) — 체결 칩은 빈 값
+                          tip: m.tip || '',      // 넷째 줄의 전문(툴팁) — 칩에는 짧은 라벨만
                           fund: m.fund || '',    // SUE 배지만 갖는다 — 클릭하면 재무분석 상세
                           hi: b.high === null ? b.close : b.high,
                           lo: b.low  === null ? b.close : b.low });
@@ -2056,6 +2137,7 @@
         drawMarkChips();
         drawBoxes();
         hlDraw();
+        refDraw();
       });
     }
     chart.timeScale().subscribeVisibleLogicalRangeChange(overlaysSoon);
@@ -2308,7 +2390,8 @@
     };
     // 체결 마커 토글 — 끄는 것은 «그리기»뿐이다. _marks 는 그대로라 다시 켜면 그대로 돌아온다
     self.setMarksOn = function (on) { self._marksOn = !!on; applyMarkers(); return self; };
-    /* 참조선 묶음 — [{price,color,style,width,axisLabel}] + {label, title, on}
+    /* 참조선 묶음 — [{price,title,color,style,width,axisLabel}] + {label, title, on}
+     * 선의 title(예 「3차」)은 왼쪽 가격 배지에 작게 앞서 적힌다.
      * label 은 기간 바 토글 버튼의 이름이 된다 (예: 「차수가격 7」) */
     self.setRefLines = function (list, cfg) {
       cfg = cfg || {};
@@ -2349,11 +2432,35 @@
         var t = null;
         for (var i = 0; i < bars.length; i++) if (bars[i].time > m.d) { t = bars[i].time; break; }
         var shock = m.sue <= (self._sueShock === undefined ? -1 : self._sueShock);
+        // 셋째 줄 = «그때 PER·PBR»(공시일 시총 기준 — 서버 pf_sue_valuation 이 계산의 단일본).
+        // null 은 값이 없는 것(적자·자본잠식·원장 이전)이라 그 항목을 아예 안 적는다 — '-' 는 소음이다.
+        var val = [];
+        if (m.per != null) val.push('PER ' + m.per);
+        if (m.pbr != null) val.push('PBR ' + m.pbr);
+        // 넷째 줄 = «그때 TTM 연속 횟수»(2026-09-03) — 재무분석 「분기 추이」 소형 차트의 원 안 숫자와 같은 값
+        //   (서버 pf_ttm_series 단일본). +N 연속 상승 · −N 연속 하락 · 0 은 «같음»이라 적는다(빈 자리는 「없음」으로 읽힌다).
+        //   전문은 툴팁에(칩에는 한 글자 라벨만 — 아래).
+        var tr = m.trend || {}, trend = [], trendTip = [];
+        // ★라벨은 한 글자(매·영·순)에 숫자를 붙여 쓴다(2026-09-03 사용자 「매+1영+1순+1」) — 「매출 +5 영익 +2 순익 +2」는
+        //   첫 줄보다 넓어 봉을 가렸다. 셋을 «항상» 다 적는다(사용자 지시) — 없는 항목은 '-' 로 자리를 지킨다
+        //   (세 자리가 고정이라야 눈이 위치로 읽는다). 셋 다 없을 때만 줄을 안 만든다.
+        var hasAny = false;
+        [['rev', '매', '매출 TTM'], ['op', '영', '영업이익 TTM'], ['net', '순', '순이익 TTM']].forEach(function (k) {
+          var v = tr[k[0]];
+          if (v == null) { trend.push(k[1] + '-'); return; }
+          hasAny = true;
+          var txt = v > 0 ? '+' + v : (v < 0 ? '−' + (-v) : '0');
+          trend.push(k[1] + txt);
+          trendTip.push(k[2] + ' ' + (v > 0 ? v + '분기 연속 상승' : (v < 0 ? (-v) + '분기 연속 하락' : '전분기와 같음')));
+        });
+        if (!hasAny) trend = [];
         // chip:true — 화면이 「라이브러리 글자」를 쓰더라도(시뮬레이터) 이 배지만은 칩으로.
         // 같은 사실을 화면마다 다른 모양으로 보여 주면 그것이 곧 「다른 말」이 된다.
         fit.push({ time: t || last, sell: shock, chip: true, fund: fund,
                    text: shock ? '어닝쇼크' : '어닝서프라이즈',
-                   state: m.q + ' SUE ' + m.sue });
+                   state: m.q + ' SUE ' + m.sue,
+                   sub: val.join(' '), sub2: trend.join(' '),
+                   tip: trendTip.join(' · ') });
       });
       self._sueFit  = fit.length;
       self._sueMarks = self._sueOn ? fit : [];

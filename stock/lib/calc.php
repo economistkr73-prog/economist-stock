@@ -226,6 +226,21 @@ function pf_theory_ladder(array $steps, array $trades, array $p = [], ?float $an
 
 // ── §2.3 차수별 금액 / 이론수량 ───────────────────────────────────────
 /** 차수 투입금액 = 투자한도 × 비중 */
+/**
+ * 보유분 평가수익률 = 평가손익 ÷ 총매입(보유분 원가).
+ *
+ * ★ 「수익률」(추정자산÷원금−1)과 <b>다른 자</b>다 — 저건 실현손익·예수금까지 든 계좌 전체의 성적이고,
+ *   이건 <b>지금 들고 있는 종목만</b>의 성적이다(매입 100만·평가 90만 → −10%).
+ *   관일산업처럼 실현이 커서 수익률은 +20% 인데 보유분은 −18% 인 경우, 둘을 나란히 두지 않으면
+ *   평가손익 −340만원이 어느 크기의 손실인지 읽을 수 없다.
+ * ★ 매입이 0(보유 없음)이면 null — 0% 는 「본전」으로 읽혀 거짓이 된다.
+ */
+function pf_eval_rate($pl, float $cost): ?float
+{
+    if ($pl === null || $cost <= 0) return null;
+    return (float)$pl / $cost;
+}
+
 function pf_step_amount(float $limitAmt, float $weight): float
 {
     return $limitAmt * $weight;

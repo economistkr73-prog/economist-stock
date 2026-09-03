@@ -98,6 +98,13 @@ function pf_signed_pct($v, int $dec = 2): string
     return '<span class="' . pf_updown($v) . '">' . pf_h(pf_pct($v, $dec)) . '</span>';
 }
 
+/** 요약 카드의 평가손익 아랫줄 — 「매입 대비 −11.11%」. 보유가 없으면 빈 문자열(줄 자체를 안 그린다). */
+function pf_eval_sub($pl, float $cost): string
+{
+    $r = pf_eval_rate($pl, $cost);
+    return $r === null ? '' : '매입 대비 ' . pf_pct($r);
+}
+
 /**
  * <b>비율 그 자체</b>를 보여 주는 셀 — 영업이익률·순이익률·ROE 처럼 "얼마인가"를 읽는 값.
  *

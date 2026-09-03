@@ -18,6 +18,10 @@ class Gift
     /** 발송 구분 */
     public const DELIVERY = ['택배', '일괄', '별도'];
 
+    /** 회차 라인의 순서 단일본 — ①발송구분(택배→일괄→별도) ②고객명 (2026-08-31 사용자 지시).
+     *  `items()` 와 `resequence()` 가 같이 본다 — 갈리면 화면 번호와 확정 번호가 다른 말을 한다. */
+    public const ITEM_ORDER = "FIELD(delivery_type, '택배','일괄','별도'), customer_name ASC, id ASC";
+
     private PDO $pdo;
 
     public function __construct(PDO $pdo)
@@ -58,6 +62,10 @@ class Gift
         // 이미 만들어진 표에도 붙인다 (2026-08-03 추가)
         $this->pdo->exec("ALTER TABLE gift_customer ADD COLUMN IF NOT EXISTS is_offline TINYINT(1) NOT NULL DEFAULT 0
                           COMMENT '오프라인 전달(주소 있어도 택배로 안 보냄)'");
+        // 기본 추가 수량 — 회차에 대상으로 넣을 때 「추가」 칸의 초기값(2026-08-31 사용자 요청 —
+        // 매 회차 같은 사람에게 같은 수를 다시 적고 있었다). 회차 행에 복사된 뒤에는 행이 주인이다(스냅샷 규칙).
+        $this->pdo->exec("ALTER TABLE gift_customer ADD COLUMN IF NOT EXISTS extra_qty INT NOT NULL DEFAULT 0
+                          COMMENT '기본 추가 수량 — 회차에 넣을 때 초기값'");
 
         // 고객 분류 그룹 — 이름이 아니라 id 로 잇는다(그룹명을 바꿔도 연결이 안 끊긴다)
         $this->pdo->exec("
@@ -93,6 +101,51 @@ class Gift
                 INDEX idx_sort (sort_order, id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         ");
+
+        // 판매자 — 물품과 따로 둔다(2026-08-31 사용자 「판매자가 여러 물품을 팔면 매번 입력해야 하나?」).
+        // 한 판매자를 여러 물품이 가리키고, 물품 모달에서는 셀렉트로 고른다. 회차 스냅샷엔 안 들어간다
+        // (발송 명단의 정보가 아니라 주문할 때 보는 정보다).
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS gift_vendor (
+                id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+                name        VARCHAR(100) NOT NULL COMMENT '판매자(업체)명',
+                phone       VARCHAR(30)  DEFAULT NULL,
+                addr        VARCHAR(255) DEFAULT NULL,
+                memo        VARCHAR(255) DEFAULT NULL COMMENT '담당자·계좌·주문 방법·납기 등',
+                tax_invoice TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '세금계산서 발행 가능',
+                created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP,
+                updated_at  DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_name (name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        ");
+        $this->pdo->exec("ALTER TABLE gift_product ADD COLUMN IF NOT EXISTS vendor_id BIGINT DEFAULT NULL COMMENT '판매자'");
+        try {
+            $this->pdo->exec("ALTER TABLE gift_product ADD CONSTRAINT fk_gprod_vendor
+                              FOREIGN KEY (vendor_id) REFERENCES gift_vendor(id) ON DELETE SET NULL");
+        } catch (PDOException $e) {
+            // 이미 걸려 있으면 그만이다
+        }
+        // 1회 이관 — 같은 날 오전 몇 시간 동안 물품에 직접 적던 vendor_* 칸이 남아 있으면 판매자 표로 옮기고 지운다.
+        // (삭제 순서 규칙: 코드 배포 → DROP. 이 코드가 곧 배포 뒤라 여기서 지운다.)
+        if ($this->pdo->query("SHOW COLUMNS FROM gift_product LIKE 'vendor_name'")->fetch()) {
+            $old = $this->pdo->query("
+                SELECT id, vendor_name, vendor_phone, vendor_addr, vendor_memo, tax_invoice FROM gift_product
+                 WHERE vendor_id IS NULL AND (IFNULL(vendor_name,'') <> '' OR IFNULL(vendor_phone,'') <> ''
+                    OR IFNULL(vendor_addr,'') <> '' OR IFNULL(vendor_memo,'') <> '' OR tax_invoice = 1)
+            ")->fetchAll();
+            foreach ($old as $o) {
+                $vid = $this->vendorSave([
+                    'name' => trim((string)$o['vendor_name']) !== '' ? $o['vendor_name'] : '(이름 없음)',
+                    'phone' => $o['vendor_phone'], 'addr' => $o['vendor_addr'], 'memo' => $o['vendor_memo'],
+                    'tax_invoice' => $o['tax_invoice'],
+                ]);
+                $this->pdo->prepare("UPDATE gift_product SET vendor_id = :v WHERE id = :id")
+                          ->execute([':v' => $vid, ':id' => (int)$o['id']]);
+            }
+            foreach (['vendor_name', 'vendor_phone', 'vendor_addr', 'vendor_memo', 'tax_invoice'] as $col) {
+                $this->pdo->exec("ALTER TABLE gift_product DROP COLUMN IF EXISTS {$col}");
+            }
+        }
 
         // uniq_key = 연도·명절 중복 생성 방지. '기타'는 여러 번 가능해야 하므로 고유 꼬리를 붙인다.
         $this->pdo->exec("
@@ -359,6 +412,7 @@ class Gift
             ':ad2'   => trim((string)($d['address2'] ?? '')),
             ':off'   => $offline,
             ':grp'   => (int)($d['group_id'] ?? 0) > 0 ? (int)$d['group_id'] : null,
+            ':ex'    => max(0, self::num($d['extra_qty'] ?? 0)),
         ];
         $id = (int)($d['id'] ?? 0);
 
@@ -366,7 +420,8 @@ class Gift
             $bind[':id'] = $id;
             $this->pdo->prepare(
                 "UPDATE gift_customer SET name=:name, memo=:memo, phone=:phone,
-                        zipcode=:zip, address1=:ad1, address2=:ad2, is_offline=:off, group_id=:grp
+                        zipcode=:zip, address1=:ad1, address2=:ad2, is_offline=:off, group_id=:grp,
+                        extra_qty=:ex
                   WHERE id=:id"
             )->execute($bind);
             return $id;
@@ -376,8 +431,8 @@ class Gift
 
         $this->pdo->prepare(
             "INSERT INTO gift_customer
-                (name, memo, phone, zipcode, address1, address2, is_offline, group_id, source_ref_id)
-             VALUES (:name, :memo, :phone, :zip, :ad1, :ad2, :off, :grp, :ref)"
+                (name, memo, phone, zipcode, address1, address2, is_offline, group_id, source_ref_id, extra_qty)
+             VALUES (:name, :memo, :phone, :zip, :ad1, :ad2, :off, :grp, :ref, :ex)"
         )->execute($bind);
 
         return (int)$this->pdo->lastInsertId();
@@ -498,18 +553,54 @@ class Gift
     // ==========================================================
     // 물품
     // ==========================================================
+    /** 물품 + 판매자(LEFT JOIN) — 판매자 칸은 vendor_name·vendor_phone·vendor_addr·vendor_memo·tax_invoice 로 편다 */
+    private const PRODUCT_SELECT = "
+        SELECT p.*, v.name AS vendor_name, v.phone AS vendor_phone, v.addr AS vendor_addr,
+               v.memo AS vendor_memo, IFNULL(v.tax_invoice, 0) AS tax_invoice
+          FROM gift_product p LEFT JOIN gift_vendor v ON v.id = p.vendor_id";
+
     public function productList(bool $onlyActive = false): array
     {
-        $sql = "SELECT * FROM gift_product" . ($onlyActive ? " WHERE is_active = 1" : "")
-             . " ORDER BY sort_order ASC, id ASC";
+        $sql = self::PRODUCT_SELECT . ($onlyActive ? " WHERE p.is_active = 1" : "")
+              . " ORDER BY p.sort_order ASC, p.id ASC";
         return $this->pdo->query($sql)->fetchAll();
     }
 
     public function productGet(int $id): ?array
     {
-        $st = $this->pdo->prepare("SELECT * FROM gift_product WHERE id = :id");
+        $st = $this->pdo->prepare(self::PRODUCT_SELECT . " WHERE p.id = :id");
         $st->execute([':id' => $id]);
         return $st->fetch() ?: null;
+    }
+
+    // ── 판매자 ──
+    public function vendorList(): array
+    {
+        return $this->pdo->query("SELECT * FROM gift_vendor ORDER BY name ASC, id ASC")->fetchAll();
+    }
+
+    /** 판매자 저장 — 물품 모달 안에서 고치면 그 판매자를 쓰는 «모든» 물품에 함께 적용된다(공유가 목적) */
+    public function vendorSave(array $d): int
+    {
+        $name = trim((string)($d['name'] ?? ''));
+        if ($name === '') throw new InvalidArgumentException('판매자명은 필수입니다.');
+        $bind = [
+            ':n'  => $name,
+            ':p'  => trim((string)($d['phone'] ?? '')),
+            ':a'  => trim((string)($d['addr'] ?? '')),
+            ':m'  => trim((string)($d['memo'] ?? '')),
+            ':tx' => !empty($d['tax_invoice']) ? 1 : 0,
+        ];
+        $id = (int)($d['id'] ?? 0);
+        if ($id > 0) {
+            $bind[':id'] = $id;
+            $this->pdo->prepare("UPDATE gift_vendor SET name=:n, phone=:p, addr=:a, memo=:m, tax_invoice=:tx WHERE id=:id")
+                      ->execute($bind);
+            return $id;
+        }
+        $this->pdo->prepare("INSERT INTO gift_vendor (name, phone, addr, memo, tax_invoice) VALUES (:n, :p, :a, :m, :tx)")
+                  ->execute($bind);
+        return (int)$this->pdo->lastInsertId();
     }
 
     public function productSave(array $d): int
@@ -522,20 +613,41 @@ class Gift
             ':p' => self::num($d['unit_price'] ?? 0),
             ':d' => trim((string)($d['description'] ?? '')),
             ':s' => self::num($d['sort_order'] ?? 0),
+            ':v' => $this->resolveVendor($d),
         ];
         $id = (int)($d['id'] ?? 0);
 
         if ($id > 0) {
             $bind[':id'] = $id;
             $this->pdo->prepare(
-                "UPDATE gift_product SET name=:n, unit_price=:p, description=:d, sort_order=:s WHERE id=:id"
+                "UPDATE gift_product SET name=:n, unit_price=:p, description=:d, sort_order=:s, vendor_id=:v WHERE id=:id"
             )->execute($bind);
             return $id;
         }
         $this->pdo->prepare(
-            "INSERT INTO gift_product (name, unit_price, description, sort_order) VALUES (:n, :p, :d, :s)"
+            "INSERT INTO gift_product (name, unit_price, description, sort_order, vendor_id) VALUES (:n, :p, :d, :s, :v)"
         )->execute($bind);
         return (int)$this->pdo->lastInsertId();
+    }
+
+    /**
+     * 물품 폼의 판매자 선택을 vendor_id 로 푼다.
+     *   vendor_id = 0  → 판매자 없음(NULL)
+     *   vendor_id = -1 → 새 판매자(칸 값으로 INSERT)
+     *   vendor_id > 0  → 기존 판매자(칸 값으로 UPDATE — 이 판매자를 쓰는 모든 물품에 적용)
+     */
+    private function resolveVendor(array $d): ?int
+    {
+        $vid = (int)($d['vendor_id'] ?? 0);
+        if ($vid === 0) return null;
+        return $this->vendorSave([
+            'id'          => max(0, $vid),
+            'name'        => $d['vendor_name']  ?? '',
+            'phone'       => $d['vendor_phone'] ?? '',
+            'addr'        => $d['vendor_addr']  ?? '',
+            'memo'        => $d['vendor_memo']  ?? '',
+            'tax_invoice' => $d['tax_invoice']  ?? 0,
+        ]);
     }
 
     /** 삭제는 제공하지 않는다 — 비활성화만 (이력 무결성) */
@@ -744,7 +856,7 @@ class Gift
     {
         $rows = $this->pdo->prepare("
             SELECT id FROM gift_item WHERE batch_id = :b
-             ORDER BY FIELD(delivery_type, '택배','일괄','별도'), seq ASC, id ASC
+             ORDER BY " . self::ITEM_ORDER . "
         ");
         $rows->execute([':b' => $batchId]);
 
@@ -761,7 +873,7 @@ class Gift
     public function items(int $batchId): array
     {
         $st = $this->pdo->prepare("
-            SELECT * FROM gift_item WHERE batch_id = :b ORDER BY seq ASC, id ASC
+            SELECT * FROM gift_item WHERE batch_id = :b ORDER BY " . self::ITEM_ORDER . "
         ");
         $st->execute([':b' => $batchId]);
         return $st->fetchAll();
@@ -894,7 +1006,7 @@ class Gift
             INSERT INTO gift_item
                 (batch_id, seq, customer_id, customer_name, customer_memo, phone, zipcode, address1, address2,
                  delivery_type, product_id, product_name, unit_price, extra_qty, total_qty, amount)
-            VALUES (:b, :sq, :cid, :cn, :cm, :ph, :zip, :ad1, :ad2, :dt, :pid, :pn, :up, 0, 1, :am)
+            VALUES (:b, :sq, :cid, :cn, :cm, :ph, :zip, :ad1, :ad2, :dt, :pid, :pn, :up, :ex, :tq, :am)
         ");
 
         foreach ($customerIds as $cid) {
@@ -904,6 +1016,8 @@ class Gift
             if (!$c || (int)$c['is_active'] !== 1) continue;
 
             $up = $prod ? (int)$prod['unit_price'] : 0;
+            $ex = max(0, (int)($c['extra_qty'] ?? 0));   // 고객 명단의 기본 추가 수량이 초기값 — 행에서 언제든 고친다
+            $tq = 1 + $ex;
             $ins->execute([
                 ':b'   => $batchId,
                 ':sq'  => $seq++,
@@ -918,7 +1032,9 @@ class Gift
                 ':pid' => $prod ? (int)$prod['id'] : null,
                 ':pn'  => $prod ? (string)$prod['name'] : '',
                 ':up'  => $up,
-                ':am'  => $up,
+                ':ex'  => $ex,
+                ':tq'  => $tq,
+                ':am'  => $up * $tq,
             ]);
             $have[$cid] = 1;
             $n++;
@@ -1196,6 +1312,7 @@ class Gift
                         'name' => $name, 'memo' => $memo, 'phone' => $phone,
                         'zipcode' => $zip, 'address1' => $ad1, 'address2' => '',
                         'is_offline' => ($dt !== '택배') ? 1 : 0,
+                        'extra_qty'  => $ex,   // 엑셀의 「추가」를 기본 추가 수량으로 (새 고객만)
                     ]);
                     $res['customers']++;
                 }

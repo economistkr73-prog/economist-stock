@@ -239,6 +239,11 @@ const TASKS = [
         'get'  => ['key' => DART_KEY, 'job' => 'slots'],
         'desc' => '[확인] fresh 가 고를 슬롯 미리보기 (&today=2026-08-15 로 미래도)',
     ],
+    'dart_move' => [
+        'file' => 'cron/dart_collect.php', 'bg' => false, 'cron' => '',
+        'get'  => ['key' => DART_KEY, 'job' => 'move'],
+        'desc' => '[확인] 마감 변동 요약 미리보기 — 관심·단타·보유 중 ±Thr::EOD_MOVE_PCT↑ (보내지 않음 · 실제 발송은 dart_eod 끝)',
+    ],
 
     // ── 크론 미등록: 수동·SSH 전용 (길거나 1회성) ────────────────────────
     'dart_daily' => [

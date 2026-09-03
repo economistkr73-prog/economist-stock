@@ -5,6 +5,7 @@
  *   ?id=<회차>&type=vendor  → ① 업체 발송용 (택배 건만 · 배송 라벨 기준)
  *   ?id=<회차>&type=full    → ② 전체 내역   (발송구분별 시트 분리 + 합계 행)
  *   ?id=<회차>&type=print   → ③ 큰 글씨 인쇄용 HTML (연락처·주소·물품 없이 종이로 보는 명단)
+ *   …&preview=1              → ①②를 내려받기 전에 «같은 행 배열»을 HTML 표로 보여 준다(새 탭 · 안에서 내려받기)
  *
  * ★ 이 서버에는 composer/PhpSpreadsheet 가 없다. nw/report.php 가 쓰는 순수 PHP
  *   OOXML 라이터를 그대로 가져왔다(gx_ 접두어). ZipArchive 가 없으면 SpreadsheetML(.xls)로 폴백.
@@ -122,12 +123,80 @@ if ($type === 'vendor') {
     $fname = $title . '_전체내역_' . date('Ymd');
 }
 
+// ── 미리보기 — 직렬화 «직전»의 같은 $sheets 를 HTML 로 그린다. 데이터를 두 번 만들지 않으니
+//    미리보기와 파일이 다른 말을 할 수 없다(2026-08-31 사용자 요청 — 업체발송용은 택배 건만 담겨 행 수가 목록과 다르다).
+if (!empty($_GET['preview'])) {
+    gx_preview_html($batch, $sheets, $type, $batchId);
+    exit;
+}
+
 if (class_exists('ZipArchive')) {
     gx_stream_xlsx($sheets, $fname . '.xlsx');
 } else {
     gx_stream_spreadsheetml($sheets, $fname . '.xls');
 }
 exit;
+
+// ==========================================================
+// 엑셀 미리보기 HTML — 시트 배열을 표로. 스타일키(H/C/L/N/FN/FL)는 xlsx 와 같은 뜻으로 그린다.
+// ==========================================================
+function gx_preview_html(array $batch, array $sheets, string $type, int $batchId): void
+{
+    $h     = fn($v) => htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+    $label = $type === 'vendor' ? '업체 발송용 리스트' : '전체 내역 리스트';
+    $dl    = '/gift/export.php?id=' . $batchId . '&type=' . $h($type);
+    $cls   = ['H' => 'hd', 'C' => 'c', 'L' => 'l', 'N' => 'n', 'FN' => 'fn', 'FL' => 'fl'];
+
+    $body = '';
+    foreach ($sheets as $sh) {
+        $n = max(0, count($sh['rows']) - 2); // 머리글·합계 행 제외
+        $body .= '<section class="sheet"><h2>' . $h($sh['name']) . ' <span>' . $n . '행</span></h2>'
+               . '<div class="wrap"><table>';
+        foreach ($sh['rows'] as $row) {
+            $body .= '<tr>';
+            foreach ($row as $cell) {
+                $st  = $cell['st'] ?? 'L';
+                $txt = ($cell['t'] ?? 's') === 'n' ? number_format((int)$cell['v']) : (string)$cell['v'];
+                $tag = $st === 'H' ? 'th' : 'td';
+                $body .= '<' . $tag . ' class="' . ($cls[$st] ?? 'l') . '">' . $h($txt) . '</' . $tag . '>';
+            }
+            $body .= '</tr>';
+        }
+        $body .= '</table></div></section>';
+    }
+    if (!$sheets) $body = '<p class="empty">내보낼 행이 없습니다.</p>';
+
+    $title = $h($batch['title']);
+    header('Content-Type: text/html; charset=UTF-8');
+    echo '<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8">'
+       . '<meta name="viewport" content="width=device-width, initial-scale=1">'
+       . '<title>' . $title . ' · ' . $label . '</title>'
+       . '<style>'
+       . "body{font-family:'맑은 고딕','Malgun Gothic',sans-serif;color:#2c3e50;margin:0;padding:18px 22px;background:#f6f7f9}"
+       . '.bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 14px}'
+       . '.bar h1{font-size:17px;margin:0 12px 0 0}.bar h1 small{font-weight:400;color:#7f8c8d;font-size:13px;margin-left:6px}'
+       . '.bar .note{color:#7f8c8d;font-size:12px;flex-basis:100%}'
+       . '.btn{display:inline-block;border:1px solid #bdc3c7;background:#fff;color:#2c3e50;border-radius:6px;padding:7px 14px;font-size:13px;cursor:pointer;text-decoration:none}'
+       . '.btn:hover{background:#ecf0f1}.btn.pri{background:#3498db;border-color:#3498db;color:#fff}.btn.pri:hover{background:#2980b9}'
+       . '.sheet{background:#fff;border:1px solid #e1e4e8;border-radius:8px;padding:12px 14px;margin:0 0 16px}'
+       . '.sheet h2{font-size:14px;margin:0 0 8px}.sheet h2 span{font-weight:400;color:#7f8c8d;font-size:12px}'
+       . '.wrap{overflow-x:auto}table{border-collapse:collapse;font-size:12.5px;white-space:nowrap}'
+       . 'th,td{border:1px solid #d5d8dc;padding:4px 8px}'
+       . 'th.hd{background:#f2f2f2;font-weight:700;text-align:center}'
+       . 'td.c{text-align:center}td.l{text-align:left}td.n{text-align:right;font-variant-numeric:tabular-nums}'
+       . 'td.fn{text-align:right;background:#f2f2f2;font-weight:700}td.fl{background:#f2f2f2;font-weight:700}'
+       . 'tr:hover td{background:#fbfcfd}tr:hover td.fn,tr:hover td.fl{background:#f2f2f2}'
+       . '.empty{color:#7f8c8d}'
+       . '</style></head><body>'
+       . '<div class="bar"><h1>' . $title . '<small>' . $label . '</small></h1>'
+       . '<a class="btn pri" href="' . $dl . '">⬇ 엑셀 내려받기</a>'
+       . '<button class="btn" onclick="window.close()">닫기</button>'
+       . '<div class="note">엑셀에 담기는 행과 같습니다'
+       . ($type === 'vendor' ? ' — 업체 발송용은 <b>「택배」 건만</b> 담깁니다(일괄·별도는 제외).' : ' — 시트마다 한 표로 폈습니다.')
+       . '</div></div>'
+       . $body
+       . '</body></html>';
+}
 
 // ==========================================================
 // 큰 글씨 인쇄용 HTML

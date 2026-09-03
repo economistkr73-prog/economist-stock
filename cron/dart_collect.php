@@ -29,11 +29,13 @@
  *
  *   확인:  ?key=econ-dart-collect&job=log      (지난 bg 실행이 무엇을 했는지)
  *          ?key=econ-dart-collect&job=status   (수집 현황)
+ *          ?key=econ-dart-collect&job=move     (마감 변동 요약 미리보기 — 보내지 않음 · 실제 발송은 eod 끝)
  *
  * ══ 크론에 걸지 않는 것 (SSH 전용 — 한 번 돌리면 끝나는 것들) ═══════════
  *   job=range&full=1   일별 고·저 씨 뿌리기 (6분) — 최초 1회면 끝이다
  *   job=quarter        분기 재무제표 최초 적재
  *   job=shares         연도별 주식수
+ *   job=alot           연도별 배당(DPS·수익률) 백필 — 매일 몫은 fresh 안에 있다
  *
  * 시각이 다른 이유
  *   DART  아무 때나 받아도 된다.
@@ -82,7 +84,7 @@
  *   php cron_dart_collect.php job=shares  from=2015 to=2022 budget=1200
  *
  * 파라미터
- *   job     fresh | krx | eod | quotes | range | quarter | shares | slots | log | status
+ *   job     fresh | krx | eod | quotes | range | quarter | shares | alot | slots | log | status
  *           (기본 status — 아무것도 건드리지 않고 현황만 본다)
  *           eod = quotes + range. 마감 뒤 한 줄로 묶은 것 (크론용)
  *   bg      1 이면 즉시 200 OK 로 연결을 닫고 뒤에서 계속 돈다 (크론 30초 우회).
@@ -323,6 +325,10 @@ function fresh_slots(int $n = 5, ?string $today = null): array
 /** fresh 한 번에 메울 순이익 결측 행수 — 슬롯당. 5슬롯이면 최대 75콜(한도의 0.4%) */
 const FRESH_NIFIX_CAP = 15;
 
+/** fresh 한 번에 받을 배당 결측 종목 수 — 시즌(3~5월)에 하루 수십~수백 건, 평시 0건.
+ *  콜당 ~0.4초라 상한 300 이면 최악 2분 — bg 예산(600초) 안이다. */
+const FRESH_ALOT_CAP = 300;
+
 function job_fresh(Dart $dart, int $n, int $budget, float $start, int $secs): void
 {
     $slots = fresh_slots($n);
@@ -366,6 +372,26 @@ function job_fresh(Dart $dart, int $n, int $budget, float $start, int $secs): vo
     }
     if ($fx['done']) say(sprintf('순이익 보수 — 시도 %d · 채움 %d · 이 슬롯들에 남음 %d',
                                  $fx['done'], $fx['filled'], $fx['remain']));
+
+    /* ★ 배당 자동 갱신 (2026-09-02) — 새 사업보고서가 들어와 연간 재무 행이 생겼는데
+     * 배당(stock_fundamental.dps)이 아직 없는 종목만 그 자리에서 받는다. 시즌(3~5월)에
+     * 하루 수십~수백 콜, 평시 0콜 — 이 단계 덕에 배당은 앞으로 손댈 일이 없다.
+     * 최신 두 연도만 본다(사업보고서는 이듬해 3~4월에 나온다 · 비12월 결산이 당해분을 조기 제출). */
+    $ab = 0;
+    foreach ([(int)date('Y') - 1, (int)date('Y')] as $ay) {
+        if (over($start, $secs)) break;
+        $left = FRESH_ALOT_CAP - $ab;
+        if ($left <= 0) break;
+        try {
+            $r = $dart->collectAlot($ay, $left, true);
+        } catch (Throwable $e) {
+            say('배당 갱신 실패(무시하고 계속): ' . $e->getMessage());
+            break;
+        }
+        $ab += $r['done'];
+        if ($r['done']) say(sprintf('배당 갱신 %d — 처리 %d · 배당있음 %d · 남음 %d',
+                                    $ay, $r['done'], $r['filled'], $r['remain']));
+    }
 
     say('갱신 완료.');
 }
@@ -682,6 +708,39 @@ function job_shares(Dart $dart, int $from, int $to, int $budget, float $start, i
     say('주식수 수집 완료.');
 }
 
+// ── 연도별 배당 (job=alot · 2026-09-02) ────────────────────────────────
+/**
+ * DPS·현금배당수익률을 전종목으로 채운다 (stock_fundamental).
+ *
+ * alotMatter 는 다중회사 버전이 없어 종목마다 1회 — 주식수(job=shares)와 같은 이어받기 설계다.
+ * 이미 채운 (종목,연도)는 SQL 에서 빠지므로 budget= 으로 조각내 반복 실행하면 이어진다.
+ * 전종목 11년 ≈ 28,000콜이라 하루 한도(20,000)를 넘는다 — <b>이틀에 나눠</b> 돌린다.
+ * 매일 몫(새 사업보고서 종목)은 job=fresh 안에 들어 있다.
+ */
+function job_alot(Dart $dart, int $from, int $to, int $budget, float $start, int $secs): void
+{
+    $used = 0;
+    for ($y = $to; $y >= $from; $y--) {
+        if (over($start, $secs))             { say('시간 예산 초과 — 멈춥니다.'); return; }
+        if ($budget > 0 && $used >= $budget) { say('호출 예산 소진 — 멈춥니다.'); return; }
+
+        $limit = ($budget > 0) ? max(1, $budget - $used) : 0;
+
+        $t0 = microtime(true);
+        $r  = $dart->collectAlot($y, $limit, true, function ($done, $total, $filled) use ($y) {
+            say("  {$y} … {$done}/{$total} (배당있음 {$filled})");
+        });
+        $used += $r['done'];
+
+        say(sprintf('%d 배당 — 처리 %5s · 배당있음 %5s · 무배당·값없음 %4s · 남음 %5s (%.0f초)',
+            $y, number_format($r['done']), number_format($r['filled']),
+            number_format($r['empty']), number_format($r['remain']), microtime(true) - $t0));
+
+        if ($r['remain'] > 0) { say('이 해가 아직 남았습니다 — 다시 실행하면 이어받습니다.'); return; }
+    }
+    say('배당 수집 완료.');
+}
+
 // ── 정기보고서 접수일 원장 (job=rcept · 2026-08-02) ─────────────────────
 /**
  * DART 공시목록(list.json)에서 <b>정기보고서의 실제 접수일</b>을 모은다.
@@ -913,6 +972,26 @@ switch ($job) {
             say('알림 실패(무시하고 계속): ' . $e->getMessage());
             if (function_exists('pf_alert_fail')) pf_alert_fail('eod', $e);     // §2.5 규칙 3 — 삼킨 예외는 직접 알림
         }
+        /* ★ 마감 변동 요약 (2026-08-31) — 관심·단타·보유 종목 중 오늘 |등락률| 이 Thr::EOD_MOVE_PCT 를
+         *   넘은 것을 한 건으로 묶어 쏜다. 방금 메운 all_stock_info 를 읽기만 한다(새 수집 없음).
+         *   위 수급 신호(이벤트·신규만)와 «묻는 것»이 달라 제목을 가른다. 미리보기 = job=move. */
+        say('── 마감 변동 요약');
+        try {
+            require_once $_SERVER['DOCUMENT_ROOT'] . '/stock/lib/alert.php';
+            $mv = pf_alert_move($pdo);
+            say($mv ? '발송: ' . $mv[0] : '임계 넘은 종목 없음 — 발송 안 함');
+        } catch (Throwable $e) {
+            say('변동 요약 실패(무시하고 계속): ' . $e->getMessage());
+            if (function_exists('pf_alert_fail')) pf_alert_fail('eod', $e);
+        }
+        break;
+
+    /* ── 마감 변동 요약 미리보기 — 보내지 않고 본문만 찍는다(pf_alert_log 도 안 적는다). 실제 발송은 eod 끝. */
+    case 'move':
+        require_once $_SERVER['DOCUMENT_ROOT'] . '/stock/lib/alert.php';
+        $mv = pf_alert_move($pdo, true);
+        if ($mv) { say('[미리보기 · 보내지 않음] 📊 마감 변동'); foreach ($mv as $l) say('  | ' . $l); }
+        else say('임계 넘은 종목 없음 (오늘 갱신된 시세 기준 · 휴장일이면 늘 0건)');
         break;
 
     /* ── 일봉 이력만 따로 (시장 신호 백데이터) ───────────────────────────
@@ -976,6 +1055,15 @@ switch ($job) {
         if ($from <= 0) $from = Dart::MIN_YEAR;
         say("연도별 주식수 수집 — {$from}~{$to}년");
         job_shares($dart, $from, $to, $budget, $start, $secs);
+        break;
+
+    /* ── 연도별 배당 (DPS·배당수익률) — 최초 백필은 SSH 조각 실행 (전종목 11년 ≈ 28,000콜 · 이틀)
+     *   php cron/dart_collect.php job=alot from=2015 to=2025 budget=2500 sec=560 */
+    case 'alot':
+        if ($to   <= 0) $to   = (int)date('Y');
+        if ($from <= 0) $from = Dart::MIN_YEAR;
+        say("연도별 배당 수집 — {$from}~{$to}년");
+        job_alot($dart, $from, $to, $budget, $start, $secs);
         break;
 
     /* ── 정기보고서 접수일 원장 ─────────────────────────────────────────

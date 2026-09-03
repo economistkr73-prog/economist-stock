@@ -352,8 +352,11 @@ class Dart
                 $v   = self::num($x['thstrm'] ?? null);           // 당기만
                 if ($v === null) { $v = null; }
 
-                // 우선주 행이 바로 뒤에 붙어 온다 — 보통주만 골라야 값이 덮이지 않는다
-                $isCommon = ($knd === '' || $knd === '-' || mb_strpos($knd, '보통') !== false);
+                /* 우선주 행이 바로 뒤에 붙어 온다 — 우선주·종류주만 배제한다.
+                 * ★「보통주만 통과」로 두면 안 된다(2026-09-02 실측 005990): stock_knd 에 주식 종류가 아니라
+                 *   「기말배당금」·「결산배당금」·「중간, 분기배당금」을 적는 회사가 있어 DPS 행이 통째로 버려지고
+                 *   수익률 행만 남았다(「DPS 없는데 배당수익률만 있는」 연도의 정체). */
+                $isCommon = (mb_strpos($knd, '우선') === false && mb_strpos($knd, '종류') === false);
 
                 if ($v !== null) {
                     if (mb_strpos($se, '액면가') !== false) {
@@ -365,7 +368,8 @@ class Dart
                         // (백만원) 단위로 온다
                         if (mb_strpos($se, '연결') !== false || !isset($acc[$y]['net_income'])) $put($y, 'net_income', (int)round($v * 1000000));
                     } elseif ($isCommon && mb_strpos($se, '현금배당금') !== false && mb_strpos($se, '주당') !== false) {
-                        $put($y, 'dps', (int)round($v));
+                        // 기말·중간(분기) 배당이 별도 행으로 오면 그 «합»이 그 해 DPS 다
+                        $put($y, 'dps', (int)($acc[$y]['dps'] ?? 0) + (int)round($v));
                     } elseif ($isCommon && mb_strpos($se, '현금배당수익률') !== false) {
                         $put($y, 'div_yield', round($v, 2));
                     }
@@ -918,6 +922,93 @@ class Dart
         return ['done' => $done, 'filled' => $filled, 'empty' => $blank, 'remain' => $remain - $done];
     }
 
+    /**
+     * 연도별 배당(DPS·현금배당수익률)을 전종목으로 채운다 (stock_fundamental · 2026-09-02).
+     *
+     * ★ alotMatter 는 다중회사 버전이 없어 <b>종목별·연도별 1회</b> 호출이다 — collectShares 와 같은 구조.
+     * ★ 대상은 그 해 <b>사업보고서 재무가 있는</b> 거래종목이다 — 연도별 표가 그 행에만 DPS 를 그린다.
+     * ★ 이어받기: stock_fundamental 에 dps 가 NOT NULL 이면 끝난 것이다. 무배당·응답없음(013)은
+     *   <b>0 으로 남겨 다시 부르지 않는다</b>(주식수 백필과 같은 규칙 — 무배당의 DPS 0 은 사실이기도 하다).
+     * ★ 저장은 배당 칼럼만 갱신한다 — save() 를 쓰면 이미 받아 둔 종목의 eps·자본총계가 null 로 덮인다.
+     *
+     * @return array [done, filled, empty, remain]
+     */
+    public function collectAlot(int $year, int $limit = 0, bool $krxOnly = true, ?callable $progress = null): array
+    {
+        $krxJoin = $krxOnly
+            ? "JOIN krx_daily k ON k.stock_code = f.stock_code
+                             AND k.bas_dd = (SELECT MAX(bas_dd) FROM krx_daily)"
+            : '';
+
+        $sql = "SELECT f.stock_code, c.corp_code
+                  FROM stock_financial f
+                  JOIN dart_corp_code c ON c.stock_code = f.stock_code
+                  {$krxJoin}
+                 WHERE f.bsns_year = ? AND f.reprt_code = ?
+                   AND NOT EXISTS (SELECT 1 FROM stock_fundamental sf
+                                    WHERE sf.stock_code = f.stock_code
+                                      AND sf.bsns_year  = f.bsns_year
+                                      AND sf.dps IS NOT NULL)
+                 ORDER BY f.stock_code";
+        $st = $this->pdo->prepare($sql);
+        $st->execute([$year, self::REPRT_ANNUAL]);
+        $todo = $st->fetchAll(PDO::FETCH_ASSOC);
+
+        $remain = count($todo);
+        if ($limit > 0) $todo = array_slice($todo, 0, $limit);
+
+        $up = $this->pdo->prepare("
+            INSERT INTO stock_fundamental (stock_code, bsns_year, dps, div_yield, par_value, stlm_dt, updated_at)
+            VALUES (?,?,?,?,?,?,NOW())
+            ON DUPLICATE KEY UPDATE
+                dps = VALUES(dps), div_yield = VALUES(div_yield),
+                par_value  = COALESCE(VALUES(par_value), par_value),
+                stlm_dt    = COALESCE(VALUES(stlm_dt), stlm_dt),
+                updated_at = NOW()
+        ");
+
+        $done = $filled = $blank = 0;
+        foreach ($todo as $t) {
+            $done++;
+            try {
+                $j = $this->call('alotMatter.json', [
+                    'corp_code' => $t['corp_code'], 'bsns_year' => (string)$year,
+                    'reprt_code' => self::REPRT_ANNUAL,
+                ]);
+            } catch (Throwable $e) {
+                if (mb_strpos($e->getMessage(), '020') !== false) break;   // 일일 한도 — 더 돌아도 소용없다
+                continue;   // 그 밖의 실패는 행을 안 남긴다 — 다음 실행이 다시 잰다
+            }
+
+            $dps = null; $dy = null; $par = null; $stlm = null;
+            foreach (($j['list'] ?? []) as $x) {
+                $se  = (string)($x['se'] ?? '');
+                $knd = trim((string)($x['stock_knd'] ?? ''));
+                $v   = self::num($x['thstrm'] ?? null);
+                // collect() 와 같은 규칙 — 우선주·종류주만 배제 (stock_knd 에 배당 «종류»를 적는 회사가 있다)
+                $isCommon = (mb_strpos($knd, '우선') === false && mb_strpos($knd, '종류') === false);
+                if ($v !== null) {
+                    if (mb_strpos($se, '액면가') !== false) {
+                        $par = (int)round($v);
+                    } elseif ($isCommon && mb_strpos($se, '현금배당금') !== false && mb_strpos($se, '주당') !== false) {
+                        // 기말·중간(분기) 배당이 별도 행으로 오면 그 «합»이 그 해 DPS 다
+                        $dps = (int)($dps ?? 0) + (int)round($v);
+                    } elseif ($isCommon && mb_strpos($se, '현금배당수익률') !== false) {
+                        $dy = round($v, 2);
+                    }
+                }
+                if ($stlm === null && !empty($x['stlm_dt'])) $stlm = substr((string)$x['stlm_dt'], 0, 10);
+            }
+
+            if ($dps !== null) $filled++; else $blank++;
+            $up->execute([$t['stock_code'], $year, $dps ?? 0, $dy, $par, $stlm]);
+
+            if ($progress && $done % 100 === 0) $progress($done, count($todo), $filled);
+        }
+
+        return ['done' => $done, 'filled' => $filled, 'empty' => $blank, 'remain' => $remain - $done];
+    }
+
     /** 연도별 주식수 채움 현황 */
     public function sharesStatus(): array
     {
@@ -1224,6 +1315,34 @@ class Dart
         ");
         $st->execute([$stockCode]);
         return (float)$st->fetchColumn();
+    }
+
+    /**
+     * 한 종목의 «지금» 시세 — ratio() 가 읽는 키 그대로(nav_price·nav_age·close_prc) + 표시용 nav_at.
+     *
+     * withNav() 는 스크리너용이라 전종목을 한 번에 읽는다. 종목 상세 한 화면에 그것을 부르면 낭비라
+     * PK 한 건씩 읽는다. ★조인이 아니라 단건 조회다 — all_stock_info(utf8mb3) 조인 사고와 무관하다.
+     * 주가 우선순위(네이버 → 묵으면 KRX 종가)는 ratio() 가 정한다. 여기서 고르지 않는다.
+     */
+    public function quoteOf(string $stockCode): array
+    {
+        $st = $this->pdo->prepare("
+            SELECT stock_price, DATEDIFF(CURDATE(), DATE(uDate)) AS age, DATE_FORMAT(uDate, '%m-%d %H:%i') AS at
+              FROM all_stock_info WHERE stock_code = ?
+        ");
+        $st->execute([$stockCode]);
+        $n = $st->fetch(PDO::FETCH_ASSOC) ?: [];
+        $st = $this->pdo->prepare("
+            SELECT close_prc FROM krx_daily
+             WHERE stock_code = ? AND bas_dd = (SELECT MAX(bas_dd) FROM krx_daily)
+        ");
+        $st->execute([$stockCode]);
+        return [
+            'nav_price' => $n['stock_price'] ?? null,
+            'nav_age'   => $n['age'] ?? null,
+            'nav_at'    => $n['at'] ?? null,
+            'close_prc' => $st->fetchColumn() ?: null,
+        ];
     }
 
     /** 한 종목의 연도별 재무 (최근 먼저) */

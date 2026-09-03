@@ -9,6 +9,8 @@
  *                          ②보유종목 계단관통↓ 신규 ③오늘 신규 매집형 신호(잠정)
  *   pf_alert_fresh($pdo) — 08:05 dart_fresh 끝: ④보유·관심종목 어닝쇼크(SUE≤−1) 신규
  *                          ⑤관심종목 새 SUE ≥ 1  ⑥전종목 규칙 충족 신규(발굴)
+ *   pf_alert_move($pdo)  — 15:50 dart_eod 끝(pf_alert_eod 다음): ⑦관심·단타·보유 종목의 오늘 등락률이
+ *                          Thr::EOD_MOVE_PCT 를 넘은 것을 «한 건으로 요약» (신규 판정이 아니라 하루 요약 · 2026-08-31)
  *
  * ★④⑤ 와 ⑥ 은 <b>묻는 것이 다르다</b>(2026-08-05) — ④⑤ 는 「내가 보고 있는 종목의 실적이
  *   새로 튀었나」이고, ⑥ 은 「내가 아직 모르는 종목이 규칙을 충족했나」다. 그래서 ⑥ 은
@@ -361,5 +363,76 @@ function pf_alert_fresh(PDO $pdo): array
 
     pf_alert_send('📊 실적 신호', $lines, 'https://economist.kr/stock/index.php?mode=earn');
     return $lines;
+}
+
+/**
+ * 15:50 마감 «변동 요약» (2026-08-31 신설 · 사용자 요청) — 내가 보는 종목(관심 · 단타 풀 · 보유) 중
+ * 오늘 |등락률| 이 Thr::EOD_MOVE_PCT 이상인 것을 <b>한 건</b>으로 묶어 보낸다.
+ *
+ * ★pf_alert_eod 와 <b>묻는 것이 다르다</b> — 저것은 「신호가 새로 생겼나」(이벤트 · 신규만), 이것은
+ *   「오늘 내 종목 중 크게 움직인 게 있나」(하루 요약). 그래서 제목을 갈라 둔다(앱 목록에서 구별).
+ * ★새로 받지 않는다 — 시세는 방금 job_quotes 가 메운 all_stock_info 그대로다(주식시세가져오기.md §4:
+ *   있는 것을 먼저 쓴다). <b>오늘 갱신된 행(DATE(uDate)=오늘)만</b> 본다 — 낡은 시세로 「오늘 움직였다」고
+ *   말하면 거짓이고, 휴장일엔 오늘 행이 없어 자연히 0건(=무음)이 된다.
+ * ★세 집합의 판정을 다시 적지 않는다 — 보유 Dt::heldCodes() · 단타 Dt::activeCodes() · 관심 pf_watchlist
+ *   (단타 화면의 목록·배지와 같은 원천이라 화면과 알림이 같은 종목을 「보유」라 부른다).
+ * ★임계는 Thr::EOD_MOVE_PCT 하나(CLAUDE.md 규칙 3) · 중복방지 키 (code|날짜) — 같은 날 eod 를 다시
+ *   돌려도 두 번 안 온다 · 0건이면 안 보낸다(CRON.md §2.5 규칙 1) · 미리보기는 $dry(안 보내고 본문만).
+ *
+ * @return string[] 발송한(또는 $dry 면 발송했을) 본문 줄 — 비면 무음
+ */
+function pf_alert_move(PDO $pdo, bool $dry = false): array
+{
+    pf_alert_ensure($pdo);
+    $dt    = new Dt($pdo);
+    $held  = array_flip($dt->heldCodes());
+    $pool  = array_flip($dt->activeCodes());
+    $watch = array_flip($pdo->query("SELECT stock_code FROM pf_watchlist")->fetchAll(PDO::FETCH_COLUMN));
+    $codes = array_keys($held + $pool + $watch);
+    if (!$codes) return [];
+
+    $in = implode(',', array_fill(0, count($codes), '?'));
+    $st = $pdo->prepare("
+        SELECT stock_code, stock_name, stock_price, stock_rate, stock_vol_cap
+          FROM all_stock_info
+         WHERE stock_code IN ($in) AND DATE(uDate) = CURDATE()");
+    $st->execute($codes);
+    $thr   = Thr::EOD_MOVE_PCT * 100;          // stock_rate 는 % 단위(3.25 = +3.25%)
+    $today = date('Y-m-d');
+    $up = $dn = [];
+    foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+        $rate = (float)$r['stock_rate'];
+        if (abs($rate) < $thr) continue;
+        if (!$dry && !pf_alert_new($pdo, 'move', $r['stock_code'] . '|' . $today)) continue;
+        if ($rate >= 0) $up[] = $r; else $dn[] = $r;
+    }
+    if (!$up && !$dn) return [];
+    usort($up, fn($a, $b) => (float)$b['stock_rate'] <=> (float)$a['stock_rate']);   // 상승 큰 것부터
+    usort($dn, fn($a, $b) => (float)$a['stock_rate'] <=> (float)$b['stock_rate']);   // 하락 큰 것부터
+
+    $tag = function (string $c) use ($held, $pool, $watch): string {
+        $t = [];
+        if (isset($held[$c]))  $t[] = '보유';
+        if (isset($pool[$c]))  $t[] = '단타';
+        if (isset($watch[$c])) $t[] = '관심';
+        return implode('·', $t);
+    };
+    $fmt = fn(array $r, string $arrow): string => sprintf('%s %s %+.1f%% %s · %s · %s억',
+        $arrow, (string)$r['stock_name'], (float)$r['stock_rate'],
+        number_format((float)$r['stock_price']), $tag($r['stock_code']),
+        number_format((float)$r['stock_vol_cap']));
+    $lines = array_merge(array_map(fn($r) => $fmt($r, '▲'), $up), array_map(fn($r) => $fmt($r, '▼'), $dn));
+
+    /* ★자르기를 «여기서» 한다(bx_alert 와 같은 이유) — pf_alert_send 가 10줄에서 자르므로 머리말을
+     *   포함해 10줄 안에 맞춘다. 머리말이 「감시 N종목 중 M건」이라 잘린 뒤에도 전체 규모는 남는다. */
+    $n    = count($lines);
+    $MAX  = 8;
+    $body = ['감시 ' . count($codes) . '종목 중 ±' . Thr::pct(Thr::EOD_MOVE_PCT) . '%↑ ' . $n
+           . '건 (▲' . count($up) . ' ▼' . count($dn) . ')'];
+    foreach (array_slice($lines, 0, $MAX) as $l) $body[] = $l;
+    if ($n > $MAX) $body[] = '… 외 ' . ($n - $MAX) . '건 (단타 화면에서 전부 보기)';
+
+    if (!$dry) pf_alert_send('📊 마감 변동 ' . $n . '건', $body, 'https://economist.kr/stock/index.php?mode=short');
+    return $body;
 }
 ?>
