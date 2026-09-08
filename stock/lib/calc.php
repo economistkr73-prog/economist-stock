@@ -884,7 +884,7 @@ function pf_allocate_holdings(array $stepQty, int $soldQty): array
  *                              (매도가 없는 화면/테스트는 생략 가능 — 매수만으로 계산)
  * @return array
  */
-function pf_position_calc(array $steps, array $trades, float $limitAmt, ?float $lastPrice = null, array $p = [], array $ledger = [], array $levels = []): array
+function pf_position_calc(array $steps, array $trades, float $limitAmt, ?float $lastPrice = null, array $p = [], array $ledger = [], array $levels = [], ?int $cycleSold = null): array
 {
     $p = pf_params($p);
 
@@ -974,7 +974,9 @@ function pf_position_calc(array $steps, array $trades, float $limitAmt, ?float $
     $hasLedger = ($ledger !== []);
     $avgCost   = $hasLedger ? $ledger['avg_cost'] : pf_avg_cost(array_intersect_key($trades, $rows), $p);
     $heldQty   = $hasLedger ? (int)$ledger['held_qty']    : $filledQty;
-    $soldQty   = $hasLedger ? (int)$ledger['sell_qty']    : 0;
+    /* ★매도 수량은 <b>현재 사이클</b> 것이다(2026-09-08 · pf_cycle_sold 주석). $cycleSold 를 안 주면
+     * 옛 동작(원장 전체)이라 시뮬레이터처럼 사이클 개념이 없는 호출은 그대로다. */
+    $soldQty   = $cycleSold ?? ($hasLedger ? (int)$ledger['sell_qty'] : 0);
     $realized  = $hasLedger ? (float)$ledger['realized_pl'] : 0.0;
 
     // 매도분을 차수별로 안분해 차수별 보유수량·보유원가를 만든다
@@ -1269,6 +1271,53 @@ function pf_box_ladder_build(array $prices): ?array
     }
     return ['levels' => $levels, 'be' => $best['be'], 'k' => $best['k'],
             'ratio' => $best['ratio'], 'depth' => $depth, 'mono' => $best['mono']];
+}
+
+/**
+ * 후보 지지선에서 <b>사다리를 자동으로 고른다</b> — 재진입할 때 쓴다(2026-09-08 사용자 지시).
+ *
+ * 편입 화면에서는 사람이 후보를 3~5개 고르지만, 재진입은 «체결 저장 한 번»에 끝나는 흐름이라
+ * 고를 자리가 없다. 그래서 같은 재료(최고 거래대금 박스의 H·L)로 같은 규칙(pf_box_ladder_build)을 돌린다.
+ *
+ * 규칙 —
+ *  ①<b>1차 = 새 진입가</b>. 사용자의 말이 그것이었다(「최초진입가가 달라지면 바뀌어야」).
+ *    하락률 룰셋이 «직전 차수의 실매수가»를 기준가로 삼는 것과 같은 자리다.
+ *  ②2차 아래는 <b>진입가보다 낮은</b> 후보만 쓴다 — 위쪽 지지선은 이번 사이클에 뜻이 없다(이미 그 아래에서 샀다).
+ *  ③너무 촘촘한 것은 건너뛴다(직전 고른 값 대비 최소 $minGap · 기본 2%). 촘촘한 박스만 고르면 깊이가
+ *    안 나와 pf_box_ladder_build 가 통째로 실패한다(PF_BOX_MIN_DEPTH). ★<b>3% 로 뒀다가 실측에서
+ *    진짜 지지선을 버렸다</b> — 삼양식품의 1,272,000 이 새 진입가 대비 −2.0% 였다.
+ *  ④5개로 안 풀리면 <b>가장 깊은 것부터</b> 하나씩 빼며 4개·3개로 다시 푼다.
+ *  ⑤그래도 못 풀면 null — 부르는 쪽이 <b>옛 사다리를 그대로 둔다</b>(사다리 없는 포지션을 만들지 않는다).
+ *
+ * @param array $cands 후보 가격들(순서 무관 · 중복 무방)
+ * @param float $entryPx 새 사이클 1차 실매수가
+ * @return array|null pf_box_ladder_build() 결과 (levels·be·k·ratio·depth·mono)
+ */
+function pf_box_pick_levels(array $cands, float $entryPx, float $minGap = 0.03): ?array
+{
+    if ($entryPx <= 0) return null;
+    $below = [];
+    foreach ($cands as $v) {
+        $v = (float)$v;
+        if ($v > 0 && $v < $entryPx) $below[] = $v;
+    }
+    $below = array_values(array_unique($below, SORT_NUMERIC));
+    rsort($below);
+
+    $picked = [$entryPx];
+    $prev   = $entryPx;
+    foreach ($below as $v) {
+        if (count($picked) >= PF_BOX_LV_MAX) break;
+        if ($v > $prev * (1 - $minGap)) continue;   // 직전 지지선과 붙어 있다 — 건너뛴다
+        $picked[] = $v;
+        $prev     = $v;
+    }
+    for ($n = count($picked); $n >= PF_BOX_LV_MIN; $n--) {
+        $try = array_slice($picked, 0, $n);          // 깊은 것부터 뺀다
+        $r   = pf_box_ladder_build($try);
+        if ($r !== null) return $r;
+    }
+    return null;
 }
 
 /**
@@ -2382,10 +2431,91 @@ const PF_CYCLE_WARN_DAYS = 730;   // 달력일 2년
 const PF_CYCLE_WARN_STEP = 5;     // 물림비율이 9% → 23% 로 꺾이는 차수
 
 /**
+ * 재진입 후보의 <b>시효</b> — 청산 후 이 날수가 지나면 후보 목록에서 뺀다(2026-09-08 사용자 선택 「6개월」).
+ *
+ * ★<b>왜 필요한가</b>: 후보 목록은 청산 포지션을 <b>전부</b> 실어서 기간·개수 제한이 없었다.
+ *   2021년에 팔고 다시 볼 일 없는 종목도 5년 뒤까지 매일 판정되고 화면에 남는다
+ *   (실측 2026-09-08: 청산 10건 · 전부 41일 이내라 아직 티가 안 났을 뿐이다).
+ * ★<b>기록을 지우는 것이 아니다</b> — 체결·실현손익은 그대로고 «후보»에서만 빠진다.
+ *   매매히스토리 표에서 <b>「전부 보기」로 다시 펼 수 있다</b>(보이지 않는 필터 금지 · 주소 &reall=1).
+ * ★그 종목을 다시 담고 싶으면 그냥 <b>새로 편입</b>하면 된다 — 시효는 「자동으로 권하지 않는다」일 뿐
+ *   「사면 안 된다」가 아니다.
+ */
+const PF_REENTRY_TTL_DAYS = 180;   // 달력일 6개월
+
+// ── 사이클 (전량매도로 끝나는 한 판) ──────────────────────────────────────
+/**
+ * 체결 이력을 «사이클»로 가른다 — 보유수량이 0 이 되는 지점(전량매도)이 경계다.
+ *
+ * ★왜(2026-09-06 사용자 신고 — SK하이닉스·LG전자): 재진입은 새 포지션이 아니라 <b>같은 포지션에 다시 매수</b>다
+ *   (uk_pf_pos · 한 포트폴리오에 같은 종목 하나). 그런데 사다리는 그 포지션의 체결 «전부»를 차수별로 합쳤다 —
+ *   새 1차가 옛 1차와 수량가중으로 섞이고 2차 이론가가 옛 진입가에서 내려왔다. 1년 뒤 재편입해도 옛 값이 남았다.
+ *   ⇒ 사다리·차수·나이·차수 지연은 <b>현재 사이클 체결만</b> 본다(적용 3곳: pf_load_calc · api payload · 종목 상세).
+ * ★돈 셈(pf_ledger: 예수금·실현손익·누적단가)은 <b>전 사이클 누적 그대로</b> — 계좌의 돈은 사이클의 것이 아니다.
+ *   원장은 전량매도에서 원가를 0 으로 되돌리므로 새 사이클의 누적단가는 저절로 새 값이다(여기서 손댈 것 없음).
+ * ★컬럼이 없다 — 이력에서 그때그때 가른다. 옛 기록도 그대로 맞고, 체결을 지우면 저절로 다시 맞는다.
+ * ★정렬·무시 규칙은 pf_ledger 와 같다(traded_at, id · 보유 없는 매도는 무시) — 둘이 다르면 경계가 어긋난다.
+ *
+ * @return array cycles(사이클별 행 배열 · 시간순) · cur(현재 = 마지막 사이클의 행 — 종료됐어도 «기록»으로 돌려준다)
+ *               · no(현재 사이클 번호 · 1부터 · 체결 없으면 1) · closed(마지막 사이클이 전량매도로 끝났나)
+ */
+function pf_cycle_split(array $rows): array
+{
+    usort($rows, fn($a, $b) =>
+        [$a['traded_at'] ?? '', (int)($a['id'] ?? 0)] <=> [$b['traded_at'] ?? '', (int)($b['id'] ?? 0)]);
+
+    $cycles = [];
+    $cur    = [];
+    $qty    = 0;
+    $closed = false;
+    foreach ($rows as $r) {
+        $q = (int)($r['qty'] ?? 0);
+        if ($q <= 0 || (float)($r['price'] ?? 0) <= 0) continue;
+        if (($r['side'] ?? 'buy') === 'buy') {
+            if ($closed) { $cycles[] = $cur; $cur = []; $closed = false; }   // 전량매도 뒤 첫 매수 = 새 사이클
+            $qty += $q;
+        } else {
+            if ($qty <= 0) continue;                                          // 보유 없는 매도 — 원장과 같은 규칙
+            $qty -= min($q, $qty);
+        }
+        $cur[] = $r;
+        if ($qty === 0) $closed = true;
+    }
+    if ($cur) $cycles[] = $cur;
+    $n = count($cycles);
+    return ['cycles' => $cycles, 'cur' => $n ? $cycles[$n - 1] : [], 'no' => max(1, $n), 'closed' => $closed];
+}
+
+/**
+ * 현재 사이클의 <b>매도 수량</b> — 차수별 보유수량 안분(pf_allocate_holdings)에 쓴다.
+ *
+ * ★<b>왜 원장(pf_ledger)의 sell_qty 를 쓰면 안 되나</b>(2026-09-08 실측 · 삼양식품 003230):
+ *   사다리 차수는 <b>현재 사이클</b>의 체결로 만드는데 매도 수량만 <b>포지션 전체</b>에서 가져오면,
+ *   전량매도로 끝난 옛 사이클의 매도가 새 사이클의 매수를 상계한다 — 사이클 2 의 1차 1주가
+ *   FLOOR(1 × (1 − 1/1)) = <b>0주</b>가 되어 보유수량·보유원가·계획대비·과부족이 전부 거짓이 됐다
+ *   (합계 행은 원장이라 1주라서 «같은 표 안에서» 두 말을 했다).
+ *   돈(누적단가·실현손익·현금흐름)은 그대로 원장 전체다 — 가르는 것은 «수량 안분»뿐이다.
+ *
+ * 규칙은 pf_cycle_split·pf_ledger 와 같다 — 보유 없는 매도는 세지 않고, 매도는 보유를 넘지 못한다.
+ */
+function pf_cycle_sold(array $rows): int
+{
+    $qty = 0; $sold = 0;
+    foreach ($rows as $r) {
+        $q = (int)($r['qty'] ?? 0);
+        if ($q <= 0 || (float)($r['price'] ?? 0) <= 0) continue;
+        if (($r['side'] ?? 'buy') === 'buy') { $qty += $q; continue; }
+        if ($qty <= 0) continue;
+        $e = min($q, $qty); $qty -= $e; $sold += $e;
+    }
+    return $sold;
+}
+
+/**
  * 사이클 나이 — <b>첫 매수일</b>부터 오늘까지 달력일.
  *
- * 실전 포지션은 전량매도하면 closed 가 되고 재진입은 새 포지션이므로,
- * 열린 포지션의 사이클 시작 = 그 포지션의 가장 이른 매수일이다.
+ * ★넘기는 것은 <b>현재 사이클의 체결</b>(pf_cycle_split()['cur'])이다 — 포지션의 체결 전부를 넘기면
+ *   재진입한 종목의 나이가 옛 사이클의 1차부터 세어져 「장기물림」이 헛뜬다(2026-09-06).
  */
 function pf_cycle_age(array $tradeRows, ?string $today = null): array
 {
@@ -2432,5 +2562,157 @@ function pf_cycle_alert(?int $days, ?int $curStep): array
 function pf_signal_rank(?string $kind): int
 {
     return ['sell' => 0, 'buy' => 1, 'fill' => 2][$kind ?? ''] ?? 3;
+}
+
+// ── 포트폴리오 돈 셈 · 일일 결산 (2026-09-07) ─────────────────────────
+/**
+ * 포트폴리오 한 개(또는 전체 합계)의 돈 셈 — 예수금·추정자산·실현손익·수익률을 <b>한 곳에서</b> 만든다.
+ * (2026-09-07 index.php 에서 여기로 옮겼다 — 일일 결산(크론·CLI)도 같은 함수를 써야 하므로.)
+ *
+ * 목록 소계·전체 합계·상세 요약 세 곳이 각자 더하면 곧 갈린다. 실제로 청산분이 한 곳에서만
+ * 빠져 1,772,382원이 어긋난 적이 있다(pf_calc_closed 주석).
+ *
+ * ★ <b>income = 손익성 입출금</b>(pf_income_flow 합계) — <b>체결기록으로는 만들 수 없는 돈</b>이다.
+ *   ①이월 실현손익: 포트폴리오에 담기 전에 그 계좌에서 이미 난 손익
+ *     (실측 관사장학회: 증권사 예수금 8,855,233 vs 화면 4,469,607 = 4,385,626원 차이가 그것이었다)
+ *   ②배당금: 종목을 팔지 않아도 들어오므로 매도 기록에 영영 안 잡힌다.
+ * ★ <b>원금이 아니라 이익이다.</b> 그래서 예수금·실현손익에는 더하고
+ *   <b>수익률 분모(원금)는 건드리지 않는다</b>. 원금으로 넣으면 「2천만으로 시작해 이익이 났다」가
+ *   「2천4백만을 넣었다」로 뒤바뀌고, 배당을 받을수록 수익률이 낮아진다.
+ */
+function pf_folio_money(float $prin, float $income, array $sub): array
+{
+    $cash  = $prin + $income + $sub['flow'];  // 예수금 = 원금 + 손익성입금 − 매수지출 + 매도수취
+    $asset = $cash + $sub['net'];             // 추정자산 = 예수금 + 보유 현재가치
+    return [
+        'cash'  => $cash,
+        'asset' => $asset,
+        'real'  => $sub['real'] + $income,    // 실현손익 = 기록된 체결분 + 이월·배당
+        'rate'  => ($prin > 0) ? ($asset / $prin - 1) : null,
+    ];
+}
+
+/**
+ * 어느 날(d)의 포트폴리오 결산 — 순수함수 (2026-09-07 · lib/value.php 가 매 거래일 부른다).
+ *
+ * 「그 날까지의 체결 + 그 날 종가 + 그 날까지의 원금·이월배당」으로 그 날의 합계 카드를 다시 만든다.
+ * 화면의 pf_sum_calc + pf_folio_money 와 <b>같은 식</b>이라 오늘 결산은 마감 뒤 화면 합계와 일치해야 한다.
+ *
+ * @param array  $posTrades [['code'=>종목코드, 'rows'=>pf_trade 행 전부, 'prm'=>비용 파라미터(pf_cost_params)], …]
+ * @param array  $closes    [code => 그 날 종가]  — 없는 종목은 gaps 에 세고 누적단가로 평가한다(손익 0 · 부르는 쪽이 이월값을 넣어 준다)
+ * @param string $d         결산일 — traded_at <= d 인 체결만 본다
+ * @param float  $prin      그 날까지의 원금 합계
+ * @param float  $income    그 날까지의 이월·배당 합계
+ * @param float  $carry     그 중 <b>이월손익</b>만(kind='carry') — TWR 이 «외부 유입»으로 다뤄야 하는 몫(pf_twr 주석)
+ * @return array principal·income·carry·cash·cost·eval·pl·net·asset·real·rate·n_pos·gaps
+ */
+function pf_value_at(array $posTrades, array $closes, string $d, float $prin, float $income, float $carry = 0.0): array
+{
+    $sum  = ['cost' => 0.0, 'eval' => 0.0, 'pl' => 0.0, 'real' => 0.0, 'flow' => 0.0, 'net' => 0.0];
+    $n    = 0;
+    $gaps = 0;
+    foreach ($posTrades as $pt) {
+        $rows = [];
+        foreach ($pt['rows'] ?? [] as $r) {
+            if ((string)($r['traded_at'] ?? '') <= $d) $rows[] = $r;
+        }
+        if (!$rows) continue;
+        $p  = pf_params($pt['prm'] ?? []);
+        $lg = pf_ledger($rows, $p);
+        $sum['real'] += (float)$lg['realized_pl'];
+        $sum['flow'] += (float)$lg['cash_flow'];
+        $qty = (int)$lg['held_qty'];
+        if ($qty <= 0) continue;
+
+        $close = $closes[(string)($pt['code'] ?? '')] ?? null;
+        if ($close === null || (float)$close <= 0) { $gaps++; $close = (float)$lg['avg_cost']; }
+        $eval = (float)$close * $qty;
+        $sum['cost'] += (float)$lg['cost_amount'];
+        $sum['eval'] += $eval;
+        $sum['pl']   += $eval - (float)$lg['cost_amount'];
+        $sum['net']  += pf_net_value($qty, (float)$close, $p);
+        $n++;
+    }
+    $m = pf_folio_money($prin, $income, $sum);
+    return [
+        'principal' => $prin,
+        'income'    => $income,
+        'carry'     => $carry,
+        'cash'      => $m['cash'],
+        'cost'      => $sum['cost'],
+        'eval'      => $sum['eval'],
+        'pl'        => $sum['pl'],
+        'net'       => $sum['net'],
+        'asset'     => $m['asset'],
+        'real'      => $m['real'],
+        'rate'      => $m['rate'],
+        'n_pos'     => $n,
+        'gaps'      => $gaps,
+    ];
+}
+
+/**
+ * 시간가중수익률(TWR) 누적 배수 — 원금 입출금의 영향을 뺀 «운용 성적». 지수와 견줄 때 쓴다.
+ *
+ * 하루 수익률 r_t = asset_t ÷ (asset_{t−1} + 외부유입_t) − 1 (유입은 그 날 시작에 들어온 것으로 본다 —
+ * 첫 입금일에 asset_{t−1}=0 이어도 식이 선다). 분모가 0 이하면 그 날은 변화 없음. 첫 행은 1.0.
+ *
+ * ★★<b>외부유입 = 원금 + 이월손익(carry)</b>이다(2026-09-08 실측으로 고침).
+ *   이월손익은 «포트폴리오에 담기 전 그 계좌에서 이미 난 손익»이라 <b>운용으로 번 것이 아니다</b>.
+ *   빼지 않았더니 2026-08-06 에 넣은 9,667,146원이 <b>하루 만에 +15.97% 운용수익</b>이 되어
+ *   화면의 「KOSPI 대비」가 +32.47%p 로 떴다(바로잡으면 +16.91%p · 전체기간 TWR +5.14% → −9.17%).
+ *   <b>배당은 그대로 이익</b>이다 — 종목을 들고 있어서 생긴 돈이라 운용 성과가 맞다.
+ *   그래서 income(이월+배당) 전체가 아니라 carry 만 뺀다. carry 가 없는 행은 옛 동작과 같다.
+ *
+ * @param array $rows d 오름차순 [['asset'=>, 'principal'=>, 'carry'=>], …]
+ * @return float[] 행마다 누적 배수 (1.0 = 시작)
+ */
+function pf_twr(array $rows): array
+{
+    $out  = [];
+    $acc  = 1.0;
+    $prev = null;
+    foreach ($rows as $r) {
+        $asset = (float)($r['asset'] ?? 0);
+        $ext   = (float)($r['principal'] ?? 0) + (float)($r['carry'] ?? 0);   // 외부 유입 = 원금 + 이월손익
+        if ($prev !== null) {
+            $base = $prev[0] + ($ext - $prev[1]);
+            if ($base > 0) $acc *= $asset / $base;
+        }
+        $out[] = $acc;
+        $prev  = [$asset, $ext];
+    }
+    return $out;
+}
+
+/**
+ * 시계열 → 화면 곡선. 각 행에 twr(누적 배수 − 1) · bK/bQ(지수를 첫 행에서 0 으로 리베이스 · 없으면 null · 빈 날은 직전값 이월) ·
+ * dK/dQ(twr − b · 소수). 창을 잘라 넘기면 그 창의 시작일이 기준이 된다(미니 60일 · 팝업 기간 버튼).
+ *
+ * @param array $rows  d 오름차순 (pf_value_series)
+ * @param array $bench ['K'=>[d=>종가], 'Q'=>[d=>종가]]
+ */
+function pf_value_curves(array $rows, array $bench = []): array
+{
+    $twr  = pf_twr($rows);
+    $base = [];
+    $last = [];
+    $out  = [];
+    foreach ($rows as $i => $r) {
+        $o = $r;
+        $o['twr'] = $twr[$i] - 1;
+        foreach (['K', 'Q'] as $m) {
+            $c = $bench[$m][(string)$r['d']] ?? ($last[$m] ?? null);
+            if ($c !== null) {
+                $last[$m] = $c;
+                if (!isset($base[$m])) $base[$m] = $c;
+            }
+            $b = ($c !== null && !empty($base[$m])) ? ($c / $base[$m] - 1) : null;
+            $o['b' . $m] = $b;
+            $o['d' . $m] = ($b === null) ? null : $o['twr'] - $b;
+        }
+        $out[] = $o;
+    }
+    return $out;
 }
 ?>

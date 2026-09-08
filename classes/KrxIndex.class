@@ -1,0 +1,176 @@
+<?php
+/**
+ * classes/KrxIndex.class — KOSPI·KOSDAQ 지수 일별 종가 (2026-09-07 신설)
+ *
+ * 포트폴리오 일일 결산(stock/lib/value.php)의 「지수 대비 수익률」 벤치마크.
+ * 사이트 어디에도 지수 «수준»의 이력이 없었다(모닝브리핑은 투자자별 매매동향만 긁는다) — 여기가 처음이자 단일본.
+ *
+ * ══ 원천 = 네이버 모바일 지수 API (사용자 선택 2026-09-07 · KRX OpenAPI 는 이용신청·T+1 이라 두지 않았다) ═══
+ *   GET https://m.stock.naver.com/api/index/{KOSPI|KOSDAQ}/price?pageSize=N&page=M
+ *   실측 2026-09-07 — pageSize 는 <b>60 까지</b>(100 은 HTTP 400) · page 60×20 이 2021-10 까지 있다 ·
+ *   모바일 UA + Referer 가 필요하다 · 응답은 <b>최신순</b>
+ *   [{localTradedAt:"2026-09-07", closePrice:"6,964.55", openPrice, highPrice, lowPrice, fluctuationsRatio, …}]
+ *   ★장중에 부르면 <b>오늘 행이 장중값</b>으로 온다 → 15:30 전에는 오늘 행을 저장하지 않는다(장중값이 종가처럼 굳는다).
+ *
+ * ══ 규칙 ═══
+ * ★ 표 `krx_index_daily` 는 시장 사실이라 `krx_` 소속(pf_ 아님). PK (mkt, d). 지수엔 수정치가 없으니 UPSERT 로 덮기만 한다.
+ * ★ DDL 은 크론·수동 잡에서만(`ensureTable`) — 요청 경로에서 부르지 않는다(hotel·recipe·StockName 과 같은 규칙).
+ * ★ 콜은 아낀다 — 매일 몫은 page 1 한 장(20행) × 2시장 = 2콜(eod 15:50 · krx 13:05). 백필은 60행/콜 · 4년 ≈ 17콜 × 2.
+ * ★ 서버 IP 가 네이버 시세 크롤링과 같다 — 백필 루프에도 usleep 을 둔다(CRON.md §4).
+ */
+class KrxIndex
+{
+    const MARKETS  = ['K' => 'KOSPI', 'Q' => 'KOSDAQ'];
+    const PAGE_MAX = 60;
+    const URL      = 'https://m.stock.naver.com/api/index/%s/price?pageSize=%d&page=%d';
+    const UA       = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Safari/604.1';
+
+    private PDO $pdo;
+
+    public function __construct(PDO $pdo)
+    {
+        $this->pdo = $pdo;
+    }
+
+    public function ensureTable(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS krx_index_daily (
+              mkt        CHAR(1)       NOT NULL COMMENT 'K=코스피 Q=코스닥',
+              d          DATE          NOT NULL,
+              c          DECIMAL(12,2) NOT NULL COMMENT '종가',
+              o          DECIMAL(12,2) NULL,
+              h          DECIMAL(12,2) NULL,
+              l          DECIMAL(12,2) NULL,
+              updated_at DATETIME      NOT NULL,
+              PRIMARY KEY (mkt, d),
+              KEY idx_kid_d (d)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+    }
+
+    /** 한 장 받기 — 최신순 [['d','c','o','h','l'], …]. HTTP·JSON 실패는 예외(빈 배열과 가른다 — dt/qm 의 「빈 목록」 교훈). */
+    public function fetch(string $mkt, int $page = 1, int $size = 20): array
+    {
+        $name = self::MARKETS[$mkt] ?? null;
+        if ($name === null) throw new InvalidArgumentException("알 수 없는 시장 {$mkt}");
+        $size = max(1, min(self::PAGE_MAX, $size));
+        $url  = sprintf(self::URL, $name, $size, max(1, $page));
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 15,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_USERAGENT      => self::UA,
+            CURLOPT_HTTPHEADER     => ['Referer: https://m.stock.naver.com/', 'Accept: application/json'],
+        ]);
+        $body = curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err  = curl_error($ch);
+        curl_close($ch);
+        if ($body === false || $code !== 200) throw new RuntimeException("네이버 지수 {$name} p{$page}: HTTP {$code} {$err}");
+
+        $j = json_decode($body, true);
+        if (!is_array($j)) throw new RuntimeException("네이버 지수 {$name} p{$page}: JSON 이 아닙니다");
+
+        $out = [];
+        foreach ($j as $r) {
+            $d = (string)($r['localTradedAt'] ?? '');
+            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $d)) continue;
+            $c = self::num($r['closePrice'] ?? null);
+            if ($c === null || $c <= 0) continue;
+            $out[] = [
+                'd' => $d, 'c' => $c,
+                'o' => self::num($r['openPrice'] ?? null),
+                'h' => self::num($r['highPrice'] ?? null),
+                'l' => self::num($r['lowPrice'] ?? null),
+            ];
+        }
+        return $out;
+    }
+
+    private static function num($v): ?float
+    {
+        if ($v === null || $v === '') return null;
+        $s = str_replace(',', '', (string)$v);
+        return is_numeric($s) ? (float)$s : null;
+    }
+
+    /** 오늘 행을 넣어도 되는가 — 15:30 전엔 장중값이라 안 넣는다(마감 뒤 크론이 다시 받는다) */
+    private static function todayOk(): bool
+    {
+        return (int)date('Hi') >= 1530;
+    }
+
+    /** 매일 몫 — 두 시장 최근 몇 장. ['rows'=>저장 행, 'calls'=>콜 수, 'last'=>최신 날짜] */
+    public function collect(int $pages = 1, int $size = 20): array
+    {
+        $rows = 0; $calls = 0; $last = null;
+        foreach (array_keys(self::MARKETS) as $mkt) {
+            for ($p = 1; $p <= $pages; $p++) {
+                $rs = $this->fetch($mkt, $p, $size);
+                $calls++;
+                if (!$rs) break;
+                $rows += $this->upsert($mkt, $rs);
+                if ($last === null || $rs[0]['d'] > $last) $last = $rs[0]['d'];
+                if ($p < $pages) usleep(200000);
+            }
+        }
+        return ['rows' => $rows, 'calls' => $calls, 'last' => $last];
+    }
+
+    /** 백필 — from 날짜까지 60행/콜로 되짚는다. 표는 캐시라 몇 번 돌려도 같은 값으로 덮인다. */
+    public function backfill(string $from, int $maxCalls = 80): array
+    {
+        $rows = 0; $calls = 0;
+        foreach (array_keys(self::MARKETS) as $mkt) {
+            for ($p = 1; $calls < $maxCalls; $p++) {
+                $rs = $this->fetch($mkt, $p, self::PAGE_MAX);
+                $calls++;
+                if (!$rs) break;
+                $rows += $this->upsert($mkt, $rs);
+                if (end($rs)['d'] < $from) break;
+                usleep(200000);
+            }
+        }
+        return ['rows' => $rows, 'calls' => $calls];
+    }
+
+    private function upsert(string $mkt, array $rs): int
+    {
+        $today = date('Y-m-d');
+        $skipToday = !self::todayOk();
+        $st = $this->pdo->prepare("
+            INSERT INTO krx_index_daily (mkt, d, c, o, h, l, updated_at) VALUES (?,?,?,?,?,?,NOW())
+            ON DUPLICATE KEY UPDATE c=VALUES(c), o=VALUES(o), h=VALUES(h), l=VALUES(l), updated_at=NOW()
+        ");
+        $n = 0;
+        foreach ($rs as $r) {
+            if ($r['d'] > $today) continue;
+            if ($skipToday && $r['d'] === $today) continue;
+            $st->execute([$mkt, $r['d'], $r['c'], $r['o'], $r['h'], $r['l']]);
+            $n++;
+        }
+        return $n;
+    }
+
+    /** ['K' => [d => 종가], 'Q' => [d => 종가]] — 표가 없으면 예외(부르는 쪽이 삼킨다) */
+    public function series(string $from, ?string $to = null): array
+    {
+        $to = $to ?: date('Y-m-d');
+        $st = $this->pdo->prepare("SELECT mkt, d, c FROM krx_index_daily WHERE d BETWEEN ? AND ? ORDER BY d");
+        $st->execute([$from, $to]);
+        $out = ['K' => [], 'Q' => []];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) $out[(string)$r['mkt']][(string)$r['d']] = (float)$r['c'];
+        return $out;
+    }
+
+    public function lastDate(): ?string
+    {
+        $v = $this->pdo->query("SELECT MAX(d) FROM krx_index_daily")->fetchColumn();
+        return $v ? (string)$v : null;
+    }
+}
+?>

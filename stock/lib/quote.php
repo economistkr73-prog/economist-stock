@@ -192,7 +192,19 @@ function quote_sources(): array
             'probe' => 'all_stock_info',
             'warn'  => [
                 '★<b>사이트 전 주가의 단일 원천</b>이다. 네이버가 막히면 다섯 화면이 함께 멈춘다.',
-                '★정규 경로에 <b>DELETE … NOT IN</b> 이 있다 — 네이버가 부분 응답을 주면 종목이 통째로 사라진다.',
+                '★정규 경로에 <b>DELETE … NOT IN</b> 이 있다 — 그래서 가드가 둘이다(2026-09-04): '
+                . '①한 시장이라도 못 받은 회차는 <b>삭제를 건너뛴다</b>(페이지 하나가 실패하면 그 시장이 통째로 빈다) '
+                . '②<b>지켜보는 종목</b>(포트폴리오·보유·관심·단타 풀 = <code>NaverFinanceAPI::keepCodes()</code>)은 '
+                . '목록에 없어도 지우지 않는다.',
+                '★★<b>네이버 전종목 목록은 상장 종목을 빠뜨린다</b> — 실측 2026-09-04 유니트론텍 142210 '
+                . '(네이버 종목 페이지엔 KOSDAQ·거래중인데 marketValue 목록엔 없다) · 헝셩그룹 900270 · '
+                . '경방·DL 도 빠진 적이 있다. 그래서 <b>이 표에 없다 ≠ 없는 종목</b>이다. '
+                . '지켜보는 종목이 빠지면 정규 회차 끝에 <b>폴링 API 로 메운다</b>(회차당 1콜 안팎). '
+                . '오른쪽 「지금」의 <b>「지켜보는 종목 중 빠짐」이 0 이어야 정상</b>이다 — 빨갛게 뜨면 다음 정규 회차가 메우고, '
+                . '단타 화면을 열어도 실시간 경로(키움·네이버 폴링)가 없는 행을 만든다(UPSERT · 예전엔 UPDATE 라 헛돌았다).',
+                '★★<b>종목명의 주인은 이 표가 아니다</b> — <code>classes/StockName.class</code>(아래 ⑦ 종목명 사슬)가 잇는다. '
+                . '<code>SELECT stock_name FROM all_stock_info</code> 를 화면에 새로 적지 않는다 '
+                . '(단타 보유 목록이 유니트론텍을 <b>코드로</b> 보인 원인이 정확히 그것이었다).',
                 '★정규 수집은 <b>평일만</b>이다. 주말에 열면 금요일 값이다.',
                 '★★<b>NXT(시간외)를 쓰지 않는다</b>(2026-08-06 · <code>USE_NXT=false</code>). '
                 . '이 표는 사이트 전 화면이 읽는 단일 원천이라, 여기에 시간외 값이 들어오면 마감 뒤 '
@@ -608,6 +620,82 @@ function quote_externals(): array
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+//  4-2. 종목명 — 어디서 오나 (단일본은 classes/StockName.class)
+// ══════════════════════════════════════════════════════════════════════════
+/**
+ * 종목명 사슬을 화면용 행으로 — <code>StockName::CHAIN</code> 을 <b>그대로</b> 읽는다.
+ * ★여기에 표 이름을 다시 적지 않는다 — 사슬을 고치면 이 표가 함께 바뀌어야 한다.
+ *
+ * @return array<int,array{0:string,1:string,2:string,3:string}> [순서, 표.컬럼, 어떤 이름, 함정]
+ */
+function quote_names(): array
+{
+    $out = [];
+    foreach (StockName::CHAIN as $i => [$table, $col, $codeCol, $what, $warn]) {
+        $out[] = [(string)($i + 1), $table . '.' . $col, $what, $warn];
+    }
+    return $out;
+}
+
+/**
+ * 종목 마스터(<code>stock_master</code>) 「지금」 — 종목 수 · 기준 거래일 · 지켜보는 종목 중 마스터에 없는 것.
+ * ★표가 아직 없으면(첫 동기화 전) 그 사실을 말한다 — 빈 칸은 고장으로 읽힌다.
+ *
+ * @return array{0:int,1:string} [마스터에 없는 지켜보는 종목 수, 표시 문자열]
+ */
+function quote_master_probe(PDO $pdo): array
+{
+    try {
+        $r = $pdo->query("SELECT COUNT(*) AS n, MAX(last_seen) AS mx,
+                                 SUM(last_seen = (SELECT MAX(last_seen) FROM " . StockName::TABLE . ")) AS live
+                            FROM " . StockName::TABLE)->fetch(PDO::FETCH_ASSOC);
+    } catch (Throwable $e) {
+        return [0, '<b>표가 없습니다</b> — 크론 <code>dart_krx</code> 가 첫 동기화를 합니다'];
+    }
+    $n = (int)($r['n'] ?? 0);
+    if ($n === 0) return [0, '0종목 — 크론 <code>dart_krx</code> 가 첫 동기화를 합니다'];
+    $keep = NaverFinanceAPI::keepCodes($pdo);
+    $miss = [];
+    if ($keep) {
+        $ph = implode(',', array_fill(0, count($keep), '?'));
+        $st = $pdo->prepare("SELECT code FROM " . StockName::TABLE . " WHERE code IN ({$ph})");
+        $st->execute($keep);
+        $have = array_flip(array_map('strval', $st->fetchAll(PDO::FETCH_COLUMN)));
+        $miss = array_values(array_filter($keep, static fn($c) => !isset($have[$c])));
+    }
+    $s = number_format($n) . '종목 · 기준 ' . pf_h((string)$r['mx']) . ' (그 날 상장 ' . number_format((int)$r['live']) . ')'
+       . ' · 지켜보는 종목 중 마스터에 없음 <b>' . count($miss) . '</b>'
+       . ($miss ? ' <span class="muted">(' . pf_h(implode(', ', $miss)) . ' — 상장폐지·신규상장 첫날)</span>' : '');
+    return [count($miss), $s];
+}
+
+/**
+ * 지켜보는 종목(<code>NaverFinanceAPI::keepCodes()</code>) 중 <code>all_stock_info</code> 에 없는 것.
+ * ★같은 판정을 화면에 다시 적지 않는다 — 크론이 「누구를 지키고 메우나」에 쓰는 그 함수를 그대로 본다.
+ *
+ * @return array{0:int,1:string} [빠진 수, 표시 문자열(코드·이름)]
+ */
+function quote_keep_gap(PDO $pdo): array
+{
+    try {
+        $keep = NaverFinanceAPI::keepCodes($pdo);
+        if (!$keep) return [0, '0종목'];
+        $ph = implode(',', array_fill(0, count($keep), '?'));
+        $st = $pdo->prepare("SELECT stock_code FROM all_stock_info WHERE stock_code IN ({$ph})");
+        $st->execute($keep);
+        $have = array_flip(array_map('strval', $st->fetchAll(PDO::FETCH_COLUMN)));
+        $miss = array_values(array_filter($keep, static fn($c) => !isset($have[$c])));
+        if (!$miss) return [0, '0종목 <span class="muted">(' . count($keep) . '종목 감시)</span>'];
+        $names = StockName::many($pdo, $miss);
+        $lab = [];
+        foreach ($miss as $c) $lab[] = pf_h($c . (isset($names[$c]) ? ' ' . $names[$c] : ''));
+        return [count($miss), count($miss) . '종목 <span class="muted">(' . implode(' · ', $lab) . ')</span>'];
+    } catch (Throwable $e) {
+        return [0, '—'];
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 //  5. 실측 탐침 — 카탈로그가 아니라 「지금」
 // ══════════════════════════════════════════════════════════════════════════
 /**
@@ -642,12 +730,16 @@ function quote_probe_all(PDO $pdo): array
                  FROM all_stock_info");
     $n = (int)($r['n'] ?? 0);
     $t = (int)($r['today'] ?? 0);
+    $gap = quote_keep_gap($pdo);
     $out['all_stock_info'] = ['rows' => [
         ['종목 수',        $n ? number_format($n) . '종목' : '—'],
         ['가장 최근 갱신', quote_ago($r['last_u'] ?? null)],
         ['오늘 갱신',      $n ? number_format($t) . '종목 (' . round($t / $n * 100, 1) . '%)' : '—',
                            ($n && $t > 0 && $t / $n < 0.8)],
         ['그중 신선',      quote_stale_count($pdo, NaverFinanceAPI::QUOTE_MAX_AGE, $n)],
+        /* ★지켜보는 종목이 이 표에 없으면 그 종목은 이름 대신 코드, 현재가는 빈칸이 된다(2026-09-04 유니트론텍).
+         *   0 이 아니면 빨갛게 — 다음 정규 회차(stock_news)가 메운다. 계속 남으면 상장폐지·거래정지를 의심한다. */
+        ['지켜보는 종목 중 빠짐', $gap[1], $gap[0] > 0],
         ['표 크기',        quote_size($meta, 'all_stock_info')],
     ]];
 

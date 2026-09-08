@@ -1097,14 +1097,6 @@ class Pf
         $st->execute([$flowId]);
     }
 
-    public function incomeSum(int $id): int
-    {
-        $st = $this->pdo->prepare(
-            "SELECT COALESCE(SUM(amount),0) FROM pf_income_flow WHERE portfolio_id = ?"
-        );
-        $st->execute([$id]);
-        return (int)$st->fetchColumn();
-    }
 
     public function principalSum(int $id): int
     {
@@ -1371,6 +1363,21 @@ class Pf
         return (int)$this->pdo->lastInsertId();
     }
 
+    /**
+     * 이 룰셋을 쓰는 포지션 수 — 삭제 가드용(2026-09-08).
+     *
+     * ★쓰는 룰셋을 지우면 <b>그 포지션이 사라진다</b>. positionGet()·positions() 가 pf_rule_set 과
+     *   INNER JOIN 이라 행 자체가 안 나오고, 그러면 현황·보유종목 목록은 물론 <b>예수금·수익률 합계까지</b>
+     *   조용히 틀려진다(체결·돈은 그대로 남아 있는데 화면에서만 증발한다). 종료 포지션도 센다 —
+     *   청산분의 실현손익도 같은 경로로 합계에 든다.
+     */
+    public function ruleSetUseCount(int $id): int
+    {
+        $st = $this->pdo->prepare("SELECT COUNT(*) FROM pf_position WHERE rule_set_id = ?");
+        $st->execute([$id]);
+        return (int)$st->fetchColumn();
+    }
+
     public function ruleSetDelete(int $id): void
     {
         $st = $this->pdo->prepare("DELETE FROM pf_rule_set WHERE id = ?");
@@ -1504,21 +1511,22 @@ class Pf
     /**
      * 관심종목 목록 — 종목명·현재가를 붙여 돌려준다.
      *
-     * 종목명은 all_stock_info(네이버) 를 먼저 보고, 없으면 DART 이름으로 떨어진다.
-     * 네이버 목록엔 상장인데도 빠지는 종목이 있어서다(실측 — DL·경방 등).
+     * 종목명은 <b>StockName 단일본</b>이 잇는다(2026-09-04 — 옛 「all_stock_info → DART」 사슬을 여기와
+     * stock_analysis_api 에 두 벌 적어 두고 있었다. 네이버 목록엔 상장인데도 빠지는 종목이 있다 — DL·경방·유니트론텍).
      */
     public function watchList(): array
     {
-        return $this->pdo->query("
+        $rows = $this->pdo->query("
             SELECT w.stock_code, w.added_at, w.added_price, w.memo, w.source,
                    w.adopt_at, w.adopt_bm, w.adopt_rule, w.adopt_prices,
-                   COALESCE(NULLIF(n.stock_name,''), c.corp_name, w.stock_code) AS stock_name,
+                   COALESCE(n.stock_name, '') AS stock_name,
                    n.stock_price AS last_price
               FROM pf_watchlist w
               LEFT JOIN all_stock_info n ON n.stock_code = w.stock_code
-              LEFT JOIN dart_corp_code c ON c.stock_code = w.stock_code
              ORDER BY w.added_at DESC
         ")->fetchAll(PDO::FETCH_ASSOC);
+        StockName::fill($this->pdo, $rows, 'stock_code', 'stock_name');
+        return $rows;
     }
 
     /** 관심종목 한 건 — 편입 시 added_at/added_price/source 를 pf_position 으로 승계할 때 쓴다 */
@@ -1664,11 +1672,6 @@ class Pf
         }
     }
 
-    public function positionLevelsDelete(int $positionId): void
-    {
-        $st = $this->pdo->prepare("DELETE FROM pf_position_level WHERE position_id = ?");
-        $st->execute([$positionId]);
-    }
 
     public function stockCodes(): array
     {
@@ -1825,16 +1828,7 @@ class Pf
             $q->execute([$d['stock_code'], $inSed]);
             $sed = $q->fetchColumn() ?: null;
         }
-        if ($sed === null) {
-            try {
-                $q = $this->pdo->prepare("
-                    SELECT MAX(d) FROM krx_surge
-                     WHERE code = ? AND src = 'k' AND d <= CURDATE()
-                       AND d >= DATE_SUB(CURDATE(), INTERVAL ? DAY)");
-                $q->execute([$d['stock_code'], self::SURGE_BACKFILL_MAX_DAYS]);
-                $sed = $q->fetchColumn() ?: null;
-            } catch (Throwable $e) { $sed = null; }   // krx_surge 미구축 환경
-        }
+        if ($sed === null) $sed = $this->surgeEventDerive($d['stock_code']);
 
         $st = $this->pdo->prepare("
             INSERT INTO pf_position (portfolio_id, stock_code, rule_set_id, limit_amt, started_at, status, sort_no, memo,
@@ -1856,6 +1850,29 @@ class Pf
         return (int)$this->pdo->lastInsertId();
     }
 
+    /** 기준 박스 파생 — 상한(SURGE_BACKFILL_MAX_DAYS) 안의 최신 확정 신호. 없으면 NULL(기준 박스 없음). 신규 편입·재진입이 같은 규칙을 쓴다 */
+    private function surgeEventDerive(string $code): ?string
+    {
+        try {
+            $q = $this->pdo->prepare("
+                SELECT MAX(d) FROM krx_surge
+                 WHERE code = ? AND src = 'k' AND d <= CURDATE()
+                   AND d >= DATE_SUB(CURDATE(), INTERVAL ? DAY)");
+            $q->execute([$code, self::SURGE_BACKFILL_MAX_DAYS]);
+            return $q->fetchColumn() ?: null;
+        } catch (Throwable $e) { return null; }   // krx_surge 미구축 환경
+    }
+
+    /**
+     * 재진입(2026-09-06) — 종료된 포지션에 다시 매수가 들어와 새 사이클이 열릴 때 기준 박스를 «지금» 것으로 바꾼다.
+     * 옛 사이클의 기준 박스는 그 사이클의 스냅샷(signal_date)에 남는다. 규칙 2(krx_surge 는 surge_event_d 경유)는 그대로다.
+     */
+    public function positionReenter(int $id, string $code): void
+    {
+        $st = $this->pdo->prepare("UPDATE pf_position SET surge_event_d = ? WHERE id = ?");
+        $st->execute([$this->surgeEventDerive($code), $id]);
+    }
+
     // ══ 편입 스냅샷 (position_entry_snapshot · M4 · v0.3 §2.5) ═════════════
     /**
      * ★★ <b>왜 스냅샷인가.</b> 퀀트 판정(신호·경로·계단)은 날마다 바뀐다. 그런데 「내가 왜 이걸 담았나」는
@@ -1872,7 +1889,8 @@ class Pf
     {
         $this->pdo->exec("
             CREATE TABLE IF NOT EXISTS pf_entry_snapshot (
-              position_id  INT  NOT NULL PRIMARY KEY,
+              position_id  INT  NOT NULL,
+              cycle_no     INT  NOT NULL DEFAULT 1      COMMENT '사이클 번호(pf_cycle_split · 1부터) — 재진입마다 한 벌',
               snapshot_at  DATE NOT NULL                COMMENT '편입일',
               quant_signal ENUM('accumulate','neutral','flame','none') NOT NULL DEFAULT 'none'
                                                         COMMENT '2-a 퀀트신호 — 매집형/중립/불꽃형',
@@ -1886,10 +1904,18 @@ class Pf
               ret_20d      DECIMAL(10,6) NULL           COMMENT '신호일 기준 20거래일 수익률',
               sue_latest   DECIMAL(10,4) NULL           COMMENT '편입 시점 최신 분기 SUE',
               def_ver      INT NOT NULL DEFAULT 0       COMMENT '판정 정의 버전 — 임계가 바뀌면 올린다',
-              created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+              created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              PRIMARY KEY (position_id, cycle_no)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-              COMMENT='편입 당시의 퀀트 판정 — 다시 계산하지 않는 기록(v0.3 §2.5)'
+              COMMENT='편입 당시의 퀀트 판정 — 다시 계산하지 않는 기록(v0.3 §2.5) · 사이클마다 한 벌'
         ");
+        /* 2026-09-06 — 재진입은 «같은 포지션의 새 사이클»이라 스냅샷도 사이클마다 한 벌: PK position_id → (position_id, cycle_no).
+         * 옛 행은 cycle_no=1 그대로. 「편입 당시」 칸은 최신 사이클 것을 읽고 옛 것은 회고용으로 남는다(지우지 않는다). */
+        if ($this->tableExists('pf_entry_snapshot') && !$this->columnExists('pf_entry_snapshot', 'cycle_no')) {
+            $this->pdo->exec("ALTER TABLE pf_entry_snapshot
+                ADD cycle_no INT NOT NULL DEFAULT 1 COMMENT '사이클 번호(pf_cycle_split · 1부터) — 재진입마다 한 벌' AFTER position_id,
+                DROP PRIMARY KEY, ADD PRIMARY KEY (position_id, cycle_no)");
+        }
         /* 2026-08-03 — 스냅샷을 <b>자기완결</b>로 만든다. floors_count(개수)만으로는 「어느 가격이
          * 계단이었나」를 되짚을 수 없어서, 그 값은 여전히 krx_surge 를 다시 읽어야 나왔다.
          * 레벨을 값으로 들고 있으면 캐시가 어떻게 되든 편입 당시 그림이 남는다(§2.1 「참조가 아니라 값」). */
@@ -1900,18 +1926,19 @@ class Pf
         }
     }
 
-    /** 편입 스냅샷 저장 — 포지션당 한 벌. 이미 있으면 덮지 않는다(편입은 한 번이다) */
-    public function entrySnapshotSave(int $positionId, array $s): void
+    /** 편입 스냅샷 저장 — (포지션, 사이클)당 한 벌. 이미 있으면 덮지 않는다(편입은 한 번이다 · 재진입은 다음 cycle_no) */
+    public function entrySnapshotSave(int $positionId, array $s, int $cycleNo = 1): void
     {
         if ($positionId <= 0) return;
         $this->entrySnapshotEnsure();
         $st = $this->pdo->prepare("
             INSERT IGNORE INTO pf_entry_snapshot
-                (position_id, snapshot_at, quant_signal, flame_reason, box_path,
+                (position_id, cycle_no, snapshot_at, quant_signal, flame_reason, box_path,
                  floors_count, box_levels, signal_date, ret_20d, sue_latest, def_ver)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)");
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)");
         $st->execute([
             $positionId,
+            max(1, $cycleNo),
             $s['snapshot_at']  ?? date('Y-m-d'),
             in_array($s['quant_signal'] ?? '', ['accumulate', 'neutral', 'flame'], true)
                 ? $s['quant_signal'] : 'none',
@@ -1942,11 +1969,11 @@ class Pf
         return $st->fetchColumn() ?: null;
     }
 
-    /** 편입 스냅샷 한 건 (없으면 null) */
+    /** 편입 스냅샷 한 건 — <b>최신 사이클</b> 것 (없으면 null). 옛 사이클 것은 회고용으로 표에 남아 있다 */
     public function entrySnapshot(int $positionId): ?array
     {
         try {
-            $st = $this->pdo->prepare("SELECT * FROM pf_entry_snapshot WHERE position_id = ?");
+            $st = $this->pdo->prepare("SELECT * FROM pf_entry_snapshot WHERE position_id = ? ORDER BY cycle_no DESC LIMIT 1");
             $st->execute([$positionId]);
             return $st->fetch(PDO::FETCH_ASSOC) ?: null;
         } catch (Throwable $e) {

@@ -241,6 +241,7 @@ class Dt
         $rows = $this->finishRows($rows);
         foreach ($rows as &$r) $r['init_status'] = (int)$r['init_status'];
         unset($r);
+        StockName::fill($this->pdo, $rows);   // all_stock_info·dt_pool 둘 다 비면 사슬의 나머지가 잇는다
         return $rows;
     }
 
@@ -325,11 +326,7 @@ class Dt
             }
         }
 
-        if ($name === '') {
-            $st = $this->pdo->prepare("SELECT stock_name FROM all_stock_info WHERE stock_code=?");
-            $st->execute([$code]);
-            $name = (string)($st->fetchColumn() ?: $code);
-        }
+        if ($name === '') $name = StockName::one($this->pdo, $code);   // 종목명 단일본 (없으면 코드)
         $next = (int)$this->pdo->query("SELECT COALESCE(MAX(sort_no),0)+1 FROM dt_pool")->fetchColumn();
 
         $st = $this->pdo->prepare("
@@ -557,11 +554,14 @@ class Dt
             try {
                 $cut = date('Y-m-d H:i:s', NaverFinanceAPI::staleCutoff($age));
                 $ph  = implode(',', array_fill(0, count($codes), '?'));
+                /* ★「신선한 것」을 골라 «나머지»를 낡음으로 본다 (2026-09-04) — 「낡은 것」을 고르면
+                 *   표에 행이 없는 종목(네이버 목록이 빠뜨린 유니트론텍 142210)이 영영 대상에서 빠진다. */
                 $st  = $this->pdo->prepare(
                     "SELECT stock_code FROM all_stock_info
-                      WHERE stock_code IN ($ph) AND (uDate IS NULL OR uDate < ?)");
+                      WHERE stock_code IN ($ph) AND uDate IS NOT NULL AND uDate >= ?");
                 $st->execute(array_merge($codes, [$cut]));
-                $stale = $st->fetchAll(PDO::FETCH_COLUMN);
+                $fresh = array_flip(array_map('strval', $st->fetchAll(PDO::FETCH_COLUMN)));
+                $stale = array_values(array_filter($codes, static fn($c) => !isset($fresh[$c])));
             } catch (Throwable $e) { /* 판정 실패 — 전부 받는다 */ }
         }
         $out['stale'] = count($stale);
@@ -597,17 +597,23 @@ class Dt
          *   안 바뀐 행(거래정지 등)은 MySQL 이 UPDATE 를 건너뛰어 영원히 「낡음」으로 잡힌다.
          * ★stock_cap·stock_vol_cap 은 <b>0 이 아닐 때만</b> 덮는다(위 주석).
          * ★stock_rate_rt 에 직전 등락률을 밀어 둔다 — 기존 갱신 경로와 같은 규칙이다. */
+        /* ★UPSERT 다 (2026-09-04 · UPDATE 에서 바꿈) — 네이버 목록이 빠뜨려 행이 없는 종목은 키움이 준
+         *   이름(stk_nm)으로 행을 만든다. 이름은 비어 있을 때만 채운다(정규 수집의 거래소명을 덮지 않는다). */
         $up = $this->pdo->prepare("
-            UPDATE all_stock_info
-               SET stock_rate_rt = stock_rate,
-                   stock_price   = :price,
-                   stock_yrate   = :yrate,
-                   stock_rate    = :rate,
-                   stock_vol     = :vol,
+            INSERT INTO all_stock_info
+                   (stock_code, stock_name, stock_price, stock_yrate, stock_rate, stock_vol,
+                    stock_vol_cap, stock_cap, stock_vol_tot, uDate)
+            VALUES (:code, :name, :price, :yrate, :rate, :vol, :amt0, :cap0, 0, NOW())
+            ON DUPLICATE KEY UPDATE
+                   stock_name    = IF(stock_name = '', VALUES(stock_name), stock_name),
+                   stock_rate_rt = stock_rate,
+                   stock_price   = VALUES(stock_price),
+                   stock_yrate   = VALUES(stock_yrate),
+                   stock_rate    = VALUES(stock_rate),
+                   stock_vol     = VALUES(stock_vol),
                    stock_cap     = IF(:cap > 0, :cap2, stock_cap),
                    stock_vol_cap = IF(:amt > 0, :amt2, stock_vol_cap),
                    uDate         = NOW()
-             WHERE stock_code = :code
         ");
 
         $n = 0;
@@ -619,11 +625,12 @@ class Dt
                     ':yrate' => (int)$x['diff'],
                     ':rate'  => (float)$x['rate'],
                     ':vol'   => (int)$x['vol'],
-                    ':cap'   => (int)$x['capEok'],  ':cap2' => (int)$x['capEok'],
-                    ':amt'   => (float)$x['amtEok'], ':amt2' => (float)$x['amtEok'],
+                    ':cap'   => (int)$x['capEok'],  ':cap2' => (int)$x['capEok'],  ':cap0' => (int)$x['capEok'],
+                    ':amt'   => (float)$x['amtEok'], ':amt2' => (float)$x['amtEok'], ':amt0' => (float)$x['amtEok'],
                     ':code'  => $code,
+                    ':name'  => mb_substr(trim((string)($x['name'] ?? '')), 0, 40),
                 ]);
-                $n += $up->rowCount();
+                if ($up->rowCount() > 0) $n++;   // INSERT 1 · UPDATE 2 — 「종목 수」로 센다
             }
             $this->pdo->commit();
         } catch (Throwable $e) {
@@ -787,6 +794,16 @@ class Dt
             if (!isset($map[$c])) continue;
             if ((string)$r['name'] === '') unset($r['name']);   // 이름이 비면 코드를 남긴다
             $map[$c] = array_merge($map[$c], $r);
+        }
+
+        /* ★이름은 StockName 단일본이 잇는다 (2026-09-04) — all_stock_info 에 없는 종목(네이버 목록이 빠뜨린
+         *   유니트론텍 142210)이 코드 그대로 보였다. 그 표는 이름의 주인이 아니다. */
+        $bare = [];
+        foreach ($map as $c => $r) if ((string)$r['name'] === (string)$c) $bare[] = (string)$c;
+        if ($bare) {
+            foreach (StockName::many($this->pdo, $bare) as $c => $nm) {
+                if (isset($map[$c])) $map[$c]['name'] = $nm;
+            }
         }
 
         $st = $this->pdo->prepare(

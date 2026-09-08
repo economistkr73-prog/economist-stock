@@ -30,7 +30,7 @@ echo "<!DOCTYPE html><html lang='ko'><head><meta charset='utf-8'>";
 echo "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
 echo "<title>차트 스타일 갤러리</title>";
 echo "<script src='/style/dailychart.js?v=62'></script>";
-echo "<script src='/style/bandchart.js?v=3'></script>";      // 구성 ⑥ 밴드형 (dailychart 위의 얇은 층)
+echo "<script src='/style/bandchart.js?v=4'></script>";      // 구성 ⑥ 밴드형 (dailychart 위의 얇은 층)
 if (!$embed) nav_css();
 echo <<<'HTML'
 <style>

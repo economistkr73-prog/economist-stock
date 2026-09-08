@@ -41,7 +41,15 @@
     + 'border:1px solid #e6ebf1;border-radius:4px;padding:2px 7px;white-space:nowrap}'
     + '.band-cur .v{color:#22303f;font-size:12px}'
     + '.band-cur .na{color:#a0a8b2}'
-    + '.band-leg .st em{font-style:normal;color:#a0a8b2}';
+    + '.band-leg .st em{font-style:normal;color:#a0a8b2}'
+    /* 공시 배지 — 색은 일봉 SUE 칩(dailychart .dc-mk.buy/.sell)과 같은 빨강·파랑 */
+    + '.band-mk-layer{position:absolute;left:0;top:0;right:0;bottom:0;z-index:2;pointer-events:none;overflow:hidden}'
+    + '.band-mk{position:absolute;width:26px;height:26px;margin:-13px 0 0 -13px;border-radius:50%;'
+    + 'display:flex;align-items:center;justify-content:center;font-size:9.5px;font-weight:700;line-height:1;'
+    + 'letter-spacing:-.2px;color:#fff;border:2px solid #fff;box-sizing:border-box;box-shadow:0 1px 4px rgba(20,40,70,.35)}'
+    + '.band-mk.hit{background:#d32f2f}.band-mk.shock{background:#1565c0}.band-mk.mid{background:#8a96a3}'
+    + '.band-mk.na{background:#e3e8ee;color:#7a8794}'
+    + '.band-leg .bl i.mk-i{width:10px;height:10px;border-radius:50%;margin-right:-2px}';
     document.head.appendChild(st);
   }
 
@@ -82,6 +90,66 @@
     }
     if (typeof t === 'object' && t.year) return t.year + '-' + pad2(t.month) + '-' + pad2(t.day);
     return String(t);
+  }
+
+  /* ── 공시 배지 — 계단이 꺾이는 그 자리에 «그때 PER·PBR» 를 원 안에 (2026-09-04) ──
+   * 값·색의 재료는 서버(band.php `marks`)가 정한다 — 색 문턱(hit/shock)도 응답에 실려 온다(Thr 단일본).
+   * ★HTML 층이다 — 가격축 autoscale 에 안 잡히고, 스크롤·줌·리사이즈를 따라 다시 놓는다(dailychart 의 칩과 같은 방식).
+   * ★pointer-events 없음 — 배지가 마우스를 먹으면 그 자리에서 크로스헤어·드래그가 끊긴다. 분기·공시일·SUE 는 판독기가 말한다. */
+  function fmtMult(v, kind) {
+    if (v === null || v === undefined || !isFinite(v)) return '–';
+    if (kind === 'per') return v >= 100 ? String(Math.round(v)) : v.toFixed(1);
+    return v >= 10 ? v.toFixed(1) : v.toFixed(2);
+  }
+  function badges(dc, host, data, kind, at) {
+    var marks = (data && data.marks) || [];
+    if (!marks.length || typeof dc.main !== 'function') return 0;
+    var hit = +data.hit || 1, shock = +data.shock || -1;
+    var layer = document.createElement('div');
+    layer.className = 'band-mk-layer';
+    host.appendChild(layer);
+    var items = [];
+    marks.forEach(function (m) {
+      var r = at[m.t];
+      if (!r) return;                                // 계단날이 주가선에 없다 — 그릴 자리가 없다
+      var v = m[kind];
+      var cls = (v === null || v === undefined) ? 'na'
+              : (m.sue === null || m.sue === undefined) ? 'mid'
+              : (m.sue >= hit ? 'hit' : (m.sue <= shock ? 'shock' : 'mid'));
+      var el = document.createElement('div');
+      el.className = 'band-mk ' + cls;
+      el.textContent = fmtMult(v, kind);
+      layer.appendChild(el);
+      items.push({ t: m.t, won: r.won, el: el });
+    });
+    var D = 26, raf = 0;
+    function place() {
+      raf = 0;
+      var ts = dc.chart.timeScale(), main = dc.main();
+      var cw = host.clientWidth, ch = host.clientHeight, placed = [];
+      items.forEach(function (it) {
+        var x = ts.timeToCoordinate(it.t), y = main ? main.priceToCoordinate(it.won) : null;
+        if (x === null || y === null || x < -D || x > cw + D) { it.el.style.display = 'none'; return; }
+        // 이웃과 겹치면 위로 한 칸씩 피한다 — 5년·좁은 폭(모바일 1열)에서 분기 배지가 서로 덮는다
+        for (var k = 0; k < 4; k++) {
+          var over = placed.some(function (p) { return Math.abs(p.x - x) < D && Math.abs(p.y - y) < D; });
+          if (!over) break;
+          y -= D + 2;
+        }
+        placed.push({ x: x, y: y });
+        it.el.style.display = '';
+        it.el.style.left = x + 'px';
+        it.el.style.top  = Math.max(D / 2, Math.min(ch - D / 2, y)) + 'px';
+      });
+    }
+    function soon() { if (!raf) raf = requestAnimationFrame(place); }
+    dc.chart.timeScale().subscribeVisibleLogicalRangeChange(soon);
+    ['mousemove', 'mouseup', 'wheel', 'touchmove', 'touchend'].forEach(function (ev) {
+      host.addEventListener(ev, soon, { passive: true });
+    });
+    if (w.ResizeObserver) new ResizeObserver(soon).observe(host);
+    soon(); setTimeout(soon, 80);                    // fitContent 뒤 좌표가 잡히는 한 박자를 기다린다
+    return items.length;
   }
 
   /**
@@ -136,6 +204,11 @@
       at[p.t] = { won: p.v / shrs, mult: (v === null || v === undefined || v <= 0) ? null : p.v / v };
     });
 
+    // 공시 배지 (계단이 꺾이는 날) + 판독기가 그 날을 짚으면 분기·접수일·SUE 를 덧붙인다
+    var nMk = badges(dc, host, data, kind, at);
+    var mkAt = {};
+    (data.marks || []).forEach(function (m) { mkAt[m.t] = m; });
+
     var read = document.createElement('div');
     read.className = 'band-cur';
     host.appendChild(read);
@@ -144,10 +217,14 @@
     function show(t) {
       var r = at[t];
       if (!r) { read.innerHTML = ''; return; }
+      var m = mkAt[t];
       read.innerHTML = '<b>' + fmtDate(t) + '</b> ' + label + ' '
         + (r.mult === null ? '<span class="na">—</span>'
                            : '<b class="v">' + r.mult.toFixed(2) + 'x</b>')
-        + ' <span class="na">·</span> ' + fmtWon(r.won);
+        + ' <span class="na">·</span> ' + fmtWon(r.won)
+        + (m ? ' <span class="na">·</span> ' + m.q + ' 공시 ' + fmtDate(m.d)
+             + (m.sue === null || m.sue === undefined ? '' : ' <span class="na">SUE</span> ' + m.sue)
+             : '');
     }
     show(lastT);                                   // 커서가 없을 때는 «최신»을 띄워 둔다
     dc.chart.subscribeCrosshairMove(function (p) {
@@ -161,6 +238,13 @@
         html += '<span class="bl"><i style="background:' + COLORS[i % COLORS.length] + '"></i>'
               + m + 'x</span>';
       });
+      if (nMk) {
+        html += '<span class="bl" title="계단이 꺾이는 자리의 원형 배지 — 안의 숫자는 공시일 시총 기준 «그때» ' + label
+              + ' (위 표의 ' + label + ' 열·일봉 SUE 배지와 같은 값) · 빨강 어닝서프라이즈(SUE ≥ ' + data.hit
+              + ') · 파랑 어닝쇼크(SUE ≤ ' + data.shock + ') · 회색 그 사이 · 연회색 적자·자본잠식">'
+              + '<i class="mk-i" style="background:#d32f2f"></i><i class="mk-i" style="background:#1565c0"></i>'
+              + '공시 ' + nMk + '건 — 안의 숫자는 그때 ' + label + '</span>';
+      }
       /* 기간 최저·최고 — 밴드선(분위수)이 «말하지 않는» 양 끝이다.
        * 10% 선 아래·90% 선 위가 얼마나 먼지는 이 두 수치로만 알 수 있다. */
       var s = b.stat;

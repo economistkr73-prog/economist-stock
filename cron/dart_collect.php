@@ -460,6 +460,17 @@ function job_krx(PDO $pdo, int $keep): void
     say(sprintf('%s 기준 %s종목 · 오늘로부터 %d일 전 (%.1f초)%s', $dd, number_format($r['rows']),
         $lag, microtime(true) - $t0, $dd === $before ? ' — 이미 있던 날짜를 새로 덮었습니다' : ''));
 
+    /* ★종목 마스터 동기화 (2026-09-04) — krx_daily → stock_master (API 0회 · classes/StockName.class).
+     *   종목명·시장구분의 주인은 이 표다. 시세 스냅샷(all_stock_info)을 마스터로 쓰다가 네이버 목록이
+     *   빠뜨린 종목(유니트론텍 142210)이 화면에 코드로 뜬 사고의 재발 방지. prune 보다 먼저 한다. */
+    try {
+        $m = StockName::sync($pdo);
+        say(sprintf('종목 마스터 동기화 — %s 기준 %s종목 (신규 %d · 마스터 총 %s)', $m['date'],
+            number_format($m['rows']), $m['inserted'], number_format($m['total'])));
+    } catch (Throwable $e) {
+        say('⚠ 종목 마스터 동기화 실패: ' . $e->getMessage());
+    }
+
     /* ★ 지우기 전에 시세·거래대금을 장기 원장으로 옮긴다.
      *
      * krx_daily 는 최근 며칠만 두고 지운다(prune). 그런데 krx_amt 는 <b>전종목 일별 원장</b>이라
@@ -488,6 +499,20 @@ function job_krx(PDO $pdo, int $keep): void
             $t1 = microtime(true);
             $sg = $amt->rebuildSurge($dd);
             say(sprintf('신고가 신호 재계산 — %s 신호 %d종목 (%.1f초)', $dd, count($sg['rows']), microtime(true) - $t1));
+        }
+        /* ★ 일일 결산 재계산 (2026-09-07) — 확정 종가가 잠정치를 덮었으니 그 날짜부터 다시 잰다(지수도 최근 20일 덮음). */
+        if ($moved) {
+            try {
+                require_once $_SERVER['DOCUMENT_ROOT'] . '/stock/lib/value.php';
+                pf_value_ensure($pdo);
+                $ki = new KrxIndex($pdo);
+                $ki->ensureTable();
+                $ki->collect(1, 20);
+                $vr = pf_value_rebuild($pdo, null, $dd, null, 'k');
+                say(sprintf('일일 결산 재계산 — %s 부터 거래일 %d · %d행', $dd, $vr['days'], $vr['rows']));
+            } catch (Throwable $e) {
+                say('일일 결산 재계산 실패(무시): ' . $e->getMessage());
+            }
         }
     } catch (Throwable $e) {
         say('장기 원장 이관 실패(무시하고 계속): ' . $e->getMessage());
@@ -933,6 +958,24 @@ switch ($job) {
         } catch (Throwable $e) {
             say('잠정 적재 실패(무시하고 계속): ' . $e->getMessage());
         }
+        /* ★ 지수 + 일일 결산 (2026-09-07 · stock/lib/value.php)
+         *   방금 krx_amt 에 들어간 오늘 잠정 종가로 포트폴리오별 결산 행(pf_value_daily)을 쓴다 — 현황 카드 미니 그래프의 원천.
+         *   지수(KOSPI·KOSDAQ)는 네이버에서 최근 20일을 받아 덮는다(당일 종가 포함 · 2콜). 내일 13:05 확정값이 오면 job=krx 가 다시 잰다.
+         *   휴장일은 krx_amt 에 오늘 행이 없어 저절로 0건. 실패해도 마감 묶음은 계속 간다(캐시일 뿐이다). */
+        say('── 지수 · 일일 결산');
+        try {
+            require_once $_SERVER['DOCUMENT_ROOT'] . '/stock/lib/value.php';
+            pf_value_ensure($pdo);
+            $ki = new KrxIndex($pdo);
+            $ki->ensureTable();
+            $ir = $ki->collect(1, 20);
+            say(sprintf('지수 — KOSPI·KOSDAQ %d행 갱신 (최신 %s · %d콜)', $ir['rows'], $ir['last'] ?? '-', $ir['calls']));
+            $vr = pf_value_rebuild($pdo, null, date('Y-m-d'), null, 'e');
+            say($vr['rows'] ? sprintf('결산 — %s · 포트폴리오 %d행', $vr['to'], $vr['rows'])
+                            : '결산 — 오늘 거래일 행이 없어 건너뜀 (휴장일이거나 잠정 적재 0건)');
+        } catch (Throwable $e) {
+            say('일일 결산 실패(무시하고 계속): ' . $e->getMessage());
+        }
         /* ★ 데이터 레벨 감시 (2026-08-02)
          * "크론은 성공했는데 데이터가 안 들어온" 케이스는 실행 감시(cron_job.php 중앙
          * 실패 알림)로는 못 잡는다 — 마감 묶음이 끝난 시점에 all_stock_info 의 당일
@@ -986,6 +1029,29 @@ switch ($job) {
         }
         break;
 
+    /* ── 포트폴리오 일일 결산 백필·재생성 (수동 · 2026-09-07) — &from=YYYY-MM-DD [&to=] [&fid=] [&idx=1 지수 백필]
+     *   표(pf_value_daily)는 캐시라 몇 번 돌려도 같은 값으로 덮인다. 매일 몫은 eod(오늘)·krx(확정 재계산) 안에 있다.
+     *   idx=1 이면 지수를 from 까지 되짚어 받는다(60행/콜 · 4년 ≈ 34콜) — 없으면 최근 20일만. */
+    case 'pfvalue':
+        require_once $_SERVER['DOCUMENT_ROOT'] . '/stock/lib/value.php';
+        pf_value_ensure($pdo);
+        $vFrom = (string)($_GET['from'] ?? date('Y-m-d', strtotime('-60 days')));
+        $vTo   = (string)($_GET['to'] ?? date('Y-m-d'));
+        $vFid  = (isset($_GET['fid']) && $_GET['fid'] !== '') ? (int)$_GET['fid'] : null;
+        $ki = new KrxIndex($pdo);
+        $ki->ensureTable();
+        if (!empty($_GET['idx'])) {
+            $ir = $ki->backfill($vFrom);
+            say(sprintf('지수 백필 — %d콜 · %d행 (%s 까지)', $ir['calls'], $ir['rows'], $vFrom));
+        } else {
+            $ir = $ki->collect(1, 20);
+            say(sprintf('지수 최근 — %d행 (최신 %s)', $ir['rows'], $ir['last'] ?? '-'));
+        }
+        $t1 = microtime(true);
+        $vr = pf_value_rebuild($pdo, $vFid, $vFrom, $vTo, 'b');
+        say(sprintf('결산 %s ~ %s — 거래일 %d · %d행 (%.1f초)%s', $vr['from'], $vr['to'], $vr['days'], $vr['rows'],
+            microtime(true) - $t1, $vFid !== null ? " · 포트폴리오 {$vFid}" : ''));
+        break;
     /* ── 마감 변동 요약 미리보기 — 보내지 않고 본문만 찍는다(pf_alert_log 도 안 적는다). 실제 발송은 eod 끝. */
     case 'move':
         require_once $_SERVER['DOCUMENT_ROOT'] . '/stock/lib/alert.php';

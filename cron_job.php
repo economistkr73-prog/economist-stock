@@ -246,6 +246,11 @@ const TASKS = [
     ],
 
     // ── 크론 미등록: 수동·SSH 전용 (길거나 1회성) ────────────────────────
+    'pf_value' => [
+        'file' => 'cron/dart_collect.php', 'bg' => false, 'cron' => '',
+        'get'  => ['key' => DART_KEY, 'job' => 'pfvalue'],
+        'desc' => '[수동] 포트폴리오 일일 결산 백필·재생성 (&from=YYYY-MM-DD [&to=] [&fid=] [&idx=1 지수 백필]) — 매일 몫은 dart_eod·dart_krx 안',
+    ],
     'dart_daily' => [
         'file' => 'cron/dart_collect.php', 'bg' => false, 'cron' => '',
         'get'  => ['key' => DART_KEY, 'job' => 'daily'],

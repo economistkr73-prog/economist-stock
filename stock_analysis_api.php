@@ -113,7 +113,7 @@ function api_stock(string $action, PDO $pdo): void
 
         // ── 관심종목 (pf_watchlist · 2026-08-20 단타 탐색 패널용) ──
         //   행 모양을 top30 과 똑같이 맞춘다 — 소비자(단타 renderTop)가 두 목록을 한 렌더러로 그린다.
-        //   시세·이름은 Pf::watchList() 와 같은 조인(all_stock_info 우선 · DART 이름 폴백).
+        //   시세는 all_stock_info · 이름은 StockName 단일본(Pf::watchList 와 같은 사슬 — SQL 사본을 두지 않는다).
         //   정렬은 상승률 순(같은 날 사용자 지시 — 담은 순에서 바꿈) · 동률은 최근 담은 것 위.
         //   시세가 아직 없는 종목(rate=0)은 그 값 그대로 줄을 선다 — 없는 값을 지어내지 않는다.
         //   ★판정을 여기서 새로 내리지 않는다 — 배지는 top30 과 같은 quant_augment 단일본이다.
@@ -124,7 +124,7 @@ function api_stock(string $action, PDO $pdo): void
             try { $held = array_flip((new Dt($pdo))->heldCodes()); } catch (Throwable $e) { /* 판정 실패 시 전체 표시 */ }
             $rows = $pdo->query("
                 SELECT w.stock_code AS code,
-                       COALESCE(NULLIF(s.stock_name,''), c.corp_name, w.stock_code) AS name,
+                       COALESCE(s.stock_name, '') AS name,
                        COALESCE(s.stock_price, 0)   AS price,
                        COALESCE(s.stock_rate, 0)    AS rate,
                        COALESCE(s.stock_cap, 0)     AS cap,
@@ -133,10 +133,10 @@ function api_stock(string $action, PDO $pdo): void
                        COALESCE(sh.etf_count, 0)      AS etfCnt
                   FROM pf_watchlist w
                   LEFT JOIN all_stock_info s           ON s.stock_code  = w.stock_code
-                  LEFT JOIN dart_corp_code c           ON c.stock_code  = w.stock_code
                   LEFT JOIN all_stock_holdings_info sh ON sh.stock_code = w.stock_code
                  ORDER BY rate DESC, w.added_at DESC
             ")->fetchAll(PDO::FETCH_ASSOC);
+            StockName::fill($pdo, $rows, 'code', 'name');   // 종목명 단일본 (2026-09-04 · Pf::watchList 와 같은 사슬)
 
             $out = [];
             foreach ($rows as $r) {

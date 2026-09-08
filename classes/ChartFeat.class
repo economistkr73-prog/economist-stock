@@ -225,6 +225,25 @@ class ChartFeat
             'note' => '메인=1분 고정([당일]300봉/[전체]5거래일·휠) · 보조=5분 10거래일 · 일봉은 다크 관찰용 한 벌'
                     . ' · 실계좌 체결은 <b>기록</b>이라 얹는다(판정이 아니다) — 분봉은 체결 시각이 있는 것만',
         ],
+        /* 멀티차트(2026-09-04 사용자 요청 · HTS 멀티차트 · 상단 메뉴 독립 항목) — 단타 종목(풀 ∪ 보유)의 일봉을
+         * 가로×세로 격자로. 차트는 단타 일봉 패널 그대로(구성 ④)라 차트틀·지표를 'short' 와 나눠 쓴다.
+         * ★기간 바·지표 바 <b>하나</b>가 격자 전체를 조종한다(갤러리와 같다) — 그래서 전체화면 off.
+         * ★범례는 기본 꺼짐 — 칸이 좁다. 켜면 칸 머리줄(종목명 옆)에 붙는다. 기준선(당일전고·현재가)은 켠다.
+         * ★기간은 이 화면이 따로 기억(chart_pref 'multi' 행) · 높이는 격자가 정하므로 기억하지 않는다. */
+        'multi' => [
+            'label' => '멀티차트', 'pref' => 'short', 'style' => 4,
+            'url' => '/stock/index.php?mode=multi',
+            'data' => ['intraday', 'daily'], 'lock' => [],
+            'on' => ['overlay.intraday_ref'], 'off' => ['fullscreen', 'legend.values'],
+            'note' => '단타 일봉 패널 한 벌을 N칸 격자로 — 바 하나가 전부를 조종(갤러리 방식) · 격자는 주소(&c=&r=)·쿠키, 기간은 이 화면이 따로 기억',
+        ],
+        'move' => [
+            'label' => '마감 변동 리포트', 'pref' => 'short', 'style' => 4,
+            'url' => '/stock/index.php?mode=move',
+            'data' => ['intraday', 'daily'], 'lock' => [],
+            'on' => ['overlay.intraday_ref'], 'off' => ['fullscreen', 'legend.values'],
+            'note' => '마감 변동 알림이 쏜 종목을 카드로(미니 일봉 + 뉴스 · 2026-09-04) — 멀티차트 칸과 같은 한 벌 · 바 하나가 전부 조종 · 기간은 이 화면이 따로 기억',
+        ],
         'gallery' => [
             'label' => '차트설정 (이 화면)', 'pref' => 'gallery', 'style' => 0,
             'url' => '/chart_gallery.php',

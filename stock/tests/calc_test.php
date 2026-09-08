@@ -1746,6 +1746,213 @@ t_eq('평가손익 null 이면 null', null, pf_eval_rate(null, 1000000));
 t_eq('카드 아랫줄 문구', '매입 대비 -10.00%', pf_eval_sub(-100000, 1000000));
 t_eq('보유 없으면 빈 줄', '', pf_eval_sub(0, 0));
 
+// ══ 사이클 가르기 ════════════════════════════════════════════════════════
+t_head('pf_cycle_split — 전량매도가 경계 · 재진입은 같은 포지션의 새 사이클 (2026-09-06 SK하이닉스 실측)');
+$cyRows = [
+    ['id' => 1, 'side' => 'buy',  'step_no' => 1, 'traded_at' => '2026-08-04', 'price' => 1565000, 'qty' => 1],
+    ['id' => 2, 'side' => 'buy',  'step_no' => 2, 'traded_at' => '2026-08-07', 'price' => 1429000, 'qty' => 1],
+    ['id' => 3, 'side' => 'sell', 'step_no' => 0, 'traded_at' => '2026-08-20', 'price' => 1780000, 'qty' => 2],
+    ['id' => 4, 'side' => 'buy',  'step_no' => 1, 'traded_at' => '2026-09-06', 'price' => 1647000, 'qty' => 1],
+];
+$cy = pf_cycle_split($cyRows);
+t_eq('사이클 수', 2, count($cy['cycles']));
+t_eq('현재 사이클 번호', 2, $cy['no']);
+t_eq('현재 사이클은 진행 중', false, $cy['closed']);
+t_eq('현재 사이클 체결 1건', 1, count($cy['cur']));
+t_eq('현재 사이클 1차 = 새 진입가', 1647000.0, pf_trades_by_step($cy['cur'])[1]['price'], 1e-6);
+t_eq('전부 합치면 옛 1차와 섞인다(그래서 가른다)', 1606000.0, pf_trades_by_step($cyRows)[1]['price'], 1e-6);
+t_eq('현재 사이클엔 2차가 없다', false, isset(pf_trades_by_step($cy['cur'])[2]));
+t_eq('사이클 나이 시작 = 새 1차', '2026-09-06', pf_cycle_age($cy['cur'], '2026-09-06')['start']);
+t_eq('마지막 매수일도 새 사이클', '2026-09-06', pf_last_buy_at($cy['cur']));
+$lgAll = pf_ledger($cyRows);
+t_eq('원장은 전부 — 보유 1주', 1, $lgAll['held_qty']);
+t_eq('원장 실현손익은 옛 사이클 것이 남는다', true, $lgAll['realized_pl'] > 0);
+t_eq('원장 누적단가는 새 사이클 값(전량매도에서 되돌아감 · 수수료 포함이라 새 매수 한 건만의 원장과 같다)', pf_ledger([$cyRows[3]])['avg_cost'], $lgAll['avg_cost'], 1e-6);
+$cl = pf_cycle_split(array_slice($cyRows, 0, 3));
+t_eq('전량매도로 끝난 이력 — 사이클 1', 1, $cl['no']);
+t_eq('… 종료', true, $cl['closed']);
+t_eq('종료 사이클도 cur 로 돌려준다(기록)', 3, count($cl['cur']));
+$ps = pf_cycle_split([$cyRows[0], $cyRows[1], ['id' => 3, 'side' => 'sell', 'step_no' => 0, 'traded_at' => '2026-08-20', 'price' => 1780000, 'qty' => 1]]);
+t_eq('일부 매도는 경계가 아니다', 1, count($ps['cycles']));
+t_eq('… 진행 중', false, $ps['closed']);
+$e = pf_cycle_split([]);
+t_eq('체결 없음 → 사이클 1', 1, $e['no']);
+t_eq('… 빈 배열', 0, count($e['cur']));
+$oo = pf_cycle_split([$cyRows[3], $cyRows[2], $cyRows[1], $cyRows[0]]);
+t_eq('입력 순서와 무관(원장과 같은 정렬)', 2, $oo['no']);
+t_eq('보유 없는 매도는 무시', 1, count(pf_cycle_split([['id' => 9, 'side' => 'sell', 'traded_at' => '2026-01-01', 'price' => 100, 'qty' => 5], $cyRows[0]])['cycles']));
+
+
+// ══ 재진입 사다리 자동 선택 (2026-09-08) ═══════════════════════════════════
+t_head('pf_box_pick_levels — 1차 = 새 진입가 · 아래 지지선만 · 촘촘한 것은 건너뛴다');
+$pkC = [1341000, 1272000, 1082000, 922000, 625000, 1450000, 1500000];   // 위 두 개는 진입가보다 높다
+$pk  = pf_box_pick_levels($pkC, 1298000);
+t_eq('풀린다', true, $pk !== null);
+t_eq('1차 = 새 진입가', 1298000.0, $pk['levels'][1]['price'], 1e-6);
+/* ★1,272,000 은 새 진입가 대비 −2.0% 라 «건너뛴다» — 넣으면 pf_box_ladder_build 가 아예 못 푼다(아래에서 증명).
+   2% 짜리 차수는 물타기 단계로도 뜻이 없다. */
+t_eq('2차 = 촘촘한 1,272,000 을 건너뛴 1,082,000', 1082000.0, $pk['levels'][2]['price'], 1e-6);
+t_eq('… 그 조합(1,272,000 포함)은 솔버가 거부한다', null, pf_box_ladder_build([1298000, 1272000, 1082000, 922000, 625000]));
+t_eq('… 빼면 풀린다(4차)', 4, count(pf_box_ladder_build([1298000, 1082000, 922000, 625000])['levels']));
+t_eq('진입가 위(1,450,000·1,500,000)는 안 쓴다', false, in_array(1450000.0, array_column($pk['levels'], 'price'), true));
+t_eq('차수 4개(촘촘한 것 하나가 빠졌다)', 4, count($pk['levels']));
+t_eq('비중 합 1.0', 1.0, array_sum(array_column($pk['levels'], 'weight')), 0.002);
+t_eq('1차 비중이 가장 얇지 않다(계단형)', true, $pk['levels'][2]['weight'] >= $pk['levels'][1]['weight'] - 0.001);
+
+/* 촘촘한 후보 — minGap 3% 안에 붙은 값은 건너뛴다 */
+$pkTight = pf_box_pick_levels([1290000, 1285000, 1280000, 1000000, 800000], 1298000);
+t_eq('촘촘한 것을 건너뛰고 풀린다', true, $pkTight !== null);
+t_eq('… 2차는 1,290,000 이 아니다(진입가와 0.6% 차)', true, $pkTight['levels'][2]['price'] <= 1000000);
+
+/* 아래 후보가 하나뿐 — 3개를 못 채우면 null */
+t_eq('아래 후보 1개 → null', null, pf_box_pick_levels([1200000], 1298000));
+t_eq('아래 후보 없음 → null', null, pf_box_pick_levels([1400000, 1500000], 1298000));
+t_eq('빈 후보 → null', null, pf_box_pick_levels([], 1298000));
+t_eq('진입가 0 → null', null, pf_box_pick_levels([100, 200], 0));
+
+/* 5개로 안 풀리면 깊은 것부터 빼고 다시 — 마지막이 너무 얕아 실패하는 조합 */
+$pkDeep = pf_box_pick_levels([1200000, 1000000, 800000, 600000, 400000, 200000], 1298000);
+t_eq('후보가 많아도 5차까지만', 5, count($pkDeep['levels']));
+t_eq('… 1차는 진입가', 1298000.0, $pkDeep['levels'][1]['price'], 1e-6);
+
+// ══ 사이클 매도 안분 (2026-09-08 삼양식품 003230 실측) ═══════════════════════
+/* 재진입 첫 매수가 «옛 사이클의 매도»로 상계돼 보유수량 0 이 됐다.
+ * 사다리 차수는 현재 사이클 체결로 만드는데 매도 수량만 원장 전체에서 왔기 때문이다.
+ * 돈(누적단가·실현손익)은 원장 전체가 맞고, 가르는 것은 «수량 안분»뿐이다. */
+t_head('pf_cycle_sold — 사다리 안분은 «그 사이클 안에서만» 상계한다 (2026-09-08 삼양식품 실측)');
+$smRows = [
+    ['id' => 1, 'side' => 'buy',  'step_no' => 1, 'traded_at' => '2026-08-18 09:54', 'price' => 1328000, 'qty' => 1],
+    ['id' => 2, 'side' => 'sell', 'step_no' => 0, 'traded_at' => '2026-08-26 11:28', 'price' => 1534000, 'qty' => 1],
+    ['id' => 3, 'side' => 'buy',  'step_no' => 1, 'traded_at' => '2026-09-08 11:53', 'price' => 1298000, 'qty' => 1],
+];
+$smCy  = pf_cycle_split($smRows);
+$smCur = $smCy['cur'];
+t_eq('사이클 2 가 시작됐다', 2, $smCy['no']);
+t_eq('현재 사이클 매도 = 0주', 0, pf_cycle_sold($smCur));
+t_eq('옛 사이클(종료)의 매도 = 1주', 1, pf_cycle_sold($smCy['cycles'][0]));
+t_eq('원장(포지션 전체)의 매도는 여전히 1주', 1, pf_ledger($smRows)['sell_qty']);
+
+/* 퀀트 사다리(절대가격) — 화면 값 그대로. 한도 2,000만 · 1차 비중 6.94% → 누적목표 1,388,000 */
+$smLv = [];
+foreach ([[1, 1341000, 0.0694], [2, 1272000, 0.0740], [3, 1082000, 0.1919], [4, 922000, 0.1797], [5, 625000, 0.4851]] as [$no, $px, $w]) {
+    $smLv[$no] = ['price' => $px, 'weight' => $w, 'target_rate' => 0.15, 'delay_days' => 0];
+}
+$smLed = pf_ledger($smRows);
+$smC   = pf_position_calc([], pf_trades_by_step($smCur), 20000000, 1297000, [], $smLed, $smLv, pf_cycle_sold($smCur));
+
+t_eq('보유수량 = 1주 (원장)', 1, $smC['filled_qty']);
+t_eq('★1차 보유수량 = 1주 (안분이 옛 매도를 물지 않는다)', 1, $smC['steps'][1]['held_qty']);
+t_eq('★1차 보유원가 = 1,298,000', 1298000.0, $smC['steps'][1]['held_amount'], 1e-6);
+t_eq('1차 누적목표 = 1,388,000', 1388000.0, $smC['steps'][1]['plan_cum'], 1e-6);
+t_eq('★1차 과부족 = −90,000 (0 − 1,388,000 이 아니다)', -90000.0, $smC['steps'][1]['gap'], 1e-6);
+t_eq('2차 누적목표 = 2,868,000', 2868000.0, $smC['steps'][2]['plan_cum'], 1e-6);
+t_eq('★다음 매수금액 = 2,868,000 − 1,298,000', 1570000.0, $smC['next_amount'], 1e-6);
+t_eq('… 다음 수량 1주 (2주가 아니다)', 1, $smC['next_qty']);
+t_eq('실현손익은 옛 사이클 것이 남는다', true, $smC['realized_pl'] > 0);
+t_eq('이 사이클의 매도 = 0', 0, $smC['sold_qty']);
+t_eq('총 매수 = 이 사이클 1주', 1, $smC['bought_qty']);
+
+/* 넘기지 않으면(옛 동작) 그대로 0 이 된다 — 이 줄이 회귀의 표식이다 */
+$smBug = pf_position_calc([], pf_trades_by_step($smCur), 20000000, 1297000, [], $smLed, $smLv);
+t_eq('★cycleSold 를 안 넘기면 옛 결함이 재현된다(보유 0)', 0, $smBug['steps'][1]['held_qty']);
+
+/* 사이클 «안에서»의 일부 매도는 그대로 안분한다 — 이번 수정이 그 기능을 끄지 않았나 */
+$smPart = [
+    ['id' => 1, 'side' => 'buy',  'step_no' => 1, 'traded_at' => '2026-08-18', 'price' => 1000000, 'qty' => 4],
+    ['id' => 2, 'side' => 'buy',  'step_no' => 2, 'traded_at' => '2026-08-20', 'price' => 900000,  'qty' => 4],
+    ['id' => 3, 'side' => 'sell', 'step_no' => 0, 'traded_at' => '2026-08-25', 'price' => 1100000, 'qty' => 2],
+];
+$smPc = pf_cycle_split($smPart);
+t_eq('일부 매도는 같은 사이클', 1, $smPc['no']);
+t_eq('그 사이클의 매도 = 2주', 2, pf_cycle_sold($smPc['cur']));
+$smP = pf_position_calc([], pf_trades_by_step($smPc['cur']), 20000000, 950000, [], pf_ledger($smPart), $smLv, pf_cycle_sold($smPc['cur']));
+t_eq('1차 보유 = 3주 (8주 중 2주 매도 → 비례 안분)', 3, $smP['steps'][1]['held_qty']);
+t_eq('2차 보유 = 3주', 3, $smP['steps'][2]['held_qty']);
+t_eq('보유 합계 = 6주', 6, $smP['filled_qty']);
+
+// ══ 일일 결산 (2026-09-07) — pf_value_at · pf_twr · pf_value_curves ═══════════════════
+t_head('일일 결산 — pf_value_at (d 까지의 체결 · 그 날 종가)');
+$vt = [['id' => 1, 'side' => 'buy',  'step_no' => 1, 'traded_at' => '2026-01-05', 'price' => 1000, 'qty' => 10],
+       ['id' => 2, 'side' => 'sell', 'step_no' => 0, 'traded_at' => '2026-01-10', 'price' => 1200, 'qty' => 4]];
+$vp = [['code' => 'A', 'rows' => $vt, 'prm' => []]];
+$v0 = pf_value_at($vp, ['A' => 1100], '2026-01-04', 1000000, 0);
+t_eq('체결 전 — 보유 0', 0, $v0['n_pos']);
+t_eq('체결 전 — 예수금 = 원금', 1000000, $v0['cash'], 1e-6);
+t_eq('체결 전 — 수익률 0', 0.0, $v0['rate'], 1e-9);
+$v1 = pf_value_at($vp, ['A' => 1100], '2026-01-05', 1000000, 0);
+t_eq('매수일 — 총매입(수수료 0.34% 포함)', 10034.0, $v1['cost'], 1e-6);
+t_eq('매수일 — 총평가 = 10주 × 1,100', 11000.0, $v1['eval'], 1e-6);
+t_eq('매수일 — 평가손익', 966.0, $v1['pl'], 1e-6);
+t_eq('매수일 — 예수금 = 원금 − 매수지출', 1000000 - 10034, $v1['cash'], 1e-6);
+t_eq('매수일 — 추정자산 = 예수금 + (평가 − 매도비용 0.3%)', 1000000 - 10034 + 11000 - 33, $v1['asset'], 1e-6);
+t_eq('매수일 — 수익률 = 추정자산 ÷ 원금 − 1', (1000000 - 10034 + 11000 - 33) / 1000000 - 1, $v1['rate'], 1e-12);
+$v2 = pf_value_at($vp, ['A' => 1150], '2026-01-10', 1000000, 5000);
+t_eq('매도 뒤 — 보유 6주 평가', 6900.0, $v2['eval'], 1e-6);
+t_eq('매도 뒤 — 실현손익 = 매도수취 − 누적단가×4 + 이월배당', 772.0 + 5000, $v2['real'], 1e-6);
+t_eq('매도 뒤 — 예수금엔 배당이 들어간다', 1000000 + 5000 + 4785.6 - 10034, $v2['cash'], 1e-6);
+t_eq('매도 뒤 — 원금(분모)은 배당과 무관', 1000000, $v2['principal'], 1e-6);
+t_eq('매도 뒤 — 총매입은 남은 6주 원가', 6020.4, $v2['cost'], 1e-6);
+$v3 = pf_value_at($vp, [], '2026-01-10', 1000000, 0);
+t_eq('종가 없음 — gaps 1', 1, $v3['gaps']);
+t_eq('종가 없음 — 누적단가로 평가(손익 0)', 0.0, $v3['pl'], 1e-6);
+$v4 = pf_value_at([$vp[0], ['code' => 'B', 'rows' => [['id' => 3, 'side' => 'buy', 'traded_at' => '2026-01-07', 'price' => 500, 'qty' => 2]], 'prm' => []]],
+                  ['A' => 1100, 'B' => 600], '2026-01-08', 0, 0);
+t_eq('두 포지션 합 — 평가', 11000 + 1200, $v4['eval'], 1e-6);
+t_eq('두 포지션 — n_pos', 2, $v4['n_pos']);
+t_eq('원금 0 — 수익률 null', null, $v4['rate']);
+t_eq('원금 0 — 예수금 음수(체결이 원금보다 먼저면 데이터 결함이 드러난다)', true, $v4['cash'] < 0);
+t_eq('빈 입력', 0, pf_value_at([], [], '2026-01-01', 0, 0)['n_pos']);
+
+t_head('일일 결산 — pf_twr (원금 입출금을 뺀 시간가중)');
+$tw = pf_twr([['asset' => 100, 'principal' => 100], ['asset' => 110, 'principal' => 100],
+              ['asset' => 210, 'principal' => 200], ['asset' => 231, 'principal' => 200]]);
+t_eq('첫 행 1.0', 1.0, $tw[0], 1e-9);
+t_eq('+10%', 1.1, $tw[1], 1e-9);
+t_eq('원금 100 추가한 날 — 수익 0 이면 그대로(단순 수익률이면 여기서 뛴다)', 1.1, $tw[2], 1e-9);
+t_eq('그 뒤 +10% → 1.21', 1.21, $tw[3], 1e-9);
+$tw2 = pf_twr([['asset' => 0, 'principal' => 0], ['asset' => 100, 'principal' => 100], ['asset' => 90, 'principal' => 100]]);
+t_eq('자산 0 에서 시작 — 첫 입금일은 변화 없음', 1.0, $tw2[1], 1e-9);
+t_eq('… 이어서 −10%', 0.9, $tw2[2], 1e-9);
+t_eq('빈 배열', 0, count(pf_twr([])));
+/* ★이월손익(carry)은 «외부 유입»이다 (2026-09-08 실측 — 넣지 않았더니 9,667,146원이 하루 +15.97% 운용수익이 됐다) */
+$twC = pf_twr([
+    ['asset' => 100, 'principal' => 100, 'carry' => 0],
+    ['asset' => 110, 'principal' => 100, 'carry' => 0],
+    ['asset' => 210, 'principal' => 100, 'carry' => 100],   // 이월 100 유입 — 운용수익 0
+    ['asset' => 231, 'principal' => 100, 'carry' => 100],
+]);
+t_eq('이월 들어온 날 — 수익 0 이면 그대로(안 빼면 여기서 +91%)', 1.1, $twC[2], 1e-9);
+t_eq('그 뒤 +10% → 1.21', 1.21, $twC[3], 1e-9);
+$twD = pf_twr([
+    ['asset' => 100, 'principal' => 100, 'carry' => 0],
+    ['asset' => 110, 'principal' => 100, 'carry' => 0],
+]);
+t_eq('배당은 이익이라 그대로 오른다(carry 아님)', 1.1, $twD[1], 1e-9);
+$twE = pf_twr([['asset' => 100, 'principal' => 100], ['asset' => 110, 'principal' => 100]]);
+t_eq('carry 칸이 없는 옛 행은 옛 동작 그대로', 1.1, $twE[1], 1e-9);
+/* 원금과 이월이 같은 날 함께 들어와도 둘 다 빠진다 */
+$twF = pf_twr([
+    ['asset' => 100, 'principal' => 100, 'carry' => 0],
+    ['asset' => 300, 'principal' => 150, 'carry' => 50],
+]);
+t_eq('원금 +50 · 이월 +50 · 운용 +100 → +50%', 1.5, $twF[1], 1e-9);
+
+
+t_head('일일 결산 — pf_value_curves (지수 리베이스 · 빈 날 이월)');
+$cr = pf_value_curves([['d' => '2026-01-05', 'asset' => 100, 'principal' => 100],
+                       ['d' => '2026-01-06', 'asset' => 105, 'principal' => 100],
+                       ['d' => '2026-01-07', 'asset' => 110, 'principal' => 100]],
+                      ['K' => ['2026-01-05' => 1000, '2026-01-07' => 1050], 'Q' => []]);
+t_eq('twr 첫 행 0', 0.0, $cr[0]['twr'], 1e-9);
+t_eq('KOSPI 첫 행 0(리베이스)', 0.0, $cr[0]['bK'], 1e-9);
+t_eq('지수 없는 날은 직전값 이월 → 0', 0.0, $cr[1]['bK'], 1e-9);
+t_eq('셋째 날 KOSPI +5%', 0.05, $cr[2]['bK'], 1e-9);
+t_eq('셋째 날 twr +10%', 0.10, $cr[2]['twr'], 1e-9);
+t_eq('대비 = twr − 지수 = 10% − 5%', 0.05, $cr[2]['dK'], 1e-9);
+t_eq('KOSDAQ 없음 → null', null, $cr[2]['bQ']);
+t_eq('… 대비도 null', null, $cr[2]['dQ']);
+t_eq('원래 열은 그대로', 110.0, $cr[2]['asset'], 1e-9);
+
 // ══ 결과 ════════════════════════════════════════════════════════════════
 $pass = $GLOBALS['pf_pass'];
 $fail = $GLOBALS['pf_fail'];

@@ -17,6 +17,47 @@
 require_once __DIR__ . '/sue.php';
 
 /**
+ * 재진입 사다리 재생성 — 새 진입가 기준으로 퀀트 사다리를 다시 짠다(2026-09-08).
+ *
+ * ★<b>왜 필요한가</b>: 퀀트 사다리는 «절대 가격»이라 재진입해도 편입 때 박스가 그대로 남는다.
+ *   실측(삼양식품 003230): 사이클 2 를 1,298,000 에 시작했는데 1차 지지선은 옛 1,341,000 이었다.
+ *   하락률 룰셋은 기준가가 «직전 차수의 실매수가»라 저절로 다시 짜인다 — 그 쪽과 뜻을 맞추는 것이다.
+ * ★<b>①먼저 「그 사람이 고른 지지선」을 다시 쓴다</b> — 박스는 그대로인데 진입가만 달라진 경우가 대부분이라,
+ *   새로 훑기보다 확정본 중 진입가 «아래»만 남기고 1차만 새 진입가로 바꾸는 것이 가장 가깝다.
+ *   ★간격 문턱은 후보를 훑을 때와 <b>같다</b>(3%) — 사람이 고른 값이라도 새 1차에 너무 붙으면 그 조합은
+ *   솔버가 거부한다(실측: 1,272,000 이 새 진입가 대비 −2.0% · 빼면 4차로 풀린다).
+ * ★②고른 값이 전부 진입가 «위»면(훨씬 싸게 재진입) 박스 후보를 새로 훑는다 — 재료·규칙은 <b>편입 화면과 같다</b>
+ *   (최고 거래대금 박스의 H·L → pf_box_ladder_build). 일봉으로 안 풀리면 주봉으로 한 번 더(편입 화면이 권하는 순서).
+ *   ★새 판정을 만들지 않는다 — 후보도 비중 풀이도 전부 기존 함수 그대로다.
+ * ★못 풀면 null 이고 부르는 쪽은 <b>옛 사다리를 그대로 둔다</b>. 사다리 없는 포지션을 만들지 않는다.
+ *
+ * @param array $oldPrices 지금 확정돼 있는 차수 가격들(pf_position_level) — ①에서 먼저 쓴다
+ * @return array|null pf_box_ladder_build 결과 + src('old'=고른 값 재사용 / 'day'·'week'=박스 후보에서 새로)
+ */
+function pf_box_ladder_regen(PDO $pdo, string $code, float $entryPx, array $oldPrices = [], int $months = 24): ?array
+{
+    if ($entryPx <= 0) return null;
+
+    if ($oldPrices) {
+        $r = pf_box_pick_levels($oldPrices, $entryPx);
+        if ($r !== null) { $r['src'] = 'old'; return $r; }
+    }
+    if (!preg_match('/^\\w{6}$/', $code)) return null;
+    try {
+        $krx = new KrxAmt($pdo);
+        foreach (['day', 'week'] as $tf) {
+            $boxes = ($tf === 'week') ? $krx->weeklyBoxCandidates($code, $months)
+                                       : $krx->dailyBoxCandidates($code, $months);
+            $px = [];
+            foreach ($boxes as $b) { $px[] = (float)$b['l']; $px[] = (float)$b['h']; }
+            $r = pf_box_pick_levels($px, $entryPx);
+            if ($r !== null) { $r['src'] = $tf; return $r; }
+        }
+    } catch (Throwable $e) { /* 원장이 없어도 재진입은 끝난다 */ }
+    return null;
+}
+
+/**
  * 판정 정의 버전 — 임계·규칙을 바꾸면 <b>올린다</b>.
  * 옛 스냅샷과 새 스냅샷을 같은 잣대로 착각해 섞어 세지 않기 위한 표식이다(v0.3 §3.1.2·D7).
  * 1 = 2026-08-03 기준 (매집형 20평비≤5 ∧ 등락 0~10% · 불꽃형 등락≥20% ∨ 20평비≥20 · 계단 floors≥3)

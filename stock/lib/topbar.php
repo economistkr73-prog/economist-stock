@@ -46,6 +46,10 @@ function pf_menus(): array
          * 포트폴리오(들고 있는 것)와 <b>다른 시간축</b>의 일이라 섞지 않고 별도 섹션으로 둔다.
          * (위 3개는 /stock 밖 화면이라 순서 기준이 다르다 — 여기부터가 /stock 안이다.) */
         ['key' => 'short',     'href' => '/stock/index.php?mode=short',   'label' => '단타'],
+        /* 멀티차트는 처음 하루(2026-09-04) 단타의 하위탭이었다 — 같은 날 사용자 지시로 상단 메뉴로 올렸다
+         * (「모닝브리핑·단타·멀티차트·포트폴리오」). 단타와 같은 종목 집합을 «전부 한눈에» 보는 자리라
+         * 단타 «안»이 아니라 단타 «옆»이다. 하위탭 구역('short')은 함께 걷어냈다(탭 하나짜리 줄은 소음). */
+        ['key' => 'multi',     'href' => '/stock/index.php?mode=multi',   'label' => '멀티차트'],
         ['key' => 'dashboard', 'href' => '/stock/index.php',              'label' => '포트폴리오'],
         ['key' => 'sim',       'href' => '/stock/index.php?mode=sim',     'label' => '시뮬레이터'],
         ['key' => 'fund',      'href' => '/stock/index.php?mode=fund',    'label' => '재무분석'],

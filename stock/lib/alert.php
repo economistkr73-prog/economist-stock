@@ -42,6 +42,25 @@ function pf_alert_ensure(PDO $pdo): void
           PRIMARY KEY (kind, ref)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     ");
+    /* 마감 변동 «기록» (2026-09-04) — 알림이 쏜 그 목록을 날짜별로 남긴다. 화면(mode=move)은 읽기만 한다.
+     *   왜 저장하나 — 판정 재료(all_stock_info 오늘 등락률 · 보유/단타/관심 집합)가 다음 날이면 바뀐다.
+     *   알림이 말한 종목과 화면이 보여 주는 종목이 같으려면 «쏜 순간»의 목록을 남겨야 한다.
+     *   뉴스·차트는 저장하지 않는다 — 화면이 그때그때 받는다(비용 0 · 지난 날짜를 열면 «지금» 기준이다).
+     *   watch_n(감시 종목 수)은 머리말 「감시 N종목 중」을 위해 행마다 같은 값을 둔다. */
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS pf_move_hit (
+          d        DATE          NOT NULL,
+          code     CHAR(6)       NOT NULL,
+          name     VARCHAR(60)   NOT NULL DEFAULT '',
+          rate     DECIMAL(7,2)  NOT NULL COMMENT '등락률 %',
+          price    INT UNSIGNED  NOT NULL DEFAULT 0 COMMENT '종가',
+          amt_eok  DECIMAL(12,1) NULL COMMENT '거래대금(억원) all_stock_info.stock_vol_cap',
+          tags     VARCHAR(20)   NOT NULL DEFAULT '' COMMENT '보유·단타·관심',
+          watch_n  SMALLINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '그 날 감시 종목 수',
+          made_at  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (d, code)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ");
 }
 
 /** 신규면 true (기록까지 한다) — INSERT IGNORE 라 동시 실행에도 안전 */
@@ -381,15 +400,19 @@ function pf_alert_fresh(PDO $pdo): array
  *
  * @return string[] 발송한(또는 $dry 면 발송했을) 본문 줄 — 비면 무음
  */
-function pf_alert_move(PDO $pdo, bool $dry = false): array
+/**
+ * 마감 변동 «판정» 단일본 — 관심·단타·보유 종목 중 오늘 |등락률| ≥ Thr::EOD_MOVE_PCT 인 것.
+ * 중복방지·기록·발송은 하지 않는다(pf_alert_move 가 한다) — 그래서 백필·미리보기가 같은 판정을 쓸 수 있다.
+ * @return ['n'=>감시 종목 수, 'rows'=>[['code','name','rate','price','amt_eok','tags'] …] 상승 큰 것 → 하락 큰 것 순]
+ */
+function pf_move_scan(PDO $pdo): array
 {
-    pf_alert_ensure($pdo);
     $dt    = new Dt($pdo);
     $held  = array_flip($dt->heldCodes());
     $pool  = array_flip($dt->activeCodes());
     $watch = array_flip($pdo->query("SELECT stock_code FROM pf_watchlist")->fetchAll(PDO::FETCH_COLUMN));
     $codes = array_keys($held + $pool + $watch);
-    if (!$codes) return [];
+    if (!$codes) return ['n' => 0, 'rows' => []];
 
     $in = implode(',', array_fill(0, count($codes), '?'));
     $st = $pdo->prepare("
@@ -397,19 +420,7 @@ function pf_alert_move(PDO $pdo, bool $dry = false): array
           FROM all_stock_info
          WHERE stock_code IN ($in) AND DATE(uDate) = CURDATE()");
     $st->execute($codes);
-    $thr   = Thr::EOD_MOVE_PCT * 100;          // stock_rate 는 % 단위(3.25 = +3.25%)
-    $today = date('Y-m-d');
-    $up = $dn = [];
-    foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
-        $rate = (float)$r['stock_rate'];
-        if (abs($rate) < $thr) continue;
-        if (!$dry && !pf_alert_new($pdo, 'move', $r['stock_code'] . '|' . $today)) continue;
-        if ($rate >= 0) $up[] = $r; else $dn[] = $r;
-    }
-    if (!$up && !$dn) return [];
-    usort($up, fn($a, $b) => (float)$b['stock_rate'] <=> (float)$a['stock_rate']);   // 상승 큰 것부터
-    usort($dn, fn($a, $b) => (float)$a['stock_rate'] <=> (float)$b['stock_rate']);   // 하락 큰 것부터
-
+    $thr = Thr::EOD_MOVE_PCT * 100;          // stock_rate 는 % 단위(3.25 = +3.25%)
     $tag = function (string $c) use ($held, $pool, $watch): string {
         $t = [];
         if (isset($held[$c]))  $t[] = '보유';
@@ -417,22 +428,98 @@ function pf_alert_move(PDO $pdo, bool $dry = false): array
         if (isset($watch[$c])) $t[] = '관심';
         return implode('·', $t);
     };
+    $up = $dn = [];
+    foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+        $rate = (float)$r['stock_rate'];
+        if (abs($rate) < $thr) continue;
+        $row = [
+            'code'    => (string)$r['stock_code'],
+            'name'    => (string)$r['stock_name'],
+            'rate'    => $rate,
+            'price'   => (float)$r['stock_price'],
+            'amt_eok' => (float)$r['stock_vol_cap'],
+            'tags'    => $tag((string)$r['stock_code']),
+        ];
+        if ($rate >= 0) $up[] = $row; else $dn[] = $row;
+    }
+    usort($up, fn($a, $b) => $b['rate'] <=> $a['rate']);   // 상승 큰 것부터
+    usort($dn, fn($a, $b) => $a['rate'] <=> $b['rate']);   // 하락 큰 것부터
+    return ['n' => count($codes), 'rows' => array_merge($up, $dn)];
+}
+
+/** 기록 — INSERT IGNORE 라 같은 (날짜, 종목)을 두 번 넣어도 안전(백필·재실행) */
+function pf_move_hits_save(PDO $pdo, string $d, int $watchN, array $rows): int
+{
+    if (!$rows) return 0;
+    $st = $pdo->prepare("INSERT IGNORE INTO pf_move_hit (d, code, name, rate, price, amt_eok, tags, watch_n)
+                         VALUES (?,?,?,?,?,?,?,?)");
+    $n = 0;
+    foreach ($rows as $r) {
+        $st->execute([$d, $r['code'], mb_substr($r['name'], 0, 60), round($r['rate'], 2), (int)round($r['price']),
+                      $r['amt_eok'] !== null ? round($r['amt_eok'], 1) : null, $r['tags'], $watchN]);
+        $n += $st->rowCount() > 0 ? 1 : 0;
+    }
+    return $n;
+}
+
+/**
+ * 화면(mode=move)용 읽기 — 날짜를 안 주면 «마지막 발생일». 표가 없으면(첫 알림 전) 빈 것으로 본다(DDL 은 크론만).
+ * @return ['date'=>?string, 'n'=>감시 수, 'rows'=>[], 'prev'=>?string, 'next'=>?string, 'last'=>?string]
+ */
+function pf_move_hits(PDO $pdo, ?string $d = null): array
+{
+    $out = ['date' => $d, 'n' => 0, 'rows' => [], 'prev' => null, 'next' => null, 'last' => null];
+    try {
+        $out['last'] = $pdo->query("SELECT MAX(d) FROM pf_move_hit")->fetchColumn() ?: null;
+        if ($d === null) $d = $out['date'] = $out['last'];
+        if ($d === null) return $out;
+        $st = $pdo->prepare("SELECT code, name, rate, price, amt_eok, tags, watch_n FROM pf_move_hit
+                              WHERE d = ? ORDER BY (rate < 0), ABS(rate) DESC");   // ▲ 큰 것부터 → ▼ 큰 것부터
+        $st->execute([$d]);
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $out['n'] = max($out['n'], (int)$r['watch_n']);
+            $r['rate'] = (float)$r['rate']; $r['price'] = (int)$r['price'];
+            $r['amt_eok'] = $r['amt_eok'] !== null ? (float)$r['amt_eok'] : null;
+            $out['rows'][] = $r;
+        }
+        $st = $pdo->prepare("SELECT MAX(d) FROM pf_move_hit WHERE d < ?"); $st->execute([$d]);
+        $out['prev'] = $st->fetchColumn() ?: null;
+        $st = $pdo->prepare("SELECT MIN(d) FROM pf_move_hit WHERE d > ?"); $st->execute([$d]);
+        $out['next'] = $st->fetchColumn() ?: null;
+    } catch (Throwable $e) { /* 표 없음 = 아직 기록 없음 */ }
+    return $out;
+}
+
+function pf_alert_move(PDO $pdo, bool $dry = false): array
+{
+    pf_alert_ensure($pdo);
+    $scan  = pf_move_scan($pdo);
+    $today = date('Y-m-d');
+    $rows  = [];
+    foreach ($scan['rows'] as $r) {
+        if (!$dry && !pf_alert_new($pdo, 'move', $r['code'] . '|' . $today)) continue;
+        $rows[] = $r;
+    }
+    if (!$rows) return [];
+    $up = array_values(array_filter($rows, fn($r) => $r['rate'] >= 0));
+    $dn = array_values(array_filter($rows, fn($r) => $r['rate'] <  0));
+    if (!$dry) pf_move_hits_save($pdo, $today, $scan['n'], $rows);   // 기록 — 화면(mode=move)이 읽는 그 목록
+
     $fmt = fn(array $r, string $arrow): string => sprintf('%s %s %+.1f%% %s · %s · %s억',
-        $arrow, (string)$r['stock_name'], (float)$r['stock_rate'],
-        number_format((float)$r['stock_price']), $tag($r['stock_code']),
-        number_format((float)$r['stock_vol_cap']));
+        $arrow, $r['name'], $r['rate'], number_format($r['price']), $r['tags'], number_format($r['amt_eok']));
     $lines = array_merge(array_map(fn($r) => $fmt($r, '▲'), $up), array_map(fn($r) => $fmt($r, '▼'), $dn));
 
     /* ★자르기를 «여기서» 한다(bx_alert 와 같은 이유) — pf_alert_send 가 10줄에서 자르므로 머리말을
      *   포함해 10줄 안에 맞춘다. 머리말이 「감시 N종목 중 M건」이라 잘린 뒤에도 전체 규모는 남는다. */
     $n    = count($lines);
     $MAX  = 8;
-    $body = ['감시 ' . count($codes) . '종목 중 ±' . Thr::pct(Thr::EOD_MOVE_PCT) . '%↑ ' . $n
+    $body = ['감시 ' . $scan['n'] . '종목 중 ±' . Thr::pct(Thr::EOD_MOVE_PCT) . '%↑ ' . $n
            . '건 (▲' . count($up) . ' ▼' . count($dn) . ')'];
     foreach (array_slice($lines, 0, $MAX) as $l) $body[] = $l;
-    if ($n > $MAX) $body[] = '… 외 ' . ($n - $MAX) . '건 (단타 화면에서 전부 보기)';
+    if ($n > $MAX) $body[] = '… 외 ' . ($n - $MAX) . '건 (리포트에서 전부 보기)';
 
-    if (!$dry) pf_alert_send('📊 마감 변동 ' . $n . '건', $body, 'https://economist.kr/stock/index.php?mode=short');
+    // 링크는 리포트 화면(종목 목록 + 뉴스 + 미니 일봉 · 2026-09-04) — 거기서 종목을 누르면 단타로 간다
+    if (!$dry) pf_alert_send('📊 마감 변동 ' . $n . '건', $body, 'https://economist.kr/stock/index.php?mode=move&d=' . $today);
     return $body;
 }
 ?>

@@ -102,6 +102,8 @@ function pf_band_filings(PDO $pdo, string $code): array
  *   px:array,            // [['t'=>'YYYY-MM-DD','v'=>시총(원)], …] 주 단위
  *   per:array, pbr:array,// ['ok'=>, 'mult'=>[5], 'step'=>[['t'=>,'v'=>], …], 'n'=>, 'cover'=>,
  *                        //  'stat'=>['min'=>,'minAt'=>,'max'=>,'maxAt'=>,'cur'=>,'curAt'=>]]
+ *   marks:array,         // 공시 배지 [['t'=>계단날,'d'=>접수일,'q'=>'25.4Q','sue'=>,'per'=>,'pbr'=>], …]
+ *   hit:float, shock:float, // 배지 색 문턱(Thr::SUE_HIT / SUE_SHOCK) — JS 가 문턱을 다시 적지 않는다
  *   note:string[]
  * }
  */
@@ -110,7 +112,8 @@ function pf_band_series(PDO $pdo, string $code, int $years = 5): array
     $code = preg_replace('/[^0-9A-Za-z]/', '', $code);
     $note = [];
     $out  = ['ok' => false, 'code' => $code, 'from' => '', 'to' => '', 'shrs' => 0.0,
-             'px' => [], 'per' => null, 'pbr' => null, 'note' => $note];
+             'px' => [], 'per' => null, 'pbr' => null, 'note' => $note,
+             'marks' => [], 'hit' => Thr::SUE_HIT, 'shock' => Thr::SUE_SHOCK];
 
     /* ── ① 시총 시계열 ──────────────────────────────────────────────
      * krx_amt 는 전종목 일별 원장이다(2019-01-02~, 471만행). mktcap 결측 0건을 실측했다.
@@ -174,10 +177,18 @@ function pf_band_series(PDO $pdo, string $code, int $years = 5): array
      * 비12월 결산 회사에서 실제로 발생한다 — reprt_code 로 분기를 가릴 수 없어 원장이 건너뛴다. */
     $fil  = pf_band_filings($pdo, $code);
     $days = array_column($daily, 'd');               // 거래일 목록 (오름차순)
+    $capAt = [];
+    foreach ($daily as $r) $capAt[(string)$r['d']] = (float)$r['mktcap'];
 
-    $stepNi = []; $stepEq = [];
+    /* 공시 배지의 색 = SUE(서프라이즈 빨강 · 쇼크 파랑) — 계산 단일본 stock/lib/sue.php.
+     * 재무 이력이 짧아 SUE 가 없으면 null → 배지는 회색으로 나간다(배지를 빼는 게 아니라 «색만» 잃는다). */
+    $sue = [];
+    try { require_once __DIR__ . '/sue.php'; $sue = pf_sue_stock($pdo, $code); } catch (Throwable $e) { $sue = []; }
+
+    $stepNi = []; $stepEq = []; $marks = [];
     foreach ($ttm as $t) {
-        $dt = $fil[$t['y'] * 4 + $t['q']] ?? null;
+        $qk = $t['y'] * 4 + $t['q'];
+        $dt = $fil[$qk] ?? null;
         if ($dt === null) continue;
         // 공시 다음 거래일로 스냅 — 차트의 ▲▼ 마커와 같은 규칙(백테스트의 매수 시점 그대로)
         $at = null;
@@ -185,8 +196,31 @@ function pf_band_series(PDO $pdo, string $code, int $years = 5): array
         if ($at === null) continue;                  // 아직 시세가 안 따라온 공시(오늘 이후)
         if ($t['ni'] !== null) $stepNi[$at] = $t['ni'];
         if ($t['eq'] !== null) $stepEq[$at] = $t['eq'];
+
+        /* ── 공시 배지(2026-09-04) — 계단이 꺾이는 그 자리에 «그때 PER·PBR» 를 원 안에 적는다 ──
+         * ★값의 정의는 위 표의 PER·PBR 열·일봉 SUE 배지 셋째 줄(pf_sue_valuation)과 «같다»:
+         *   공시일 시총(휴장이면 직전 10일 내) ÷ 순이익 TTM / 그 분기말 자본총계.
+         *   배지가 서는 날(공시 다음 거래일)의 시총으로 내면 같은 공시에 화면 셋이 다른 수를 적는다.
+         * ★창 이전의 공시는 계단의 «출발값»일 뿐이라 배지를 달지 않는다 — 안 그러면 첫 거래일에 몰린다. */
+        if ($dt < $out['from']) continue;
+        $cap = 0.0;
+        $lo  = date('Y-m-d', strtotime($dt . ' -10 day'));
+        for ($i = count($days) - 1; $i >= 0; $i--) {
+            if ($days[$i] > $dt) continue;
+            if ($days[$i] < $lo) break;
+            $cap = $capAt[$days[$i]]; break;
+        }
+        $marks[] = [
+            't'   => $at, 'd' => $dt,
+            'q'   => ($t['y'] % 100) . '.' . $t['q'] . 'Q',
+            'sue' => isset($sue[$qk]) ? round($sue[$qk], 1) : null,
+            'per' => ($cap > 0 && $t['ni'] !== null && $t['ni'] > 0) ? round($cap / $t['ni'], 1) : null,
+            'pbr' => ($cap > 0 && $t['eq'] !== null && $t['eq'] > 0) ? round($cap / $t['eq'], 2) : null,
+        ];
     }
     ksort($stepNi); ksort($stepEq);
+    usort($marks, fn($a, $b) => strcmp($a['t'], $b['t']));
+    $out['marks'] = $marks;
 
     if (!$stepNi && !$stepEq) { $out['note'] = ['공시 접수일 원장이 없어 계단을 만들 수 없습니다.']; return $out; }
 
@@ -197,9 +231,6 @@ function pf_band_series(PDO $pdo, string $code, int $years = 5): array
      * ★ 다만 <b>계단이 꺾이는 날은 정확한 그 날짜로</b> 끼워 넣는다.
      *   주 단위로만 줄이면 전환일이 그 주 금요일까지 최대 4일 밀려, 「▲ 마커와 같은 날 꺾인다」는
      *   이 화면의 주장이 눈으로 어긋난다(실측: 삼성 26.1Q 공시 5/15 → 계단이 5/22 에 섰다). */
-    $capAt = [];
-    foreach ($daily as $r) $capAt[(string)$r['d']] = (float)$r['mktcap'];
-
     $keep = [];
     foreach ($daily as $r) $keep[date('oW', strtotime((string)$r['d']))] = (string)$r['d'];
     $dates = array_values($keep);

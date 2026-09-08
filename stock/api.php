@@ -11,6 +11,7 @@ require_once __DIR__ . '/lib/calc.php';
 require_once __DIR__ . '/lib/entry.php';   // M4 — 편입 스냅샷 조립 (index.php 와 함께 쓴다)
 require_once __DIR__ . '/lib/quant.php';   // 목록 퀀트 배지 판정 (상위 종목 목록과 같은 단일본)
 require_once __DIR__ . '/lib/slowlog.php'; // 느린 렌더 계측 — index.php 와 같은 임계·같은 파일
+require_once __DIR__ . '/lib/value.php';   // 일일 결산 시계열 — 체결·원금·이월배당 저장 뒤 그 날짜부터 재계산 + history
 require_login();
 pf_slowlog_boot();
 
@@ -89,6 +90,30 @@ function api_portfolio(string $action, PDO $pdo, Pf $pf): void
     $back = '/stock/index.php?mode=portfolio';
 
     switch ($action) {
+        /* ── 일일 결산 시계열 (2026-09-07) — 현황 카드 미니 그래프의 팝업이 읽는다. fid=0 이면 전체 합계.
+         *   판정·수집 없음 — pf_value_daily 를 읽어 곡선(TWR·지수 리베이스)만 붙인다. from 이 창의 기준일(0%)이다. */
+        case 'history': {
+            $fid  = (int)($_GET['fid'] ?? 0) ?: null;
+            $from = trim((string)($_GET['from'] ?? '')) ?: null;
+            if ($from !== null && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $from)) $from = null;
+            header('Content-Type: application/json; charset=utf-8');
+            try {
+                $rows  = pf_value_series($pdo, $fid, $from);
+                $bench = $rows ? pf_value_bench($pdo, $rows[0]['d'], end($rows)['d']) : [];
+                $out   = [];
+                foreach (pf_value_curves($rows, $bench) as $r) {
+                    $out[] = [
+                        'd' => $r['d'], 'eval' => round($r['eval']), 'asset' => round($r['asset']),
+                        'principal' => round($r['principal']), 'cash' => round($r['cash']),
+                        'rate' => $r['rate'], 'twr' => $r['twr'], 'bK' => $r['bK'], 'bQ' => $r['bQ'], 'dK' => $r['dK'], 'dQ' => $r['dQ'],
+                    ];
+                }
+                echo json_encode(['ok' => true, 'rows' => $out], JSON_UNESCAPED_UNICODE);
+            } catch (Throwable $e) {
+                echo json_encode(['ok' => false, 'message' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+            }
+            exit;
+        }
         case 'save':
             $name = trim($_POST['name'] ?? '');
             $id   = (int)($_POST['id'] ?? 0);
@@ -153,11 +178,14 @@ function api_portfolio(string $action, PDO $pdo, Pf $pf): void
                 pf_api_done($to, 'err', '인출 후 원금이 음수가 됩니다. 금액을 확인하세요.');
             }
             $pf->principalFlowAdd($fid, $date, $signed, $reason);
+            pf_value_touch($pdo, $fid, $date);   // 일일 결산 — 그 날짜부터 다시(원금은 분모)
             pf_api_done($to, 'ok', ($out ? '인출' : '증액') . ' ' . number_format($amt) . '원을 반영했습니다.');
 
         case 'flow_del':
             $fid = (int)($_POST['fid'] ?? 0);
+            $fdAt = pf_value_flow_date($pdo, 'pf_principal_flow', (int)($_POST['id'] ?? 0));   // 지우기 전에 날짜를 읽는다
             $pf->principalFlowDelete((int)($_POST['id'] ?? 0));
+            pf_value_touch($pdo, $fid, $fdAt);
             pf_api_done($back . ($fid ? '&fid=' . $fid : ''), 'ok', '원금 변동 기록을 삭제했습니다.');
 
         /* ── 이월손익·배당 (체결기록으로는 만들 수 없는 돈. 원금과 달리 수익률의 분자다)
@@ -175,12 +203,15 @@ function api_portfolio(string $action, PDO $pdo, Pf $pf): void
             if ($amt === 0) pf_api_done($to, 'err', '금액을 입력하세요.');
 
             $pf->incomeFlowAdd($fid, $date, $amt, $kind, $reason);
+            pf_value_touch($pdo, $fid, $date);   // 일일 결산 — 예수금·실현손익에 든다
             $label = Pf::INCOME_KINDS[$kind] ?? Pf::INCOME_KINDS['etc'];
             pf_api_done($to, 'ok', $label . ' ' . number_format($amt) . '원을 반영했습니다.');
 
         case 'income_del':
             $fid = (int)($_POST['fid'] ?? 0);
+            $fdAt = pf_value_flow_date($pdo, 'pf_income_flow', (int)($_POST['id'] ?? 0));
             $pf->incomeFlowDelete((int)($_POST['id'] ?? 0));
+            pf_value_touch($pdo, $fid, $fdAt);
             pf_api_done($back . ($fid ? '&fid=' . $fid : ''), 'ok', '이월·배당 기록을 삭제했습니다.');
 
         // ── 메모 이력 (수정 없이 신규/삭제만)
@@ -352,16 +383,18 @@ function api_ruleset(string $action, PDO $pdo, Pf $pf): void
 
         case 'delete':
             $id = (int)($_POST['id'] ?? 0);
+            /* ★쓰는 포지션이 있으면 지우지 않는다(2026-09-08) — INNER JOIN 이라 지우는 순간
+             * 그 포지션이 화면·합계에서 통째로 사라진다(Pf::ruleSetUseCount 주석). */
+            $use = $pf->ruleSetUseCount($id);
+            if ($use > 0) {
+                $rsD = $pf->ruleSetGet($id);
+                pf_api_done($back . '&rid=' . $id, 'err',
+                    '「' . ($rsD['name'] ?? $id) . '」 은 ' . $use . '개 종목이 쓰고 있어 지울 수 없습니다. '
+                    . '그 종목들의 룰셋을 먼저 바꾸세요(설정 수정).');
+            }
             $pf->ruleSetDelete($id);
             pf_api_done($back, 'ok', '룰셋을 삭제했습니다.');
 
-        case 'simulate':
-            // ajax 미리보기 (화면 JS 가 자체 계산하므로 예비용)
-            $rid   = (int)($_GET['rid'] ?? 0);
-            $limit = (float)str_replace(',', '', (string)($_GET['limit'] ?? 0));
-            header('Content-Type: application/json; charset=utf-8');
-            echo json_encode(pf_simulate($pf->ruleSteps($rid), $limit), JSON_UNESCAPED_UNICODE);
-            exit;
 
         default:
             pf_api_done($back, 'err', '알 수 없는 action 입니다.');
@@ -449,6 +482,7 @@ function api_position(string $action, PDO $pdo, Pf $pf): void
                     if ($name === '')   $name = $row['stock_name'];
                     if ($last === null) $last = (float)$row['stock_price'];
                 }
+                if ($name === '') $name = StockName::one($pdo, $code, '');   // 종목명 단일본 — 저장이라 못 찾으면 빈 값
             }
             if ($name === '') $name = $code;
 
@@ -574,11 +608,12 @@ function pf_positions_payload(Pf $pf): array
         $rows   = $tradesMap[(int)$p['id']] ?? [];
         $last   = ($p['last_price'] !== null) ? (float)$p['last_price'] : null;
         $prm    = pf_cost_params($p, $feeMap[(int)$p['broker_id']] ?? []);
-        $c      = pf_position_calc($steps, pf_trades_by_step($rows), (float)$p['limit_amt'], $last, $prm, pf_ledger($rows, $prm), $lvs);
+        $cur    = pf_cycle_split($rows)['cur'];   // 사이클(2026-09-06) — 사다리·지연은 현재 사이클, 원장은 전부 (pf_load_calc 와 같은 규칙)
+        $c      = pf_position_calc($steps, pf_trades_by_step($cur), (float)$p['limit_amt'], $last, $prm, pf_ledger($rows, $prm), $lvs, pf_cycle_sold($cur));
         // 종료 포지션은 계획·신호를 지운다 (화면과 같은 규칙 — pf_calc_closed 주석 참조)
         if ($p['status'] === 'closed') $c = pf_calc_closed($c);
         // 차수 지연 — pf_load_calc 와 같은 규칙 (세 적용 지점이 같아야 화면 간 판정이 일치한다)
-        elseif ($c !== null) $c = pf_delay_adjust($c, $steps, pf_last_buy_at($rows), date('Y-m-d'));
+        elseif ($c !== null) $c = pf_delay_adjust($c, $steps, pf_last_buy_at($cur), date('Y-m-d'));
 
         $out[] = [
             'id'           => (int)$p['id'],
@@ -633,6 +668,7 @@ function api_trade(string $action, PDO $pdo, Pf $pf): void
 
             $prm    = pf_cost_params($pos, $pf->brokerFees((int)$pos['broker_id']));
             $before = pf_ledger($pf->trades($pid), $prm);
+            $oldT   = ((int)($_POST['id'] ?? 0)) ? $pf->tradeGet((int)$_POST['id']) : null;   // 수정이면 옛 날짜부터 결산을 다시 잰다
 
             if ($side === 'sell') {
                 if ($before['held_qty'] <= 0) {
@@ -657,12 +693,21 @@ function api_trade(string $action, PDO $pdo, Pf $pf): void
             ]);
 
             $after = pf_ledger($pf->trades($pid), $prm);
+            /* 일일 결산(2026-09-07) — 체결이 바뀐 날짜부터 그 포트폴리오를 다시 잰다(캐시 · 실패해도 저장은 끝났다) */
+            pf_value_touch($pdo, (int)$pos['portfolio_id'], min($date, (string)($oldT['traded_at'] ?? $date)));
 
             // 상태 자동 전환: 첫 매수 → 보유 / 전량 매도 → 종료 / 재매수 → 보유
             $status  = $pos['status'];
             $started = $pos['started_at'];
+            $reenter = false;
             if ($side === 'buy') {
-                if ($status !== 'open' && $after['held_qty'] > 0) $status = 'open';
+                if ($status !== 'open' && $after['held_qty'] > 0) {
+                    /* 종료 → 보유 = 재진입(2026-09-06). 같은 포지션의 <b>새 사이클</b>이라 시작일을 이 매수일로 옮긴다 —
+                     * 옛 시작일이 남으면 「언제부터」(시뮬 시작·나이)가 전부 옛 사이클을 가리킨다. 사다리는 pf_cycle_split 이 가른다. */
+                    $reenter = ($status === 'closed');
+                    $status  = 'open';
+                    if ($reenter) $started = $date;
+                }
                 if (!$started) $started = $date;
             } elseif ($after['held_qty'] === 0) {
                 $status = 'closed';
@@ -671,6 +716,25 @@ function api_trade(string $action, PDO $pdo, Pf $pf): void
                 $pos['status']     = $status;
                 $pos['started_at'] = $started;
                 $pf->positionSave($pos);
+            }
+            $cyNo = 1;
+            if ($reenter) {
+                /* 기준 박스(surge_event_d)·「편입 당시」 스냅샷도 새 사이클 것으로 찍는다 — 옛 스냅샷은 (position_id, cycle_no) 로 남는다.
+                 * 신규 편입과 같은 규칙(상한 안의 최신 확정 신호 · 없으면 NULL). 실패해도 체결은 끝난다. */
+                try {
+                    $pf->positionReenter($pid, (string)$pos['stock_code']);
+                    $cyNo = pf_cycle_split($pf->trades($pid))['no'];
+                    $pf->entrySnapshotSave($pid, pf_entry_snapshot_build($pdo, (string)$pos['stock_code'], $pf->positionSurgeEventDate($pid)), $cyNo);
+                } catch (Throwable $e) { /* 기록 없이도 재진입은 끝난다 */ }
+                /* ★퀀트 사다리는 «절대 가격»이라 두면 옛 박스가 남는다 — 새 진입가 기준으로 다시 짠다
+                 * (2026-09-08 사용자 지시). 못 풀면 옛 사다리를 그대로 둔다(사다리 없는 포지션 금지). */
+                $lvOld = $pf->positionLevels($pid);
+                if ($lvOld) {
+                    try {
+                        $reLv = pf_box_ladder_regen($pdo, (string)$pos['stock_code'], $price, array_column($lvOld, 'price'));
+                        if ($reLv !== null) $pf->positionLevelsReplace($pid, $reLv['levels']);
+                    } catch (Throwable $e) { $reLv = null; }
+                }
             }
 
             if ($side === 'sell') {
@@ -682,12 +746,34 @@ function api_trade(string $action, PDO $pdo, Pf $pf): void
                 pf_api_done($back, 'ok', $msg);
             }
 
-            pf_api_done($back, 'ok', '체결 내역을 등록했습니다.');
+            /* ★재진입 안내는 «사다리 종류»에 따라 다르다(2026-09-08 감사).
+             * 하락률 룰셋은 기준가가 «직전 차수의 실매수가»라 새 1차부터 저절로 다시 짜이지만,
+             * 퀀트 사다리(pf_position_level)는 <b>절대 가격</b>이라 편입 때 정한 박스가 그대로 남는다 —
+             * 「다시 짭니다」라고 알리면 화면과 다른 말이 된다. 다시 잡으려면 설정 수정에서 지지선을 고른다. */
+            $reMsg = '체결 내역을 등록했습니다.';
+            if ($reenter) {
+                /* 사다리에 실제로 무슨 일이 있었는지 그대로 말한다 — 세 갈래다(2026-09-08).
+                 * ①퀀트 사다리를 다시 짰다 ②후보가 모자라 옛 것을 뒀다 ③하락률 룰셋이라 저절로 다시 짜인다. */
+                $lvNow = $pf->positionLevels($pid);
+                if ($lvNow && !empty($reLv)) {
+                    $reWhat = '사다리를 이 매수가 기준으로 다시 짰습니다(1차 ' . number_format($price)
+                            . '원 · ' . count($reLv['levels']) . '차'
+                            . ((($reLv['src'] ?? 'old') === 'old') ? '' : ' · 박스 후보에서 새로') . ').';
+                } elseif ($lvNow) {
+                    $reWhat = '지지선 후보가 모자라 옛 사다리를 그대로 뒀습니다 — 「설정 수정」에서 다시 고르세요.';
+                } else {
+                    $reWhat = '사다리는 이 매수가부터 다시 짭니다.';
+                }
+                $reMsg = '재진입 — ' . $cyNo . '번째 사이클을 시작했습니다. ' . $reWhat
+                       . ' (옛 체결·실현손익은 그대로 남습니다)';
+            }
+            pf_api_done($back, 'ok', $reMsg);
 
         case 'delete':
             $t   = $pf->tradeGet((int)($_POST['id'] ?? 0));
             $pid = $t ? (int)$t['position_id'] : 0;
             if ($t) $pf->tradeDelete((int)$t['id']);
+            if ($t) pf_value_touch_pos($pdo, $pid, (string)$t['traded_at']);
             pf_api_done('/stock/index.php?mode=position&id=' . $pid, 'ok', '체결 기록을 삭제했습니다.');
 
         default:
