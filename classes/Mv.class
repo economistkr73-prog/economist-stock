@@ -1,0 +1,426 @@
+<?php
+/**
+ * classes/Mv.class — 시장 변수(환율·유가·금리·금속·운임…) 일별 값  (2026-10-12 신설)
+ *
+ * 관심그룹(mode=wgroup)을 «테마»로 쓸 때 그 그룹에 연결하는 변수다. 「환율이 오를 때 유리한 종목」 같은 그룹의
+ * 오른쪽 차트에 변수 선을 겹치고, 격자 맨 앞 칸에 변수 자체의 추이를 그린다. 규칙은 CLAUDE.md 「/stock 관심그룹」 절.
+ *
+ * ══ 원천 = 네이버 모바일 시장지표 API (2026-10-12 실호출로 확정) ═══
+ *   일별 값  GET https://api.stock.naver.com/marketindex/{분류}/{코드}/prices?page=N&pageSize=M
+ *            pageSize 는 10~60(밖이면 400) · 최신순 · [{localTradedAt, closePrice:"1,332.90", …}]
+ *            localTradedAt 은 분류마다 모양이 다르다("2026-10-12" · "2026-10-09T16:00:00-05:00") → 앞 10글자 = «그 시장의 날짜».
+ *            깊이도 분류마다 다르다(원·달러는 2007년까지 · WTI 는 1,200행에 못 미친다) → 빈 장이 오면 거기가 끝이다.
+ *   목록     /marketindex/exchange · /energy · /metals · /bond/majors · /majors/part1 · /majors/part2
+ *            (standardInterest = 기준금리는 일별 값 주소가 없다(404) — 목록에서 뺀다)
+ *   국내 지수 GET https://m.stock.naver.com/api/index/{KOSPI|KOSDAQ}/price (KrxIndex 와 같은 주소 · 분류 'index')
+ *
+ * ══ 규칙 ═══
+ * ★ 변수는 «그때그때 등록»한다 — 목록(catalog)에 있는 (분류,코드)만 받는다. 아무 글자나 네이버에 묻는 문이 되지 않게.
+ * ★ 등록할 때 한 번 과거를 되짚고(BACKFILL_CALLS 장까지 · 응답 30초 벽 안), 그 뒤는 ①마감 크론(dart_eod 15:50 · dart_krx 13:05 에 묶음)
+ *   ②화면이 그 변수를 볼 때 STALE_SEC 보다 낡았으면 한 장(1콜)으로 잇는다. 「보는 변수만 촘촘히」다.
+ * ★ 가장 최근 하루는 잠정일 수 있다(환율은 장중 고시 회차 · 해외 선물은 지연 시세) — 다음에 받을 때 덮인다. 화면은 기준일을 적는다.
+ * ★ 표 `mv_var`·`mv_daily` 는 원천에서 언제든 다시 받을 수 있는 캐시다. 그룹과의 연결은 `wg_group_var`(관심그룹 소속).
+ * ★ DDL 은 ensureTables()(api schema · CLI)에서만 — 요청 경로에서 부르지 않는다.
+ * ★ 서버 IP 가 네이버 시세 크롤링과 같다 — 콜 사이에 usleep 을 둔다(CRON.md §4). 변수는 VAR_MAX 개까지.
+ */
+class Mv
+{
+    /** 분류 => [표시 이름, 기본 단위] — 일별 값 주소가 있는 것만 */
+    const CATS = [
+        'exchange'         => ['환율',     '원'],
+        'exchangeWorld'    => ['국제환율', ''],
+        'energy'           => ['에너지',   ''],
+        'metals'           => ['금속',     ''],
+        'bond'             => ['국채금리', '%'],
+        'domesticInterest' => ['국내금리', '%'],
+        'transport'        => ['운임지수', ''],
+        'index'            => ['국내지수', ''],
+    ];
+    /** 목록을 주는 주소(분류 무관 — 응답 안의 categoryType 으로 가른다) */
+    const LISTS = ['exchange', 'energy', 'metals', 'bond/majors', 'majors/part1', 'majors/part2'];
+    const INDEXES = ['KOSPI' => '코스피', 'KOSDAQ' => '코스닥'];
+    /** 네이버 목록에는 없지만 일별 값 주소가 되는 것(실호출로 확인한 것만 적는다) — [분류, 코드, 이름] */
+    const EXTRA = [['bond', 'KR3YT=RR', '한국 국채 3년']];
+
+    const BASE = 'https://api.stock.naver.com/marketindex/';
+    const UA   = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Safari/604.1';
+
+    const PAGE_MAX       = 60;
+    const PAGE_MIN       = 10;
+    const VAR_MAX        = 40;      // 등록 변수 상한 — 마감 크론이 변수당 1콜을 쓴다
+    const GROUP_VAR_MAX  = 4;       // 한 그룹에 연결하는 변수(첫째가 주 변수)
+    const TARGET_DAYS    = 1250;    // 등록할 때 되짚는 깊이(≈ 5년)
+    const BACKFILL_CALLS = 22;      // 한 요청에서 쓰는 콜(60행 × 22 ≈ 1,320행 · 실측 한 콜 0.3초 안팎)
+    const STALE_SEC      = 10800;   // 화면이 볼 때 이보다 낡았으면 한 장으로 잇는다(3시간)
+    const CATALOG_TTL    = 86400;
+    const NAME_MAX       = 40;
+
+    private PDO $pdo;
+
+    public function __construct(PDO $pdo)
+    {
+        $this->pdo = $pdo;
+    }
+
+    // ══ 스키마 ══════════════════════════════════════════════════════════
+    public function ensureTables(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS mv_var (
+              id         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+              cat        VARCHAR(20)  NOT NULL COMMENT '네이버 시장지표 분류',
+              code       VARCHAR(30)  NOT NULL COMMENT '네이버 코드(reutersCode)',
+              name       VARCHAR(40)  NOT NULL,
+              unit       VARCHAR(12)  NOT NULL DEFAULT '',
+              digits     TINYINT      NOT NULL DEFAULT 2 COMMENT '소수 자리',
+              last_d     DATE         NULL COMMENT '가장 최근 값의 날짜',
+              tried_at   DATETIME     NULL COMMENT '마지막으로 받으려 한 시각(성공·실패 무관)',
+              created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE KEY uq_cat_code (cat, code)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='시장 변수'
+        ");
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS mv_daily (
+              var_id INT UNSIGNED  NOT NULL,
+              d      DATE          NOT NULL,
+              v      DECIMAL(16,4) NOT NULL,
+              PRIMARY KEY (var_id, d),
+              CONSTRAINT fk_mv_daily_var FOREIGN KEY (var_id) REFERENCES mv_var(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='시장 변수 일별 값'
+        ");
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS wg_group_var (
+              group_id INT UNSIGNED NOT NULL,
+              var_id   INT UNSIGNED NOT NULL,
+              sort_no  INT NOT NULL DEFAULT 0 COMMENT '1 = 주 변수',
+              PRIMARY KEY (group_id, var_id),
+              CONSTRAINT fk_wg_gv_group FOREIGN KEY (group_id) REFERENCES wg_group(id) ON DELETE CASCADE,
+              CONSTRAINT fk_wg_gv_var   FOREIGN KEY (var_id)   REFERENCES mv_var(id)  ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='관심그룹에 연결한 시장 변수'
+        ");
+    }
+
+    public function ready(): bool
+    {
+        try {
+            $st = $this->pdo->prepare(
+                "SELECT COUNT(*) FROM information_schema.TABLES
+                  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('mv_var','mv_daily','wg_group_var')");
+            $st->execute();
+            return (int)$st->fetchColumn() === 3;
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
+    // ══ 네이버 ══════════════════════════════════════════════════════════
+    private static function http(string $url): string
+    {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 12,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_USERAGENT      => self::UA,
+            CURLOPT_HTTPHEADER     => ['Referer: https://m.stock.naver.com/', 'Accept: application/json'],
+        ]);
+        $body = curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err  = curl_error($ch);
+        curl_close($ch);
+        if ($body === false || $code !== 200) throw new RuntimeException("네이버 시장지표 HTTP {$code} {$err}");
+        return (string)$body;
+    }
+
+    private static function num($v): ?float
+    {
+        if ($v === null || $v === '') return null;
+        $s = str_replace(',', '', (string)$v);
+        return is_numeric($s) ? (float)$s : null;
+    }
+
+    public static function cleanCode(string $code): string
+    {
+        $code = trim($code);
+        if (!preg_match('/^[A-Za-z0-9_.=\-]{1,30}$/', $code)) throw new InvalidArgumentException('변수 코드가 올바르지 않습니다.');
+        return $code;
+    }
+
+    /**
+     * 한 장 받기 — 최신순 [['d'=>날짜, 'v'=>값, 'dec'=>소수 자리], …].
+     * HTTP·JSON 실패는 예외다(빈 배열 = «거기가 끝»과 가른다 — dt/qm 의 「빈 목록」 교훈).
+     */
+    public function fetch(string $cat, string $code, int $page = 1, int $size = 20): array
+    {
+        if (!isset(self::CATS[$cat])) throw new InvalidArgumentException('알 수 없는 분류입니다.');
+        $code = self::cleanCode($code);
+        $size = max(self::PAGE_MIN, min(self::PAGE_MAX, $size));
+        $page = max(1, $page);
+        $url  = ($cat === 'index')
+              ? 'https://m.stock.naver.com/api/index/' . rawurlencode($code) . "/price?pageSize={$size}&page={$page}"
+              : self::BASE . $cat . '/' . rawurlencode($code) . "/prices?page={$page}&pageSize={$size}";
+        $j = json_decode(self::http($url), true);
+        if (!is_array($j)) throw new RuntimeException('네이버 시장지표: JSON 이 아닙니다');
+
+        $today = date('Y-m-d');
+        $out = [];
+        foreach ($j as $r) {
+            if (!is_array($r)) continue;
+            $d = substr((string)($r['localTradedAt'] ?? ''), 0, 10);
+            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $d) || $d > $today) continue;
+            $raw = (string)($r['closePrice'] ?? '');
+            $v   = self::num($raw);
+            if ($v === null) continue;
+            $p   = strpos($raw, '.');
+            $out[] = ['d' => $d, 'v' => $v, 'dec' => $p === false ? 0 : strlen($raw) - $p - 1];
+        }
+        return $out;
+    }
+
+    /**
+     * 등록할 수 있는 변수 목록 — [['cat','code','name','label'=>분류 이름, 'unit'], …].
+     * 네이버 목록 여섯 장을 하루에 한 번만 받아 파일에 둔다(변수를 등록하려고 검색칸을 열 때만 쓴다).
+     */
+    public function catalog(bool $force = false): array
+    {
+        $file = rtrim(sys_get_temp_dir(), '/\\') . '/econ_mv_catalog.json';
+        if (!$force && is_file($file) && (time() - (int)filemtime($file)) < self::CATALOG_TTL) {
+            $c = json_decode((string)@file_get_contents($file), true);
+            if (is_array($c) && $c) return $c;
+        }
+        $seen = [];
+        $walk = static function ($node) use (&$walk, &$seen): void {
+            if (!is_array($node)) return;
+            $cat = $node['categoryType'] ?? null; $code = $node['reutersCode'] ?? null; $name = $node['name'] ?? null;
+            if (is_string($cat) && is_string($code) && is_string($name) && isset(self::CATS[$cat])
+                && preg_match('/^[A-Za-z0-9_.=\-]{1,30}$/', $code)) {
+                $k = $cat . '|' . $code;
+                if (!isset($seen[$k])) {
+                    $unit = (isset($node['unit']) && is_string($node['unit'])) ? $node['unit'] : '';
+                    $seen[$k] = ['cat' => $cat, 'code' => $code, 'name' => trim($name), 'label' => self::CATS[$cat][0],
+                                 'unit' => $unit !== '' ? $unit : self::CATS[$cat][1]];
+                }
+                return;
+            }
+            foreach ($node as $child) $walk($child);
+        };
+        $ok = 0;
+        foreach (self::LISTS as $i => $path) {
+            try { $walk(json_decode(self::http(self::BASE . $path), true)); $ok++; }
+            catch (Throwable $e) { /* 한 장이 실패해도 나머지로 */ }
+            if ($i < count(self::LISTS) - 1) usleep(150000);
+        }
+        foreach (self::INDEXES as $code => $name) {
+            $seen['index|' . $code] = ['cat' => 'index', 'code' => $code, 'name' => $name, 'label' => self::CATS['index'][0], 'unit' => ''];
+        }
+        foreach (self::EXTRA as [$cat, $code, $name]) {
+            if (!isset($seen[$cat . '|' . $code])) {
+                $seen[$cat . '|' . $code] = ['cat' => $cat, 'code' => $code, 'name' => $name, 'label' => self::CATS[$cat][0], 'unit' => self::CATS[$cat][1]];
+            }
+        }
+        $list = array_values($seen);
+        if ($ok === count(self::LISTS)) @file_put_contents($file, json_encode($list, JSON_UNESCAPED_UNICODE));   // 온전할 때만 굳힌다
+        return $list;
+    }
+
+    // ══ 변수 ════════════════════════════════════════════════════════════
+    private static function shape(array $r): array
+    {
+        $cat = (string)$r['cat'];
+        return ['id' => (int)$r['id'], 'cat' => $cat, 'code' => (string)$r['code'], 'name' => (string)$r['name'],
+                'label' => self::CATS[$cat][0] ?? $cat, 'unit' => (string)$r['unit'], 'digits' => (int)$r['digits'],
+                'last_d' => $r['last_d'], 'n' => isset($r['n']) ? (int)$r['n'] : null,
+                'from' => $r['from_d'] ?? null, 'groups' => isset($r['g']) ? (int)$r['g'] : null];
+    }
+
+    /** 등록된 변수 전부 — n = 쌓인 날 수 · from = 첫 날 · groups = 연결된 그룹 수 */
+    public function vars(): array
+    {
+        $rows = $this->pdo->query("
+            SELECT v.*, (SELECT COUNT(*) FROM mv_daily x WHERE x.var_id = v.id) AS n,
+                   (SELECT MIN(d) FROM mv_daily x WHERE x.var_id = v.id) AS from_d,
+                   (SELECT COUNT(*) FROM wg_group_var gv WHERE gv.var_id = v.id) AS g
+              FROM mv_var v ORDER BY v.cat, v.name")->fetchAll(PDO::FETCH_ASSOC);
+        return array_map([self::class, 'shape'], $rows);
+    }
+
+    public function varGet(int $id): ?array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM mv_var WHERE id = ?");
+        $st->execute([$id]);
+        $r = $st->fetch(PDO::FETCH_ASSOC);
+        return $r ? self::shape($r) : null;
+    }
+
+    private function upsert(int $id, array $rs): int
+    {
+        if (!$rs) return 0;
+        $st = $this->pdo->prepare("INSERT INTO mv_daily (var_id, d, v) VALUES (?,?,?) ON DUPLICATE KEY UPDATE v = VALUES(v)");
+        foreach ($rs as $r) $st->execute([$id, $r['d'], $r['v']]);
+        return count($rs);
+    }
+
+    private function touch(int $id): void
+    {
+        $this->pdo->prepare("UPDATE mv_var SET tried_at = NOW(), last_d = (SELECT MAX(d) FROM mv_daily WHERE var_id = ?) WHERE id = ?")
+                  ->execute([$id, $id]);
+    }
+
+    /**
+     * 변수 등록 — 목록에 있는 (분류,코드)만. 한 장을 받아 값이 오는지 본 뒤 과거를 되짚는다.
+     * 이미 등록된 것이면 그 id 를 그대로 돌려준다(다시 받지 않는다).
+     *
+     * @return array ['id', 'new'=>bool, 'rows'=>저장 행, 'calls'=>콜 수]
+     */
+    public function register(string $cat, string $code): array
+    {
+        $code = self::cleanCode($code);
+        $st = $this->pdo->prepare("SELECT id FROM mv_var WHERE cat = ? AND code = ?");
+        $st->execute([$cat, $code]);
+        $id = (int)$st->fetchColumn();
+        if ($id) return ['id' => $id, 'new' => false, 'rows' => 0, 'calls' => 0];
+
+        $hit = null;
+        foreach ($this->catalog() as $c) if ($c['cat'] === $cat && $c['code'] === $code) { $hit = $c; break; }
+        if (!$hit) throw new InvalidArgumentException('목록에 없는 변수입니다.');
+        if ((int)$this->pdo->query("SELECT COUNT(*) FROM mv_var")->fetchColumn() >= self::VAR_MAX) {
+            throw new InvalidArgumentException('변수는 ' . self::VAR_MAX . '개까지 등록할 수 있습니다 — 안 쓰는 변수를 지워 주세요.');
+        }
+        $first = $this->fetch($cat, $code, 1, self::PAGE_MAX);
+        if (!$first) throw new InvalidArgumentException('「' . $hit['name'] . '」은(는) 일별 값이 오지 않습니다.');
+        $dec = 0;
+        foreach ($first as $r) $dec = max($dec, (int)$r['dec']);
+
+        $name = function_exists('mb_substr') ? mb_substr($hit['name'], 0, self::NAME_MAX) : substr($hit['name'], 0, self::NAME_MAX);
+        $this->pdo->prepare("INSERT INTO mv_var (cat, code, name, unit, digits) VALUES (?,?,?,?,?)")
+                  ->execute([$cat, $code, $name, substr((string)$hit['unit'], 0, 12), min(4, $dec)]);
+        $id = (int)$this->pdo->lastInsertId();
+
+        $rows = $this->upsert($id, $first); $calls = 1; $got = count($first);
+        for ($p = 2; $calls < self::BACKFILL_CALLS && $got < self::TARGET_DAYS; $p++) {
+            usleep(150000);
+            try { $rs = $this->fetch($cat, $code, $p, self::PAGE_MAX); } catch (Throwable $e) { break; }   // 받은 데까지는 남긴다
+            $calls++;
+            if (!$rs) break;                                   // 빈 장 = 원천의 끝
+            $rows += $this->upsert($id, $rs); $got += count($rs);
+        }
+        $this->touch($id);
+        return ['id' => $id, 'new' => true, 'rows' => $rows, 'calls' => $calls];
+    }
+
+    /** 변수 삭제 — 일별 값과 그룹 연결도 함께 간다(FK CASCADE). 원천에서 다시 받을 수 있는 캐시다 */
+    public function varDelete(int $id): void
+    {
+        $this->pdo->prepare("DELETE FROM mv_var WHERE id = ?")->execute([$id]);
+        // 종목의 «같이 볼 변수»로 달려 있던 것도 비운다(그 컬럼엔 FK 가 없다)
+        try { $this->pdo->prepare("UPDATE wg_item SET var_id = NULL WHERE var_id = ?")->execute([$id]); }
+        catch (Throwable $e) { /* 컬럼이 아직 없으면 지나간다 */ }
+    }
+
+    /**
+     * 최근 한 장으로 잇기 — $ids 가 null 이면 등록된 변수 전부(마감 크론), 아니면 그 변수만.
+     * $staleSec 를 주면 그보다 최근에 받으려 한 변수는 건너뛴다(화면이 볼 때 쓰는 길 — 실패를 되풀이해 콜을 태우지 않는다).
+     *
+     * @return array ['vars'=>대상 수, 'rows'=>저장 행, 'calls'=>콜 수, 'fail'=>[이름…]]
+     */
+    public function collect(?array $ids = null, int $size = 20, ?int $staleSec = null): array
+    {
+        $sql = "SELECT id, cat, code, name FROM mv_var";
+        $w = []; $arg = [];
+        if ($ids !== null) {
+            $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+            if (!$ids) return ['vars' => 0, 'rows' => 0, 'calls' => 0, 'fail' => []];
+            $w[] = 'id IN (' . implode(',', array_fill(0, count($ids), '?')) . ')';
+            $arg = $ids;
+        }
+        if ($staleSec !== null) { $w[] = '(tried_at IS NULL OR tried_at < DATE_SUB(NOW(), INTERVAL ? SECOND))'; $arg[] = $staleSec; }
+        if ($w) $sql .= ' WHERE ' . implode(' AND ', $w);
+        $st = $this->pdo->prepare($sql);
+        $st->execute($arg);
+        $vars = $st->fetchAll(PDO::FETCH_ASSOC);
+
+        $res = ['vars' => count($vars), 'rows' => 0, 'calls' => 0, 'fail' => []];
+        foreach ($vars as $i => $v) {
+            if ($i) usleep(150000);
+            try {
+                $rs = $this->fetch((string)$v['cat'], (string)$v['code'], 1, $size);
+                $res['calls']++;
+                $res['rows'] += $this->upsert((int)$v['id'], $rs);
+            } catch (Throwable $e) {
+                $res['calls']++;
+                $res['fail'][] = (string)$v['name'];
+            }
+            $this->touch((int)$v['id']);
+        }
+        return $res;
+    }
+
+    /** [변수 id => [[날짜, 값], …]] — 날짜 오름차순 */
+    public function series(array $ids, ?string $from = null): array
+    {
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        $out = [];
+        if (!$ids) return $out;
+        foreach ($ids as $id) $out[$id] = [];
+        $from = $from ?: date('Y-m-d', strtotime('-6 years'));
+        $ph = implode(',', array_fill(0, count($ids), '?'));
+        $st = $this->pdo->prepare("SELECT var_id, d, v FROM mv_daily WHERE var_id IN ($ph) AND d >= ? ORDER BY var_id, d");
+        $st->execute(array_merge($ids, [$from]));
+        foreach ($st->fetchAll(PDO::FETCH_NUM) as $r) $out[(int)$r[0]][] = [(string)$r[1], (float)$r[2]];
+        return $out;
+    }
+
+    // ══ 그룹 연결 ═══════════════════════════════════════════════════════
+    /** 그 그룹에 연결한 변수(순서대로 · 첫째가 주 변수) */
+    public function groupVars(int $gid): array
+    {
+        if ($gid <= 0) return [];
+        $st = $this->pdo->prepare("
+            SELECT v.* FROM wg_group_var gv JOIN mv_var v ON v.id = gv.var_id
+             WHERE gv.group_id = ? ORDER BY gv.sort_no, v.id");
+        $st->execute([$gid]);
+        return array_map([self::class, 'shape'], $st->fetchAll(PDO::FETCH_ASSOC));
+    }
+
+    /** [그룹 id => 주 변수 이름] — 그룹 목록의 꼬리표 */
+    public function groupTags(): array
+    {
+        $out = [];
+        foreach ($this->pdo->query("
+            SELECT gv.group_id, v.name FROM wg_group_var gv JOIN mv_var v ON v.id = gv.var_id
+             ORDER BY gv.group_id, gv.sort_no DESC, v.id DESC")->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $out[(int)$r['group_id']] = (string)$r['name'];        // 뒤에 오는(= sort_no 가 작은) 것이 이긴다
+        }
+        return $out;
+    }
+
+    /** 그룹의 변수 목록을 통째로 갈아 끼운다 — 보낸 순서가 곧 순서(첫째 = 주 변수) */
+    public function groupSet(int $gid, array $ids): void
+    {
+        $st = $this->pdo->prepare("SELECT COUNT(*) FROM wg_group WHERE id = ?");
+        $st->execute([$gid]);
+        if ($gid <= 0 || !(int)$st->fetchColumn()) throw new InvalidArgumentException('변수는 내가 만든 그룹에만 연결할 수 있습니다.');
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        if (count($ids) > self::GROUP_VAR_MAX) {
+            throw new InvalidArgumentException('한 그룹에 변수는 ' . self::GROUP_VAR_MAX . '개까지입니다.');
+        }
+        if ($ids) {
+            $ph = implode(',', array_fill(0, count($ids), '?'));
+            $ck = $this->pdo->prepare("SELECT COUNT(*) FROM mv_var WHERE id IN ($ph)");
+            $ck->execute($ids);
+            if ((int)$ck->fetchColumn() !== count($ids)) throw new InvalidArgumentException('등록되지 않은 변수가 있습니다.');
+        }
+        $this->pdo->beginTransaction();
+        try {
+            $this->pdo->prepare("DELETE FROM wg_group_var WHERE group_id = ?")->execute([$gid]);
+            $ins = $this->pdo->prepare("INSERT INTO wg_group_var (group_id, var_id, sort_no) VALUES (?,?,?)");
+            foreach ($ids as $i => $id) $ins->execute([$gid, $id, $i + 1]);
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+    }
+}
+?>

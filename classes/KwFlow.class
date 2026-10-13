@@ -1,0 +1,227 @@
+<?php
+/**
+ * classes/KwFlow.class — 일별 수급 원장 (외인비 · 외인 순매수) · 표 kw_flow (2026-10-08)
+ *
+ * HTS 「일별주가」 화면의 외인비를 «쌓아서» 쓰려고 만들었다(사용자 요청). 원천은 키움 ka10086(Kiwoom::flow).
+ *
+ * ══ 언제 받나 — «버튼을 누를 때만» (같은 날 사용자가 다시 정의) ══════════════
+ *  · <b>자동으로 받지 않는다.</b> 크론에도, 차트를 여는 경로에도 걸지 않는다. 받는 문은 재무분석 상세의 「외인비」 버튼 하나
+ *    (stock/api.php?module=flow&action=pull)이다. 처음엔 Top-Pick ∪ 보유 종목에만 열었다가 같은 날 <b>모든 종목</b>으로 풀었다(allowed 주석).
+ *    외인비는 매일 훑는 값이 아니라 한 종목을 깊이 볼 때 쓰는 값이라서다 — 필요한 종목에만 콜을 쓴다.
+ *  · 한 번 누르면 TARGET_DAYS 까지 되짚는다. 한 콜이 20거래일이고 키움이 초당 1콜이라 한 번의 요청은 PULL_CALLS 콜까지만
+ *    쓰고(응답 30초 벽) 화면이 «다 받았다»가 올 때까지 이어서 부른다.
+ *  · 다시 열었을 때 그 사이가 비어 있으면 버튼이 「최신까지 받기」가 된다 — 빈 기간만 이어 받는다.
+ *
+ * ══ 무엇을 ═════════════════════════════════════════════════════════════
+ *  · <b>외인비와 외인 순매수(주) 둘만</b> 담는다(사용자 결정). 같은 콜에 개인·기관·프로그램·신용비도 오지만 담지 않는다 —
+ *    개인·기관·프로그램은 HTS 화면 값과 달랐고(원인 미확인), 안 쓰는 값을 쌓아 두면 언젠가 확인 없이 쓰게 된다.
+ *  · 금액·가격은 담지 않는다(가격의 주인은 krx_amt · Kiwoom::flow 주석의 ★).
+ *  · ★<b>가장 최근 하루는 잠정</b>일 수 있다 — 당일 외인 수치는 저녁에야 굳는다. 「최신까지 받기」가 그 날을 다시 덮는다.
+ *
+ * ★새 표 접두어 kw_ = «키움에서 받아 쌓는 종목별 원장». krx_(KRX 전종목 원장)와 달리 받은 종목만 들어 있다 —
+ *   이 표에 없다고 그 종목의 수급이 없는 것이 아니다.
+ * ★DDL 은 수동 잡(cron/dt_min.php job=flow)에서만 — 화면·API 는 표가 없으면 빈 것으로 본다.
+ */
+class KwFlow
+{
+    /** 버튼 한 번이 채우려는 깊이(거래일) — 밴드 차트의 가장 긴 기간(5년 ≈ 1,230거래일)을 덮는다 */
+    public const TARGET_DAYS = 1250;
+    /** 한 번의 요청이 쓰는 키움 콜 수 — 콜당 1초 남짓이라 10콜이면 12초 안팎(응답 30초 벽 안) */
+    public const PULL_CALLS = 10;
+    /** 수동 잡(job=flow)이 처음 받는 종목을 몇 콜 되짚나 — 한 콜 20거래일 */
+    public const BACKFILL_PAGES = 6;
+
+    private PDO $pdo;
+
+    public function __construct(PDO $pdo)
+    {
+        $this->pdo = $pdo;
+    }
+
+    public function ensureTable(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS kw_flow (
+              code     CHAR(6)      NOT NULL,
+              d        DATE         NOT NULL,
+              for_rt   DECIMAL(6,2) NULL COMMENT '외인비(%) — 외국인 보유 비중',
+              for_net  BIGINT       NOT NULL DEFAULT 0 COMMENT '외인 순매수(주)',
+              upd_at   DATETIME     NOT NULL,
+              PRIMARY KEY (code, d),
+              KEY idx_kwf_d (d)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+              COMMENT='일별 수급(외인비·외인 순매수) — 키움 ka10086 · 받은 종목만'
+        ");
+    }
+
+    /** 표가 있나 — 화면·API 가 DDL 없이 물어본다 */
+    public function ready(): bool
+    {
+        try {
+            $this->pdo->query("SELECT 1 FROM kw_flow LIMIT 1");
+            return true;
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
+    /** 그 종목에 쌓인 날 수 */
+    public function days(string $code): int
+    {
+        $st = $this->pdo->prepare("SELECT COUNT(*) FROM kw_flow WHERE code = ?");
+        $st->execute([Dt::cleanCode($code)]);
+        return (int)$st->fetchColumn();
+    }
+
+    /**
+     * 이 종목은 받아도 되나 — <b>종목 마스터에 있는 실제 종목이면 된다</b> (2026-10-08 사용자 결정).
+     * 처음엔 Top-Pick ∪ 보유로 좁혔는데 같은 날 풀었다 — 받는 문이 «버튼»뿐이라(자동 수집이 없다) 누른 종목에만 콜이 나간다.
+     * 그래도 문지기는 남긴다: 이름을 못 찾는 코드는 받지 않는다(아무 글자나 키움에 60콜씩 묻는 문이 되면 안 된다).
+     */
+    public function allowed(string $code): bool
+    {
+        try {
+            $code = Dt::cleanCode($code);
+            return strlen($code) === 6 && StockName::one($this->pdo, $code, '') !== '';
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
+    /**
+     * 그 종목의 적재 상태 — 버튼의 글자를 정한다.
+     *   need: '' 다 받았다 · 'new' 처음 · 'top' 최신 쪽이 비었다 · 'back' 과거를 더 받을 수 있다
+     * @return array ['days','from','to','latest'(그 종목의 마지막 거래일),'need']
+     */
+    public function status(string $code): array
+    {
+        $out = ['days' => 0, 'from' => null, 'to' => null, 'latest' => null, 'need' => 'new'];
+        try {
+            $code = Dt::cleanCode($code);
+            $st = $this->pdo->prepare("SELECT COUNT(*) n, MIN(d) mn, MAX(d) mx FROM kw_flow WHERE code = ?");
+            $st->execute([$code]);
+            $r = $st->fetch(PDO::FETCH_ASSOC);
+            /* 달력은 krx_amt 다(휴장일 표를 따로 두지 않는다) — 그 종목 자신의 마지막 거래일 */
+            $q = $this->pdo->prepare("SELECT MAX(d) FROM krx_amt WHERE code = ? AND vol > 0");
+            $q->execute([$code]);
+            $latest = $q->fetchColumn();
+            $out['latest'] = $latest ? (string)$latest : null;
+            $out['days']   = (int)$r['n'];
+            if ($out['days'] > 0) {
+                $out['from'] = (string)$r['mn'];
+                $out['to']   = (string)$r['mx'];
+                $out['need'] = ($latest && $out['to'] < (string)$latest) ? 'top'
+                             : ($out['days'] < self::TARGET_DAYS ? 'back' : '');
+            }
+        } catch (Throwable $e) { /* 표가 없다 — 처음 */ }
+        return $out;
+    }
+
+    /** 받은 행을 덮어쓴다(UPSERT — 몇 번을 돌려도 같은 값). @param array $rows Kiwoom::flow() 의 반환 */
+    public function save(string $code, array $rows): int
+    {
+        $code = Dt::cleanCode($code);
+        if ($code === '' || !$rows) return 0;
+        $st = $this->pdo->prepare("
+            INSERT INTO kw_flow (code, d, for_rt, for_net, upd_at)
+            VALUES (?,?,?,?,NOW())
+            ON DUPLICATE KEY UPDATE for_rt=VALUES(for_rt), for_net=VALUES(for_net), upd_at=NOW()
+        ");
+        $n = 0;
+        $this->pdo->beginTransaction();
+        try {
+            foreach ($rows as $r) {
+                $st->execute([$code, $r['d'], $r['for_rt'], $r['for_net']]);
+                $n++;
+            }
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+        return $n;
+    }
+
+    /**
+     * 버튼 한 번의 몫 — PULL_CALLS 콜 안에서 ①최신 쪽 빈 기간 ②과거 순으로 메운다.
+     *
+     * ① 오늘부터 과거로 되짚어 이미 가진 가장 최근 날짜에 닿을 때까지. 한 번에 못 닿으면 어디까지 받았는지를 cursor 로 돌려주고
+     *    화면이 그것을 들고 다시 부른다(그 날부터 이어 받는다 — 가운데 구멍을 남기지 않는다).
+     * ② 가진 것의 가장 옛 날짜부터 더 과거로 — TARGET_DAYS 가 찰 때까지, 또는 키움이 「더 없다」고 할 때까지(상장일).
+     *
+     * @param  string $cursor ①을 이어 받을 날짜(Y-m-d) — 지난 응답의 cursor 를 그대로
+     * @return array status() + ['calls','added'(이번에 쓴 행),'cursor'(''=①끝),'end'(이력 끝에 닿음),'done'(더 부를 필요 없음)]
+     */
+    public function pull(Kiwoom $kw, string $code, string $cursor = ''): array
+    {
+        $code  = Dt::cleanCode($code);
+        $left  = self::PULL_CALLS;
+        $added = 0; $end = false; $next = '';
+        $s     = $this->status($code);
+
+        // ── ① 최신 쪽 ──
+        if ($s['need'] === 'new' || $s['need'] === 'top' || $cursor !== '') {
+            $stop = (string)($s['to'] ?? '');                 // 여기에 닿으면 이어졌다 ('' = 가진 것이 없다 → 그대로 과거로 간다)
+            $from = preg_match('/^\d{4}-\d{2}-\d{2}$/', $cursor) ? $cursor : '';
+            while ($left > 0) {
+                if ($left < self::PULL_CALLS) usleep(Kiwoom::GAP_USEC);
+                $rows = $kw->flow($code, 1, $from);
+                $left--;
+                if (!$rows) { $end = true; break; }
+                $added += $this->save($code, $rows);
+                $old = min(array_column($rows, 'd'));
+                if (!$kw->flowMore) { $end = true; break; }
+                if ($stop !== '' && $old <= $stop) break;     // 가진 것과 이어졌다
+                if ($stop === '' && $this->days($code) >= self::TARGET_DAYS) break;
+                $from = $old;                                 // 그 날부터 다시(한 줄 겹친다 — UPSERT 라 무해)
+                if ($left === 0 && $stop !== '') $next = $old;   // 못 닿았다 — 다음 요청이 여기서 잇는다
+            }
+        }
+
+        // ── ② 과거 쪽 ──
+        if (!$end && $next === '') {
+            while ($left > 0 && $this->days($code) < self::TARGET_DAYS) {
+                $st = $this->pdo->prepare("SELECT MIN(d) FROM kw_flow WHERE code = ?");
+                $st->execute([$code]);
+                $min = (string)$st->fetchColumn();
+                if ($min === '') break;
+                if ($left < self::PULL_CALLS) usleep(Kiwoom::GAP_USEC);
+                $rows = $kw->flow($code, 1, $min);
+                $left--;
+                $new = array_filter($rows, static fn($r) => $r['d'] < $min);
+                if ($rows) $added += $this->save($code, $rows);
+                if (!$new || !$kw->flowMore) { $end = true; break; }
+            }
+        }
+
+        $s = $this->status($code);
+        return $s + ['calls' => self::PULL_CALLS - $left, 'added' => $added, 'cursor' => $next,
+                     'end' => $end, 'done' => $next === '' && ($end || $s['need'] === '')];
+    }
+
+    /**
+     * 한 종목을 받아 쌓는다(수동 잡용) — 처음이면 BACKFILL_PAGES 콜, 아니면 1콜(최근 20거래일을 다시 덮는다).
+     * @return array ['rows'=>int, 'calls'=>int 요청한 콜 수, 'first'=>bool 처음 받는 종목이었나]
+     */
+    public function collect(Kiwoom $kw, string $code, int $pages = 0): array
+    {
+        $first = $this->days($code) === 0;
+        $pages = $pages > 0 ? $pages : ($first ? self::BACKFILL_PAGES : 1);
+        $rows  = $kw->flow($code, $pages);
+        return ['rows' => $this->save($code, $rows), 'calls' => $pages, 'first' => $first];
+    }
+
+    /** 한 종목의 시계열(오름차순) — from 이후. 표가 없으면 빈 배열 */
+    public function series(string $code, string $from = ''): array
+    {
+        try {
+            $sql = "SELECT d, for_rt, for_net FROM kw_flow WHERE code = ?" . ($from !== '' ? " AND d >= ?" : '') . " ORDER BY d";
+            $st = $this->pdo->prepare($sql);
+            $st->execute($from !== '' ? [Dt::cleanCode($code), $from] : [Dt::cleanCode($code)]);
+            return $st->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Throwable $e) {
+            return [];
+        }
+    }
+}
+?>

@@ -316,7 +316,7 @@ function pf_alert_fresh(PDO $pdo): array
                 if ($f['sue'] > Thr::SUE_SHOCK) continue;
                 // 중복방지 키는 (shock|종목|분기) 하나 — 관심에서 보유로 옮겨도 같은 쇼크를 다시 쏘지 않는다
                 if (!pf_alert_new($pdo, 'shock', $c . '|' . $qk)) continue;
-                $lines[] = '🔻 ' . (isset($heldAt[$c]) ? '보유 ' : '관심 ') . $nm($c)
+                $lines[] = '🔻 ' . (isset($heldAt[$c]) ? '보유 ' : pf_watch_label() . ' ') . $nm($c)
                          . ' 어닝쇼크 — SUE ' . number_format($f['sue'], 1)
                          . ' (' . substr($f['d'], 5) . ' 공시 · 쇼크 무리 = 두 달 하방 드리프트 실측)';
             }
@@ -330,7 +330,7 @@ function pf_alert_fresh(PDO $pdo): array
             foreach (pf_alert_sue_fresh($pdo, $c, $watchAt[$c] ?? null) as $qk => $f) {
                 if ($f['sue'] < Thr::SUE_HIT) continue;
                 if (!pf_alert_new($pdo, 'sue', $c . '|' . $qk)) continue;
-                $lines[] = '⭐ 관심 ' . $nm($c) . ' 서프라이즈 — SUE ' . number_format($f['sue'], 1)
+                $lines[] = '⭐ ' . pf_watch_label() . ' ' . $nm($c) . ' 서프라이즈 — SUE ' . number_format($f['sue'], 1)
                          . ' (' . substr($f['d'], 5) . ' 공시 · 상위 20%권)';
             }
         } catch (Throwable $e) { /* 다음 종목 */ }
@@ -401,17 +401,53 @@ function pf_alert_fresh(PDO $pdo): array
  * @return string[] 발송한(또는 $dry 면 발송했을) 본문 줄 — 비면 무음
  */
 /**
- * 마감 변동 «판정» 단일본 — 관심·단타·보유 종목 중 오늘 |등락률| ≥ Thr::EOD_MOVE_PCT 인 것.
+ * ☆ 로 담은 목록(pf_watchlist)의 «이름표» — 알림 본문·마감 변동 기록(pf_move_hit.tags)·리포트 배지가 이 한 곳을 본다.
+ * 2026-10-07 「관심」 → 「Top-Pick」(사용자 결정 — 화면 이름을 Top-Pick 으로 바꾸면서 알림도 맞췄다.
+ * 「관심」은 이제 관심그룹을 가리키는 말이라, 알림이 「관심 ○○」라고 하면 다른 목록으로 읽힌다).
+ */
+function pf_watch_label(): string
+{
+    return 'Top-Pick';
+}
+
+/**
+ * 옛 기록의 이름표를 지금 이름으로 읽는다 — 2026-10-07 이전에 쏜 행의 tags 에는 「관심」이 남아 있다.
+ * ★기록은 고치지 않는다(그때 알림이 그렇게 말한 것은 사실이다) — «보여 줄 때만» 새 이름으로 바꾼다.
+ */
+function pf_move_tag_label(string $tag): string
+{
+    if ($tag === '관심') return pf_watch_label();
+    if ($tag === '단타') return pf_pool_label();    // 2026-10-07 이전 기록 — 직접 담던 「단타」 목록이 「최근조회」가 됐다(같은 표 dt_pool)
+    return $tag;
+}
+
+/**
+ * dt_pool 의 «이름표» — 2026-10-07 「단타」 → 「최근조회」(사용자 결정 · A안).
+ * 직접 담고 빼던 단타 목록을 없애고, 단타 화면에서 «열어 본 종목»이 스스로 쌓이는 목록으로 바꿨다(Dt::touch).
+ * 알림 본문·마감 변동 기록(tags)·리포트 배지·멀티차트 분류가 이 이름을 쓴다.
+ */
+function pf_pool_label(): string
+{
+    return '최근조회';
+}
+
+/**
+ * 마감 변동 «판정» 단일본 — Top-Pick(☆ 목록)·단타·보유 종목 중 오늘 |등락률| ≥ Thr::EOD_MOVE_PCT 인 것.
  * 중복방지·기록·발송은 하지 않는다(pf_alert_move 가 한다) — 그래서 백필·미리보기가 같은 판정을 쓸 수 있다.
  * @return ['n'=>감시 종목 수, 'rows'=>[['code','name','rate','price','amt_eok','tags'] …] 상승 큰 것 → 하락 큰 것 순]
  */
-function pf_move_scan(PDO $pdo): array
+function pf_move_scan(PDO $pdo, ?array $only = null): array
 {
     $dt    = new Dt($pdo);
     $held  = array_flip($dt->heldCodes());
     $pool  = array_flip($dt->activeCodes());
     $watch = array_flip($pdo->query("SELECT stock_code FROM pf_watchlist")->fetchAll(PDO::FETCH_COLUMN));
-    $codes = array_keys($held + $pool + $watch);
+    /* $only — 대상을 이 종목들로 «한정»한다(2026-10-07 · 마감 변동 화면의 관심그룹 보기 &g=).
+     * 임계·「오늘 갱신된 행만」·정렬·꼬리표는 그대로다 — 그룹 보기가 판정을 따로 적지 않게 여기 한 곳에 둔다.
+     * 알림(pf_alert_move)은 이 인자를 주지 않는다 — 알림의 감시 대상은 여전히 보유 ∪ 단타 ∪ Top-Pick 이다. */
+    $codes = ($only !== null)
+        ? array_values(array_unique(array_filter(array_map('strval', $only), fn($c) => $c !== '')))
+        : array_keys($held + $pool + $watch);
     if (!$codes) return ['n' => 0, 'rows' => []];
 
     $in = implode(',', array_fill(0, count($codes), '?'));
@@ -424,8 +460,8 @@ function pf_move_scan(PDO $pdo): array
     $tag = function (string $c) use ($held, $pool, $watch): string {
         $t = [];
         if (isset($held[$c]))  $t[] = '보유';
-        if (isset($pool[$c]))  $t[] = '단타';
-        if (isset($watch[$c])) $t[] = '관심';
+        if (isset($pool[$c]))  $t[] = pf_pool_label();
+        if (isset($watch[$c])) $t[] = pf_watch_label();
         return implode('·', $t);
     };
     $up = $dn = [];

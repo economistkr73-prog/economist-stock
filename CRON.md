@@ -37,7 +37,7 @@
 | 5 | 매일 10회 `5 6,8-10,12,14,16,18,20,22 * * *` | 네이버뉴스 가져오기 | `cron/keyword_collector.php` `mode=news` | 4.5s | ✅ |
 | 6 | **평일 9회** `5 6-9,11,13,15,17,19 * * 1-5` | get_news_keyword (제목 `7회` 는 낡음) | `cron/keyword_collector.php` `mode=stock_etf_news` | 14.3s | ✅ |
 | 7 | 매일 13:05 | krx 상장주식수 | `cron/dart_collect.php` `job=krx` | 19.8s | ✅ **오후 1회로 확정** · 2026-07-31 **거래대금 장기보관 이관 추가**(krx_daily→krx_amt · API 0회) · ⊕2026-09-07 확정값이 잠정치를 덮은 뒤 **포트폴리오 일일 결산 재계산**(`pf_value_daily` 그 날짜부터 · 지수 최근 20일 2콜) |
-| 8 | **평일** 15:50 `50 15 * * 1-5` | 당일종가 | `cron/dart_collect.php` `job=eod` | ~3s (2026-08-02 실측 9.1s — 잠정적재·신호 추가분) | ✅ 2026-08-02 EDIT 화면 실확인 · ⊕2026-08-31 끝에 **📊 마감 변동 요약** 추가(관심·단타·보유 ±`Thr::EOD_MOVE_PCT`↑ 한 건 · 미리보기 `task=dart_move`) · ⊕2026-09-04 쏜 목록을 **`pf_move_hit`** 에 날짜별 기록 → 리포트 `mode=move`(카드 = 머리줄+미니 일봉+뉴스 · 알림 링크가 여기로) · ⊕2026-09-07 잠정 적재 뒤 **지수(KOSPI·KOSDAQ 네이버 2콜) + 포트폴리오 일일 결산 오늘 행**(`krx_index_daily`·`pf_value_daily` — 현황 카드 미니 그래프·팝업의 원천 · `stock/lib/value.php`) |
+| 8 | **평일** 15:50 `50 15 * * 1-5` | 당일종가 | `cron/dart_collect.php` `job=eod` | ~3s (2026-08-02 실측 9.1s — 잠정적재·신호 추가분) | ✅ 2026-08-02 EDIT 화면 실확인 · ⊕2026-08-31 끝에 **📊 마감 변동 요약** 추가(관심·단타·보유 ±`Thr::EOD_MOVE_PCT`↑ 한 건 · 미리보기 `task=dart_move`) · ⊕2026-09-04 쏜 목록을 **`pf_move_hit`** 에 날짜별 기록 → 리포트 `mode=move`(카드 = 머리줄+미니 일봉+뉴스 · 알림 링크가 여기로) · ⊕2026-09-07 잠정 적재 뒤 **지수(KOSPI·KOSDAQ 네이버 2콜) + 포트폴리오 일일 결산 오늘 행**(`krx_index_daily`·`pf_value_daily` — 현황 카드 미니 그래프·팝업의 원천 · `stock/lib/value.php`) · ⊕2026-10-12 지수 앞에 **시장 변수**(환율·유가·금리… 관심그룹의 테마 변수 · `Mv::collect()` · 등록된 변수마다 네이버 1콜 · 상한 40 · 표 `mv_daily` · 실측 2변수 0.19초 · 표·변수가 없으면 조용히 지나감) |
 | 9 | **평일** 16:20 `20 16 * * 1-5` | ETF 편입종목 가져오기 | `cron/keyword_collector.php` `mode=etf_update` | **901.7s** (bg · 2026-08-04 로그 실측 · ETF 435개 × sleep 2초 → **16:35 종료**) | ✅ 2026-08-02 EDIT 화면 실확인 · bg 는 레지스트리가 붙임 |
 | 17 | **평일** 16:20 `20 16 * * 1-5` | 박스상향돌파(일,1회,16:20) | `cron/bx_scan.php` `job=daily&ag=B&mincalls=400` | 적재·판정 수 초(API 0) + 분봉 최대 400s (키움 1 req/s · bg 아님 — CLI/크론엔 30초 벽 무관) | ✅ **2026-08-09 신설 · 2026-08-11 크론 사이트 등록** (그 사이 이틀은 미등록으로 안 돌았다 — 신호 0건 시기라 실측 손실 없음. 상세는 CLAUDE.md 「패턴분석 (박스 상향돌파)」) |
 | 16 | **평일** 16:45 `45 16 * * 1-5` | 키움단타데이터(일1회) | `cron/dt_min.php` `job=daily&bg=1` | 종목당 ~1s (20종목 ≈ 40s · bg) | ✅ **2026-08-04 신설·등록 완료** (Save responses ON · 실패 알림 3종 ON) |
@@ -287,7 +287,7 @@ bg 실행 로그 (뒤에서 돈 잡이 무엇을 했는지 — **bg 잡은 이�
 
 | 자리 | 재는 것 | 무음 조건 | 경고 |
 |------|---------|-----------|------|
-| `dart_collect job=eod` 끝 | `all_stock_info` 당일 갱신률 | 갱신 0건 = 휴장일 | 0 < 갱신률 < 80% → `⚠️ 종가 갱신률 저조` priority 1 |
+| `dart_collect job=eod` 끝 | `all_stock_info` 당일 갱신률 | 휴장일은 묶음 자체를 건너뛴다(2026-10-08 · 아래 「휴장일 문지기」) | 0 < 갱신률 < 80% → `⚠️ 종가 갱신률 저조` priority 1 |
 | `dt_min job=daily` 끝(⑤) | **수집 대상**(풀 ∪ 보유 · `Dt::targetCodes`) 중 당일 봉이 남은 종목 수(`Dt::collectedCount` · 치유 뒤 기준) | 거래일 아님 · 대상 0종목 | 적재 < 절반 → `cron_fail_notify('dt_min', …)` priority 1 |
 
 ★둘 다 **자체 catch 로 예외를 삼키는 크론**이라 중앙 알림이 못 본다(규칙 3). 삼키는 이유가 있는 코드는
@@ -302,9 +302,9 @@ bg 실행 로그 (뒤에서 돈 잡이 무엇을 했는지 — **bg 잡은 이�
 | 모닝브리핑 (`market` 08:10) | 1건/일 (월~토) | 매 성공 시 |
 | 뉴스 키워드 (`news`) | **2건/일 (08·18시 fire 만)** | 10회/일 발송을 축소 — 데이터는 매회 쌓인다 |
 | ETF 편입종목 (`etf_update`) | **조건부** | 신규 ETF 발견 · 예산 도달(이어받기)일 때만. 평상시 완주=무음 |
-| **📊 실적 신호** (`dart_fresh` 끝 · **08:05 + 17:05**) | **조건부** | 보유 어닝쇼크(SUE≤−1)·관심 서프라이즈(SUE≥1) **신규만**. 구현 `stock/lib/alert.php` `pf_alert_fresh` · 중복방지 `pf_alert_log` · 새 신호 없으면 무음 (2026-08-02 신설 · 2026-08-11 오후 fire 추가 — #3 의 «기존 크론» 스케줄에 17시를 더했다. DART 재무 API 지연분 따라잡기 · 같은 신호가 두 번 울지 않는 근거 = `pf_alert_log`) |
-| **📈 마감 신호** (`dart_eod` 끝 · 15:50) | **조건부** | 관심 트리거(돌파확인·계단지지)·보유 계단관통↓·오늘 매집형(잠정) **신규만**. 구현 `pf_alert_eod` — 판정은 화면과 같은 단일본(boxStatusMany·SUE lib) (2026-08-02 신설) |
-| **📊 마감 변동** (`dart_eod` 끝 · 15:50 · 마감 신호 다음) | **조건부 · 하루 최대 1건** | 관심(`pf_watchlist`)·단타(`dt_pool`)·보유(`Dt::heldCodes`) 종목 중 **오늘 갱신된** `all_stock_info` 등락률이 ±`Thr::EOD_MOVE_PCT`(5%) 이상인 것을 **한 건으로 요약**(▲상승 큰 순 → ▼하락 큰 순 · 보유/단타/관심 태그 · 거래대금억 · 머리말 「감시 N종목 중 M건」 · 8줄+외 N건). 구현 `pf_alert_move` · 중복방지 `pf_alert_log` kind=`move` ref=`code|날짜` · 0건·휴장일 무음 · **새 수집 없음**(eod 가 메운 시세 재사용). 미리보기 `cron_job.php?task=dart_move&k=…`(안 보냄) (2026-08-31 신설). ⊕**2026-09-04 기록** — 쏜 그 목록을 표 `pf_move_hit`(d·code·rate·price·amt_eok·tags·watch_n · INSERT IGNORE)에 남기고 링크를 **`mode=move&d=날짜`**(마감 변동 리포트)로 바꿈. 판정 단일본은 `pf_move_scan()`(중복방지·기록·발송은 `pf_alert_move`) — 백필·미리보기가 같은 판정을 쓴다. 리포트는 표를 읽기만 하고 뉴스·일봉은 열 때마다 받는다(저장 0 · 지난 날짜는 «지금» 기준). DDL 은 `pf_alert_ensure`(크론 경로)뿐 |
+| **📊 실적 신호** (`dart_fresh` 끝 · **08:05 + 17:05**) | **조건부** | 보유 어닝쇼크(SUE≤−1)·Top-Pick 서프라이즈(SUE≥1) **신규만**. 구현 `stock/lib/alert.php` `pf_alert_fresh` · 중복방지 `pf_alert_log` · 새 신호 없으면 무음 (2026-08-02 신설 · 2026-08-11 오후 fire 추가 — #3 의 «기존 크론» 스케줄에 17시를 더했다. DART 재무 API 지연분 따라잡기 · 같은 신호가 두 번 울지 않는 근거 = `pf_alert_log`) |
+| **📈 마감 신호** (`dart_eod` 끝 · 15:50) | **조건부** | Top-Pick 트리거(돌파확인·계단지지)·보유 계단관통↓·오늘 매집형(잠정) **신규만**. 구현 `pf_alert_eod` — 판정은 화면과 같은 단일본(boxStatusMany·SUE lib) (2026-08-02 신설) |
+| **📊 마감 변동** (`dart_eod` 끝 · 15:50 · 마감 신호 다음) | **조건부 · 하루 최대 1건** | Top-Pick(`pf_watchlist`)·단타(`dt_pool`)·보유(`Dt::heldCodes`) 종목 중 **오늘 갱신된** `all_stock_info` 등락률이 ±`Thr::EOD_MOVE_PCT`(5%) 이상인 것을 **한 건으로 요약**(▲상승 큰 순 → ▼하락 큰 순 · 보유/단타/관심 태그 · 거래대금억 · 머리말 「감시 N종목 중 M건」 · 8줄+외 N건). 구현 `pf_alert_move` · 중복방지 `pf_alert_log` kind=`move` ref=`code|날짜` · 0건·휴장일 무음 · **새 수집 없음**(eod 가 메운 시세 재사용). 미리보기 `cron_job.php?task=dart_move&k=…`(안 보냄) (2026-08-31 신설). ⊕**2026-09-04 기록** — 쏜 그 목록을 표 `pf_move_hit`(d·code·rate·price·amt_eok·tags·watch_n · INSERT IGNORE)에 남기고 링크를 **`mode=move&d=날짜`**(마감 변동 리포트)로 바꿈. 판정 단일본은 `pf_move_scan()`(중복방지·기록·발송은 `pf_alert_move`) — 백필·미리보기가 같은 판정을 쓴다. 리포트는 표를 읽기만 하고 뉴스·일봉은 열 때마다 받는다(저장 0 · 지난 날짜는 «지금» 기준). DDL 은 `pf_alert_ensure`(크론 경로)뿐 |
 | 네이버 수집/정합 완료 | ≤2건/카테고리/월 | 회차 마지막 fire 1회만 |
 | 아덴트 AI 수집 완료 | 드묾 | 완주+실적 있을 때만 |
 | 공휴일 동기화 | 1건/년 | – |
@@ -707,6 +707,14 @@ https://economist.kr/market/crawl.php?key=econ-mkt-7x3k&report=1&notify=1&bg=1
 **왜 있나** — 네이버 분봉은 **최근 7거래일**만 준다(실측). 그 뒤로는 어떤 파라미터로도 못 받는다.
 단타 화면의 보관 창이 10거래일이라, 오늘부터 **우리가 쌓아야만** 성립한다. 저장처는 `dt_min`(1분봉 원장).
 
+**★★2026-10-07 — 수집 대상 = 「최근조회 ∪ 보유 ∪ Top-Pick」** (`Dt::targetCodes()` · 사용자 결정 A안).
+직접 담는 단타 목록(20칸)을 없앴다. `dt_pool` 은 이제 **「최근조회」**(단타 화면에서 열어 3초 머문 종목 · 상한 60 · LRU)이고,
+보유 ∪ Top-Pick(`Dt::alwaysCodes()`)은 열어 보지 않아도 **항상** 수집한다. **②-b 「최근조회 만료」**가 ② 뒤에 붙었다 —
+보관 창(10거래일) 동안 한 번도 안 연 종목을 내린다(`Dt::expireViews()` · 항상 수집되는 종목의 봉은 남긴다 · ★수집 «다음»).
+실측 2026-10-07: 최근조회 13 + 보유 15 + Top-Pick 29 − 겹침 = **44종목**(그중 17종목은 봉이 없어 첫 실행의 ③ 치유가 채운다 —
+종목당 ~5콜이라 첫날만 2~3분 더 걸린다). 아래 08-05 서술의 「풀」은 이제 최근조회를 뜻하고, 「보유를 담지 않는다」의 이유는
+`poolRemove()` 가 항상 수집되는 종목의 봉을 안 지우는 것으로 지킨다.
+
 **★수집 대상은 「단타 풀」이 아니라 「풀 ∪ 보유」다** (2026-08-05).
 단일본은 **`Dt::targetCodes()`** = `dt_pool`(active=1) **∪** 살아있는 포지션(`pf_position.status <> 'closed'`).
 아래 ①③④⑤ 가 **전부 그 하나**를 본다 — 한 곳만 넓히면 「어떤 단계는 보유를 받고 어떤 단계는 안 받는」 어긋남이 난다.
@@ -725,13 +733,26 @@ https://economist.kr/market/crawl.php?key=econ-mkt-7x3k&report=1&notify=1&bg=1
 |---|---|---|
 | ① 수집 | **대상 종목**(풀 ∪ 보유)의 **당일분** (키움 ka10080 → 실패 시 네이버) | 종목당 1초 간격 = 20종목 40초 → **bg 필수** |
 | ② 만료 삭제 | 보관 창(최근 10거래일) 밖의 봉 · 60일 지난 로그 | ★**반드시 수집 다음** — 순서가 뒤집히면 수집 실패한 날 보관 일수만 줄어든다 |
-| ③ 구멍 치유 | `dt_min_log` 가 `partial/none/fail` 인 (종목,날짜) 재수집 (`tries<5`) | 키움이 1년을 보관하므로 며칠 놓쳐도 복구된다. 네이버 폴백은 7거래일까지만 |
+| ③ 구멍 치유 | `Dt::holes(40)` 이 고른 **종목**(최대 40)의 창 전체를 다시 받고 `Dt::healMark()` 로 시도 횟수를 올린다 | ★무엇이 구멍인지는 `Dt::holes()` 한 곳(2026-10-08 다시 정함): **거래한 날만**(`krx_amt.vol>0`) · 빈 칸 먼저 · `partial` 은 **마지막 봉이 15:19 에 못 닿은 것만** · `tries<5`. 옛 정의는 얇은 종목의 partial 이 매일 40칸을 다 먹어 새 종목이 굶었다 |
 | ④ 분할 감지 | `krx_amt.list_shrs` 가 전일 대비 ±20% → **전량 삭제 후 재수집** | 계수를 곱하지 않는다 — 10거래일이면 5콜이라 다시 받는 편이 싸고 확실하다 |
 | ⑤ 적재율 감시 | 치유까지 끝난 뒤 **실제로 남은** 종목 수(`Dt::collectedCount`)가 절반 미만이면 `cron_fail_notify` priority 1 | ★이 파일은 실패를 **전부 자체 catch 로 삼킨다**(네이버 폴백을 위해) → 중앙 실패 알림이 못 본다. §2.5 규칙 3 대로 스스로 쏜다 |
 
+**★★휴장일 문지기 (2026-10-08)** — 「오늘 실제로 장이 섰나」의 단일본은 **`NaverFinanceAPI::tradedToday()`**
+(대형주 둘의 마지막 체결 시각 `localTradedAt` 이 오늘인가 · `/tmp/econ_traded_today.json` 캐시 · true/false/null=모른다).
+`all_stock_info.uDate` 가 오늘이라는 것은 **거래일의 증거가 아니다** — 시세 크론(`stock_news`)은 평일 휴장일에도 돌아 직전 거래일 값을
+다시 받고 `uDate` 만 오늘로 찍는다. 그 가정 때문에 2026-08-17 · 09-24 · 09-25 · 10-05(대체공휴일·추석)에
+①`dart_eod` 의 잠정 적재가 직전 거래일의 복사본을 `krx_amt` «오늘 행»으로 넣었고(확정값이 오지 않아 **유령 거래일**로 남는다)
+②이 크론이 돌아 전 종목이 `fail` 로 적혔고(적재율 감시 0/26) ③마감 변동 알림이 전날 목록을 또 쐈다.
+지금은 `dart_eod` 가 휴장일에 **묶음을 통째로 건너뛰고**(`오늘은 휴장일입니다 …` 한 줄), `KrxAmt::provisionalFromSnapshot()` 은
+`tradedToday() === true` 일 때만 쓰며, `Dt::isTradingDay()` 의 오늘 폴백도 그것을 묻는다(이 크론은 휴장일에 `거래일이 아닙니다` 로 끝난다).
+★확인 불가(null)면 `dart_eod` 는 **원장 잠정 적재만** 건너뛰고 나머지는 진행한다 — 안 쓴 날은 다음날 13:05 확정값이 채우지만 잘못 쓴 날은 못 지운다.
+★유령 나흘은 `D:\tmp\wg_e2e\run_clean.ps1 -Mode go`(백업 → `krx_amt`·`pf_value_daily`·`dt_min_log` 그 날짜 삭제 → `krx_amt.php job=surge` ·
+`dart_collect.php job=pfvalue` 로 캐시 재생성)로 지운다 — **2026-10-08 현재 아직 남아 있다**. 남아 있는 동안 보관 창 10일 중 2일이 빈 날이고
+③치유가 그 빈 날 때문에 매일 최대 40종목을 다시 받는다(`tries` 5회에서 멎는다).
+
 **★마감 뒤여야 하는 이유 (타이밍 의존)** — 「오늘이 거래일인가」를 `krx_amt` 의 오늘 행으로 판정하는데,
 그 행은 **15:50 `dart_eod`** 가 `all_stock_info` 스냅샷에서 넣는다(`src='n'`). 앞에 두면 매일 「휴장일」로
-오판해 그날 분봉을 조용히 건너뛴다. 폴백으로 `all_stock_info.uDate` 도 보지만, 순서를 지키는 편이 낫다.
+오판해 그날 분봉을 조용히 건너뛴다. 폴백으로 «오늘 실제 체결이 있었나»(`tradedToday`)도 보지만, 순서를 지키는 편이 낫다.
 (15:30 종가 단일가 체결 반영도 16:00 이후여야 안전하다)
 **★16:25 가 아니라 16:45 인 이유** — 바로 앞 `etf_update`(16:20)가 실측 901.7초라 16:35 까지 돈다(§1).
 데이터 조건은 15:50 이후면 똑같이 만족하므로, 겹치지 않게 뒤로 물린 것이다.
@@ -799,6 +820,7 @@ php cron/dt_min.php job=heal                구멍만 치유
 | `all_etf_price` / `all_etf_info` / `all_etf_holdings_info` | `keyword_collector`(stock_etf_news / etf_update) | – |
 | `krx_daily` | `dart_collect`(krx) | **상장주식수 + 거래종목 판정** 전담. `close_prc` 는 폴백 전용 |
 | `pf_value_daily` | `dart_collect`(eod 오늘 행 · krx 확정 재계산 · pfvalue 백필) / **stock/api.php**(체결·원금·이월배당 저장 뒤 그 날짜부터 `pf_value_touch`) | ★**재생성 가능한 캐시**(진실 = pf_trade·pf_principal_flow·pf_income_flow·krx_amt). 가격은 `krx_amt.c` 하나(수정주가 `pf_daily` 금지). 거래일 달력 = 005930 행. 단일본 `stock/lib/value.php` |
+| `mv_var`·`mv_daily` | `dart_collect`(eod · 변수당 최근 20행) + 화면(`module=mv` — 등록할 때 과거 되짚기 · 볼 때 3시간보다 낡았으면 한 장) | 시장 변수(환율·유가·금리·금속·운임) 일별 값 · 네이버 모바일 `api.stock.naver.com/marketindex/{분류}/{코드}/prices`(pageSize 10~60) · 최근 하루는 잠정 · `classes/Mv.class` |
 | `krx_index_daily` | `dart_collect`(eod·krx 최근 20일 · pfvalue `idx=1` 백필) | KOSPI·KOSDAQ 종가 · 네이버 모바일 `api/index/{KOSPI\|KOSDAQ}/price`(pageSize≤60) · **15:30 전엔 오늘 행을 안 넣는다**(장중값) · `classes/KrxIndex.class` |
 | `stock_financial` | `dart_collect`(fresh·quarter) | 분기는 **누적(YTD)** 저장. 규칙 `thstrm_add ?? thstrm` |
 | `stock_fundamental` | `dart_collect`(shares) | 연도별 주식수 |

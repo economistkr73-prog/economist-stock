@@ -63,55 +63,51 @@ class NaverFinanceAPI {
         return ["success" => $all_stocks];
     }
 
+    // ★2026-10-06 소스 교체 — 옛 finance.naver.com/item/news_news.naver 는 네이버가 폐지했다
+    //   (HTTP 410 · 「이 페이지는 더 이상 제공되지 않습니다」). 지수(KrxIndex)·시세 폴링과 같은
+    //   모바일 JSON API 로 옮겼다. 응답은 «묶음» 배열이고 각 묶음의 첫 기사가 대표다(관련 기사는 뒤에 딸린다).
+    //   돌려주는 모양(title·link·info·date)은 옛것 그대로라 소비자 넷은 손대지 않는다.
+    //   실패·빈 응답은 조용히 [] — 이 함수는 JSON API 안에서도 불리므로 아무것도 echo 하지 않는다.
     public function getNaverFinanceNews(string $stockCode, int $limit = 10): array {
-        $url = "https://finance.naver.com/item/news_news.naver?code=" . $stockCode;
+        $size = max(1, min(20, $limit));
+        $url = "https://m.stock.naver.com/api/news/stock/" . rawurlencode($stockCode) . "?pageSize={$size}&page=1";
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, $url);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_REFERER, "https://finance.naver.com/item/news.naver?code=" . $stockCode);
-        curl_setopt($ch, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36");
+        curl_setopt($ch, CURLOPT_REFERER, "https://m.stock.naver.com/");
+        curl_setopt($ch, CURLOPT_USERAGENT, "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1");
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-        $html = curl_exec($ch);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+        $body = curl_exec($ch);
+        $http = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
-        if (!$html) return [];
-        $html = mb_convert_encoding($html, 'UTF-8', 'EUC-KR');
-        $html = preg_replace('/<meta[^>]+charset=[\'"]?(euc-kr|EUC-KR)[\'"]?[^>]*>/i', '', $html);
-        $html = '<?xml encoding="UTF-8">' . $html;
-        libxml_use_internal_errors(true);
-        $dom = new DOMDocument();
-        @$dom->loadHTML($html, LIBXML_NOERROR | LIBXML_NOWARNING);
-        libxml_clear_errors();
-        $xpath = new DOMXPath($dom);
-        $rows = $xpath->query("//table[contains(@class, 'type5')]//tr");
-        $newsList = []; $seenTitles = []; $fetched_count = 0;
-        foreach ($rows as $row) {
-            if ($fetched_count >= $limit) break;
-            $titleNode = $xpath->query(".//td[contains(@class, 'title')]/a", $row)->item(0);
-            if (!$titleNode) $titleNode = $xpath->query(".//a[contains(@class, 'tit')]", $row)->item(0);
-            $infoNode = $xpath->query(".//td[contains(@class, 'info')]", $row)->item(0);
-            $dateNode = $xpath->query(".//td[contains(@class, 'date')]", $row)->item(0);
-            if ($titleNode && $dateNode) {
-                $title = trim($titleNode->nodeValue);
-                if (in_array($title, $seenTitles)) continue;
-                $seenTitles[] = $title;
-                // ★모바일 대응: 구형 finance.naver.com news_read(?article_id&office_id) 는 모바일에서
-                //   기사로 못 열고 목록으로 떨어짐 → 모던 네이버뉴스 URL(n.news.naver.com/article/oid/aid)로 변환
-                $nhref = $titleNode->getAttribute('href');
-                if (preg_match('/article_id=(\d+)/', $nhref, $aM) && preg_match('/office_id=(\d+)/', $nhref, $oM)) {
-                    $nlink = "https://n.news.naver.com/article/{$oM[1]}/{$aM[1]}";
-                } else {
-                    $nlink = (strpos($nhref, 'http') === 0) ? $nhref : "https://finance.naver.com" . $nhref;
-                }
-                $newsList[] = [
-                    'title' => $title,
-                    'link'  => $nlink,
-                    'info'  => $infoNode ? trim($infoNode->nodeValue) : '',
-                    'date'  => trim($dateNode->nodeValue)
-                ];
-                $fetched_count++;
-            }
+        if (!$body || $http !== 200) return [];
+        $groups = json_decode($body, true);
+        if (!is_array($groups)) return [];
+
+        $newsList = []; $seenTitles = [];
+        foreach ($groups as $g) {
+            if (count($newsList) >= $limit) break;
+            $it = $g['items'][0] ?? null;
+            if (!is_array($it)) continue;
+            $title = trim(html_entity_decode((string) ($it['titleFull'] ?? $it['title'] ?? ''), ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+            if ($title === '' || isset($seenTitles[$title])) continue;
+            $seenTitles[$title] = 1;
+            $oid = (string) ($it['officeId'] ?? ''); $aid = (string) ($it['articleId'] ?? '');
+            $link = ($oid !== '' && $aid !== '')
+                ? "https://n.news.naver.com/article/{$oid}/{$aid}"
+                : (string) ($it['mobileNewsUrl'] ?? '');
+            // datetime = YYYYMMDDHHMM → 옛 표기 「YYYY.MM.DD HH:MM」
+            $dt = (string) ($it['datetime'] ?? '');
+            $date = preg_match('/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})/', $dt, $m) ? "{$m[1]}.{$m[2]}.{$m[3]} {$m[4]}:{$m[5]}" : $dt;
+            $newsList[] = [
+                'title' => $title,
+                'link'  => $link,
+                'info'  => (string) ($it['officeName'] ?? ''),
+                'date'  => $date,
+            ];
         }
-        if (empty($newsList)) echo "<h3 style='color:#e1234a;'>[디버깅] 뉴스를 찾지 못했습니다.</h3>";
         return $newsList;
     }
 
@@ -734,12 +730,13 @@ class NaverFinanceAPI {
      *   장중이면 현재가, 마감 뒤면 정규장 종가다. marketStatus(OPEN/CLOSE) 로 구분할 수 있다.
      *
      * @param  string[] $codes 6자리 종목코드
+     * @param  int      $timeout 응답 대기(초) — 문지기처럼 «자주» 묻는 자리는 짧게 준다
      * @return array [ code => ['price'=>int, 'rate'=>float, 'diff'=>int, 'open'=>int, 'high'=>int,
      *                          'low'=>int, 'vol'=>int, 'cap'=>int, 'name'=>string,
      *                          'status'=>'OPEN'|'CLOSE', 'traded_at'=>string] ]
      *                 실패하면 빈 배열 — 부르는 쪽이 기존 값을 그대로 쓰면 된다
      */
-    public function getRealtimeQuotes(array $codes): array
+    public function getRealtimeQuotes(array $codes, int $timeout = 10): array
     {
         $codes = array_values(array_unique(array_filter(array_map(
             static fn($c) => preg_match('/^\w{6}$/', trim((string)$c)) ? trim((string)$c) : null, $codes))));
@@ -752,7 +749,7 @@ class NaverFinanceAPI {
             $ch  = curl_init($url);
             curl_setopt_array($ch, [
                 CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_TIMEOUT        => 10,
+                CURLOPT_TIMEOUT        => max(1, $timeout),
                 CURLOPT_SSL_VERIFYPEER => false,
                 CURLOPT_FOLLOWLOCATION => true,
                 CURLOPT_HTTPHEADER     => [
@@ -826,6 +823,83 @@ class NaverFinanceAPI {
         if ($now > $close) return $close;                     // 마감 뒤 — 시각 규칙이 이긴다
         $age = ($maxAge !== null && $maxAge > 0) ? $maxAge : self::QUOTE_MAX_AGE;
         return $now - $age;
+    }
+
+    /** 「오늘 장이 섰나」를 묻는 종목 — 대형주 둘. 하나가 거래정지여도 답이 선다. */
+    const TRADED_PROBE = ['005930', '000660'];
+
+    /** 「아직 안 섰다」·「모르겠다」는 답을 얼마나 쥐고 있나(초) — 개장 직후에 「아직」을 오래 믿지 않게 짧게 둔다. */
+    const TRADED_NEG_TTL = 60;
+
+    /**
+     * 오늘 <b>실제로 장이 섰나</b> — true / false / null(판정 불가) (2026-10-08).
+     *
+     * ══ 왜 있나 ═════════════════════════════════════════════════════════
+     * 사이트 곳곳이 「all_stock_info.uDate 가 오늘이면 거래일」로 읽고 있었다. 그런데 uDate 는
+     * <b>「마지막으로 확인한 시각」</b>이다(refreshQuotes 주석) — 시세 크론은 평일 휴장일에도 돌아
+     * 직전 거래일 값을 그대로 다시 받고 uDate 만 오늘로 찍는다. 그래서 평일 휴장일마다
+     *   · 15:50 잠정 적재가 직전 거래일의 복사본을 krx_amt «오늘 행»으로 넣었고
+     *     (KRX 확정값이 영영 오지 않아 <b>유령 거래일</b>로 굳는다 — 그 표가 사이트의 거래일 달력이다)
+     *   · 단타 분봉 크론이 돌아 전 종목이 실패로 적혔고 · 마감 변동 알림이 전날 목록을 또 쐈다.
+     * 실측 2026-10-08: 08-17 · 09-24 · 09-25 · 10-05 나흘이 그렇게 들어가 있었다(지수 원장에는 그 날짜가 없다).
+     *
+     * ══ 무엇으로 아나 ═══════════════════════════════════════════════════
+     * 네이버 폴링 응답의 <code>localTradedAt</code>(그 종목의 마지막 체결 시각). 휴장일엔 직전 거래일 시각에 멈춰 있다.
+     * <b>하나라도 오늘 체결</b>이면 장이 선 것이다. 장전 시간외의 체결도 오늘로 잡히므로 개장 전에도 답이 나온다.
+     * ★그 필드가 응답에서 사라지면 「휴장일」이 아니라 <b>「모른다」(null)</b>다 — 네이버가 응답 모양을 바꾼 날
+     *   사이트 전체가 조용히 「오늘은 휴장일」로 서 버리면 안 된다.
+     *
+     * ══ 캐시 (파일 하나) ════════════════════════════════════════════════
+     * 10초마다 도는 문지기(Dt::isTradingDay)가 부른다.
+     *   참   — 그 날 내내 유효 (장이 한 번 섰으면 그 날은 거래일이다)
+     *   거짓 — TRADED_NEG_TTL 초 (휴장일에 화면을 열어 둬도 분당 한 콜 · 늦은 개장은 저절로 따라간다)
+     *   불가 — 같은 시간만큼 «다시 묻지 않는다» (네이버가 죽었을 때 요청마다 타임아웃을 물지 않게)
+     *
+     * ★null 을 어느 쪽으로 읽을지는 <b>부르는 쪽</b>이 정한다 — 원장에 쓰는 자리(잠정 적재)는 「안 쓴다」
+     *   (안 쓴 날은 다음날 확정값이 채우지만 잘못 쓴 날은 영영 남는다), 화면의 문지기는 옛 근사로 물러선다
+     *   (거래일이 훨씬 많다). 틀렸을 때 값이 싼 쪽이 자리마다 다르다.
+     */
+    public static function tradedToday(): ?bool
+    {
+        if ((int)date('N') >= 6) return false;                 // 주말은 물어볼 것도 없다
+        $today = date('Y-m-d');
+        $file  = sys_get_temp_dir() . '/econ_traded_today.json';
+
+        $j = is_file($file) ? json_decode((string)@file_get_contents($file), true) : null;
+        if (is_array($j) && ($j['d'] ?? '') === $today) {
+            $v = $j['v'] ?? null;
+            if ($v === 1) return true;
+            if ((time() - (int)($j['at'] ?? 0)) < self::TRADED_NEG_TTL) return $v === 0 ? false : null;
+        }
+
+        $t = self::tradedOn($today, self::TRADED_PROBE);
+        $v = $t === null ? null : ($t ? 1 : 0);
+
+        /* 임시파일 → rename 으로 갈아 끼운다 — 반쯤 쓰인 파일을 다른 요청이 읽지 않게 */
+        $tmp = $file . '.' . getmypid();
+        if (@file_put_contents($tmp, json_encode(['d' => $today, 'v' => $v, 'at' => time()])) !== false) @rename($tmp, $file);
+        return $t;
+    }
+
+    /**
+     * 그 종목들의 <b>마지막 체결이 그 날짜인가</b> — tradedToday() 의 «묻기» 부분(캐시 없음 · 한 콜).
+     * 하나라도 그 날 체결이면 true · 체결 시각을 받았는데 그 날 것이 없으면 false ·
+     * 응답이 없거나 체결 시각 필드가 비었으면 null(모른다).
+     */
+    public static function tradedOn(string $day, array $codes): ?bool
+    {
+        try {
+            $seen = false;
+            foreach ((new self())->getRealtimeQuotes($codes, 4) as $x) {
+                $at = (string)($x['traded_at'] ?? '');
+                if ($at === '') continue;
+                $seen = true;
+                if (substr($at, 0, 10) === $day) return true;
+            }
+            return $seen ? false : null;
+        } catch (Throwable $e) {
+            return null;
+        }
     }
 
     /**

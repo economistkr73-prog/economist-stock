@@ -21,6 +21,7 @@ require_once __DIR__ . '/lib/topbar.php';  // 섹션 헤더 — pf_menus / pf_to
 require_once __DIR__ . '/lib/slowlog.php'; // 느린 렌더 계측 — 임계 초과 요청만 웹 루트 밖 파일에 한 줄
 require_once __DIR__ . '/lib/note.php';    // 종목 개요·태그 단일본 — 재무 상세 카드·스크리너 &tag=·목록 칩
 require_once __DIR__ . '/lib/value.php';   // 일일 결산 시계열 — 현황 카드 미니 그래프(총평가·수익률·KOSPI 대비)와 팝업
+require_once __DIR__ . '/lib/wgroup.php';  // 관심그룹 화면(mode=wgroup) — pf_page_wgroup
 require_login();
 pf_slowlog_boot();
 
@@ -46,8 +47,8 @@ $mode = $_GET['mode'] ?? 'dashboard';
 
 $routes = [
     'short'     => 'pf_page_short',       // 단타 — 1분봉 원장(dt_min) 3분할 화면 (다크)
-    'multi'     => 'pf_page_multi',       // 멀티차트 — 단타 종목의 일봉을 가로×세로 격자로 (다크 · 상단 메뉴 독립 항목)
     'move'      => 'pf_page_move',        // 마감 변동 리포트 — 15:50 알림이 쏜 종목의 카드(미니 일봉+뉴스) (다크 · 진입은 알림 링크·단타 칩)
+    'wgroup'    => 'pf_page_wgroup',      // 관심그룹 — 그룹별 종목 리스트(기준가 대비) + 그룹 전체 멀티 차트 (다크 · stock/lib/wgroup.php)
     'dashboard' => 'pf_page_dashboard',   // 포트폴리오 목록 + 오늘의 신호
     'all'       => 'pf_page_all',         // 보유종목 — 전 포트폴리오 종목을 한 표에
     'hist'      => 'pf_page_hist',        // 매매히스토리 — 체결 뒤 가격이 어떻게 됐나
@@ -59,7 +60,7 @@ $routes = [
     'earn'      => 'pf_page_earn',        // 재무분석 > 어닝 서프라이즈 (최근 공시 SUE 목록)
     'earncase'  => 'pf_page_earncase',    // 재무분석 > 서프라이즈 사례 — 성공·실패 실사례 차트
 
-    'watch'     => 'pf_page_watch',       // 관심종목 (재무분석에서 담아 둔 것)
+    'watch'     => 'pf_page_watch',       // Top-Pick (재무분석에서 담아 둔 것)
     'quant'     => 'pf_page_quant',       // 퀀트 > 최고 거래대금 (krx_amt 전종목 원장)
     'boxbrk'    => 'pf_page_boxbrk',      // 퀀트 > 패턴분석 (박스 상향돌파) — 한 패턴을 매일 쌓는다
     'signal'    => 'pf_page_signal',      // 퀀트 > 신호분석 — 화면 곳곳의 배지·신호 전체의 기준을 한 자리에
@@ -75,6 +76,12 @@ $routes = [
  *   수기 사례 화면 · mode=pattern)은 2026-08-10 에 「패턴분석 (박스 상향돌파)」로 합쳐졌다.
  *   북마크·옛 알림 링크가 말없이 대시보드로 떨어지면 「사라졌다」로 읽힌다.
  *   옛 5개 패턴(매집형 돌파·계단지지·첫 폭발·불꽃형 둘)의 «근거 표»는 검증 탭 ④~⑥에 그대로다. */
+/* 멀티차트(mode=multi)는 2026-10-07 에 없앴다(사용자 지시 — 「메뉴는 이제 필요 없다」). 그 «격자(가로×세로)» 배열은
+ * 관심그룹 화면이 물려받았다. 옛 분류(&f=)는 고정 그룹으로 옮겨 준다: 보유 → 보유종목 · 단타(pool) → 최근조회. */
+if ($mode === 'multi') {
+    $mf = (string)($_GET['f'] ?? ($_COOKIE['mc_filter'] ?? 'held'));
+    header('Location: /stock/index.php?mode=wgroup&g=' . ($mf === 'pool' ? 'recent' : 'held'), true, 301); exit;
+}
 if ($mode === 'flame' || $mode === 'pattern') {
     header('Location: /stock/index.php?mode=boxbrk', true, 301); exit;
 }
@@ -117,7 +124,7 @@ function pf_sub_menus(string $section = 'setting'): array
             ['key' => 'screener', 'href' => '/stock/index.php?mode=fund',      'label' => '스크리너'],
             ['key' => 'earn',     'href' => '/stock/index.php?mode=earn',      'label' => '어닝 서프라이즈'],
             ['key' => 'earncase', 'href' => '/stock/index.php?mode=earncase',  'label' => '사례분석'],
-            ['key' => 'watch',    'href' => '/stock/index.php?mode=watch',     'label' => '관심종목'],
+            ['key' => 'watch',    'href' => '/stock/index.php?mode=watch',     'label' => 'Top-Pick'],
         ],
         /* 퀀트: 목록(오늘 뜬 것)과 검증(그 신호가 수익이 됐나)을 나란히 —
          * 배지의 근거가 한 클릭 안에 있어야 배지를 믿고 쓸 수 있다. */
@@ -457,6 +464,10 @@ a.badge{text-decoration:none}
 .sum-box.wd .k .tm-tot{font-size:12px;color:#5b6b7b;margin-left:14px;padding-left:12px;border-left:1px solid #e3eaf0}
 .sum-box.wd .k .tm-tot em{font-style:normal;font-size:15px;font-weight:800;font-variant-numeric:tabular-nums}
 .sum-box.wd .k .tm-tot small{color:#a3aeb9;font-weight:400}
+/* 포트폴리오 표의 「예수금 비중」 칸 — 숫자의 바탕색이 전체 평균과의 차이를 말한다(색은 $cashCell 이 인라인으로 준다) */
+table.pf td.cw{white-space:nowrap}
+table.pf td.cw b{display:inline-block;min-width:46px;padding:2px 6px;border-radius:5px;font-weight:700;color:#22303f;text-align:right}
+.sum-box.wd .k .tm-cash{font-weight:800;color:#3c4d5e;font-variant-numeric:tabular-nums}
 .tm{position:relative;margin-top:7px;border-radius:8px;overflow:hidden;background:#fff}
 .tm-g{position:absolute;box-sizing:border-box;border:2px solid #fff;overflow:hidden;border-radius:4px}
 .tm-gh{position:absolute;left:0;right:0;top:0;height:17px;line-height:17px;font-size:11px;padding:0 6px;
@@ -499,6 +510,57 @@ a.badge{text-decoration:none}
 /* 종목별 축에서 여러 포트폴리오에 담긴 종목 — 이름 옆 「3곳」 */
 .tm-c b i{font-style:normal;font-weight:700;font-size:10px;opacity:.72;margin-left:3px}
 .tm-empty{margin:0;padding:16px;color:#8b98a5;font-size:12px}
+/* ── 「오늘」 띠 (2026-10-02) — 트리맵 아래 한두 줄. 보유 종목의 오늘 등락률을 큰 순으로.
+ * ★배경을 칠하지 않는다 — 바로 위 트리맵의 빨강·파랑은 «평가수익률(누적)»이라 여기도 타일로 칠하면 같은 색이 두 뜻이 된다.
+ *   띠는 글자색만 쓴다(등락색 .up/.down).
+ * ★많아야 두 줄이다 — JS 가 .fit 을 달면 두 줄에서 자르고, 넘치는 동안 «0 에 가까운 것부터» 접는다(양끝이 정보다).
+ *   처음엔 한 줄이었는데 왼쪽 단(약 1,000px)에서 15종목 중 6개만 남았다 — 「흐름을 한눈에」가 안 됐다(미리보기 실측).
+ *   JS 가 없으면 그냥 줄바꿈된다(잘려서 큰 하락이 안 보이는 것보다 낫다). */
+.td-strip{display:flex;align-items:flex-start;flex-wrap:wrap;gap:3px 12px;margin-top:8px;padding-top:7px;border-top:1px solid #eef2f6;
+  font-size:12px;line-height:1.5;font-variant-numeric:tabular-nums}
+.td-sum{flex:0 0 auto;color:#5b6b7b;white-space:nowrap;padding-right:12px;border-right:1px solid #e3eaf0}
+.td-sum>b{color:#22303f;font-weight:800;margin-right:6px}
+.td-sum em{font-style:normal;font-weight:800}
+.td-sum small{font-size:11px;color:#8b98a5;margin-left:5px}
+.td-list{display:flex;align-items:baseline;flex-wrap:wrap;gap:3px 12px;flex:1 1 320px;min-width:0}
+.td-strip.fit .td-list{max-height:39px;overflow:hidden}   /* 두 줄 = 18px × 2 + 줄 간격 3px */
+.td-i{flex:0 0 auto;color:#3c4d5e;text-decoration:none;white-space:nowrap}
+.td-i b{margin-left:4px;font-weight:800}
+.td-i b.flat{font-weight:700}
+.td-i:hover{text-decoration:underline}
+.td-more{flex:0 0 auto;color:#a3aeb9;font-size:11px;white-space:nowrap}
+.td-i[hidden],.td-more[hidden]{display:none}
+.td-at{flex:0 0 auto;margin-left:auto;color:#a3aeb9;font-size:11px;white-space:nowrap}
+/* ── 카드형 툴팁 (2026-10-02 사용자 「단순 텍스트 창이라 눈에 안 들어온다」) — 트리맵 타일·머리줄·「오늘」 칩에 뜬다.
+ * 브라우저 title 은 글자 크기·색·정렬을 못 준다 → 제목 / 큰 수익률 / 항목 표로 «층»을 나눈 HTML 을 data-tip 에 싣고
+ * JS 가 한 개의 떠 있는 상자(.pf-tip)에 갈아 끼운다. title 은 JS 없을 때의 예비로 남기고 JS 가 걷어낸다(둘이 겹쳐 뜨지 않게).
+ * pointer-events 없음 — 상자가 마우스를 먹으면 타일 hover 가 끊겨 깜박인다. */
+.pf-tip{position:fixed;z-index:9000;pointer-events:none;min-width:228px;max-width:420px;background:#fff;color:#22303f;
+  border:1px solid #cfdae4;border-radius:10px;box-shadow:0 8px 24px rgba(20,35,50,.20);padding:10px 12px 9px;
+  font-size:12px;line-height:1.45;font-variant-numeric:tabular-nums}
+.pf-tip[hidden]{display:none}
+.pf-tip .tt-h{display:flex;align-items:center;gap:6px;padding-bottom:7px;margin-bottom:7px;border-bottom:1px solid #e3eaf0}
+.pf-tip .tt-h b{font-size:14px;font-weight:800;white-space:nowrap}
+.pf-tip .tt-h i{font-style:normal;font-size:11px;font-weight:700;color:#5b6b7b;background:#eef2f6;border-radius:10px;padding:0 7px;white-space:nowrap}
+.pf-tip .tt-h em{font-style:normal;margin-left:auto;padding-left:14px;font-size:17px;font-weight:800;white-space:nowrap;text-align:right;line-height:1.15}
+.pf-tip .tt-h em small{display:block;font-size:10px;font-weight:400;color:#8b98a5}
+.pf-tip dl{display:grid;grid-template-columns:auto 1fr;gap:2px 14px;margin:0}
+.pf-tip dt{color:#8b98a5;white-space:nowrap}
+.pf-tip dd{margin:0;text-align:right;font-weight:700;white-space:nowrap}
+.pf-tip dd small{font-weight:400;color:#8b98a5;margin-left:5px;font-size:11px}
+.pf-tip table{width:100%;border-collapse:collapse;margin-top:8px;border-top:1px solid #e3eaf0}
+.pf-tip th{font-size:10.5px;font-weight:400;color:#8b98a5;text-align:right;padding:5px 0 2px 10px}
+.pf-tip td{text-align:right;padding:1px 0 1px 10px;white-space:nowrap}
+.pf-tip th:first-child,.pf-tip td:first-child{text-align:left;padding-left:0}
+.pf-tip td:first-child{font-weight:700}
+.pf-tip .tt-f{margin:7px 0 0;font-size:10.5px;color:#a3aeb9}
+/* 붙잡힌 카드(타일을 눌렀을 때) — 마우스를 받고, 주소가 실린 줄이 그 포트폴리오로 가는 문이 된다 */
+.pf-tip.pin{pointer-events:auto;border-color:#7fa6cf;box-shadow:0 6px 24px rgba(20,40,60,.28)}
+.pf-tip.pin tr[data-href]{cursor:pointer}
+.pf-tip.pin tr[data-href] td{padding-top:4px;padding-bottom:4px}
+.pf-tip.pin tr[data-href] td:first-child{color:#1d5c93;text-decoration:underline}
+.pf-tip.pin tr[data-href]:hover td{background:#eaf2fb}
+.pf-tip.pin .tt-f{color:#5b6b7b}
 
 form.inline{display:inline}
 input[type=text],input[type=number],input[type=date],select,textarea{
@@ -534,6 +596,20 @@ label.fld,div.fld{display:flex;flex-direction:column;gap:4px;font-size:12px;font
 .sig-strip{background:#fff;border:1px solid #e3eaf0;border-radius:11px;padding:12px 14px;
   margin-bottom:14px;box-shadow:0 1px 3px rgba(20,40,60,.05)}
 .sig-strip.quiet{background:#fafbfc}
+/* 맨 윗줄 — [보유 비중 트리맵] [오늘의 신호]. 칸 나눔과 간격은 아래 좌우분할(.split)과 «같은 값»이다 —
+ * 트리맵의 폭이 그 아래 왼쪽 단(합계 카드·포트폴리오 표)과 맞고, 신호 표가 오른쪽 상세와 맞는다(2026-10-13 사용자).
+ * 소스 순서는 신호가 먼저다(쌓일 때 신호가 위) — 나란히 설 때만 트리맵을 왼쪽으로 보낸다(order).
+ * 신호가 없는 날(.quiet)과 .split 이 한 단으로 접히는 폭(1400px)에서는 위아래로 쌓인다. */
+.sig-row{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;align-items:stretch;margin-bottom:14px}
+.sig-row>.sig-strip,.sig-row>.sum-grid{margin-bottom:0;min-width:0}
+.sig-row>.sum-grid>.sum-box.wd{display:flex;flex-direction:column}
+.sig-row .sum-box.wd>.tm{height:300px!important}
+@media(min-width:1401px){
+  .sig-row:has(>.sig-strip:not(.quiet)){grid-template-columns:minmax(0,1fr) minmax(0,1.15fr)}
+  .sig-row:has(>.sig-strip:not(.quiet))>.sum-grid{order:-1}
+  /* 트리맵은 신호 표의 높이를 따라 늘어난다 — 박스가 줄의 높이를 다 쓰고 머리줄·「오늘」 띠를 뺀 나머지를 .tm 이 먹는다 */
+  .sig-row:has(>.sig-strip:not(.quiet)) .sum-box.wd>.tm{flex:1 1 0;height:auto!important;min-height:300px}
+}
 .sig-hd{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
 .sig-hd h2{font-size:15px;margin:0;letter-spacing:-.01em}
 .sig-strip.quiet .sig-hd{margin-bottom:0}
@@ -541,21 +617,61 @@ label.fld,div.fld{display:flex;flex-direction:column;gap:4px;font-size:12px;font
 .sig-cash{margin-left:auto;font-size:12px;color:#7d8b99;font-variant-numeric:tabular-nums}
 .sig-cash b{color:#3c4d5e}
 .sig-cash b.short{color:#c62828}
-.sig-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(238px,1fr));gap:9px}
-.sig-card{display:block;text-decoration:none;color:#22303f;background:#fcfdfe;
-  border:1px solid #e3eaf0;border-left-width:4px;border-radius:9px;padding:9px 11px}
-.sig-card:hover{background:#f4f9ff;border-color:#bcd3e8}
-.sig-top{display:flex;align-items:center;gap:6px;margin-bottom:5px}
-.sig-folio{font-size:11px;font-weight:700;color:#6c7c8c;background:#eef3f7;border-radius:5px;
-  padding:2px 6px;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* 카드 본문 한 줄 — 종목명(큼) · 차수(작게) · 주수(색). 좁으면 주수가 다음 줄로 넘어간다 */
-.sig-name{font-size:18px;font-weight:800;letter-spacing:-.02em;line-height:1.3}
-.sig-name .step{font-size:12px;font-weight:700;color:#7d8b99;margin-left:5px}
-.sig-name .qty{font-size:16px;font-weight:800;margin-left:7px;font-variant-numeric:tabular-nums}
 /* ⊖ .sig-meta(현재가 ≤ 이론가 / ≥ 자동매도가 줄)는 카드를 주수만 남기면서 2026-08-03 삭제.
    ⊖ 예수금 게이트 배지(.sig-fund)는 출력처가 없어 2026-08-02 삭제 — 스트립 머리의
    「예수금 부족 N건」(.sig-cash b.short)은 남아 있다. 그건 배지가 아니라 집계다. */
 .sig-none{font-size:13px;color:#7d8b99}
+/* 오늘의 신호 — 종목 × 포트폴리오 표(2026-10-13). 줄 = 종목 · 칸 = 포트폴리오 · 칸 안의 한 줄이 그 포지션으로 가는 링크 */
+/* ★폭은 내용만큼만 — 전폭(table.pf 의 100%)으로 두니 칸 사이가 벌어져 「신호 ··· 주수」가 한 눈에 안 들어왔다(사용자 실화면).
+ * 포트폴리오 칸마다 세로선을 긋고 머리글을 진하게 해서 어느 칸이 어느 포트폴리오인지 갈린다. */
+table.pf.sig-mx{width:100%;table-layout:fixed;min-width:860px;border:1px solid #e3eaf0}
+/* 폭을 정하지 않은 칸(종목)이 남는 폭을 다 갖는다 — 포트폴리오 칸은 같은 폭으로 좁게, 그 덕에 비중 칸이 들어간다 */
+table.pf.sig-mx col.mx-cf{width:122px}
+table.pf.sig-mx col.mx-cw{width:66px}
+table.pf.sig-mx td.mx-w{font-weight:700;font-variant-numeric:tabular-nums}
+table.pf.sig-mx td.mx-w i{display:flex;height:6px;margin-top:2px;border-radius:2px;overflow:hidden}
+table.pf.sig-mx td.mx-w u{display:block;height:100%;min-width:0;background:#aab6c2;text-decoration:none}
+table.pf.sig-mx td.mx-w u.k-sell{background:#3fb489}
+table.pf.sig-mx td.mx-w u.k-fill{background:#f0a03c}
+table.pf.sig-mx td.mx-w u.k-buy{background:#e06666}
+table.pf.sig-mx col.mx-c9{width:84px}
+table.pf.sig-mx th+th,table.pf.sig-mx td+td{border-left:1px solid #e3eaf0}
+table.pf.sig-mx thead th{background:#eef3f7;color:#3c4d5e;font-weight:800;text-align:center;padding-left:12px;padding-right:12px}
+table.pf.sig-mx td{padding:3px 8px}
+table.pf.sig-mx tbody tr:hover td{background:#fafcfe}
+table.pf.sig-mx td.stk a,table.pf.sig-mx td.stk>b{display:inline}
+/* ★줄을 낮게 — 시장 배지를 종목명 «옆»에 한 줄로 세운다(같은 날 사용자: 보유 종목을 다 올리니 표가 너무 길어졌다).
+ * 종목 칸이 두 줄이던 것이 줄 높이를 정하고 있었다. 코드는 숨긴다(종목명 툴팁에 있다) · 넘치는 배지는 잘린다. */
+table.pf.sig-mx td.stk{white-space:nowrap;overflow:hidden}
+table.pf.sig-mx td.stk .code{display:none}
+table.pf.sig-mx td.stk .mx-m{display:inline-flex;flex-wrap:nowrap;align-items:center;gap:3px;margin-left:8px;vertical-align:middle}
+table.pf.sig-mx td.stk .mx-m:empty{display:none}
+table.pf.sig-mx td.stk .mx-m .sig-conf{margin:0 3px 0 0}
+table.pf.sig-mx th{white-space:nowrap}
+table.pf.sig-mx th a{color:inherit;text-decoration:none}
+table.pf.sig-mx th a:hover{color:#1d5c93;text-decoration:underline}
+table.pf.sig-mx td{vertical-align:middle}
+table.pf.sig-mx td.mx-e{color:#d3dbe3;text-align:center}
+/* ★클래스 이름은 mx-b 다 — 처음에 bx 라 붙였더니 퀀트 배지(.bx · inline-block)와 겹쳐 상자가 내용 폭으로 쪼그라들었다 */
+.mx-c.mx-b{margin:0;padding:1px 4px;flex-direction:row;gap:7px}
+/* 열 칸 격자(5×2) — 한 칸 = 10% · 회색 = 보유 · 색 = 오늘 살(팔) 몫. 칸마다 같은 크기라 포트폴리오끼리 바로 견준다 */
+.mx-c>span.mx-wf{display:grid;grid-template-columns:repeat(5,8px);grid-auto-rows:8px;gap:2px;flex:0 0 auto;align-items:stretch}
+/* ★칸에 크기를 직접 준다 — 위 .mx-c>span 의 align-items:center 가 격자에도 먹어 빈 칸의 높이가 0 이 됐었다(화면에 아무것도 안 보였다) */
+.mx-wf i{display:block;width:8px;height:8px;border-radius:2px;background:#c3ccd5}
+.mx-c>span.mx-tx{flex-direction:column;align-items:flex-start;gap:1px;min-width:54px}
+table.pf.sig-mx th{overflow:hidden;text-overflow:ellipsis}
+.mx-c.mx-b small{color:#5f7183}
+.mx-c>span{display:flex;align-items:center;gap:6px}
+.mx-c small{font-size:10.5px;font-weight:400;color:#8b98a5;font-variant-numeric:tabular-nums;line-height:1.1}
+.mx-c{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;padding:3px 5px;margin:0 -5px;border-radius:6px;text-decoration:none;color:#22303f;white-space:nowrap}
+.mx-c+.mx-c{margin-top:2px}
+.mx-c:hover{background:#eef5fc}
+.mx-c .sig-pill{font-size:10.5px;padding:1px 7px}
+.mx-c i{font-style:normal;font-size:11.5px;font-weight:700;color:#7d8b99}
+.mx-c b{line-height:1.15;font-size:13.5px;font-weight:800;font-variant-numeric:tabular-nums}
+table.pf.sig-mx td.mx-t b{display:block;font-size:13.5px;line-height:1.15;font-weight:800}
+table.pf.sig-mx td.mx-t small{display:block;line-height:1.1;font-size:10.5px;color:#8b98a5;font-weight:400}
 /* 종류별 색 — 배지·카드 왼쪽 띠가 같은 값을 쓴다 */
 .k-sell.sig-pill,.k-sell.sig-dot{background:#e6f5ee;color:#0f8a5f}
 .k-buy.sig-pill,.k-buy.sig-dot{background:#fdeaea;color:#c62828}
@@ -609,12 +725,7 @@ a.wl-re:hover{border-color:#1f5fa8;background:#eaf1fb}
 /* 재진입 — 매수(빨강)와 <b>다른 색</b>이어야 한다. 아직 사이클이 시작되지 않은 「검토」라
    계획 매수 신호와 같은 무게로 읽히면 안 된다. */
 .k-re.sig-pill,.k-re.sig-dot{background:#eaf1fb;color:#1f5fa8}
-.sig-card.k-re{border-left-color:#1f5fa8}
 b.k-re{color:#1f5fa8}
-.sig-card.k-sell{border-left-color:#0f8a5f}
-.sig-card.k-buy{border-left-color:#c62828}
-.sig-card.k-fill{border-left-color:#e07c00}
-.sig-name b.k-sell,.sig-name b.k-buy,.sig-name b.k-fill,.sig-name b.k-re{background:none;padding:0}
 b.k-sell{color:#0f8a5f}
 b.k-buy{color:#c62828}
 b.k-fill{color:#b96600}
@@ -2100,10 +2211,11 @@ JS;
  * @param array $folios    포트폴리오 목록
  * @param array $stats     pf_folio_stats() — 포트폴리오별 cash · rate
  * @param float|null $totRate 전체 수익률(추정자산÷원금−1) — 머리줄 오른쪽에 적는다(옛 「수익률」 카드 자리)
+ * @param array $quotes    pf_today_quotes() — 종목코드 => 오늘 등락률. 트리맵 아래 「오늘」 띠의 재료(비면 띠 없음)
  */
-function pf_render_weight_treemap(array $positions, array $calc, array $folios, array $stats, ?float $totRate = null): void
+function pf_render_weight_treemap(array $positions, array $calc, array $folios, array $stats, ?float $totRate = null, array $quotes = [], float $H = 220.0): void
 {
-    $W = 830.0; $H = 220.0; $HDR = 17.0;   // 배치 계산용 가상 캔버스(px) · 머리줄 높이(.tm-gh 와 같은 값)
+    $W = 830.0; $HDR = 17.0;   // 배치 계산용 가상 캔버스(px) · 머리줄 높이(.tm-gh 와 같은 값)
 
     $groups = [];   // fid => name · cash · cells · val · n
     foreach ($folios as $f) {
@@ -2122,6 +2234,7 @@ function pf_render_weight_treemap(array $positions, array $calc, array $folios, 
         $pid  = (int)$p['id'];
         $name = (string)$p['stock_name'];
         $groups[$fid]['cells'][] = ['id' => $pid, 'name' => $name, 'amt' => $ev,
+                                    'code' => (string)($p['stock_code'] ?? ''), 'pl' => $c['eval_pl'] ?? null, 'cost' => (float)($c['cost_amount'] ?? 0),
                                     'step' => (int)($c['cur_step'] ?? 0), 'kind' => 'stk',
                                     'rate' => pf_eval_rate($c['eval_pl'] ?? null, (float)($c['cost_amount'] ?? 0))];
         $groups[$fid]['val'] += $ev;
@@ -2129,13 +2242,15 @@ function pf_render_weight_treemap(array $positions, array $calc, array $folios, 
 
         /* 종목별 축 — 코드로 합친다(이름이 같아도 코드가 다르면 다른 종목이고, 사명이 바뀌어도 코드는 그대로다). */
         $key = ($p['stock_code'] ?? '') !== '' ? 'c:' . $p['stock_code'] : 'n:' . $name;
-        if (!isset($stk[$key])) $stk[$key] = ['name' => $name, 'amt' => 0.0, 'cost' => 0.0, 'pl' => 0.0,
+        if (!isset($stk[$key])) $stk[$key] = ['name' => $name, 'code' => (string)($p['stock_code'] ?? ''), 'amt' => 0.0, 'cost' => 0.0, 'pl' => 0.0,
                                               'n' => 0, 'pid' => $pid, 'top' => 0.0, 'parts' => []];
         $stk[$key]['amt']  += $ev;
         $stk[$key]['cost'] += (float)($c['cost_amount'] ?? 0);
         $stk[$key]['pl']   += (float)($c['eval_pl'] ?? 0);
         $stk[$key]['n']++;
-        $stk[$key]['parts'][$pid] = ['f' => $groups[$fid]['name'], 'amt' => $ev, 'step' => (int)($c['cur_step'] ?? 0)];
+        $stk[$key]['parts'][$pid] = ['f' => $groups[$fid]['name'], 'amt' => $ev, 'step' => (int)($c['cur_step'] ?? 0),
+                                     'pl' => $c['eval_pl'] ?? null,
+                                     'rate' => pf_eval_rate($c['eval_pl'] ?? null, (float)($c['cost_amount'] ?? 0))];
         if ($ev > $stk[$key]['top']) { $stk[$key]['top'] = $ev; $stk[$key]['pid'] = $pid; }
     }
     $groups = array_filter($groups, fn($g) => $g['val'] > 0);
@@ -2148,6 +2263,15 @@ function pf_render_weight_treemap(array $positions, array $calc, array $folios, 
     /* 머리줄 막대의 척도 — 포트폴리오 중 |수익률| 최대가 머리줄 폭 100% 다(절대 척도로 두면 ±5% 시절엔 막대가 안 보인다). */
     $maxRate = 0.01;
     foreach ($groups as $fid => $g) $maxRate = max($maxRate, abs((float)($stats[$fid]['rate'] ?? 0)));
+
+    /* 카드형 툴팁의 재료 — 부호 붙은 금액 · 「오늘」 줄(시세가 오늘 것이 아니면 그 날짜를 적는다 · 시세 없으면 줄 자체를 뺀다) */
+    $sg = fn($v): string => $v === null ? '-' : ((float)$v > 0 ? '+' : '') . pf_n(round((float)$v)) . '원';
+    $tdRow = function (string $code) use ($quotes): ?array {
+        $q = $quotes[$code] ?? null;
+        if ($q === null) return null;
+        $ts = strtotime($q['at']) ?: time();
+        return [date('Y-m-d', $ts) === date('Y-m-d') ? '오늘' : date('n/j', $ts) . ' 등락', pf_pct($q['rate']), pf_updown($q['rate']), '현재가 ' . pf_n($q['price'])];
+    };
 
     /* ── ① 포트폴리오별 */
     $gRects = pf_tm_squarify(array_map(fn($g) => $g['val'], $groups), 0, 0, $W, $H);
@@ -2162,9 +2286,10 @@ function pf_render_weight_treemap(array $positions, array $calc, array $folios, 
         $ih     = max(1.0, $gh - ($hasHdr ? $HDR : 0));
         $inner  = pf_tm_squarify(array_map(fn($c) => $c['amt'], $cells), 0, 0, $gw, $ih);
         $pct    = $g['val'] / $total * 100;
-        $tip    = $g['name'] . ' · 추정자산 ' . pf_n(round($g['val'])) . '원 · ' . number_format($pct, 1) . '%'
-                . ' · 종목 ' . $g['n'] . '건 · 예수금 ' . pf_n(round($g['cash'])) . '원'
-                . ' · 수익률 ' . ($rate === null ? '-' : pf_pct($rate)) . '(원금 대비)';
+        $tip    = $g['name'] . "\n"
+                . '추정자산 ' . pf_n(round($g['val'])) . '원 · ' . number_format($pct, 1) . "%\n"
+                . '종목 ' . $g['n'] . '건 · 예수금 ' . pf_n(round($g['cash'])) . "원\n"
+                . '수익률 ' . ($rate === null ? '-' : pf_pct($rate)) . ' (원금 대비)';
         $html .= '<div class="tm-g' . ($hasHdr ? '' : ' nohd') . '" style="' . pf_tm_pos($gx, $gy, $gw, $gh, $W, $H) . '">';
         if ($hasHdr) {
             $bar  = '';
@@ -2174,18 +2299,39 @@ function pf_render_weight_treemap(array $positions, array $calc, array $folios, 
                 $bar  = '<i class="tm-gb ' . $ud . '" style="width:' . number_format(min(100, abs((float)$rate) / $maxRate * 100), 1) . '%"></i>';
                 $rtxt = '<em class="' . $ud . '">' . pf_h(pf_pct($rate)) . '</em>';
             }
-            $html .= '<a class="tm-gh" href="/stock/index.php?id=' . $fid . '" title="' . pf_h($tip) . '">' . $bar
+            $tipH = pf_tip_html($g['name'], '포트폴리오', $rate === null ? null : (float)$rate, '원금 대비', [
+                ['추정자산', pf_n(round($g['val'])) . '원'],
+                ['비중',     number_format($pct, 1) . '%', '', '전체 추정자산 대비'],
+                ['종목',     $g['n'] . '건'],
+                ['예수금',   pf_n(round($g['cash'])) . '원'],
+            ], [], '누르면 이 포트폴리오');
+            $html .= '<a class="tm-gh" href="/stock/index.php?id=' . $fid . '" title="' . pf_h($tip) . '" data-tip="' . pf_h($tipH) . '">' . $bar
                    . '<span><b>' . pf_h($g['name']) . '</b><small>' . number_format($pct, 1) . '%</small>' . $rtxt . '</span></a>';
         }
         $html .= '<div class="tm-b">';
         foreach ($cells as $ci => $c) {
             if ($c['kind'] === 'cash') {
                 $c['href'] = '/stock/index.php?id=' . $fid;
-                $c['tip']  = '예수금 ' . pf_n(round($c['amt'])) . '원 · ' . number_format($c['amt'] / $total * 100, 1) . '% — ' . $g['name'] . '의 남은 실탄';
+                $c['tip']  = '예수금 · ' . $g['name'] . "\n"
+                           . pf_n(round($c['amt'])) . '원 · ' . number_format($c['amt'] / $total * 100, 1) . "%\n"
+                           . '남은 실탄';
+                $c['tipH'] = pf_tip_html('예수금', $g['name'], null, '', [
+                    ['금액', pf_n(round($c['amt'])) . '원'],
+                    ['비중', number_format($c['amt'] / $total * 100, 1) . '%', '', '전체 추정자산 대비'],
+                ], [], '남은 실탄 · 누르면 이 포트폴리오');
             } else {
                 $c['href'] = '/stock/index.php?mode=position&id=' . $c['id'];
-                $c['tip']  = $c['name'] . ' ' . $c['step'] . '차 · ' . pf_n(round($c['amt'])) . '원 · ' . number_format($c['amt'] / $total * 100, 1) . '%'
-                           . ' · 평가수익률 ' . ($c['rate'] === null ? '-' : pf_pct($c['rate'])) . ' (' . $g['name'] . ')';
+                $c['tip']  = $c['name'] . "\n"
+                           . pf_n(round($c['amt'])) . '원 · ' . number_format($c['amt'] / $total * 100, 1) . "%\n"
+                           . '평가수익률 ' . ($c['rate'] === null ? '-' : pf_pct($c['rate'])) . "\n"
+                           . $g['name'] . ' ' . $c['step'] . '차';
+                $c['tipH'] = pf_tip_html($c['name'], $g['name'] . ' · ' . $c['step'] . '차', $c['rate'], '평가수익률', array_filter([
+                    ['평가금액', pf_n(round($c['amt'])) . '원'],
+                    ['비중',     number_format($c['amt'] / $total * 100, 1) . '%', '', '전체 추정자산 대비'],
+                    ['평가손익', $sg($c['pl']), pf_updown($c['pl'])],
+                    ['매입',     pf_n(round($c['cost'])) . '원'],
+                    $tdRow($c['code']),
+                ]), [], '누르면 포지션 상세');
             }
             $c['pct'] = $c['amt'] / $total * 100;
             $html .= pf_tm_tile($c, $inner[$ci], $gw, $ih);
@@ -2193,7 +2339,7 @@ function pf_render_weight_treemap(array $positions, array $calc, array $folios, 
         $html .= '</div></div>';
     }
 
-    /* ── ② 종목별 (전 포트폴리오 합산 · 분모는 총평가라 예수금이 빠진다) */
+    /* ── ② 종목별 (전 포트폴리오 합산 · 타일은 종목만 · 비중의 분모는 추정자산 — 예수금은 머리줄에 글자로) */
     $totEval = max(0.0, $total - $totCash);
     uasort($stk, fn($a, $b) => $b['amt'] <=> $a['amt']);
     $sCells = [];
@@ -2202,15 +2348,52 @@ function pf_render_weight_treemap(array $positions, array $calc, array $folios, 
         $parts = $s['parts'];
         uasort($parts, fn($a, $b) => $b['amt'] <=> $a['amt']);
         $ptxt = [];
-        foreach ($parts as $pt) $ptxt[] = $pt['f'] . ' ' . $pt['step'] . '차 ' . pf_n(round($pt['amt']));
-        $sCells[] = ['kind' => 'stk', 'name' => $s['name'], 'amt' => $s['amt'], 'rate' => $rate,
-                     'pct' => $s['amt'] / $totEval * 100, 'n' => $s['n'],
+        /* 툴팁은 «세로»로 적는다(2026-09-23 사용자 — 한 줄로 늘어놓으니 어디서 끊기는지 안 읽혔다).
+         * 브라우저 title 은 줄바꿈 문자를 그대로 줄로 보여 준다 — 윗단 = 종목 합계, 아랫단 = 포트폴리오마다 한 줄. */
+        foreach ($parts as $pt) $ptxt[] = $pt['f'] . ' ' . $pt['step'] . '차 · ' . pf_n(round($pt['amt'])) . '원'
+                                        . ($pt['rate'] === null ? '' : ' · ' . pf_pct($pt['rate']));
+        $one  = $s['n'] > 1 ? null : reset($parts);
+        $tbl  = [];
+        if ($s['n'] > 1) foreach ($parts as $ppid => $pt) $tbl[] = [$pt['f'], $pt['step'] . '차', pf_n(round($pt['amt'])), $sg($pt['pl']), $pt['rate'],
+                                                                     '/stock/index.php?mode=position&id=' . (int)$ppid];
+        $tipH = pf_tip_html($s['name'], $s['n'] > 1 ? $s['n'] . '곳' : $one['f'] . ' · ' . $one['step'] . '차', $rate,
+                            $s['n'] > 1 ? '평가수익률(가중)' : '평가수익률', array_filter([
+                    ['평가금액', pf_n(round($s['amt'])) . '원'],
+                    ['비중',     number_format($s['amt'] / $total * 100, 1) . '%', '', '추정자산 대비'],
+                    ['평가손익', $sg($s['pl']), pf_updown($s['pl'])],
+                    ['매입',     pf_n(round($s['cost'])) . '원'],
+                    $tdRow($s['code']),
+                ]), $tbl, $s['n'] > 1 ? '누르면 포트폴리오를 고릅니다' : '누르면 포지션 상세');
+        $sCells[] = ['kind' => 'stk', 'name' => $s['name'], 'amt' => $s['amt'], 'rate' => $rate, 'tipH' => $tipH, 'pick' => $s['n'] > 1,
+                     'pct' => $s['amt'] / $total * 100, 'n' => $s['n'],
                      'href' => '/stock/index.php?mode=position&id=' . $s['pid'],
-                     'tip'  => $s['name'] . ' · ' . pf_n(round($s['amt'])) . '원 · ' . number_format($s['amt'] / $totEval * 100, 1) . '%(총평가 대비)'
-                             . ' · 평가수익률 ' . ($rate === null ? '-' : pf_pct($rate)) . '(가중 · 평가손익 ' . pf_n(round($s['pl'])) . ' ÷ 매입 ' . pf_n(round($s['cost'])) . ')'
-                             . ' · ' . implode(' · ', $ptxt) . ($s['n'] > 1 ? ' — 누르면 가장 큰 포지션' : '')];
+                     'tip'  => $s['name'] . "\n"
+                             . pf_n(round($s['amt'])) . '원 · ' . number_format($s['amt'] / $total * 100, 1) . "% (추정자산 대비)\n"
+                             . '평가손익 ' . pf_n(round($s['pl'])) . '원 · ' . ($rate === null ? '-' : pf_pct($rate)) . ($s['n'] > 1 ? ' (가중)' : '') . "\n"
+                             . '매입 ' . pf_n(round($s['cost'])) . "원\n"
+                             . "──────────\n"
+                             . implode("\n", $ptxt)
+                             . ($s['n'] > 1 ? "\n(누르면 포트폴리오를 고릅니다)" : '')];
     }
     $stkN = count($sCells);
+    /* 예수금도 한 칸으로 넣는다(2026-10-13 사용자 「이 박스에 예수금을」). 09-08 에는 그 칸이 화면의 45%를 먹어 뺐는데,
+     * 비중의 분모를 추정자산으로 바꾼 뒤로는 칸이 없으면 «넓이»와 «%»가 어긋난다 — 넣어야 한 그림이 한 말을 한다. */
+    if ($sCells && $totCash > 0) {
+        $cTbl = [];   // 포트폴리오마다 한 줄 — 눌러서 카드를 붙잡으면 그 줄이 그 포트폴리오로 가는 문이다
+        foreach ($groups as $fid => $g) {
+            if ($g['cash'] <= 0) continue;
+            $cTbl[] = ['cells' => [$g['name'], pf_n(round($g['cash'])), number_format($g['cash'] / $total * 100, 1) . '%'],
+                       'href'  => '/stock/index.php?id=' . (int)$fid, 'amt' => $g['cash']];
+        }
+        usort($cTbl, fn($a, $b) => $b['amt'] <=> $a['amt']);
+        $sCells[] = ['kind' => 'cash', 'name' => '예수금', 'amt' => $totCash, 'rate' => null, 'pct' => $totCash / $total * 100, 'href' => '#pfWd', 'pick' => true,
+                     'tip'  => "예수금 · 전 포트폴리오 합산\n" . pf_n(round($totCash)) . '원 · ' . number_format($totCash / $total * 100, 1) . "% (추정자산 대비)\n남은 실탄",
+                     'tipH' => pf_tip_html('예수금', '전 포트폴리오 합산', null, '', [
+                         ['금액', pf_n(round($totCash)) . '원'],
+                         ['비중', number_format($totCash / $total * 100, 1) . '%', '', '추정자산 대비'],
+                     ], $cTbl, '남은 실탄 · 누르면 포트폴리오를 고릅니다', ['포트폴리오', '예수금', '비중'])];
+        usort($sCells, fn($a, $b) => $b['amt'] <=> $a['amt']);   // squarify 는 내림차순을 전제한다
+    }
     $sRects = pf_tm_squarify(array_map(fn($c) => $c['amt'], $sCells), 0, 0, $W, $H);
     $sHtml  = '';
     foreach ($sCells as $ci => $c) $sHtml .= pf_tm_tile($c, $sRects[$ci], $W, $H);
@@ -2232,8 +2415,11 @@ function pf_render_weight_treemap(array $positions, array $calc, array $folios, 
     $notes = [
         'folio' => ['넓이 = 금액 · 회색 = 예수금 ' . $cashPct . ' · 종목 ' . $totN . '건',
                      '비중의 분모 = 전 포트폴리오 추정자산 ' . pf_n(round($total)) . '원(예수금 포함) — 합계 카드의 추정자산과 같은 값이다'],
-        'stk'   => ['전 포트폴리오 합산 · 총평가 ' . pf_n(round($totEval)) . '원 대비 · 종목 ' . $stkN . '개(' . $totN . '건)',
-                     '비중의 분모 = 총평가 ' . pf_n(round($totEval)) . '원(예수금 제외) · 같은 종목은 포트폴리오를 넘어 합쳤고 수익률은 가중이다'],
+        /* ★분모는 두 축 모두 추정자산이다(2026-10-13 사용자 결정) — 종목 칸의 % 합 + 예수금 칸 = 100% · 넓이도 같은 비례다. */
+        'stk'   => ['추정자산 대비 · 종목 ' . $stkN . '개(' . $totN . '건) ' . number_format($totEval / $total * 100, 1) . '% · <b class="tm-cash">회색 = 예수금 ' . $cashPct . '</b>',
+                     '비중의 분모 = 전 포트폴리오 추정자산 ' . pf_n(round($total)) . '원(예수금 포함) — 종목 비중의 합 + 예수금 = 100% · 넓이 = 금액'
+                     . "\n" . '주식(총평가) ' . pf_n(round($totEval)) . '원 · 같은 종목은 포트폴리오를 넘어 합쳤고 수익률은 가중이다'
+                     . "\n" . '예수금 ' . pf_n(round($totCash)) . '원 = 추정자산 ' . pf_n(round($total)) . '원의 ' . $cashPct . ' (주식 ' . number_format($totEval / $total * 100, 1) . '%)'],
     ];
 
     /* 색 눈금 — pf_tm_rate_color() 의 구간 경계를 그대로 찍는다(손으로 색을 다시 적지 않는다). */
@@ -2241,7 +2427,7 @@ function pf_render_weight_treemap(array $positions, array $calc, array $folios, 
     foreach ([-0.25, -0.15, -0.05, -0.01, 0.01, 0.05, 0.15, 0.25] as $r) $scale .= '<i style="background:' . pf_tm_rate_color($r)[0] . '"></i>';
     echo '<div class="sum-box wd" id="pfWd" data-v="' . $view . '"><div class="k">보유 비중'
        . '<span class="tm-tabs">' . $tabs . '</span>';
-    foreach ($notes as $v => $n) echo '<span class="tm-note" data-v="' . $v . '" title="' . pf_h($n[1]) . '"' . ($view === $v ? '' : ' hidden') . '>' . pf_h($n[0]) . '</span>';
+    foreach ($notes as $v => $n) echo '<span class="tm-note" data-v="' . $v . '" title="' . pf_h($n[1]) . '"' . ($view === $v ? '' : ' hidden') . '>' . $n[0] . '</span>';   // $n[0] 은 위에서 지은 HTML 이다(숫자·고정 글자뿐)
     echo '<span class="tm-sc" title="타일 색 = 그 종목의 평가수익률(평가손익 ÷ 매입) · 종목별 축에서는 여러 포트폴리오를 합친 «가중» 수익률 · 머리줄 막대 = 그 포트폴리오 수익률(원금 대비)">'
        . '색 = 수익률 <b>−20%</b>' . $scale . '<b>+20%</b></span>'
        . ($totRate !== null ? '<span class="tm-tot">전체 수익률 <em class="' . pf_updown($totRate) . '">' . pf_h(pf_pct($totRate)) . '</em> <small>원금 대비</small></span>' : '')
@@ -2250,7 +2436,8 @@ function pf_render_weight_treemap(array $positions, array $calc, array $folios, 
     /* ★마지막 </div> 는 .sum-box.wd 를 닫는 것이다 — 트리맵을 둘로 늘리며 이걸 빠뜨려서 뒤에 오는
      * 「포트폴리오」 카드가 sum-grid 의 «격자 칸»이 되어 200px 로 눌렸다(사용자 화면으로 잡았다).
      * 서버 CLI 렌더도 php -l 도 이것을 못 잡는다 — 오류가 아니라 «중첩»이라서다. 아래 균형 검사를 테스트에 뒀다. */
-    echo '<div class="tm" data-v="stk"'   . ($view === 'stk'   ? '' : ' hidden') . ' style="height:' . (int)$H . 'px">' . $sHtml . '</div></div>';
+    echo '<div class="tm" data-v="stk"'   . ($view === 'stk'   ? '' : ' hidden') . ' style="height:' . (int)$H . 'px">' . $sHtml . '</div>'
+       . pf_today_strip($stk, $quotes) . '</div>';
     /* 글자 접기는 브라우저가 «실제 픽셀»로 다시 잰다(2026-09-04 사용자 「비중·금액이 왜 안 보이나」).
      * 서버는 가상 캔버스(830px) 폭으로 판정하는데 실제 화면은 더 넓어서 66px(가상)짜리 타일이 이름만 남았다 —
      * 높이 109px 로 넉넉한데도. 서버 판정은 JS 가 없을 때의 예비값이다. 판정은 문턱이 아니라 «넘치나»다:
@@ -2269,7 +2456,191 @@ function pf_render_weight_treemap(array $positions, array $calc, array $folios, 
        . 'var v=a.getAttribute("data-v");if(v===w.getAttribute("data-v"))return;w.setAttribute("data-v",v);'
        . 'w.querySelectorAll(".tm-tab").forEach(function(b){b.classList.toggle("on",b.getAttribute("data-v")===v)});'
        . 'w.querySelectorAll(".tm,.tm-note").forEach(function(el){el.hidden=el.getAttribute("data-v")!==v});'
-       . 'try{document.cookie="pf_wd="+v+";path=/;max-age=31536000"}catch(x){}fit();})});})();</script>';
+       . 'try{document.cookie="pf_wd="+v+";path=/;max-age=31536000"}catch(x){}fit();})});'
+       /* 카드형 툴팁 — 상자 하나를 body 에 두고 [data-tip] 위에서 갈아 끼운다. 마우스 오른쪽 아래에 띄우되 화면을 넘으면 반대편으로 뒤집는다. */
+       . 'var T=document.createElement("div"),cur=null;T.className="pf-tip";T.hidden=true;document.body.appendChild(T);'
+       . 'w.querySelectorAll("[data-tip]").forEach(function(e){e.removeAttribute("title")});'
+       . 'function mv(e){var r=T.getBoundingClientRect(),x=e.clientX+16,y=e.clientY+18;'
+       . 'if(x+r.width>innerWidth-8)x=e.clientX-r.width-12;if(x<8)x=8;'
+       . 'if(y+r.height>innerHeight-8)y=e.clientY-r.height-12;if(y<8)y=8;T.style.left=x+"px";T.style.top=y+"px"}'
+       . 'var pin=null;'
+       . 'w.addEventListener("mouseover",function(e){if(pin)return;var el=e.target.closest("[data-tip]");if(el===cur)return;cur=el;'
+       . 'if(!el){T.hidden=true;return}T.innerHTML=el.getAttribute("data-tip");T.hidden=false;mv(e)});'
+       . 'w.addEventListener("mousemove",function(e){if(cur&&!pin)mv(e)});'
+       . 'w.addEventListener("mouseleave",function(){if(pin)return;cur=null;T.hidden=true});'
+       /* 붙잡기(pin) — 여러 포트폴리오에 걸친 칸([data-pick])은 누르면 바로 넘어가지 않고 카드가 그 자리에 멈춘다.
+        * 멈춘 카드는 마우스를 받고(.pin) 표의 줄(tr[data-href])이 그 포트폴리오로 가는 문이 된다. 밖을 누르거나 Esc 면 놓는다.
+        * JS 가 없으면 칸의 href(가장 큰 포지션)가 그대로 동작한다. */
+       . 'function unpin(){pin=null;cur=null;T.classList.remove("pin");T.hidden=true}'
+       . 'w.addEventListener("click",function(e){var el=e.target.closest("[data-pick]");if(!el)return;e.preventDefault();'
+       . 'if(pin===el){unpin();return}T.classList.remove("pin");T.innerHTML=el.getAttribute("data-tip");T.hidden=false;mv(e);'
+       . 'var f=T.querySelector(".tt-f");if(f)f.textContent="포트폴리오 줄을 누르면 넘어갑니다 · 밖을 누르거나 Esc 로 닫기";'
+       . 'pin=el;cur=el;T.classList.add("pin");mv(e)});'
+       . 'T.addEventListener("click",function(e){var r=e.target.closest("tr[data-href]");if(!pin||!r)return;'
+       /* 포트폴리오 줄(예수금 칸)은 새로고침 없이 오른쪽 상세만 갈아 끼운다 — 아래 표의 행을 누른 것과 같은 길이다 */
+       . 'var u=r.getAttribute("data-href"),m=/\\?id=(\\d+)$/.exec(u);'
+       . 'if(m&&typeof pfSelectFolio==="function"){unpin();pfSelectFolio(m[1],true)}else location.href=u});'
+       . 'document.addEventListener("click",function(e){if(pin&&!T.contains(e.target)&&!e.target.closest("[data-pick]"))unpin()});'
+       . 'document.addEventListener("keydown",function(e){if(pin&&e.key==="Escape")unpin()});'
+       . '})();</script>';
+}
+
+/**
+ * 카드형 툴팁의 HTML — 트리맵 타일·머리줄·「오늘」 칩이 <b>같은 틀</b>을 쓴다(data-tip 에 싣고 JS 가 .pf-tip 상자에 넣는다).
+ * 층은 셋: ①머리(이름 · 작은 배지 · 오른쪽 큰 수익률) ②항목(라벨 왼쪽 회색 · 값 오른쪽 굵게) ③여러 곳일 때의 포트폴리오 표.
+ *
+ * @param array $kv  [[라벨, 값, 색 클래스(up|down|flat|''), 덧말], …] — 값은 평문(여기서 이스케이프한다)
+ * @param array $tbl [[포트폴리오, 차수, 평가금액, 평가손익, 수익률(비율|null)], …]
+ */
+function pf_tip_html(string $name, string $badge, ?float $rate, string $rateLab, array $kv, array $tbl = [], string $foot = '', ?array $th = null): string
+{
+    /* 행의 여섯째 값 = 그 행이 가는 주소(선택) — 타일을 «눌러» 카드를 붙잡으면 행이 곧 문이 된다(2026-10-13 · 트리맵 JS 의 pin).
+     * $th 를 주면 머리글·칸을 그대로 쓴다: 행 = ['cells' => [글자…], 'href' => 주소] (예수금 칸의 포트폴리오별 표). */
+    $go = fn($u): string => (string)$u !== '' ? ' data-href="' . pf_h((string)$u) . '"' : '';
+    $h = '<div class="tt-h"><b>' . pf_h($name) . '</b>' . ($badge !== '' ? '<i>' . pf_h($badge) . '</i>' : '')
+       . ($rate === null ? '' : '<em class="' . pf_updown($rate) . '">' . pf_h(pf_pct($rate))
+                              . ($rateLab !== '' ? '<small>' . pf_h($rateLab) . '</small>' : '') . '</em>')
+       . '</div><dl>';
+    foreach ($kv as $r) {
+        $h .= '<dt>' . pf_h($r[0]) . '</dt><dd' . (($r[2] ?? '') !== '' ? ' class="' . $r[2] . '"' : '') . '>' . pf_h($r[1])
+            . (($r[3] ?? '') !== '' ? '<small>' . pf_h($r[3]) . '</small>' : '') . '</dd>';
+    }
+    $h .= '</dl>';
+    if ($tbl && $th !== null) {
+        $h .= '<table><tr>';
+        foreach ($th as $x) $h .= '<th>' . pf_h($x) . '</th>';
+        $h .= '</tr>';
+        foreach ($tbl as $t) {
+            $h .= '<tr' . $go($t['href'] ?? '') . '>';
+            foreach ($t['cells'] as $x) $h .= '<td>' . pf_h($x) . '</td>';
+            $h .= '</tr>';
+        }
+        $h .= '</table>';
+    } elseif ($tbl) {
+        $h .= '<table><tr><th>포트폴리오</th><th>차수</th><th>평가금액</th><th>평가손익</th><th>수익률</th></tr>';
+        foreach ($tbl as $t) {
+            $ud = pf_updown($t[4]);
+            $h .= '<tr' . $go($t[5] ?? '') . '><td>' . pf_h($t[0]) . '</td><td>' . pf_h($t[1]) . '</td><td>' . pf_h($t[2]) . '</td>'
+                . '<td class="' . $ud . '">' . pf_h($t[3]) . '</td><td class="' . $ud . '">' . ($t[4] === null ? '-' : pf_h(pf_pct($t[4]))) . '</td></tr>';
+        }
+        $h .= '</table>';
+    }
+    return $h . ($foot !== '' ? '<p class="tt-f">' . pf_h($foot) . '</p>' : '');
+}
+
+/**
+ * 보유 종목의 «오늘» 시세 — all_stock_info 스냅샷을 읽기만 한다(새 수집 없음 · pf_load_calc 가 방금 메운 그 값).
+ * 조인하지 않고 IN 으로 읽는다(그 표는 utf8mb3 라 조인하면 콜레이션이 어긋난다).
+ * 그 표에 없는 종목(ETF 등)은 결과에 없다 — 부르는 쪽이 「모른다」로 다룬다(0% 로 채우지 않는다).
+ *
+ * @return array 종목코드 => ['rate' => 등락률(비율 · 0.0325 = +3.25%), 'price' => 현재가, 'at' => uDate 문자열]
+ */
+function pf_today_quotes(PDO $pdo, array $codes): array
+{
+    $codes = array_values(array_unique(array_filter(array_map('strval', $codes), fn($c) => $c !== '')));
+    if (!$codes) return [];
+    try {
+        $in = implode(',', array_fill(0, count($codes), '?'));
+        $st = $pdo->prepare("SELECT stock_code, stock_price, stock_rate, uDate FROM all_stock_info WHERE stock_code IN ($in)");
+        $st->execute($codes);
+        $out = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            if ((float)$r['stock_price'] <= 0 || $r['stock_rate'] === null) continue;
+            $out[(string)$r['stock_code']] = ['rate' => (float)$r['stock_rate'] / 100,   // stock_rate 는 % 단위
+                                              'price' => (float)$r['stock_price'], 'at' => (string)$r['uDate']];
+        }
+        return $out;
+    } catch (Throwable $e) {
+        return [];   // 띠는 곁들이는 것이다 — 못 읽으면 조용히 생략(현황 화면을 죽이지 않는다)
+    }
+}
+
+/**
+ * 「오늘」 띠 — 트리맵 아래 한두 줄(2026-10-02 사용자 「이 화면을 열었을 때 보유종목들의 등락률(흐름)을 빠르게 파악하고 싶다 ·
+ * 여기서 보고 단타 화면으로 가서 자세히」). 종목 단위(여러 포트폴리오를 합침)로 오늘 등락률 큰 순 · 칩 클릭 = 단타(mode=short&code=).
+ *
+ * - 판정이 아니다 — 오늘 등락률은 시장 사실이다(포트폴리오 규칙 1 의 「공통층」). 임계도 색 구간도 없다.
+ * - 왼쪽 요약의 「보유분」 = 지금 평가금액이 어제 종가 대비 얼마나 움직였나(금액 가중).
+ *   어제 평가 = 지금 평가 ÷ (1 + 등락률). ★오늘 산 수량도 하루치로 센다(근사) — 툴팁에 밝힌다.
+ * - 시세가 없는 종목(all_stock_info 밖)은 칩도 합계도 뺀다 — 0% 로 그리면 「안 움직였다」는 거짓이 된다.
+ * - 시세가 오늘 것이 아니면(휴장일·개장 전) 머리 글자가 「오늘」 대신 그 날짜가 된다.
+ * - 두 줄로 접는 일은 브라우저가 한다 — 넘치는 동안 |등락률| 이 작은 것부터 감추고 「… 외 N」 을 부호가 바뀌는 자리에 둔다.
+ *
+ * @param array $stk    pf_render_weight_treemap() 이 종목 코드로 합친 것(code · name · amt · n)
+ * @param array $quotes pf_today_quotes()
+ */
+function pf_today_strip(array $stk, array $quotes): string
+{
+    $rows = [];
+    $last = '';
+    foreach ($stk as $s) {
+        $q = $quotes[$s['code'] ?? ''] ?? null;
+        if ($q === null || $s['amt'] <= 0 || $q['rate'] <= -1) continue;
+        $prev   = $s['amt'] / (1 + $q['rate']);
+        $rows[] = ['code' => $s['code'], 'name' => $s['name'], 'n' => (int)$s['n'], 'amt' => (float)$s['amt'],
+                   'rate' => $q['rate'], 'price' => $q['price'], 'chg' => $s['amt'] - $prev, 'prev' => $prev];
+        if ($q['at'] > $last) $last = $q['at'];
+    }
+    if (!$rows) return '';
+    usort($rows, fn($a, $b) => $b['rate'] <=> $a['rate']);
+
+    $up = $dn = $fl = 0;
+    $chg = $prev = 0.0;
+    foreach ($rows as $r) {
+        if (abs($r['rate']) < 0.00005) $fl++; elseif ($r['rate'] > 0) $up++; else $dn++;
+        $chg  += $r['chg'];
+        $prev += $r['prev'];
+    }
+    $tot = $prev > 0 ? $chg / $prev : null;
+    $sgn = fn(float $v): string => ($v > 0 ? '+' : '') . pf_n(round($v));
+
+    $ts    = strtotime($last) ?: time();
+    $today = date('Y-m-d', $ts) === date('Y-m-d');
+    $label = $today ? '오늘' : date('n/j', $ts);
+    $miss  = count($stk) - count($rows);
+    $sum   = '<span class="td-sum" title="' . pf_h(
+                 '보유 종목 ' . count($rows) . '개의 ' . ($today ? '오늘' : date('n월 j일', $ts)) . " 등락\n"
+               . '보유분 = 지금 평가금액이 전일 종가 대비 움직인 폭(금액 가중)' . "\n"
+               . '오늘 산 수량도 하루치로 센다(근사)'
+               . ($miss > 0 ? "\n시세가 없어 뺀 종목 " . $miss . '개' : '')) . '">'
+           . '<b>' . $label . '</b>'
+           . '<span class="up">▲' . $up . '</span> <span class="down">▼' . $dn . '</span>' . ($fl ? ' <span class="flat">─' . $fl . '</span>' : '')
+           . ($tot === null ? '' : ' <em class="' . pf_updown($tot) . '">' . pf_h(pf_pct($tot)) . '</em><small>' . $sgn($chg) . '원</small>')
+           . '</span>';
+
+    $list = '';
+    $more = '<span class="td-more" hidden></span>';
+    $put  = false;
+    foreach ($rows as $r) {
+        $flat = abs($r['rate']) < 0.00005;
+        if (!$put && $r['rate'] <= 0) { $list .= $more; $put = true; }   // 부호가 바뀌는 자리 — 접힌 것들이 있던 곳
+        $tip = $r['name'] . ($r['n'] > 1 ? ' (' . $r['n'] . '곳)' : '') . "\n"
+             . '현재가 ' . pf_n($r['price']) . '원 · ' . pf_pct($r['rate']) . "\n"
+             . '보유 ' . pf_n(round($r['amt'])) . '원 · ' . ($today ? '오늘 ' : '') . $sgn($r['chg']) . "원\n"
+             . '(누르면 단타 화면)';
+        $tipH = pf_tip_html($r['name'], $r['n'] > 1 ? $r['n'] . '곳' : '', $r['rate'], $today ? '오늘' : $label . ' 등락', [
+            ['현재가',   pf_n($r['price']) . '원'],
+            ['보유 평가', pf_n(round($r['amt'])) . '원'],
+            [$today ? '오늘 손익' : '그 날 손익', $sgn($r['chg']) . '원', pf_updown($r['chg'])],
+        ], [], '누르면 단타 화면');
+        $list .= '<a class="td-i" data-r="' . round($r['rate'] * 100, 2) . '" href="/stock/index.php?mode=short&amp;code=' . pf_h($r['code']) . '"'
+               . ' title="' . pf_h($tip) . '" data-tip="' . pf_h($tipH) . '">' . pf_h($r['name'])
+               . '<b class="' . ($flat ? 'flat' : pf_updown($r['rate'])) . '">' . pf_h($flat ? '0.00%' : pf_pct($r['rate'])) . '</b></a>';
+    }
+    if (!$put) $list .= $more;
+
+    $at = '<span class="td-at" title="시세 = all_stock_info 스냅샷 · 화면을 연 순간의 값(자동 갱신 없음 — 지켜보는 자리는 단타)">'
+        . date($today ? 'H:i' : 'n/j H:i', $ts) . ' 기준</span>';
+
+    /* 두 줄 맞추기 — .fit 을 달아 두 줄에서 자르고, 넘치는 동안 0 에 가까운 것부터 감춘다(양끝은 끝까지 남긴다 · 최소 2개). */
+    $js = '<script>(function(){var s=document.getElementById("pfTd");if(!s)return;'
+        . 'var l=s.querySelector(".td-list"),m=s.querySelector(".td-more"),it=[].slice.call(l.querySelectorAll(".td-i"));'
+        . 'var o=it.slice().sort(function(a,b){return Math.abs(+a.getAttribute("data-r"))-Math.abs(+b.getAttribute("data-r"))});'
+        . 'function fit(){s.classList.add("fit");it.forEach(function(a){a.hidden=false});m.hidden=true;var n=0;'
+        . 'while(l.scrollHeight>l.clientHeight+1&&n<o.length-2){o[n].hidden=true;n++;m.hidden=false;m.textContent="… 외 "+n+" …"}}'
+        . 'fit();var t;window.addEventListener("resize",function(){clearTimeout(t);t=setTimeout(fit,80)});})();</script>';
+
+    return '<div class="td-strip" id="pfTd">' . $sum . '<div class="td-list">' . $list . $at . '</div></div>' . $js;
 }
 
 /**
@@ -2298,7 +2669,8 @@ function pf_tm_tile(array $c, array $r, float $PW, float $PH): string
     $nm  = pf_h((string)$c['name']) . ((int)($c['n'] ?? 0) > 1 ? '<i>' . (int)$c['n'] . '곳</i>' : '');
     $tag = ($c['href'] ?? '') !== '' ? 'a' : 'span';
     return '<' . $tag . ' class="tm-c ' . ($c['kind'] ?? 'stk') . $sz . ($fg === '#fff' ? '' : ' lt') . '"'
-         . ($tag === 'a' ? ' href="' . $c['href'] . '"' : '') . ' title="' . pf_h((string)($c['tip'] ?? '')) . '" style="'
+         . ($tag === 'a' ? ' href="' . $c['href'] . '"' : '') . ' title="' . pf_h((string)($c['tip'] ?? '')) . '"'
+         . (($c['tipH'] ?? '') !== '' ? ' data-tip="' . pf_h($c['tipH']) . '"' : '') . (!empty($c['pick']) ? ' data-pick="1"' : '') . ' style="'
          . pf_tm_pos($cx, $cy, $cw, $ch, $PW, $PH) . 'background:' . $bg . ';color:' . $fg . '">'
          . '<b>' . $nm . '</b>' . $rt . '<span class="am">' . pf_h(pf_n(round((float)$c['amt']))) . '</span>'
          . '<span class="pc">' . number_format((float)$c['pct'], 1) . '%</span></' . $tag . '>';
@@ -2396,8 +2768,9 @@ function pf_tm_squarify(array $vals, float $x, float $y, float $w, float $h): ar
  * @param array $re   pf_reentry_list() 결과 (예수금 게이트를 <b>이미 통과시킨</b> 상태)
  * @param int   $wait 재진입 대기일 — 후보 문구에 근거로 적는다
  */
-function pf_render_signal_strip(array $sigs, array $stats, array $re = [], int $wait = 0): void
+function pf_render_signal_strip(array $sigs, array $stats, array $re = [], int $wait = 0, array $weights = []): void
 {
+    // $weights = 종목코드 => 전 포트폴리오 평가금액 합 — 표의 줄 순서(보유 비중 큰 순)에만 쓴다
     $act  = array_values(array_filter($sigs, fn($g) => $g['s']['kind'] !== null));
     $waitRows = array_values(array_filter($sigs, fn($g) => $g['s']['kind'] === null));
     $reReady  = array_values(array_filter($re, fn($x) => $x['chk']['state'] === 'ready'));
@@ -2441,66 +2814,188 @@ function pf_render_signal_strip(array $sigs, array $stats, array $re = [], int $
     echo '</div>';
 
     if ($any) {
-        echo '<div class="sig-list">';
+        /* ── 종목 × 포트폴리오 표 (2026-10-13 사용자 — 「같은 종목이 너무 흩어져 눈에 안 들어온다 · 종목별로 모으고
+         *    포트폴리오마다 매수가 어떻게 되는지」 → 카드·표·정렬 세 안 중 표를 골랐다).
+         *    줄 = 종목(코드로 합친다) · 칸 = 포트폴리오 · 칸 안 = 「신호 · 차수 · ±주수」(누르면 그 포지션).
+         *    시장 상태는 종목의 것이라 줄마다 «한 번만» 적는다(카드 때는 포트폴리오 수만큼 되풀이됐다).
+         *    ★판정을 다시 하지 않는다 — pf_signal_list() 와 pf_reentry_list() 가 낸 것을 다시 묶을 뿐이다.
+         *    줄의 순서도 그 목록의 순서다(매도 → 매수 → 잔여매수 · 금액 큰 순 · 재진입은 뒤). */
+        $cols = [];   // fid => 포트폴리오 이름 (신호가 있는 것만)
+        $rows = [];   // 종목 키 => name · code · conf · mkt · cells[fid][] · buy · sell · amt · kinds · re
+        $rowOf = function (array &$rows, string $code, string $name): string {
+            $key = $code !== '' ? 'c:' . $code : 'n:' . $name;
+            if (!isset($rows[$key])) $rows[$key] = ['name' => $name, 'code' => $code, 'conf' => [], 'mkt' => [], 'cells' => [],
+                                                    'buy' => 0, 'sell' => 0, 'amt' => 0.0, 'kinds' => [], 're' => [], 'reNeed' => 0.0];
+            return $key;
+        };
         foreach ($act as $g) {
-            $s    = $g['s'];
-            $c    = $g['c'];
-            $kind = $s['kind'];
-
-            echo '<a class="sig-card k-' . $kind . '" href="/stock/index.php?mode=position&id=' . $g['pid'] . '">';
-            echo '<div class="sig-top"><span class="sig-pill k-' . $kind . '">' . pf_sig_label($kind) . '</span>';
-            echo '<span class="sig-folio">' . pf_h($g['fname']) . '</span></div>';
-
-            // 차수 표기 — 매수만 "올라가는" 것이라 화살표를 쓴다
-            $step = ($kind === 'buy' && (int)$c['reach_step'] > (int)$c['cur_step'])
-                ? ((int)$c['cur_step'] > 0 ? $c['cur_step'] . '차 → ' : '') . $c['reach_step'] . '차'
-                : ((int)$c['cur_step'] > 0 ? $c['cur_step'] . '차' : '진입');
-            /* 카드 본문은 <b>「종목명 차수 ±주수」 한 줄</b>이다 (2026-08-03 사용자 지시).
-             * 무엇을 하라는지는 위 배지(매수/잔여매수/매도)가 이미 말하고, 금액·현재가·이론가·자동매도가는
-             * 카드를 눌러 들어간 종목 상세에 다 있다. 스트립은 「몇 주」만 보고 지나가는 자리다.
-             * ★부호는 수량의 방향 — 담으면 ＋, 팔면 −. 색(k-*)과 같은 뜻이라 서로 어긋나지 않는다.
-             * ⊖ 실행 게이트(예수금 게이트 표시 · 체결 게이트 분할 경고)는 2026-08-02 사용자 지시로 삭제.
-             *   fund_ok 계산 자체는 유지 — 스트립 머리의 「예수금 부족 N건」 집계가 쓴다. */
-            echo '<div class="sig-name">' . pf_h($g['p']['stock_name'])
-               . '<span class="step">' . pf_h($step) . '</span>'
-               . '<b class="qty k-' . $kind . '">' . ($kind === 'sell' ? '−' : '＋')
-               . pf_n($s['qty']) . '주</b></div>';
-
-            /* ── 시장 상태. 계획 신호를 <b>보정</b>하는 자리다.
-             *   신뢰도(근거 강함 / 주의)를 먼저 쓰고 그 아래에 근거가 된 배지를 늘어놓는다 —
-             *   지표만 늘어놓으면 "그래서 어쩌라고"가 남는다. */
-            if (($g['conf']['label'] ?? '') !== '') {
-                echo '<div class="sig-conf lv-' . pf_h($g['conf']['level']) . '" title="'
-                   . pf_h($g['conf']['why']) . '">'
-                   . ($g['conf']['level'] === 'strong' ? '◎ ' : '△ ') . pf_h($g['conf']['label']) . '</div>';
-            }
-            if (!empty($g['mkt'])) echo '<div class="mkt-row">' . pf_mkt_badges($g['mkt']) . '</div>';
-            echo '</a>';
+            $fid = (int)$g['p']['portfolio_id'];
+            $key = $rowOf($rows, (string)($g['p']['stock_code'] ?? ''), (string)$g['p']['stock_name']);
+            $cols[$fid] = (string)$g['fname'];
+            $rows[$key]['cells'][$fid][] = ['t' => 'sig', 'g' => $g];
+            if (!$rows[$key]['conf'] && ($g['conf']['label'] ?? '') !== '') $rows[$key]['conf'] = $g['conf'];
+            if (!$rows[$key]['mkt'] && !empty($g['mkt']))                  $rows[$key]['mkt']  = $g['mkt'];
+            $kind = $g['s']['kind'];
+            $rows[$key]['kinds'][$kind] = true;
+            if ($kind === 'sell') {
+                $rows[$key]['sell'] += (int)$g['s']['qty'];
+                // 매도 금액 — 신호가 금액을 안 주면 주수 × 현재가로 어림한다(막대의 넓이에만 쓴다)
+                $sa = (float)($g['s']['amount'] ?? 0);
+                $rows[$key]['sellAmt'] = ($rows[$key]['sellAmt'] ?? 0.0) + ($sa > 0 ? $sa : (int)$g['s']['qty'] * (float)($g['last'] ?? 0));
+            } else { $rows[$key]['buy'] += (int)$g['s']['qty']; $rows[$key]['amt'] += (float)$g['s']['amount']; }
         }
-
-        /* ── 재진입 후보. 계획 신호 <b>뒤에</b> 온다 — 이미 시작한 사이클이 새 사이클보다 앞선다
-         *   (예수금 배정 순서와 같다). 카드를 누르면 그 종목의 지난 사이클 상세로 간다. */
         foreach ($reReady as $x) {
-            echo '<a class="sig-card k-re" href="/stock/index.php?mode=position&id=' . (int)$x['id'] . '">';
-            echo '<div class="sig-top"><span class="sig-pill k-re">재진입</span>';
-            echo '<span class="sig-folio">' . pf_h($x['portfolio_name']) . '</span></div>';
-            /* 본문 한 줄 = 「종목명 · 청산가 대비」. 계획 신호 카드가 「몇 주」를 말하는 자리에
-             * 여기는 <b>얼마나 싸졌나</b>를 말한다 — 재진입은 수량이 아직 없는 판단이다. */
-            echo '<div class="sig-name">' . pf_h($x['stock_name'])
-               . '<span class="step">' . (int)$x['days'] . '일 전 청산</span>'
-               . '<b class="qty k-re">' . pf_h(pf_pct($x['chk']['gap'], 1)) . '</b></div>';
-            $tip = '청산가 ' . pf_n($x['last_sell_price'] === null ? null : round($x['last_sell_price']))
-                 . ' → 현재가 ' . pf_n($x['last'])
-                 . ' · 하락요건 −' . number_format($x['req'] * 100, 1) . '% 충족';
-            echo '<div class="sig-conf lv-strong" title="' . pf_h($tip) . '">◎ 대기 ' . $wait . '일 경과 · 값도 내려왔음</div>';
-            if ($x['need'] !== null) {
-                echo '<div class="mkt-row"><span class="mkt t-info">1차 소요 ' . pf_n(round($x['need'])) . '</span>';
-                if ($x['fund_ok'] === false) echo '<span class="mkt t-risk">예수금 부족</span>';
-                echo '</div>';
-            }
-            echo '</a>';
+            $fid = (int)$x['portfolio_id'];
+            $key = $rowOf($rows, (string)($x['stock_code'] ?? ''), (string)$x['stock_name']);
+            $cols[$fid] = (string)$x['portfolio_name'];
+            $rows[$key]['cells'][$fid][] = ['t' => 're', 'x' => $x];
+            $rows[$key]['re'][] = $x;
+            if ($x['need'] !== null) $rows[$key]['reNeed'] += (float)$x['need'];
         }
-        echo '</div>';
+        /* 지금 들고 있는 주수(같은 날 사용자 — 「살 수량과 보유 수량이 구분돼 보였으면」). 표에 오른 종목에 한해
+         * 포트폴리오마다 보유 주수를 얹는다 — 오늘 신호가 없는 포트폴리오도 그 종목을 들고 있으면 칸이 찬다(회색).
+         * $sigs 에는 신호 없는 포지션(대기)도 들어 있어 따로 읽을 것이 없다. */
+        foreach ($sigs as $g) {
+            $q = (int)($g['c']['filled_qty'] ?? 0);
+            if ($q <= 0) continue;
+            $code = (string)($g['p']['stock_code'] ?? '');
+            /* 오늘 신호가 없는 보유 종목도 줄로 선다(같은 날 사용자) — 표가 「오늘 할 일」에 더해 「지금 무엇을 어디에 몇 주 들고 있나」까지 말한다.
+             * 그런 줄은 색이 없다(회색 열 칸 + 보유 주수뿐) · 시장 배지는 그대로 단다(신호가 없어도 「지금 뭔가 일어난」 종목은 봐야 한다). */
+            $key = $rowOf($rows, $code, (string)$g['p']['stock_name']);
+            if (!$rows[$key]['mkt'] && !empty($g['mkt'])) $rows[$key]['mkt'] = $g['mkt'];
+            $fid = (int)$g['p']['portfolio_id'];
+            $cols[$fid] = (string)$g['fname'];
+            $rows[$key]['held'][$fid] = ['qty' => $q, 'pid' => (int)$g['pid']];
+            $rows[$key]['heldTot']    = ($rows[$key]['heldTot'] ?? 0) + $q;
+        }
+
+        /* 줄의 순서 = 보유 비중 큰 순(같은 날 사용자) — 옆의 「종목별」 트리맵과 같은 순서로 읽힌다.
+         * 보유가 없는 종목(재진입 후보)은 0 이라 뒤로 가고, 같은 값끼리는 신호 목록의 순서를 지킨다(PHP 8 안정 정렬). */
+        uasort($rows, fn($a, $b) => ($weights[$b['code']] ?? 0) <=> ($weights[$a['code']] ?? 0));
+        /* 「비중」 칸의 분모 = 전 포트폴리오 추정자산(예수금 + 평가) — 트리맵과 같은 식이라 두 그림이 같은 %를 말한다 */
+        $wDen = 0.0; $wMax = 1.0;
+        foreach ($stats as $st) $wDen += max(0.0, (float)($st['cash'] ?? 0)) + (float)($st['sub']['eval'] ?? 0);
+        foreach ($rows as $r) $wMax = max($wMax, (float)($weights[$r['code']] ?? 0));
+
+        /* 칸의 순서 = 아래 포트폴리오 표의 순서($stats 의 키 순서) — 두 표가 다른 순서면 눈이 두 번 적응한다 */
+        $ord = [];
+        foreach (array_keys($stats) as $fid) if (isset($cols[(int)$fid])) $ord[(int)$fid] = $cols[(int)$fid];
+        $cols = $ord + $cols;
+
+        /* 포트폴리오 칸은 «같은 폭»이다(같은 날 사용자) — 칸이 100% 상자라 폭이 다르면 채운 넓이를 칸끼리 견줄 수 없다.
+         * table-layout:fixed 라 폭은 colgroup 이 정한다 — 포트폴리오·비중·합계 칸은 고정 폭, 종목 칸이 남는 폭을 다 갖는다. */
+        echo '<div class="tbl-scroll"><table class="pf sig-mx"><colgroup><col><col class="mx-cw">' . str_repeat('<col class="mx-cf">', count($cols))
+           . '<col class="mx-c9"></colgroup><thead><tr><th>종목</th>'
+           . '<th class="num" title="보유 비중 — 그 종목의 평가금액(전 포트폴리오 합) ÷ 추정자산 · 왼쪽 「종목별」 트리맵과 같은 값 · 막대: 회색 = 남는 보유 · 초록 = 오늘 팔 몫 · 주황/빨강 = 오늘 살 몫 (전체 = 지금 보유 + 오늘 살 금액)">비중</th>';
+        foreach ($cols as $fid => $nm) echo '<th><a href="/stock/index.php?id=' . (int)$fid . '">' . pf_h($nm) . '</a></th>';
+        echo '<th class="num" title="전 포트폴리오 합 — 윗줄 = 살 주수(＋) · 팔 주수(−) · 아랫줄 = 지금 보유 주수 · 매수 소요 금액은 칸에 마우스를 올리면">합계</th></tr></thead><tbody>';
+
+        foreach ($rows as $r) {
+            echo '<tr><td class="stk">'
+               . ($r['code'] !== '' ? '<a href="/stock/index.php?mode=short&code=' . pf_h($r['code']) . '" title="' . pf_h($r['code']) . ' · 단타 화면에서 차트 보기">' . pf_h($r['name']) . '</a>'
+                                     . '<span class="code">' . pf_h($r['code']) . '</span>'
+                                    : '<b>' . pf_h($r['name']) . '</b>');
+
+            /* 시장 — 종목 «밑»에 적는다(같은 날 사용자 — 따로 열로 두니 표가 옆으로 너무 넓어 눈에 안 들어왔다).
+             * 신뢰도(근거 강함 / 주의) 먼저, 그 옆에 근거가 된 배지. 재진입뿐인 종목은 그 근거를 적는다. */
+            echo '<div class="mx-m">';
+            if (($r['conf']['label'] ?? '') !== '') {
+                echo '<span class="sig-conf lv-' . pf_h($r['conf']['level']) . '" title="' . pf_h($r['conf']['why']) . '">'
+                   . ($r['conf']['level'] === 'strong' ? '◎ ' : '△ ') . pf_h($r['conf']['label']) . '</span>';
+            }
+            if ($r['mkt']) echo pf_mkt_badges($r['mkt']);
+            if (!$r['kinds'] && $r['re']) echo '<span class="sig-conf lv-strong">◎ 대기 ' . $wait . '일 경과 · 값도 내려왔음</span>';
+            echo '</div></td>';
+            /* 보유 비중 — 숫자는 트리맵(종목별)과 같은 분모(추정자산). 보유가 없는 줄(재진입 후보)은 빈 칸.
+             * 막대는 세 토막이다(같은 날 사용자): 회색 = 팔고도 남는 보유 · 초록 = 오늘 팔 몫 · 주황/빨강 = 오늘 살 몫.
+             * 전체 = 지금 보유 + 오늘 살 금액. 살 것만 있으면 「보유 + 매수 = 100%」, 팔 것만 있으면 「지금 보유 = 100%」가 된다
+             * (포트폴리오 칸의 열 칸과 같은 뜻). 아무 신호도 없으면 전부 회색. */
+            $wv = (float)($weights[$r['code']] ?? 0);
+            if ($wv > 0 && $wDen > 0) {
+                $bA  = (float)$r['amt'];
+                $sA  = min($wv, (float)($r['sellAmt'] ?? 0));
+                $tip = '보유 ' . pf_n(round($wv)) . '원'
+                     . ($sA > 0 ? ' − 오늘 매도 ' . pf_n(round($sA)) . '원' : '')
+                     . ($bA > 0 ? ' + 오늘 매수 ' . pf_n(round($bA)) . '원' : '')
+                     . ($sA > 0 || $bA > 0 ? ' → ' . pf_n(round($wv - $sA + $bA)) . '원 (지금의 ' . number_format(($wv - $sA + $bA) / $wv, 2) . '배)' : '');
+                $seg = '<u style="flex:' . round($wv - $sA) . '"></u>'
+                     . ($sA > 0 ? '<u class="k-sell" style="flex:' . round($sA) . '"></u>' : '')
+                     . ($bA > 0 ? '<u class="k-' . (isset($r['kinds']['buy']) ? 'buy' : 'fill') . '" style="flex:' . round($bA) . '"></u>' : '');
+                echo '<td class="num mx-w" title="' . pf_h($tip) . '">' . number_format($wv / $wDen * 100, 1) . '%<i>' . $seg . '</i></td>';
+            } else {
+                echo '<td class="mx-e">·</td>';
+            }
+
+            foreach ($cols as $fid => $nm) {
+                $cs = $r['cells'][$fid] ?? [];
+                $hd = $r['held'][$fid] ?? null;
+                /* 칸의 두 줄 — 위: 오늘 살(팔) 주수(색 · 굵게) · 아래: 지금 보유(회색 · 작게). 신호 없이 보유만이면 회색 한 줄. */
+                $hl = $hd ? '<small>보유 ' . pf_n($hd['qty']) . '</small>' : '';
+                if (!$cs) {
+                    if (!$hd) { echo '<td class="mx-e">·</td>'; continue; }
+                    echo '<td><a class="mx-c mx-b" href="/stock/index.php?mode=position&id=' . $hd['pid'] . '" title="'
+                       . pf_h($nm . ' · 보유 ' . pf_n($hd['qty']) . '주 · 오늘 신호 없음') . '"><span class="mx-wf">' . str_repeat('<i></i>', 10) . '</span><span class="mx-tx">' . $hl . '</span></a></td>';
+                    continue;
+                }
+                echo '<td>';
+                foreach ($cs as $cell) {
+                    if ($cell['t'] === 're') {
+                        $x   = $cell['x'];
+                        $tip = $nm . ' · 재진입 검토' . "\n"
+                             . '청산가 ' . pf_n($x['last_sell_price'] === null ? null : round($x['last_sell_price']))
+                             . ' → 현재가 ' . pf_n($x['last']) . ' · ' . (int)$x['days'] . '일 전 청산 · 하락요건 −' . number_format($x['req'] * 100, 1) . '% 충족'
+                             . ($x['need'] !== null ? "\n" . '1차 소요 ' . pf_n(round($x['need'])) . '원' : '')
+                             . ($x['fund_ok'] === false ? ' · 예수금 부족' : '');
+                        echo '<a class="mx-c" href="/stock/index.php?mode=position&id=' . (int)$x['id'] . '" title="' . pf_h($tip) . '">'
+                           . '<span><span class="sig-pill k-re">재진입</span>'
+                           . '<b class="k-re">' . pf_h(pf_pct($x['chk']['gap'], 1)) . '</b></span></a>';
+                        continue;
+                    }
+                    $g = $cell['g']; $s = $g['s']; $c = $g['c']; $kind = $s['kind'];
+                    // 차수 표기 — 매수만 "올라가는" 것이라 화살표를 쓴다
+                    $step = ($kind === 'buy' && (int)$c['reach_step'] > (int)$c['cur_step'])
+                        ? ((int)$c['cur_step'] > 0 ? $c['cur_step'] . '차 → ' : '') . $c['reach_step'] . '차'
+                        : ((int)$c['cur_step'] > 0 ? $c['cur_step'] . '차' : '진입');
+                    /* 금액·예수금 부족은 칸에 적지 않는다(카드 때와 같은 규칙 — 「몇 주」만 보고 지나가는 자리) · 툴팁에 둔다 */
+                    $tip = $nm . ' · ' . pf_sig_label($kind) . ' ' . $step
+                         . ($hd ? ' · 보유 ' . pf_n($hd['qty']) . '주' : '')
+                         . ((float)($s['amount'] ?? 0) > 0 ? "\n" . '금액 ' . pf_n(round((float)$s['amount'])) . '원' : '')
+                         . ($kind !== 'sell' && $g['fund_ok'] === false ? ' · 예수금 부족' : '');
+                    /* 칸 = 100% 짜리 «열 칸 격자»(같은 날 사용자 — 칸 배경 채우기 → 원(26px 라 안 보였다) → 열 칸).
+                     * 매수: 열 칸 = 사고 난 뒤의 주수(보유 + 살 것) · 회색 = 지금 보유한 몫 · 색 = 오늘 살 몫 → 「지금의 몇 배를 더 사나」가 넓이로 보인다.
+                     * 매도: 열 칸 = 지금 보유 · 초록 = 팔 몫. 회색(보유)이 먼저 깔리고 색이 뒤에 온다 · 색은 글자색과 같은 계열이다. */
+                    $hq  = (int)($hd['qty'] ?? 0); $sq = (int)$s['qty'];
+                    $tot = $kind === 'sell' ? max($hq, $sq) : $hq + $sq;
+                    $hp  = $tot > 0 ? ($kind === 'sell' ? ($tot - $sq) : $hq) / $tot * 100 : 0;
+                    $tint = ['buy' => '#e06666', 'fill' => '#f0a03c', 'sell' => '#3fb489'][$kind] ?? '#b4bfca';
+                    /* 열 칸(한 칸 = 10%) — 반올림하되, 있는 것은 최소 한 칸을 준다(보유가 있는데 회색이 0칸이면 「첫 매수」로 읽힌다) */
+                    $nH = (int)round($hp / 10);
+                    if ($hq > 0 && $tot > $sq) $nH = max(1, $nH);
+                    if ($sq > 0) $nH = min(9, $nH);
+                    $bg  = str_repeat('<i></i>', $nH) . str_repeat('<i style="background:' . $tint . '"></i>', 10 - $nH);
+                    $tip .= $tot > 0 && $kind !== 'sell' ? "\n" . '사고 나면 ' . pf_n($tot) . '주 (지금의 ' . ($hq > 0 ? number_format($tot / $hq, 1) . '배' : '첫 매수') . ')' : '';
+                    echo '<a class="mx-c mx-b" href="/stock/index.php?mode=position&id=' . (int)$g['pid'] . '" title="' . pf_h($tip) . '"><span class="mx-wf">' . $bg . '</span><span class="mx-tx">'
+                       /* 칸에는 «주수»만 적는다(같은 날 사용자 — 「잔여매수 1차 같은 문구는 없어도」). 신호의 종류는 색이 말하고
+                        * (매수 빨강 · 잔여매수 주황 · 매도 초록) 차수·금액은 툴팁에 있다. 재진입만 이름표를 남긴다 — 주수가 아니라 %라서. */
+                       . '<b class="k-' . $kind . '">' . ($kind === 'sell' ? '−' : '＋') . pf_n($s['qty']) . '주</b>' . $hl . '</span></a>';
+                }
+                echo '</td>';
+            }
+
+            // 합계 — 살 것과 팔 것을 섞어 빼지 않는다(같은 종목을 한 곳에서 팔고 다른 곳에서 사는 날이 있다)
+            /* 아랫줄은 보유 합(칸과 같은 두 줄) — 매수 소요 금액은 툴팁으로 내렸다(세 줄이 되면 줄이 높아진다 · 총액은 머리줄에 있다). */
+            $tt = array_filter([
+                $r['amt'] > 0    ? '매수 소요 ' . pf_n(round($r['amt'])) . '원' : '',
+                $r['reNeed'] > 0 ? '재진입 1차 소요 ' . pf_n(round($r['reNeed'])) . '원' : '',
+            ]);
+            echo '<td class="num mx-t"' . ($tt ? ' title="' . pf_h(implode(' · ', $tt)) . '"' : '') . '>';
+            if ($r['buy'] > 0)  echo '<b class="k-' . (isset($r['kinds']['buy']) ? 'buy' : 'fill') . '">＋' . pf_n($r['buy']) . '주</b>';
+            if ($r['sell'] > 0) echo '<b class="k-sell">−' . pf_n($r['sell']) . '주</b>';
+            if (($r['heldTot'] ?? 0) > 0) echo '<small>보유 ' . pf_n($r['heldTot']) . '</small>';
+            elseif ($r['reNeed'] > 0)     echo '<small>1차 ' . pf_n(round($r['reNeed'])) . '</small>';
+            echo '</td></tr>';
+        }
+        echo '</tbody></table></div>';
     }
 
     // ── 대기 종목 — 접어 둔다. <details> 라 JS 가 필요 없다
@@ -2629,7 +3124,28 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
     echo '<a class="btn btn-outline" href="' . $closedHref . '">' . ($showClosed ? '종료 숨기기' : '종료 보기') . '</a>';
     echo '</div></div>';
 
-    if ($folios) pf_render_signal_strip($sigs, $stats, $re, $reWait);
+    /* ── 맨 윗줄 = [오늘의 신호] [보유 비중 트리맵] (2026-10-13 사용자 — 신호 표를 내용 폭으로 좁히니 오른쪽이 비었다.
+     *    합계 카드를 올리는 안도 나왔는데 사용자가 트리맵을 골랐다: 빈자리가 한 덩어리라 한 덩어리짜리가 맞는다).
+     *    신호가 없는 날(.quiet)·좁은 화면에서는 위아래로 쌓인다(CSS .sig-row). 트리맵은 전에 왼쪽 단의 합계 카드 아래에 있었다.
+     *    합계와 같은 $positions·$calc·$stats 를 읽는다. .sum-box.wd 가 격자 전폭을 쓴다. */
+    echo '<div class="sig-row">';
+    $sigW = [];   // 종목코드 => 전 포트폴리오 평가금액 합 (신호 표의 줄 순서)
+    foreach ($positions as $p) {
+        if (($p['status'] ?? '') === 'closed') continue;
+        $cd = (string)($p['stock_code'] ?? '');
+        $sigW[$cd] = ($sigW[$cd] ?? 0) + (float)($calc[(int)$p['id']]['eval_amount'] ?? 0);
+    }
+    if ($folios) pf_render_signal_strip($sigs, $stats, $re, $reWait, $sigW);
+    /* 트리맵 높이 — 화면에서는 신호 표의 높이를 그대로 따라간다(CSS: .sig-row 가 두 칸을 같은 높이로 늘리고 .tm 이 남는 높이를 먹는다).
+     * 여기서 넘기는 값은 «배치 계산용» 어림이다: 신호 표의 줄 수(종목 수)로 어림해 사각형의 가로세로 비가 실제와 비슷하게 나오게 한다. */
+    $sigN = [];
+    foreach ($sigs as $g) if ($g['s']['kind'] !== null || (int)($g['c']['filled_qty'] ?? 0) > 0) $sigN[(string)($g['p']['stock_code'] ?? $g['pid'])] = 1;
+    foreach ($re as $x)   if ($x['chk']['state'] === 'ready') $sigN[(string)($x['stock_code'] ?? $x['id'])] = 1;
+    $tmH = max(300.0, min(640.0, 33.0 * count($sigN) - 20));
+    echo '<div class="sum-grid">';
+    pf_render_weight_treemap($positions, $calc, $folios, $stats, $tRate,
+                             pf_today_quotes($pdo, array_column($active, 'stock_code')), $tmH);
+    echo '</div></div>';   // .sum-grid · .sig-row
 
     // ── 좌우 컬럼. 오른쪽 상세는 맨 위부터 시작하는 독립 영역이다.
     echo '<div class="split">';
@@ -2659,8 +3175,6 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
         [$k, $v, $cls, $sub] = $row;
         pf_sum_card($k, $v, $cls, $sub, $row[4] ?? '', $mini, 0);
     }
-    /* 보유 비중 트리맵 — 둘째 줄 수익률 옆(2026-09-04). 합계와 같은 $positions·$calc·$stats 를 읽는다. */
-    pf_render_weight_treemap($positions, $calc, $folios, $stats, $tRate);
     echo '</div>';
 
     if (!$folios) {
@@ -2675,8 +3189,10 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
     echo '<div class="card"><h2>포트폴리오</h2>';
     echo '<div class="tbl-scroll"><table class="pf"><thead><tr>';
     foreach ([
-        ['포트폴리오', ''], ['원금', 'num'], ['예수금', 'num'], ['총매입', 'num'],
-        ['종목', 'num'], ['메모', ''], ['총평가', 'num'], ['평가손익', 'num', '보유분 현재가치 − 매입원가'],
+        ['포트폴리오', ''], ['원금', 'num'], ['예수금', 'num'],
+        ['예수금 비중', 'num', '예수금 ÷ 추정자산 — 그 포트폴리오 돈 중 아직 안 쓴 몫 · 합계 줄 = 전체 평균 · 바탕색 = 평균과의 차이: 붉을수록 평균보다 많고 푸를수록 적다(±3%p 안은 무색 · 10%p · 20%p 에서 진해진다) · 칸에 마우스를 올리면 차이(%p)'],
+        ['총매입', 'num'],
+        ['종목', 'num'], ['총평가', 'num'], ['평가손익', 'num', '보유분 현재가치 − 매입원가'],
         ['평가수익률', 'num', '평가손익 ÷ 총매입 — 지금 들고 있는 종목만의 성적'],
         ['추정자산', 'num'], ['수익률', 'num', '추정자산 ÷ 원금 − 1 — 실현손익·예수금까지 든 계좌 전체의 성적'],
     ] as $hc) {
@@ -2684,6 +3200,44 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
         echo '<th class="' . $cls . '"' . (isset($hc[2]) ? ' title="' . pf_h($hc[2]) . '"' : '') . '>' . pf_h($label) . '</th>';
     }
     echo '</tr></thead><tbody>';
+
+    /* 예수금 비중 칸(2026-10-13 사용자 — 「어느 포트폴리오에 예수금이 많은지 보고 비슷하게 맞추고 싶다」).
+     * 분모 = 그 포트폴리오의 추정자산(예수금 + 평가) — 트리맵의 예수금 %와 같은 자다. 추정자산이 없으면 「-」(0% 는 「다 썼다」로 읽힌다).
+     */
+    /* ★이 열의 자리는 「메모」 열을 빼서 냈다(같은 날 사용자) — 그냥 한 열 늘렸더니 왼쪽 단에서 가로 스크롤이 생겼다.
+     * 메모는 이름 아랫줄(증권사·계좌 뒤)로 옮겼다. 열을 또 늘릴 때는 무엇을 뺄지 먼저 정한다. */
+    /* 전체 평균과의 차이(같은 날 사용자 — 「전체 비중보다 높은 것과 낮은 것을 구분해서」).
+     * 처음엔 막대 + 평균선 + 「+21.9p」였는데 작아서 안 읽히고 열이 넓어졌다 → 숫자의 바탕색 하나로 줄였다(아래). */
+    /* 원금은 «만원» 단위로 적는다(같은 날 사용자 — 열 폭을 줄여 가로 스크롤을 없앤다). 원금은 늘 만 단위로 넣는 값이라 잃는 것이 없고,
+     * 만 단위로 안 떨어지면 소수 한 자리까지 적는다(반올림해 감추지 않는다). 정확한 값은 툴팁. */
+    $prinCell = function ($v): string {
+        $man = (float)$v / 10000;
+        $txt = fmod((float)$v, 10000.0) == 0.0 ? number_format($man) : number_format($man, 1);
+        return '<td class="num" title="' . pf_n($v) . '원">' . $txt . '<small class="muted" style="font-weight:400;margin-left:1px">만</small></td>';
+    };
+    $avgCash  = (float)$tAsset > 0 ? max(0.0, min(1.0, (float)$tCash / (float)$tAsset)) : null;
+    $cashCell = function ($cash, $asset, bool $isTot = false) use ($avgCash): string {
+        $amt = '<td class="num' . ((float)$cash < 0 ? ' down' : '') . '">' . pf_n(round((float)$cash)) . '</td>';
+        if ((float)$asset <= 0) return $amt . '<td class="num"><span class="flat">-</span></td>';
+        $r  = (float)$cash / (float)$asset;
+        $rc = max(0.0, min(1.0, $r));
+        $p  = fn(float $x): string => number_format($x * 100, 1);
+        /* ★막대·평균선은 걷어냈다(같은 날 사용자 — 60px 막대는 작아서 안 읽힌다). 대신 «숫자의 바탕»을 칠한다:
+         * 평균보다 많으면 붉게 · 적으면 푸르게 · 멀수록 진하게(3단) · 평균 ±3%p 안은 칠하지 않는다(다 칠하면 구분이 안 된다).
+         * 옆 칸의 손익은 «글자색»이고 여기는 «바탕색»이라 모양으로 갈린다 — 글자는 늘 검정이다. 구간은 표시용 눈금이지 판정이 아니다. */
+        $dif = ''; $sty = '';
+        if ($avgCash !== null) {
+            $d   = $r - $avgCash;
+            $dif = $isTot ? '전체 평균 ' . $p($avgCash) . '%'
+                          : '전체 평균 ' . $p($avgCash) . '% 대비 ' . ($d >= 0 ? '+' : '−') . $p(abs($d)) . '%p';
+            $a = abs($d);
+            if (!$isTot && $a >= 0.03) {
+                $L   = $a >= 0.20 ? 72 : ($a >= 0.10 ? 82 : 91);
+                $sty = ' style="background:hsl(' . ($d > 0 ? 0 : 215) . ',85%,' . $L . '%)"';
+            }
+        }
+        return $amt . '<td class="num cw"' . ($dif !== '' ? ' title="' . pf_h($dif) . '"' : '') . '><b' . $sty . '>' . $p($r) . '%</b></td>';
+    };
 
     foreach ($folios as $f) {
         $fid    = (int)$f['id'];
@@ -2703,15 +3257,15 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
          * 이 표는 좌우분할의 왼쪽에 들어가 폭이 빠듯해서, 열을 하나 늘리면 가로 스크롤이 생긴다. */
         if (!empty($sigCnt[$fid])) echo ' ' . pf_sig_dots($sigCnt[$fid]);
         if (!(int)$f['is_active']) echo ' <span class="badge st-closed">미사용</span>';
-        $ident = array_filter([$f['broker'], $f['acct_no']]);
-        if ($ident) echo '<br><span class="muted" style="font-size:11px">' . pf_h(implode(' ', $ident)) . '</span>';
+        $ident = implode(' ', array_filter([$f['broker'], $f['acct_no']]));
+        $ident = implode(' · ', array_filter([$ident, trim((string)$f['memo'])], fn($x) => $x !== ''));   // 메모는 열 대신 여기에
+        if ($ident !== '') echo '<br><span class="muted" style="font-size:11px">' . pf_h($ident) . '</span>';
         echo '</td>';
 
-        echo '<td class="num">' . pf_n($prin) . '</td>';
-        echo '<td class="num' . ($sCash < 0 ? ' down' : '') . '">' . pf_n(round($sCash)) . '</td>';
+        echo $prinCell($prin);
+        echo $cashCell($sCash, $sAsset);
         echo '<td class="num">' . pf_n(round($sub['cost'])) . '</td>';
         echo '<td class="num">' . $st['n'] . '</td>';   // 종료 제외 — 목록에 보이는 수와 같게
-        echo '<td class="muted">' . pf_h($f['memo']) . '</td>';
         echo '<td class="num">' . pf_n(round($sub['eval'])) . '</td>';
         echo '<td class="num">' . pf_signed($sub['pl']) . '</td>';
         echo '<td class="num">' . pf_signed_pct(pf_eval_rate($sub['pl'], $sub['cost'])) . '</td>';
@@ -2722,11 +3276,10 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
 
     echo '</tbody><tfoot><tr>';
     echo '<td>합계</td>';
-    echo '<td class="num">' . pf_n($tPrincipal) . '</td>';
-    echo '<td class="num">' . pf_n(round($tCash)) . '</td>';
+    echo $prinCell($tPrincipal);
+    echo $cashCell($tCash, $tAsset, true);
     echo '<td class="num">' . pf_n(round($t['cost'])) . '</td>';
     echo '<td class="num">' . count($active) . '</td>';
-    echo '<td></td>';
     echo '<td class="num">' . pf_n(round($t['eval'])) . '</td>';
     echo '<td class="num">' . pf_signed($t['pl']) . '</td>';
     echo '<td class="num">' . pf_signed_pct(pf_eval_rate($t['pl'], $t['cost'])) . '</td>';
@@ -2814,6 +3367,10 @@ function pf_render_folio_detail(Pf $pf, int $fid, bool $showClosed): void
     [$all, $calc] = pf_load_calc($pf, $fid);
     $sub    = pf_sum_calc($calc);
     $rows   = pf_visible($all, $showClosed);
+    /* 표 순서 = 평가금액 큰 것부터(2026-09-28 사용자). 평가금액이 없는 행(관심·종료)은 뒤로 —
+     * 같은 값끼리는 원래 순서(sort_no)를 지킨다(usort 는 PHP 8 부터 안정 정렬). */
+    usort($rows, fn($a, $b) => (float)($calc[(int)$b['id']]['eval_amount'] ?? 0)
+                            <=> (float)($calc[(int)$a['id']]['eval_amount'] ?? 0));
 
     $prin   = (float)$f['principal'];
     $income = pf_income($f);
@@ -6250,12 +6807,12 @@ function pf_render_position_form(Pf $pf, ?array $pos): void
             echo '<p class="sub muted" style="margin:8px 0 0;font-size:12px">'
                . '<b>「선택」</b>하면 위 폼에 종목과 <b>보관해 둔 매수 방식·룰셋·박스 지지선</b>까지 채워집니다'
                . '(위에 입력하던 값은 초기화). 출처·담은날·담을때가는 저장 때 자동 승계됩니다. '
-               . '맨 오른쪽 <b>×</b> 는 편입 대기만 풀고 관심종목 목록에는 남깁니다.<br>'
+               . '맨 오른쪽 <b>×</b> 는 편입 대기만 풀고 Top-Pick 목록에는 남깁니다.<br>'
                . '<b>편입해도 이 목록에 남습니다</b> — 같은 종목을 다른 포트폴리오에도 담을 수 있습니다. '
                . '<b>위쪽이 지금 담을 수 있는 종목</b>이고, 아래쪽은 이 포트폴리오에 이미 자리가 있어 고를 수 없는 것입니다'
                . '(사유는 그 칸에 마우스를 올리면 나옵니다). 전량 매도한 자리는 <b>↓</b> 로 표시되고 '
                . '아래 <b>재진입 후보</b>가 맡습니다(누르면 이동 · 표시 없이 가라앉은 행은 보유 중). '
-               . '트리거·SUE 판정은 <a href="/stock/index.php?mode=watch">관심종목</a> 화면에서 보세요.</p>';
+               . '트리거·SUE 판정은 <a href="/stock/index.php?mode=watch">Top-Pick</a> 화면에서 보세요.</p>';
             echo '</div>';
 
             echo '<script>document.addEventListener("click",function(e){'
@@ -8767,7 +9324,7 @@ function pf_page_earn(PDO $pdo, Pf $pf): void
         $r['sue_exempt'] = null;
         if ($r['sue'] < Thr::SUE_HIT) {
             if     (isset($held[$r['code']]))    $r['sue_exempt'] = '보유종목';
-            elseif (isset($watched[$r['code']])) $r['sue_exempt'] = '관심종목';
+            elseif (isset($watched[$r['code']])) $r['sue_exempt'] = 'Top-Pick';
             else { $sueHidden++; continue; }
         }
         $kept[] = $r;
@@ -8785,7 +9342,7 @@ function pf_page_earn(PDO $pdo, Pf $pf): void
        . ' · <span class="up">규칙 충족 ' . $okN . '건</span>'
        . ($okHighVol > 0 ? ' <span class="muted" style="font-size:13px">(그중 고변동⚠ ' . $okHighVol . '건)</span>' : '')
        . ($sueHidden > 0 ? ' <span class="muted" style="font-size:13px">(SUE 1 미만 '
-           . number_format($sueHidden) . '건 숨김 — 보유·관심은 예외)</span>' : '')
+           . number_format($sueHidden) . '건 숨김 — 보유·Top-Pick은 예외)</span>' : '')
        . ($total > count($rows) + $sueHidden ? ' <span class="muted" style="font-size:13px">(SUE 상위 200건 밖 '
            . number_format($total - count($rows) - $sueHidden) . '건 제외)</span>' : '')
        . '</h2>';
@@ -8833,7 +9390,7 @@ function pf_page_earn(PDO $pdo, Pf $pf): void
             $on = ($eSort === $key);
             return '<th class="num"><a href="' . pf_h('/stock/index.php?mode=earn&days=' . $days
                 . '&sort=' . $key . (($on && $eDesc) ? '&dir=asc' : '')) . '" '
-                . 'title="' . pf_h($tip . ' — 누르면 이 값 순으로 정렬합니다 (다시 누르면 반대 방향 · 관심종목은 늘 맨 위)') . '">'
+                . 'title="' . pf_h($tip . ' — 누르면 이 값 순으로 정렬합니다 (다시 누르면 반대 방향 · Top-Pick은 늘 맨 위)') . '">'
                 . pf_h($label) . ($on ? ($eDesc ? ' ▾' : ' ▴') : '') . '</a></th>';
         };
         /* ★열 골격은 관심종목·스크리너와 같다(2026-08-04) — ①종목 → ②상태(늘 하나) → … → ③☆ 는 끝. */
@@ -8851,7 +9408,7 @@ function pf_page_earn(PDO $pdo, Pf $pf): void
            . '<th class="num" title="최근 60거래일 일수익률 표준편차 — 이 목록 안에서 상위 ⅓이면 고변동⚠ (백테스트: 규칙 충족이라도 고변동⅓은 −1.6%로 독)">변동성</th>'
            . ($be['qpath'] ? '<th class="center" title="그 종목의 최근 최고 거래대금 박스가 지금 어떤 상태인가 (퀀트 탭과 같은 판정) — 실적으로 고르고 수급으로 타이밍을 봅니다">최고 거래대금 박스</th>' : '')
            . '<th>판정</th>'
-           . '<th class="center" style="width:34px" title="관심종목에 담기/빼기">☆</th>'
+           . '<th class="center" style="width:34px" title="Top-Pick에 담기/빼기">☆</th>'
            . '</tr></thead><tbody>';
         $rcName = ['11013' => '1Q', '11012' => '반기', '11014' => '3Q', '11011' => '연간'];
         foreach ($rows as $r) {
@@ -8906,7 +9463,7 @@ function pf_page_earn(PDO $pdo, Pf $pf): void
             // ③ ☆ — 토글이라 동선의 끝(관심종목·스크리너와 같은 자리)
             echo '<td class="center"><button type="button" class="wl-star' . ($won ? ' on' : '') . '"'
                . ' data-code="' . pf_h($r['code']) . '" data-name="' . pf_h($r['name']) . '"'
-               . ' title="관심종목에 담기/빼기">' . ($won ? '★' : '☆') . '</button></td>';
+               . ' title="Top-Pick에 담기/빼기">' . ($won ? '★' : '☆') . '</button></td>';
             echo '</tr>';
         }
         echo '</tbody></table></div>';
@@ -9005,7 +9562,7 @@ function pf_earn_shock_card(array $shock, int $total, int $days, array $box, arr
     $mineN = count(array_filter($shock, fn($r) => isset($held[$r['code']]) || isset($watched[$r['code']])));
     if ($mineN > 0) {
         echo '<p class="warn" style="margin:0 0 8px;font-size:13px">'
-           . '<b>보유·관심 종목 ' . $mineN . '건</b>이 이 목록에 있습니다 — 맨 위에 올려 두었습니다. '
+           . '<b>보유·Top-Pick 종목 ' . $mineN . '건</b>이 이 목록에 있습니다 — 맨 위에 올려 두었습니다. '
            . '실적 전제가 깨졌는지 확인하세요(수급 구조인 <b>계단관통↓</b>와 겹치면 손절을 판단하는 자리입니다).</p>';
     }
 
@@ -9609,7 +10166,7 @@ function pf_page_fund(PDO $pdo, Pf $pf): void
        . '<b>' . number_format($total) . '종목</b>이 조건에 맞습니다'
        . ($tagQ !== '' ? ' · <b>태그 #' . pf_h($tagQ) . '</b> 종목만' : '')
        . ($total > PF_FUND_TOP ? ' (정렬 기준 <b>상위 ' . PF_FUND_TOP . '개</b>만 표시)' : '')
-       . ($watchHit > 0 ? ' · <b class="up">관심종목 ' . $watchHit . '개</b>를 맨 위로 올렸습니다' : '')
+       . ($watchHit > 0 ? ' · <b class="up">Top-Pick ' . $watchHit . '개</b>를 맨 위로 올렸습니다' : '')
        . ' · <b>' . pf_h($basisLbl) . '</b>'
        . ($isTtm ? ' (전년 연간 ＋ 당해 누적 － 전년 동기 누적)' : '')
        . ' · 금융업은 매출액 계정이 없어 매출 관련 조건에서 빠집니다'
@@ -9681,7 +10238,7 @@ function pf_page_fund(PDO $pdo, Pf $pf): void
         echo $head('debt_ratio', '부채비율');
         echo $head('cur_ratio', '유동비율');
         echo '<th class="num">기준</th>';
-        echo '<th class="center" style="width:34px" title="관심종목에 담기/빼기">☆</th>';
+        echo '<th class="center" style="width:34px" title="Top-Pick에 담기/빼기">☆</th>';
         echo '</tr></thead><tbody>';
 
         foreach ($rows as $r) {
@@ -9749,7 +10306,7 @@ function pf_page_fund(PDO $pdo, Pf $pf): void
             // ③ ☆ — 목록에서 담고 빼는 토글이라 <b>동선의 끝</b>에 둔다(관심종목 표의 ★ 와 같은 자리)
             echo '<td class="center"><button type="button" class="wl-star' . ($on ? ' on' : '') . '"'
                . ' data-code="' . pf_h($r['stock_code']) . '" data-name="' . pf_h($nm) . '"'
-               . ' title="관심종목에 담기/빼기">' . ($on ? '★' : '☆') . '</button></td>';
+               . ' title="Top-Pick에 담기/빼기">' . ($on ? '★' : '☆') . '</button></td>';
             echo '</tr>';
         }
         echo '</tbody></table></div>';
@@ -9757,8 +10314,8 @@ function pf_page_fund(PDO $pdo, Pf $pf): void
            . '<b>포트폴리오</b> 칸에는 셋 중 하나가 옵니다 — <b>편입</b>(담을 수 있음 · 종목 추가 폼이 열립니다) · '
            . '<span class="badge st-held">보유</span> 실제로 담고 있음 · '
            . '<span class="badge st-slot">편입됨</span> 포지션만 만들고 아직 매수 기록 없음'
-           . '(여러 포트폴리오면 개수까지 · 눌러서 그 종목 상세로). 관심종목·어닝·퀀트 탭과 <b>같은 판정</b>입니다. '
-           . '맨 오른쪽 <b>☆</b> 는 관심종목에 담기/빼기입니다.<br>'
+           . '(여러 포트폴리오면 개수까지 · 눌러서 그 종목 상세로). Top-Pick·어닝·퀀트 탭과 <b>같은 판정</b>입니다. '
+           . '맨 오른쪽 <b>☆</b> 는 Top-Pick에 담기/빼기입니다.<br>'
            . '<b>행을 클릭</b>하면 그 종목의 연도별·분기별 재무를 봅니다. 금액 단위는 <b>억원</b>입니다. '
            . '자본총계가 0 이하(자본잠식)면 ROE·부채비율은 <b>-</b> 로 둡니다 — 계산하면 숫자가 거짓말을 합니다.<br>'
            . '<b>순익÷영익</b>이 <b class="down">1.5 를 넘으면</b> 자산매각 같은 <b>일회성 이익</b>이 섞였을 수 있습니다 — '
@@ -10051,12 +10608,12 @@ function pf_page_watch(PDO $pdo, Pf $pf): void
         } catch (Throwable $e) { /* pf_daily 미구축 — 시장 열 없이 목록만 */ }
     }
 
-    pf_head('관심종목', 'fund', 'wide');       // 상단은 재무분석, 하위 탭에서 관심종목
+    pf_head('Top-Pick', 'fund', 'wide');       // 상단은 재무분석, 하위 탭에서 Top-Pick
     pf_subtabs('watch', 'fund');
     pf_flash();
     pf_quant_css();   // .qb(유형)·.bx(박스)·.wl-star — 퀀트·어닝과 같은 배지 어휘
 
-    echo '<div class="pf-head"><div><h1>관심종목</h1>';
+    echo '<div class="pf-head"><div><h1>Top-Pick</h1>';
     echo '<div class="sub">재무분석에서 담아 둔 종목입니다. 지표는 저장하지 않고 '
        . ($year ? '<b>' . $year . '년 사업보고서</b>로 ' : '')
        . '매번 계산합니다 — 재무가 갱신되면 숫자도 따라옵니다.</div></div>';
@@ -10223,7 +10780,7 @@ function pf_page_watch(PDO $pdo, Pf $pf): void
            . pf_h($w['memo']) . '" placeholder="왜 담았는지" maxlength="200"></td>';
         // ⑰ 빼기 — 되돌릴 수 없는 쪽이라 <b>동선의 끝</b>에 둔다(편입 관심종목의 × 와 같은 자리)
         echo '<td class="center"><button type="button" class="wl-del" data-code="' . pf_h($code)
-           . '" title="관심종목에서 빼기">★</button></td>';
+           . '" title="Top-Pick에서 빼기">★</button></td>';
         echo '</tr>';
     }
     echo '</tbody></table></div>';
@@ -10512,7 +11069,7 @@ function pf_fund_filing_cells(?array $f, string $qLbl, bool $showQ): string
          . '>' . ($dt ? pf_h($dt) : '-') . '</td>';
 
     // 공시일 종가 기준 시총 — 마감 뒤 공시면 시장이 아직 반영하기 «전» 값이다(그래서 「기준」이 된다)
-    $out .= '<td class="num muted"'
+    $out .= '<td class="num muted" data-ttm="cap"'   // 분기 추이의 「시총(공시일)」 소형 차트 hover 가 이 칸을 찾는다(연도별 표는 행에 data-q 가 없어 무관)
           . ($cap !== null
               ? ' title="' . pf_h('공시일(' . $dt . ') 종가 기준 시가총액 ' . number_format($cap / 100000000)
                 . '억원 — 실적이 알려진 날 시장이 매기고 있던 값입니다. 공시가 마감 뒤면 아직 반영 전 값입니다.') . '"'
@@ -10561,7 +11118,7 @@ function pf_fund_note_card(PDO $pdo, string $code): void
         echo '<span class="muted" style="font-size:11px">' . pf_h(substr((string)$note['updated_at'], 0, 10)) . ' 수정</span>';
     }
     if (!$has) {
-        echo '<span class="muted" style="font-size:12px">아직 없습니다 — 적어 두면 관심종목·어닝 목록과 태그 필터에서 쓰입니다</span>';
+        echo '<span class="muted" style="font-size:12px">아직 없습니다 — 적어 두면 Top-Pick·어닝 목록과 태그 필터에서 쓰입니다</span>';
     }
     echo '<button type="button" class="btn btn-outline btn-sm" style="margin-left:auto" '
        . 'onclick="pfNoteEdit(true)">' . ($has ? '수정' : '＋ 개요 적기') . '</button>';
@@ -10694,7 +11251,7 @@ function pf_page_fund_detail(PDO $pdo, Dart $dart, string $code, ?Pf $pf = null)
         $on = isset($pf->watchCodes()[$code]);
         echo '<button type="button" class="btn ' . ($on ? 'btn-primary' : 'btn-outline') . ' wl-star2"'
            . ' data-code="' . pf_h($code) . '" data-name="' . pf_h($name ?: $code) . '">'
-           . ($on ? '★ 관심종목' : '☆ 관심종목') . '</button> ';
+           . ($on ? '★ Top-Pick' : '☆ Top-Pick') . '</button> ';
         // 편입 — 포트폴리오 정보가 없는 자리라, ★ 담긴 종목은 포트폴리오 선택으로·아니면 관심종목 등록으로
         echo '<a class="btn btn-outline" href="/stock/index.php?mode=position&id=new&src=fund&bm=box'
            . '&code=' . rawurlencode($code) . '&name=' . rawurlencode($name ?: $code)
@@ -10830,7 +11387,7 @@ document.addEventListener('click', function(e){
     .then(function(j){
       if (!j || !j.ok) { alert((j && j.message) || '실패했습니다.'); return; }
       var on = j.message.indexOf('담았습니다') >= 0;
-      b.textContent = on ? '★ 관심종목' : '☆ 관심종목';
+      b.textContent = on ? '★ Top-Pick' : '☆ Top-Pick';
       b.classList.toggle('btn-primary', on);
       b.classList.toggle('btn-outline', !on);
     })
@@ -11062,6 +11619,31 @@ function pf_fund_detail_band(PDO $pdo, string $code): void
     echo '<script src="/style/bandchart.js?v=4"></script>';
     echo '<script>BandChart.mount(' . json_encode($code)
        . ', {per:"bandPer", pbr:"bandPbr", perLegend:"bandPerLeg", pbrLegend:"bandPbrLeg"}, "bandBar");</script>';
+
+    /* ── 외인비 밴드 (2026-10-08 · style/flowchart.js · classes/KwFlow.class) ──
+     * 밴드 차트 «아래»에 일봉 차트와 같은 폭으로 둔다(사용자 지시 — 옆에 두면 폭이 줄어든다).
+     * 주가선(오른쪽 축) + 외인비 선(왼쪽 축 %) + 그 기간 외인비의 분위·최저·최고 수평선.
+     * ★외인비는 «버튼을 누를 때만» 키움에서 받는다 — 어느 종목이든 받을 수 있다(module=flow · 처음엔 Top-Pick ∪ 보유만이었다).
+     *   여기서는 화면 틀만 낸다 — 무엇을 그릴지·버튼의 글자는 모듈이 서버의 적재 상태를 읽어 정한다. */
+    echo '<div class="card" id="flowCard" style="margin-top:14px">';
+    echo '<div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin-bottom:6px">'
+       . '<h2 style="margin:0 8px 0 0">외인비 밴드</h2><span id="flowBar"></span>'
+       . '<button type="button" id="flowBtn" hidden>외인비 받기</button><span class="flow-msg" id="flowMsg"></span></div>';
+    echo '<div class="sub muted" style="font-size:12px;line-height:1.7;margin-bottom:8px">'
+       . '<b>외인비</b>는 외국인이 가진 주식의 비중(%)입니다(키움 「일별주가」의 외인비와 같은 값). '
+       . '<b>굵은 색 실선</b>이 외인비(<b>왼쪽 축</b>), 가는 검은 <b>점선</b>이 주가(<b>오른쪽 축</b>)입니다 — 외인비는 주가로 환산되지 않아 축을 둘로 나눴습니다.<br>'
+       . '맨 위 막대가 <b>지금 자리</b>입니다. 이 기간 외인비의 <b>최저~최고 범위</b>에서 아래 20%가 <b style="color:#1565c0">낮은 구역</b>(파란 배경), '
+       . '위 20%가 <b style="color:#d32f2f">높은 구역</b>(빨간 배경)이고, 외인비 선도 그 구역을 지날 때 같은 색으로 바뀝니다. 회색 점선은 실제 <b>최저·최고</b>입니다. '
+       . '주가선의 <b style="color:#d32f2f">▲</b><b style="color:#1565c0">▼</b> 는 일봉 차트와 같은 <b>정기공시</b>(어닝서프라이즈·어닝쇼크)입니다 — 마우스를 올리면 내용이 나옵니다.<br>'
+       . '「외인비가 자기 범위의 어디쯤일 때 주가가 어디였나」를 보는 그림이고, <b>구역의 경계(20%·80%)에 백테스트 근거는 없습니다</b> — 판정이 아니라 자리입니다.<br>'
+       . '외인비는 <b>버튼을 눌러</b> 받아 저장합니다(처음 받을 때 1분 남짓). 한 번 받아 둔 종목은 다시 열 때 <b>그 사이 비어 있는 기간만 스스로</b> 이어 받습니다. '
+       . '가장 최근 하루는 잠정일 수 있습니다(당일 수치는 저녁에 굳습니다 — 「최신까지 받기」가 다시 덮습니다).'
+       . '</div>';
+    echo '<div class="flow-host" id="flowHost"></div><div class="band-leg flow-leg" id="flowLeg"></div>';
+    echo '</div>';
+    echo '<script src="/style/flowchart.js?v=15"></script>';
+    echo '<script>FlowChart.mount(' . json_encode($code)
+       . ', {host:"flowHost", legend:"flowLeg", bar:"flowBar", btn:"flowBtn", msg:"flowMsg"});</script>';
 }
 
 /**
@@ -11089,7 +11671,7 @@ function pf_fund_detail_band(PDO $pdo, string $code): void
  *   모서리의 「최대·최소」 글자도 같은 빨강·파랑 — 숫자와 도형이 이어져 눈이 왕복하지 않는다.
  * 시세 차트가 아니라 재무 시계열이라 dailychart.js 규칙 밖이다 — 12점짜리 선은 인라인 SVG 로 충분하다(라이브러리 없음).
  */
-function pf_fund_ttm_spark(array $qs, array $ttm): string
+function pf_fund_ttm_spark(array $qs, array $ttm, array $cap = []): string
 {
     static $css = false;
     $out = '';
@@ -11124,27 +11706,55 @@ function pf_fund_ttm_spark(array $qs, array $ttm): string
               . '})();</script>';
     }
 
-    $panels = [
-        ['revenue',    '매출 TTM',     false],
-        ['op_income',  '영업이익 TTM', true],
-        ['net_income', '순이익 TTM',   true],
-    ];
-    $fmt = function ($v): string {
+    // 패널 = [열, 제목, 기준선(선이 이 값을 지날 때만 긋는다 · null=없음), 종류(amt 금액 · pct 비율%)] · 열이 '' 이면 빈 자리
+    // ★둘째 줄(2026-10-13 사용자 요청 「영업이익률·순이익률도 미니 그래프로」)은 <b>TTM 끼리 나눈 비율</b>이다 — 분기 이익률은 널뛰어
+    //   연속 횟수가 +1/−1 만 오간다. 윗줄과 같은 $ttm 을 나누기만 하므로 두 줄이 다른 말을 할 수 없다.
+    //   ★두 패널은 <b>제 금액 패널 바로 아래</b>에 선다(영업이익률은 영업이익 TTM 밑).
+    //   「순이익÷영업이익」 패널은 넣었다가 같은 날 사용자가 「필요없다」로 뺐다(다시 제안하지 않는다).
+    //   ★첫 칸(매출 밑)은 <b>시총</b>이다(같은 날 사용자 「빈 칸에 시가총액 추이를」) — 표의 「시총」 열(공시일 종가 기준)과 같은 값이라
+    //   「실적이 알려진 날마다 시장이 얼마로 매겼나」의 추이다. 지금 시총은 머리글에 따로 적는다(마지막 점은 마지막 공시일 값이다).
+    $der  = pf_ttm_ratio_series($ttm);
+    $capS = $cap['series'] ?? [];
+    $rows = [[
+        ['revenue',    '매출 TTM',     null, 'amt', $ttm],
+        ['op_income',  '영업이익 TTM', 0.0,  'amt', $ttm],
+        ['net_income', '순이익 TTM',   0.0,  'amt', $ttm],
+    ]];
+    // 둘째 줄 — 재료가 2점 미만인 칸은 비운다(금융주는 매출이 없어 이익률 칸이 비고 시총만 선다). 셋 다 비면 줄을 안 세운다
+    $nq = count($qs);
+    $row2 = []; $any = false;
+    foreach ([['cap', '시총(공시일)', null, 'amt', $capS],
+              ['op_margin',  '영업이익률 TTM', 0.0, 'pct', $der],
+              ['net_margin', '순이익률 TTM',   0.0, 'pct', $der]] as $p) {
+        $c = 0;
+        for ($i = 0; $i < $nq; $i++) if (($p[4][$i][$p[0]] ?? null) !== null) $c++;
+        if ($c >= 2) { $row2[] = $p; $any = true; } else $row2[] = ['', '', null, 'pct', []];
+    }
+    if ($any) $rows[] = $row2;
+    $fmtAmt = function ($v): string {
         $e = $v / 100000000;
         return number_format($e, abs($e) < 100 ? 1 : 0);
     };
+    $fmtRat = fn($v): string => number_format((float)$v, 2);
     $W = 300; $H = 124; $L = 12; $R = 12; $T = 36; $B = 24;
     $pw = $W - $L - $R; $ph = $H - $T - $B;
     // 방향색은 표의 .up/.down 과 같은 값 — 화면 어디서나 빨강=좋아짐·파랑=나빠짐
     $cUp = '#d32f2f'; $cDown = '#1565c0'; $cFlat = '#9aa8b5';
 
+    foreach ($rows as $panels) {
     $out .= '<div class="ttm-sparks">';
-    foreach ($panels as [$col, $title, $zero]) {
+    foreach ($panels as [$col, $title, $ref, $kind, $src]) {
+        // 빈 자리 — 같은 폭의 보이지 않는 칸(아래 패널이 제 금액 패널과 세로로 맞는다)
+        if ($col === '') { $out .= '<div class="ttm-spark" style="visibility:hidden;padding-top:0;padding-bottom:0"></div>'; continue; }
+        // 종류별 표기 — 금액은 억(머리글·툴팁에만 단위) · 비율은 %(눈금에도 단위를 적는다: 억과 헷갈리지 않게)
+        $fmt = $kind === 'amt' ? $fmtAmt : $fmtRat;
+        $u   = $kind === 'amt' ? '억' : '%';
+        $ua  = $kind === 'amt' ? '' : $u;
         // 시간순(왼쪽=과거). 넉 자리가 안 찬 분기(상장 초기)는 null → 점을 비우고 선을 끊는다
         $n = count($qs);
         $pts = [];
-        for ($i = $n - 1; $i >= 0; $i--) $pts[] = ['label' => (string)$qs[$i]['label'], 'v' => $ttm[$i][$col] ?? null,
-                                                'streak' => $ttm[$i]['streak'][$col] ?? null];
+        for ($i = $n - 1; $i >= 0; $i--) $pts[] = ['label' => (string)$qs[$i]['label'], 'v' => $src[$i][$col] ?? null,
+                                                'streak' => $src[$i]['streak'][$col] ?? null];
         $vals = array_values(array_filter(array_column($pts, 'v'), fn($v) => $v !== null));
 
         $out .= '<div class="ttm-spark" data-col="' . $col . '">';
@@ -11163,6 +11773,11 @@ function pf_fund_ttm_spark(array $qs, array $ttm): string
         }
         if ($peakI === $lastI) {
             $vs = '<span class="up" style="font-weight:400">고점 갱신</span>';
+        } elseif ($kind !== 'amt') {
+            // 비율은 «차이»(%p)로 적는다 — 비율의 비율(7.28% → 5.84% 를 「−19.8%」)은 읽히지 않는다
+            $df = $last - $peak;
+            $vs = '<span class="down" style="font-weight:400">고점 대비 −' . $fmtRat(abs($df)) . '%p</span>'
+                . ' <span class="muted">(고점 ' . $fmt($peak) . $u . ' · ' . pf_h($pts[$peakI]['label']) . ')</span>';
         } elseif ($peak > 0 && $last <= 0) {
             // 흑자 고점 뒤 적자 — 「−200.7%」는 맞지만 읽히지 않는다(부호가 뒤집히면 백분율이 뜻을 잃는다 · pf_profit_delta 와 같은 규칙)
             $vs = '<span class="down" style="font-weight:400">고점 뒤 적자 전환</span>'
@@ -11177,7 +11792,9 @@ function pf_fund_ttm_spark(array $qs, array $ttm): string
             $vs = '<span class="muted">고점 ' . $fmt($peak) . '(' . pf_h($pts[$peakI]['label']) . ') · 내내 적자</span>';
         }
         $out .= '<div class="ttm-spark-h"><b>' . pf_h($title) . '</b> '
-              . '<span title="최신 ' . pf_h($pts[$lastI]['label']) . ' 기준 TTM(억원)">' . $fmt($last) . '억</span> · ' . $vs . '</div>';
+              . '<span title="최신 ' . pf_h($pts[$lastI]['label']) . ' 기준 ' . ($col === 'cap' ? '공시일 종가 시총(억원)' : ($kind === 'amt' ? 'TTM(억원)' : 'TTM 끼리 나눈 값')) . '">' . $fmt($last) . $u . '</span> · '
+              . ($col === 'cap' && ($cap['now'] ?? 0) > 0 ? '<span title="지금 시총(현재가 × 상장주식수) — 선의 마지막 점은 마지막 공시일 값입니다">현재 ' . $fmt($cap['now']) . '억</span> · ' : '')
+              . $vs . '</div>';
 
         // 세로축 = 이 패널의 최소·최대(+8% 여백). ★0 을 범위에 «넣지» 않는다 — 넣으면 108~142 로 움직이는 영업이익선이
         //   위 4분의 1 에 눌려 꺾임이 안 보인다. 0 선은 선이 실제로 0 을 지날 때만(아래) 그린다
@@ -11197,8 +11814,8 @@ function pf_fund_ttm_spark(array $qs, array $ttm): string
         $s .= '<line x1="' . $L . '" y1="' . round($y((float)$rawLo), 1) . '" x2="' . ($L + $pw) . '" y2="' . round($y((float)$rawLo), 1)
             . '" stroke="' . $cDown . '" stroke-width="1" stroke-dasharray="4 3" opacity="0.8"/>';
         // 0 선 (영업이익·순이익) — 선이 흑자·적자를 오갈 때만 긋는다(적자 구간이 있으면 선이 이 밑으로 내려간다)
-        if ($zero && $rawLo < 0 && $rawHi > 0) {
-            $s .= '<line x1="' . $L . '" y1="' . round($y(0.0), 1) . '" x2="' . ($L + $pw) . '" y2="' . round($y(0.0), 1)
+        if ($ref !== null && $rawLo < $ref && $rawHi > $ref) {
+            $s .= '<line x1="' . $L . '" y1="' . round($y($ref), 1) . '" x2="' . ($L + $pw) . '" y2="' . round($y($ref), 1)
                 . '" stroke="#b9c6d4" stroke-width="1" stroke-dasharray="3 3"/>';
         }
         // ① 선분 — 전분기 대비 방향색. null 이 끼면 거기서 끊는다(빈 분기를 이어 그리면 없는 추세가 생긴다)
@@ -11227,13 +11844,13 @@ function pf_fund_ttm_spark(array $qs, array $ttm): string
             $big = $ext !== '';
             if ($streak === 0) {
                 $s .= '<g data-q="' . pf_h($p['label']) . '">' . ($big
-                    ? '<rect x="' . round($cx - 3.6, 1) . '" y="' . round($cy - 3.6, 1) . '" width="7.2" height="7.2" rx="1.5" fill="' . $cFlat . '"><title>' . pf_h($p['label'] . ' · ' . $fmt($p['v']) . '억') . $ext . '</title></rect>'
-                    : '<circle cx="' . $cx . '" cy="' . $cy . '" r="3" fill="' . $cFlat . '"><title>' . pf_h($p['label'] . ' · ' . $fmt($p['v']) . '억') . '</title></circle>') . '</g>';
+                    ? '<rect x="' . round($cx - 3.6, 1) . '" y="' . round($cy - 3.6, 1) . '" width="7.2" height="7.2" rx="1.5" fill="' . $cFlat . '"><title>' . pf_h($p['label'] . ' · ' . $fmt($p['v']) . $u) . $ext . '</title></rect>'
+                    : '<circle cx="' . $cx . '" cy="' . $cy . '" r="3" fill="' . $cFlat . '"><title>' . pf_h($p['label'] . ' · ' . $fmt($p['v']) . $u) . '</title></circle>') . '</g>';
                 continue;
             }
             $col = $streak > 0 ? $cUp : $cDown;
             $txt = ($streak > 0 ? '+' : '−') . abs($streak);
-            $tip = pf_h($p['label'] . ' · ' . $fmt($p['v']) . '억 · ' . abs($streak) . '분기 연속 ' . ($streak > 0 ? '상승' : '하락')) . $ext;
+            $tip = pf_h($p['label'] . ' · ' . $fmt($p['v']) . $u . ' · ' . abs($streak) . '분기 연속 ' . ($streak > 0 ? '상승' : '하락')) . $ext;
             $s .= '<g data-q="' . pf_h($p['label']) . '"><title>' . $tip . '</title>'
                 . ($big
                     ? '<rect x="' . round($cx - 9, 1) . '" y="' . round($cy - 9, 1) . '" width="18" height="18" rx="3.5" fill="' . $col . '"/>'
@@ -11242,18 +11859,58 @@ function pf_fund_ttm_spark(array $qs, array $ttm): string
                 . '</g>';
         }
         // 눈금 — 왼쪽 위 「최대」·「최소」 두 줄(점선과 같은 색)로 이 폭이 얼마인지 밝힌다 · 양끝 분기 라벨(왼쪽=과거)
-        $s .= '<text x="' . $L . '" y="12" font-size="10" fill="' . $cUp . '">최대 ' . $fmt($rawHi) . '</text>';
-        $s .= '<text x="' . $L . '" y="24" font-size="10" fill="' . $cDown . '">최소 ' . $fmt($rawLo) . '</text>';
+        $s .= '<text x="' . $L . '" y="12" font-size="10" fill="' . $cUp . '">최대 ' . $fmt($rawHi) . $ua . '</text>';
+        $s .= '<text x="' . $L . '" y="24" font-size="10" fill="' . $cDown . '">최소 ' . $fmt($rawLo) . $ua . '</text>';
         $s .= '<text x="' . $L . '" y="' . ($H - 5) . '" font-size="10" fill="#8b9aa8">' . pf_h($pts[0]['label']) . '</text>';
         $s .= '<text x="' . ($L + $pw) . '" y="' . ($H - 5) . '" text-anchor="end" font-size="10" fill="#8b9aa8">' . pf_h($pts[$m - 1]['label']) . '</text>';
         $s .= '</svg>';
         $out .= $s . '</div>';
     }
     $out .= '</div>';
-    $out .= '<p class="muted" style="font-size:11.5px;margin:0 0 10px">값은 아래 표의 TTM 열과 같습니다(최근 4분기 합 · 억원). '
+    }
+    $out .= '<p class="muted" style="font-size:11.5px;margin:0 0 10px">윗줄의 값은 아래 표의 TTM 열과 같습니다(최근 4분기 합 · 억원). '
+          . (count($rows) > 1
+                ? '아랫줄은 그 TTM 끼리 나눈 값입니다 — <b>영업이익률 TTM</b> = 영업이익 TTM ÷ 매출 TTM · <b>순이익률 TTM</b> = 순이익 TTM ÷ 매출 TTM'
+                  . '(표의 영업이익률·순이익률은 그 분기 3개월 값이라 숫자가 다릅니다 · 「고점 대비」는 %p 차이) · '
+                  . '<b>시총(공시일)</b>은 표의 「시총」 열과 같은 값입니다 — 실적이 알려진 날의 종가 기준이라 마지막 점은 지금 시총이 아닙니다(지금 값은 머리글의 「현재」). '
+                : '')
           . '선 색은 <b>전분기 대비</b>입니다 — <span style="color:#d32f2f">빨강</span> 상승 · <span style="color:#1565c0">파랑</span> 하락 · 같은 색이 이어진 길이가 곧 추세. '
           . '원 안의 숫자는 <b>연속 횟수</b>입니다 — <span style="color:#d32f2f">빨간 원 +N</span> 은 N분기 연속 상승 · <span style="color:#1565c0">파란 원 −N</span> 은 N분기 연속 하락 · 회색 점은 같음/이력의 첫 분기(왼쪽 첫 점도 그 앞 분기부터 이어 센 값입니다). <b>네모</b>가 최고·최저이고 <span style="color:#d32f2f">빨간 점선</span>·<span style="color:#1565c0">파란 점선</span>이 그 수준입니다. '
           . '세로축은 패널마다 최소·최대에 맞춰 늘려 그렸으니 꺾임의 <b>크기</b>는 「최대·최소」와 「고점 대비」로 읽습니다. 왼쪽이 과거입니다.</p>';
+    return $out;
+}
+
+/**
+ * TTM 끼리 나눈 비율 — 소형 차트 둘째 줄의 재료(pf_ttm_series() 의 결과를 나누기만 한다 · 같은 색인).
+ *
+ *   op_margin  = 영업이익 TTM ÷ 매출 TTM × 100      net_margin = 순이익 TTM ÷ 매출 TTM × 100
+ *
+ * ★값을 <b>표시 자릿수(소수 둘째)로 반올림한 뒤</b> 견준다 — 안 그러면 0.001%p 차이에도 연속 횟수가 붙어
+ *   화면에는 같은 숫자인데 원이 +1 이 된다. 연속 횟수는 pf_ttm_series() 와 같이 이력 전체에서 센다.
+ */
+function pf_ttm_ratio_series(array $ttm): array
+{
+    $cols = ['op_margin', 'net_margin'];
+    $out = [];
+    foreach ($ttm as $i => $t) {
+        $rev = $t['revenue'] ?? null; $op = $t['op_income'] ?? null; $ni = $t['net_income'] ?? null;
+        $out[$i] = [
+            'op_margin'  => ($rev !== null && $rev > 0 && $op !== null) ? round($op / $rev * 100, 2) : null,
+            'net_margin' => ($rev !== null && $rev > 0 && $ni !== null) ? round($ni / $rev * 100, 2) : null,
+            'streak'     => array_fill_keys($cols, null),
+        ];
+    }
+    foreach ($cols as $col) {
+        $streak = 0; $prev = null;
+        for ($i = count($ttm) - 1; $i >= 0; $i--) {
+            $v = $out[$i][$col];
+            if ($v === null) { $streak = 0; $prev = null; continue; }
+            $d = $prev === null ? 0 : ($v <=> $prev);
+            $streak = $d > 0 ? ($streak > 0 ? $streak + 1 : 1) : ($d < 0 ? ($streak < 0 ? $streak - 1 : -1) : 0);
+            $out[$i][$col] = $v; $out[$i]['streak'][$col] = $streak;
+            $prev = $v;
+        }
+    }
     return $out;
 }
 
@@ -11331,11 +11988,23 @@ function pf_fund_detail_quarters(Dart $dart, string $code, array $fil = []): voi
         return $byKey[$key] ?? null;
     };
 
+    // 시총(공시일) 시계열 — 표의 「시총」 칸과 같은 $fil 을 읽는다. 연속 횟수는 TTM 과 같이 <b>자르기 전</b> 이력 전체에서 센다
+    $capS = [];
+    foreach ($qs as $i => $q) $capS[$i] = ['cap' => $fil[(int)$q['bsns_year'] * 4 + (int)$q['quarter']]['cap'] ?? null, 'streak' => ['cap' => null]];
+    $stk = 0; $pvC = null;
+    for ($i = count($qs) - 1; $i >= 0; $i--) {
+        $v = $capS[$i]['cap'];
+        if ($v === null) { $stk = 0; $pvC = null; continue; }
+        $d = $pvC === null ? 0 : ($v <=> $pvC);
+        $stk = $d > 0 ? ($stk > 0 ? $stk + 1 : 1) : ($d < 0 ? ($stk < 0 ? $stk - 1 : -1) : 0);
+        $capS[$i]['streak']['cap'] = $stk; $pvC = $v;
+    }
+
     // 최근 12분기(3년)면 추세를 보기에 넉넉하다
     $qs = array_slice($qs, 0, 12);
 
     // TTM 추세 소형 차트 셋 — 표와 <b>같은 $ttm</b> 을 그린다(자른 12분기와 색인이 같다: $ttm 은 0 부터 쌓였다)
-    echo pf_fund_ttm_spark($qs, $ttm);
+    echo pf_fund_ttm_spark($qs, $ttm, ['series' => $capS, 'now' => $m0['mktcap'] ?? null]);
 
     echo '<div class="tbl-scroll"><table class="pf"><thead><tr>';
     // 증감은 <b>직전 분기</b> 대비 (연도별 표가 직전 연도와 견주는 것과 같은 결)
@@ -11679,12 +12348,12 @@ function pf_page_quote(PDO $pdo, Pf $pf): void
          '조회 TR 화이트리스트에 있어야 부를 수 있다(주문 API 차단 장치). '
          . '<code>_AL</code>(SOR)을 <b>붙이지 않는다</b> — 분봉과 같은 KRX 단독 기준이라야 한 종목이 '
          . '소스마다 다른 말을 하지 않는다. 실패하면 네이버로 폴백한다.'],
-        ['단타 「관심종목·시총」 탐색 패널·다른 탐색 화면', '크론 주기', '—',
+        ['단타 탐색 패널(Top-Pick·관심그룹)·다른 탐색 화면', '크론 주기', '—',
          '실시간 대상이 <b>아니다</b>. 전종목을 화면 타이머로 받으면 28콜 × ' . Dt::TICK_SEC
          . '초 = 하루 1만 콜이라 네이버 IP 차단 위험에 걸린다.'],
         ['그 밖 화면의 시세 신선도', NaverFinanceAPI::QUOTE_MAX_AGE . '초',
          '<code>classes/NaverFinanceAPI.class</code> <code>QUOTE_MAX_AGE</code>',
-         '포트폴리오 계열(<code>pf_load_calc()</code>)·관심종목·크론 <code>dart_eod</code> 의 시세 메우기가 '
+         '포트폴리오 계열(<code>pf_load_calc()</code>)·Top-Pick·크론 <code>dart_eod</code> 의 시세 메우기가 '
          . '<b>같은 판정</b>을 쓴다 — 그래야 NXT 갱신분과 부딪히는 규칙이 한 군데에만 있다. '
          . '<b>마감 뒤 규칙에는 영향이 없다</b> — 거기서는 늘 「오늘 '
          . NaverFinanceAPI::MARKET_CLOSE . ' 이전」이라야 NXT 갱신분과 안 부딪힌다.'],
@@ -11696,10 +12365,10 @@ function pf_page_quote(PDO $pdo, Pf $pf): void
          '<code>classes/Dt.class</code> <code>WINDOW_DAYS</code>',
          '★늘려도 <b>과거는 안 채워진다</b> — 네이버는 7거래일까지만 주고 그 뒤로는 어떤 파라미터로도 못 받는다. '
          . '키움이 1년을 보관하므로 구멍 치유로만 메워진다.'],
-        ['단타 풀 상한', Dt::POOL_MAX . '종목',
+        ['최근조회 상한', Dt::POOL_MAX . '종목',
          '<code>classes/Dt.class</code> <code>POOL_MAX</code>',
-         '이 숫자는 <b>「단타 풀」의 것이지 수집 대상의 것이 아니다</b> — 보유 종목은 담지 않고 '
-         . '<code>Dt::targetCodes()</code> 가 참조로 더한다.'],
+         '단타 화면에서 열어 ' . Dt::VIEW_DWELL_SEC . '초 머문 종목이 스스로 오르는 목록(<code>dt_pool</code>)의 상한 — 넘으면 가장 오래 안 본 것부터 내린다. '
+         . '<b>수집 대상의 상한이 아니다</b> — 보유·Top-Pick 은 여기 없어도 <code>Dt::targetCodes()</code> 가 참조로 더한다.'],
         ['크론 시각 · 모드 · 옵션', '—', '<code>cron_job.php</code> 의 <code>TASKS</code>',
          '★<b>크론 사이트를 건드리지 않는다.</b> 등록되는 URL 은 영원히 '
          . '<code>cron_job.php?task=…&amp;k=…</code> 하나이고, 무엇을 어떻게 부를지는 그 레지스트리가 정한다. '
@@ -12873,7 +13542,7 @@ details.card[open]>summary::before{content:"▾ "}</style>';
          * M2 — 이 목록은 「그 날($day) 신호」 한 벌이라 기준 신호일이 곧 $day 다.
          *      트리거는 이 화면이 판정하지 않으므로(관심종목 관제탑 소관) 싣지 않는다. */
         echo '<td class="center" style="white-space:nowrap"><button type="button" class="wl-star' . ($on ? ' on' : '') . '" data-code="'
-           . pf_h($code) . '" data-name="' . pf_h($name) . '" title="관심종목 담기/빼기">' . ($on ? '★' : '☆') . '</button>'
+           . pf_h($code) . '" data-name="' . pf_h($name) . '" title="Top-Pick 담기/빼기">' . ($on ? '★' : '☆') . '</button>'
            . pf_adopt_cell($code, (string)$name, $qHeld[$code] ?? null, ['sed' => (string)$day]) . '</td>';
         // href 는 JS 없을 때의 폴백 — JS 가 있으면 우측 패널에 embed 로 연다
         echo '<td class="stk"><a class="q-name" href="/stock/index.php?mode=fund&code=' . pf_h($code) . '">' . pf_h($name)
@@ -12890,11 +13559,11 @@ details.card[open]>summary::before{content:"▾ "}</style>';
         echo '</tr>';
     }
     echo '</tbody></table></div>';
-    echo '<div class="q-note">행 클릭 = 재무분석 상세(11년 재무 + 일봉차트) · ☆ = 관심종목 · '
+    echo '<div class="q-note">행 클릭 = 재무분석 상세(11년 재무 + 일봉차트) · ☆ = Top-Pick · '
        . '<b>편입</b> = 종목 추가 폼(포트폴리오 미지정 저장 = 편입 관심종목) — '
        . '이미 자리가 있으면 그 자리에 <span class="badge st-held">보유</span>·'
        . '<span class="badge st-slot">편입됨</span> 이 대신 서고 눌러서 그 종목 상세로 갑니다'
-       . '(재무분석·어닝·관심종목과 같은 판정) · '
+       . '(재무분석·어닝·Top-Pick과 같은 판정) · '
        . '<b>📦</b> = 박스 상향돌파 5조건 통과(글자는 등급 — 「담은 것과 닮음」이지 오를 확률이 아닙니다 · '
        . '판정은 <code>bx_cand</code> 16:20 적재라 <b>오늘 것은 마감 뒤에 붙습니다</b> · 성과 우위 미검증 — '
        . '<a href="/stock/index.php?mode=quantstat">검증 탭 ⑨</a>) · '
@@ -14678,17 +15347,17 @@ JS;
        .   '<td>열 이름으로는 <b>쓰지 않습니다</b>(무엇을 담은 열인지 알 수 없으므로). 이 페이지처럼 "배지 전체"를 말할 때만.</td></tr>'
        . '<tr><td><b>퀀트신호</b><br><span class="qb qb-acc">매집형</span></td>'
        .   '<td>거래대금이 <b>120거래일 중 최고</b>인 날 하나의 성격 — <b>매집형 · 중립 · 불꽃형</b> 셋 중 하나입니다.</td>'
-       .   '<td>퀀트 목록·관심종목의 <b>「퀀트신호」 열</b> · 단타 목록. 정의는 아래 <b>2-a</b>.</td></tr>'
+       .   '<td>퀀트 목록·Top-Pick의 <b>「퀀트신호」 열</b> · 단타 목록. 정의는 아래 <b>2-a</b>.</td></tr>'
        . '<tr><td><b>최고 거래대금 박스</b><br><span class="bx bx-lad">계단지지 1단</span></td>'
        .   '<td>그 신호일의 <b>고가 H(저항)·저가 L(지지)</b>가 만드는 박스와, 그 뒤 가격이 걸어간 <b>경로</b>.</td>'
-       .   '<td>퀀트 목록·📦추적 카드·관심종목·어닝의 <b>「최고 거래대금 박스」 열</b> — ★박스 상향돌파(5조건) 박스에만 붙습니다(2026-08-10 재정의). 정의는 아래 <b>2-b</b>.</td></tr>'
+       .   '<td>퀀트 목록·📦추적 카드·Top-Pick·어닝의 <b>「최고 거래대금 박스」 열</b> — ★박스 상향돌파(5조건) 박스에만 붙습니다(2026-08-10 재정의). 정의는 아래 <b>2-b</b>.</td></tr>'
        . '<tr><td><b>신호일</b></td><td>그 퀀트신호가 발생한 날 (박스가 만들어진 날).</td><td>추적 카드의 「신호일」 열 · 배지 툴팁.</td></tr>'
        . '<tr><td><b>신호</b> <span class="sig-pill k-buy">매수</span></td>'
        .   '<td>퀀트신호와 <b>다릅니다</b> — 룰셋 차수표가 내는 <b>오늘의 행동</b>(매수·잔여매수·매도·대기).</td>'
        .   '<td>현황 카드 · 보유종목의 「신호」 열. 정의는 아래 <b>③</b>.</td></tr>'
        . '<tr><td><b>트리거</b> <span class="wl-go">🟢 돌파확인</span></td>'
        .   '<td>검증된 <b>퀀트 매수규칙</b> 둘을 충족했다는 표시 — 퀀트신호 × 경로의 조합입니다.</td>'
-       .   '<td>관심종목의 「트리거」 열. 정의는 아래 <b>2-c</b>.</td></tr>'
+       .   '<td>Top-Pick의 「트리거」 열. 정의는 아래 <b>2-c</b>.</td></tr>'
        . '<tr><td><b>포트폴리오</b> <span class="mkt t-risk">계단관통↓</span></td>'
        .   '<td><b>이미 산 포지션</b>에서 판단을 다시 소집하는 셋(장기물림·N차 지연·계단관통↓) — 자동 매매는 없습니다.</td>'
        .   '<td>현황·보유종목. 정의는 아래 <b>④</b>.</td></tr></table>'
@@ -14781,7 +15450,7 @@ JS;
        .   ' 발생률 실측(600종목·2026-07-31): 20일 −30% <b>6.0%</b> · 40일 −40% <b>7.7%</b> — 급등(1.8%·2.2%)보다 3배쯤 잦은데 이는 <b>하락장의 산물</b>이지 대칭이 아닙니다.<br>'
        .   '<b>★ 기준 시점이 둘입니다 — 라벨로 구별하세요.</b><br>'
        .   '<span class="mkt t-up">20일 +90%</span> = <b>오늘 종가</b> 기준 (종목 상세의 「시장」 칸 · 단타 목록)<br>'
-       .   '<span class="mkt t-up">신호일 20일 +90%</span> = 그 <b>신호가 난 날</b> 기준 (퀀트 목록 · 관심종목) — '
+       .   '<span class="mkt t-up">신호일 20일 +90%</span> = 그 <b>신호가 난 날</b> 기준 (퀀트 목록 · Top-Pick) — '
        .   '「그 신호가 이미 오른 자리에서 났나」를 보는 값이라 <b>지금 값이 아닙니다</b>.<br>'
        .   '<span class="muted">실제로 겪은 함정(2026-08-02): 현대차는 신호일(2026-01-21) 기준 +90.3% 인데 '
        .   '<b>오늘 기준 −19.5%</b> 였습니다 — 신호가 반년 전이면 두 값이 정반대가 됩니다.</span></td></tr>'
@@ -14804,7 +15473,7 @@ JS;
        .   '<td class="crit"><b>' . Thr::num(Thr::STREAK) . '일</b> 이상 연속 (첫 낱말만 잘라 읽지 말 것 — 일수가 뜻입니다)</td>'
        .   '<td>단기 과매도/과열 국면 표시.</td></tr></table>'
 
-       . '<h3 style="font-size:13.5px;margin:18px 0 2px;color:#12406b">1-b. <b>실적 (SUE)</b> — 분기 이익 서프라이즈 <span style="font-weight:600;color:#9aa7b4">(재무 스크리너 「SUE」 열 · 어닝 탭 · 관심종목 · 보유종목·현황의 종목명 옆 · 종목 상세 · 재무상세 차트 ▲▼ 마커)</span></h3>'
+       . '<h3 style="font-size:13.5px;margin:18px 0 2px;color:#12406b">1-b. <b>실적 (SUE)</b> — 분기 이익 서프라이즈 <span style="font-weight:600;color:#9aa7b4">(재무 스크리너 「SUE」 열 · 어닝 탭 · Top-Pick · 보유종목·현황의 종목명 옆 · 종목 상세 · 재무상세 차트 ▲▼ 마커)</span></h3>'
        . '<table class="sg"><tr><th>SUE</th><th>판정 기준</th><th>어떻게 읽나</th></tr>'
        . '<tr><td><b>SUE 값</b> <span class="muted">2.1 · 26.1Q</span></td><td class="crit">(당분기 영업이익 − 전년동기) ÷ σ(과거 최대 8개 분기 증감) — 당분기는 YTD 뺄셈·연결 우선</td>'
        .   '<td>「예상 밖의 이익 변화가 평소 출렁임의 몇 배인가」. 8년 백테스트에서 5분위 단조 — 효과는 <b>상위 20% + 품질(YTD 영업흑자) + 매출동반</b>에 집중.</td></tr>'
@@ -14822,7 +15491,7 @@ JS;
      *   시장·실적은 <b>종목의 상태</b>지만, 퀀트신호·경로는 <b>한 사건(최고 거래대금 신호일)</b>의 두 면이다. */
     echo '<div class="card"><div class="sg-h2"><h2>② 퀀트 — 신호와 경로</h2>'
        . '<span class="w">거래대금이 120거래일 중 최고인 날 하나 — 그 날의 성격(신호)과 그 뒤 가격이 걸어간 길(경로)</span></div>'
-       . '<h3 style="font-size:13.5px;margin:18px 0 2px;color:#12406b">2-a. <b>퀀트신호</b> — 최고 거래대금 <b>신호일 하루</b>의 성격 <span style="font-weight:600;color:#9aa7b4">(퀀트 목록·관심종목의 「퀀트신호」 열 · 단타 목록)</span></h3>'
+       . '<h3 style="font-size:13.5px;margin:18px 0 2px;color:#12406b">2-a. <b>퀀트신호</b> — 최고 거래대금 <b>신호일 하루</b>의 성격 <span style="font-weight:600;color:#9aa7b4">(퀀트 목록·Top-Pick의 「퀀트신호」 열 · 단타 목록)</span></h3>'
        . '<div class="sg-note" style="margin:2px 0 6px">거래대금이 <b>120거래일 중 최고</b>인 날 하나를 20일 평균 대비 배수와 그날 등락률로 분류합니다.'
        . ' 판정은 <b>매집형 · 중립 · 불꽃형</b> 셋 중 하나이고, <b>나쁜 쪽 우선</b>입니다 — 매집형 조건과 불꽃형이 겹치면 불꽃형입니다.'
        . ' <b>셋 다 배지로 그립니다</b>(2026-08-02) — 빈 칸으로 두면 「중립이라고 판정한 것」과 「판정할 신호 이력이 없는 것」이 구별되지 않습니다.</div>'
@@ -14862,14 +15531,14 @@ JS;
        . ' 하루치 「<span class="mkt t-up">+16.2%</span>」와 <b>기간만 다르기</b> 때문입니다.'
        . ' 지금은 창별로 <span class="mkt t-up">20일 +112%</span> <span class="mkt t-up">40일 +139%</span> 처럼 따로 뜹니다.</div>'
 
-       . '<h3 style="font-size:13.5px;margin:18px 0 2px;color:#12406b">2-b. <b>퀀트 경로</b> — 신호일 <b>이후</b> 가격이 걸어간 길 <span style="font-weight:600;color:#9aa7b4">(= 「최고 거래대금 박스」)</span> <span style="font-weight:600;color:#9aa7b4">(퀀트 목록·📦추적 카드·관심종목·어닝의 「최고 거래대금 박스」 열)</span></h3>'
+       . '<h3 style="font-size:13.5px;margin:18px 0 2px;color:#12406b">2-b. <b>퀀트 경로</b> — 신호일 <b>이후</b> 가격이 걸어간 길 <span style="font-weight:600;color:#9aa7b4">(= 「최고 거래대금 박스」)</span> <span style="font-weight:600;color:#9aa7b4">(퀀트 목록·📦추적 카드·Top-Pick·어닝의 「최고 거래대금 박스」 열)</span></h3>'
        . '<div class="sg-note" style="margin:2px 0 6px">신호일 고가 <b>H = 저항</b> · 저가 <b>L = 지지</b>가 박스입니다. 종가가 H를 넘으면 돌파, L을 깨면 붕괴 —'
        . ' 붕괴해도 아래 계단(현재 L 아래 레벨을 주는 최근 박스 2개의 H·L)이 <b>74.9%</b> 받아줍니다. 판정은 전부 <b>종가</b> 기준·계단 터치는 ±2%.</div>'
        . '<div class="sg-note" style="margin:2px 0 8px;background:#f4f8ff;border:1px solid #dbe7f5;border-radius:8px;padding:8px 11px">'
        . '★★<b>2026-08-10 전면 재정의</b> — 아래 경로 배지(新박스·박스안·돌파✓·계단지지…)는 이제'
        . ' <b>「박스 상향돌파」(2-d · 5조건) 박스에만</b> 붙습니다. 그 밖의 최고 거래대금 신호는 경로 칸이'
        . ' <b>-</b> 입니다. 판정 «로직»은 그대로고 <b>대상 박스</b>만 좁힌 것입니다(단일본 boxStatusMany 의 게이트'
-       . ' — 퀀트 목록·관심종목·어닝·알림 크론이 한 곳으로 같이 바뀝니다). 당일 박스는 16:20 적재 뒤에 판정됩니다.'
+       . ' — 퀀트 목록·Top-Pick·어닝·알림 크론이 한 곳으로 같이 바뀝니다). 당일 박스는 16:20 적재 뒤에 판정됩니다.'
        . ' <b>유일한 예외 = ④ 계단관통↓ 경보</b>(편입 시 기준 박스는 기록·안전장치).</div>'
        . '<table class="sg"><tr><th>최고 거래대금 박스</th><th>뜻</th><th>어떻게 읽나</th></tr>'
        . '<tr><td><span class="bx bx-new">新박스</span></td><td>박스가 오늘 막 생김</td><td>아직 경로 없음 — 돌파/지지 확인 전이므로 관망. 당일 잠정치(고가·저가 미확정)는 배지 없이 빈 칸이며 다음날 13:05 KRX 확정값이 오면 박스가 생깁니다.</td></tr>'
@@ -14900,7 +15569,7 @@ JS;
 
        /* ── 2-c. 퀀트 매수원칙 — 2026-08-02 사용자가 ③ 행동에서 옮겨 온 절.
         *   트리거는 룰셋이 내는 「오늘의 행동」이 아니라 <b>2-a × 2-b 의 조합</b>이라 여기가 제자리다. */
-       . '<h3 style="font-size:13.5px;margin:18px 0 2px;color:#12406b">2-c. <b>퀀트 매수원칙</b> — <b>2-a × 2-b</b> 가 겹치는 두 자리만 산다 <span style="font-weight:600;color:#9aa7b4">(관심종목의 「트리거」 열)</span></h3>'
+       . '<h3 style="font-size:13.5px;margin:18px 0 2px;color:#12406b">2-c. <b>퀀트 매수원칙</b> — <b>2-a × 2-b</b> 가 겹치는 두 자리만 산다 <span style="font-weight:600;color:#9aa7b4">(Top-Pick의 「트리거」 열)</span></h3>'
        . '<div class="sg-note" style="margin:2px 0 6px">백테스트로 <b>검증된 매수규칙은 둘뿐</b>입니다 — 퀀트신호와 경로의'
        . ' <b>특정 조합</b>에서만 실측 우위가 있었습니다. 그 밖은 전부 관망이고, 매도 규칙도 진입한 규칙마다 다릅니다.'
        . ' 근거 전문은 <a href="/stock/index.php?mode=quantstat">검증 탭 ④~⑥</a>.'
@@ -15067,7 +15736,7 @@ JS;
        .   $ox(false)
        .   '<td>그때의 판단이 맞았나 (되짚기)</td></tr>'
 
-       . '<tr><td><a href="/stock/index.php?mode=watch">관심종목</a></td>'
+       . '<tr><td><a href="/stock/index.php?mode=watch">Top-Pick</a></td>'
        .   $ox(true, '「시장」 열 — 역배열 · 과매도 RSI · 급락 · 거래량 N배 등 최대 3개(현황·보유종목과 같은 배지)'
                    . ' + 20·40거래일 모멘텀 칩(「20일 +112%」). ★2026-08-04 이전에는 모멘텀 칩뿐이었습니다')
        .   $ox(true, 'SUE 값 (최신 분기) — 어닝 탭과 같은 계산')
@@ -15078,7 +15747,7 @@ JS;
        .   '<td>담아 둔 것 중 오늘 살 자리가 왔나 (관제탑)</td></tr>'
 
        . '<tr><td><a href="/stock/index.php?mode=quant">퀀트 목록</a></td>'
-       .   $ox(true, '20·40거래일 모멘텀 칩(「20일 +112%」)만 — 하루치 지표(역배열·RSI 등)는 pf_daily 가 보유·관심 종목만 담아 여기엔 없습니다')
+       .   $ox(true, '20·40거래일 모멘텀 칩(「20일 +112%」)만 — 하루치 지표(역배열·RSI 등)는 pf_daily 가 보유·Top-Pick 종목만 담아 여기엔 없습니다')
        .   $ox(false)
        .   $ox(true, '매집형 · 중립 · 불꽃형 — 셋 다 배지로 뜹니다 + 📦박스돌파(5조건 통과 · bx_cand 읽기 —'
                    . ' 16:20 적재라 오늘 것은 마감 뒤 · 「📦 박스 상향돌파만」 칩으로 압축 가능)')
@@ -15115,7 +15784,7 @@ JS;
        .   '<td>공시가 난 것 중 살 만한 게 있나</td></tr>'
 
        . '<tr><td><a href="/stock/index.php?mode=short">단타 <span class="muted">(목록·둘러보기)</span></a></td>'
-       .   $ox(true, '20·40거래일 모멘텀 칩(「20일 +112%」)만 — 하루치 지표(역배열·RSI 등)는 pf_daily 가 보유·관심 종목만 담아 여기엔 없습니다')
+       .   $ox(true, '20·40거래일 모멘텀 칩(「20일 +112%」)만 — 하루치 지표(역배열·RSI 등)는 pf_daily 가 보유·Top-Pick 종목만 담아 여기엔 없습니다')
        .   $ox(false)
        .   $ox(true, '🟢매집형 · 중립 · 불꽃형 — 오늘 최고 거래대금을 넘긴 종목만(장중 잠정)')
        .   $ox(true, '최근 신호 박스의 현재 상태 — ★박스 상향돌파(5조건) 박스에 한함(그 밖은 칩 없음)')
@@ -15124,9 +15793,9 @@ JS;
        .   '<td>오늘 오르는 것 중 구조가 좋은 게 있나</td></tr></table>'
        . '<div class="sg-note"><b>○</b> = 그 층의 배지가 뜬다(칸에 마우스를 올리면 실제로 뜨는 배지) · <b>✕</b> = 안 뜬다.'
        . ' 배지의 생김새와 판정 기준은 위 ①~④ 절에 있습니다.'
-       . ' ★탐색 화면(퀀트·관심종목·어닝·단타)의 배지는 맨 위 <b>배지 표시 설정</b>에서 끌 수 있습니다 —'
+       . ' ★탐색 화면(퀀트·Top-Pick·어닝·단타)의 배지는 맨 위 <b>배지 표시 설정</b>에서 끌 수 있습니다 —'
        . ' 끈 배지는 이 지도가 ○ 여도 그 화면에 안 뜹니다.</div>'
-       . '<div class="sg-note">흐름은 왼쪽에서 오른쪽입니다: 퀀트·스크리너에서 <b>발견</b> → ☆로 관심종목에 <b>보관</b> → 트리거가 오면 <b>편입</b> → 현황·보유종목에서 <b>운용</b> → 경보가 판단을 <b>소집</b>.</div></div>';
+       . '<div class="sg-note">흐름은 왼쪽에서 오른쪽입니다: 퀀트·스크리너에서 <b>발견</b> → ☆로 Top-Pick에 <b>보관</b> → 트리거가 오면 <b>편입</b> → 현황·보유종목에서 <b>운용</b> → 경보가 판단을 <b>소집</b>.</div></div>';
 
     /* ── 6. 임계 레지스트리 (M5) — <b>이 화면의 모든 숫자가 나온 곳</b>.
      *
@@ -15214,6 +15883,8 @@ function pf_page_short(PDO $pdo, Pf $pf): void
     $dt->ensureTables();
     $hasKey = (new Kiwoom($pdo))->hasKey();
     $days   = $dt->tradingDays();
+    $wc     = Dt::cleanCode((string)($_GET['code'] ?? ''));
+    $want   = strlen($wc) === 6 ? ['code' => $wc, 'name' => StockName::one($pdo, $wc)] : null;
     $F      = ChartFeat::vals('short', $pdo);      // 기능 구성 — 꺼진 패널은 DOM 도 fetch 도 없다
 
     echo '<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8">';
@@ -15240,18 +15911,15 @@ body.dt-dark{background:var(--bg);color:var(--ink);display:flex;flex-direction:c
 .up{color:var(--up)} .down{color:var(--down)} .flat{color:var(--ink-mute)}
 
 #dt-shell{flex:1;display:flex;min-height:0}
-/* ── 좌: 종목 리스트 (고정폭) ── */
-/* 목록이 3줄이 되면서(2026-08-05 · 배지·시총·회전율) 262px 로는 배지가 잘려 296px 로 넓혔다.
-   ★스크롤 없이 보이는 종목은 15~18 → 11~12 개로 줄었다. 상한(Dt::POOL_MAX=20)은 그대로다 —
-   담는 값어치는 「보관 창에 쌓아 둘 종목 수」이지 「한눈에 들어오는 수」가 아니다. */
-#dt-side{flex:0 0 296px;display:flex;flex-direction:column;min-height:0;
-  background:var(--panel);border-right:1px solid var(--line)}
+/* ── 목록 패널의 속(검색칸·행·발치) ──
+   ★가운데의 고정폭 열(#dt-side · 296px)은 2026-10-07 에 없앴다 — 아래 .dt-side-head·#dtQ·.dt-it·.dt-side-foot 은
+     이제 왼쪽 목록 패널(#dt-top · 302px)이 쓴다. 행은 3줄(이름·현재가 / 코드·SUE·봉수·등락률 / 배지·시총)이다. */
 .dt-side-head{flex:0 0 auto;padding:9px 10px;border-bottom:1px solid var(--line);position:relative;display:flex;gap:6px;align-items:stretch}
 #dtQ{flex:1;min-width:0;width:100%;padding:7px 10px;background:var(--panel-2);border:1px solid var(--line);
   border-radius:7px;color:var(--ink);font-size:13px;outline:none;font-family:inherit}
 #dtQ:focus{border-color:var(--accent)}
 /* 마감 변동 리포트 문 — 검색칸과 같은 높이·테두리의 정사각 버튼 */
-#dtMove{flex:0 0 36px;display:flex;align-items:center;justify-content:center;background:var(--panel-2);
+#dtMove{flex:0 0 30px;height:26px;display:flex;align-items:center;justify-content:center;background:var(--panel-2);
   border:1px solid var(--line);border-radius:7px;text-decoration:none;font-size:15px;line-height:1}
 #dtMove:hover{border-color:var(--accent);background:#1d2740}
 #dtSug{display:none;position:absolute;top:calc(100% - 4px);left:10px;right:10px;z-index:60;
@@ -15262,7 +15930,6 @@ body.dt-dark{background:var(--bg);color:var(--ink);display:flex;flex-direction:c
 /* .on = 키보드(↓/↑)로 고른 자리 — 왼쪽 종목 목록의 «고른 행»(.dt-it.on)과 같은 표시를 쓴다 */
 #dtSug .s.on{background:#1d2740;box-shadow:inset 3px 0 0 var(--accent)}
 #dtSug .s .c{color:var(--ink-mute);font-size:11px;font-family:var(--mono)}
-#dtList{flex:1;overflow-y:auto;min-height:0}
 .dt-it{display:grid;grid-template-columns:1fr auto;gap:2px 8px;padding:8px 10px;cursor:pointer;
   border-bottom:1px solid rgba(38,48,74,.55);position:relative}
 .dt-it:hover{background:var(--panel-2)}
@@ -15273,26 +15940,8 @@ body.dt-dark{background:var(--bg);color:var(--ink);display:flex;flex-direction:c
 .dt-it.hld:hover{background:rgba(64,178,104,.36)}
 .dt-it.on{background:#1d2740;box-shadow:inset 3px 0 0 var(--accent)}
 .dt-it.drag{opacity:.45}
-/* 이름 줄은 flex — 이름만 줄이고 배지(ETF 편입 수·수집 상태)는 끝까지 남긴다.
-   통째로 ellipsis 를 걸면 긴 이름의 종목에서 배지가 통째로 사라진다. */
-.dt-it .nm{display:flex;align-items:center;min-width:0;font-size:13.5px;font-weight:700;letter-spacing:-.01em}
-.dt-it .nm .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
-.dt-it .nm .etfb,.dt-it .nm .dt-bdg{flex:0 0 auto}
-.dt-it .px{font-size:13px;text-align:right;font-family:var(--mono);font-weight:700}
-/* 둘째 줄 — 코드 + SUE 칩(2026-08-20 · 종목명 옆에서 내림). 넘치면 잘린다(전문은 툴팁) —
-   줄을 바꾸면 종목마다 행 높이가 달라진다(.sg 와 같은 규칙). */
-.dt-it .cd{font-size:11px;color:var(--ink-mute);font-family:var(--mono);
-  min-width:0;overflow:hidden;white-space:nowrap}
-.dt-it .rt{font-size:11.5px;text-align:right;font-family:var(--mono)}
-/* 셋째 줄 — 퀀트 배지(왼쪽) + 시총·회전율(오른쪽). 왼쪽 「상위 종목」 목록과 같은 정보다.
-   배지는 넘치면 잘린다(title 에 전문이 있다) — 줄을 바꾸면 종목마다 행 높이가 달라진다. */
-.dt-it .sg{min-width:0;overflow:hidden;white-space:nowrap;line-height:1.6}
-.dt-it .mk{font-size:10.5px;text-align:right;color:var(--ink-mute);font-family:var(--mono);
-  white-space:nowrap;align-self:center}
-.dt-it .x{position:absolute;right:6px;top:6px;display:none;border:0;background:transparent;
-  color:var(--ink-mute);cursor:pointer;font-size:14px;line-height:1;padding:2px 4px}
-.dt-it:hover .x{display:block}
-.dt-it .x:hover{color:var(--up)}
+/* 행 안의 여섯 칸(.nm·.px·.cd·.rt·.sg·.mk)의 CSS 는 공용 모듈 style/stockrow.js 가 심는다(.srow) —
+   관심그룹 화면의 종목 리스트가 «같은 행»을 쓴다(2026-10-07). 여기에 칸 규칙을 다시 적지 않는다. */
 .dt-bdg{display:inline-block;margin-left:5px;padding:0 5px;border-radius:4px;font-size:10px;font-weight:800;
   vertical-align:1px;border:1px solid}
 .dt-bdg.wait{color:var(--accent);border-color:#5a4a22;background:#241d10}
@@ -15310,8 +15959,8 @@ a.dt-bdg:hover{border-color:var(--accent);color:var(--accent)}
   font-size:11px;color:var(--ink-mute);line-height:1.6}
 .dt-side-foot b{color:var(--ink-dim)}
 
-/* ── 맨 왼쪽: 관심종목 + 시총 (탐색 · 2026-08-05 · 2026-08-20 상승률→관심 교체) ──
-   소스는 stock_analysis_api.php — 관심 action=watch(pf_watchlist) · 시총 action=top30.
+/* ── 맨 왼쪽: 탐색 패널 — ☆ 관심종목 또는 관심그룹 하나 (2026-10-07 시총 목록 삭제·관심그룹 추가) ──
+   소스는 stock_analysis_api.php action=watch — ☆ 는 pf_watchlist · 그룹은 &g=<id>(wg_item).
    새 조회 경로를 만들지 않는다(watch 도 top30 과 같은 행 모양·같은 배지 단일본).
    여기서 «담고» 오른쪽 내 목록에서 «본다» — 왼쪽에서 오른쪽으로 탐색 → 편입 → 관찰. */
 #dt-top{flex:0 0 302px;display:flex;flex-direction:column;min-height:0;
@@ -15334,34 +15983,12 @@ a.dt-bdg:hover{border-color:var(--accent);color:var(--accent)}
 .dt-top-head{flex:0 0 auto;display:flex;align-items:center;gap:7px;padding:7px 9px;
   border-bottom:1px solid var(--line);flex-wrap:wrap;row-gap:5px}
 .dt-top-head .sub{font-size:11px;color:var(--ink-mute);font-family:var(--mono)}
-.dt-top-head .pg{margin-left:auto;display:flex;gap:5px}
+.dt-top-head select{flex:1;min-width:0;background:var(--panel-2);color:var(--ink);border:1px solid var(--line);
+  border-radius:7px;padding:4px 6px;font-size:12.5px;font-weight:700;font-family:inherit;outline:none}
+.dt-top-head select:focus{border-color:var(--accent)}
 #dtTopList{flex:1;overflow-y:auto;min-height:0}
-/* 자리를 못박는다 — 자동 배치에 맡기면 「담기」 버튼이 두 줄을 걸치는 순간 순서가 흔들린다 */
-.dt-tr{display:grid;grid-template-columns:1fr auto 24px;gap:2px 7px;padding:7px 9px;
-  border-bottom:1px solid rgba(38,48,74,.55);cursor:pointer}
-.dt-tr:hover{background:var(--panel-2)}
-.dt-tr.on{background:#1d2740;box-shadow:inset 3px 0 0 var(--accent)}
-.dt-tr .n1{grid-area:1/1;display:flex;align-items:center;min-width:0;
-  font-size:13px;font-weight:700;letter-spacing:-.01em}
-.dt-tr .n1 .rk{flex:0 0 auto;width:20px;margin-right:5px;text-align:right;
-  color:var(--ink-mute);font-size:11px;font-family:var(--mono);font-weight:600}
-.dt-tr .n1 .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
-.dt-tr .n1 .etfb,.dt-tr .n1 .dt-bdg{flex:0 0 auto}
-.dt-tr .v1{grid-area:1/2;text-align:right;font-size:12.5px;font-weight:700;
-  font-family:var(--mono);white-space:nowrap}
-.dt-tr .n2{grid-area:2/1;min-width:0;overflow:hidden;white-space:nowrap;line-height:1.6;
-  font-size:11px;color:var(--ink-mute);font-family:var(--mono)}
-.dt-tr .v2{grid-area:2/2;text-align:right;font-size:10.5px;color:var(--ink-mute);
-  font-family:var(--mono);white-space:nowrap;align-self:center}
-/* SUE 칩은 «코드 옆(둘째 줄)»이다(2026-08-20 사용자 — 종목명 옆에 두니 배지가 이름을 통째로
-   밀어냈다: SUE+💎175 가 들어오면 302px 에서 이름 몫이 0. 08-12 의 「종목명 바로 옆」을 뒤집음).
-   이름 줄은 이름·ETF·상태 배지만 갖는다 — 이름(.t)이 ellipsis 로 양보하는 규칙은 그대로다. */
-.dt-tr .ad{grid-area:1/3/3/4;align-self:center;width:24px;height:24px;border-radius:6px;
-  border:1px solid var(--line);background:var(--panel-2);color:var(--ink-dim);
-  font-size:13px;font-weight:800;line-height:1;padding:0;cursor:pointer;font-family:inherit}
-.dt-tr .ad:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
-.dt-tr .ad:disabled{cursor:default}
-.dt-tr .ad.has{border-color:#1e5c3a;background:#12341f;color:#5dd58a}
+/* 목록의 행은 .dt-it 하나다(listRow) — 예전의 패널 전용 행(.dt-tr)과 담기 버튼 열(.wb/.ad)은 2026-10-07 에 없앴다
+   (직접 담는 목록이 사라졌다 — 열어 머물면 스스로 「최근조회」에 오른다). */
 .dt-top-msg{padding:16px 11px;color:var(--ink-mute);font-size:11.5px;line-height:1.7}
 
 /* ── 가운데: 뉴스 (2026-08-05) ──
@@ -15427,44 +16054,56 @@ CSS;
     echo '</head><body class="dt-dark">';
     pf_topbar('short');
 
-    /* ── 맨 왼쪽: 관심종목 + 시총 (탐색) ─────────────────────────────
+    /* ── 맨 왼쪽: 탐색 패널 (☆ 관심종목 · 관심그룹) ─────────────────
      * 기본은 관심종목(action=watch — 「상승률은 거의 안 쓴다」 2026-08-20 사용자 지시로 교체).
-     * 시총 탐색은 기존 경로 그대로(action=top30). 담기 버튼 하나로 오른쪽 내 목록에 들어간다.
-     * ★페이징(처음/다음)은 시총에서만 보인다 — 관심종목은 상승률 순으로 전부 온다. */
+     * 담기 버튼 하나로 오른쪽 내 목록에 들어간다. 목록은 페이징 없이 전부 온다. */
+    /* ★2026-10-07 — 시총 목록을 걷어내고(사용자 지시) 원천을 «고르는» 셀렉트로 바꿨다:
+     *   ☆ 관심종목(pf_watchlist · 상승률 순 · 보유 제외) 또는 관심그룹 하나(wg_item · 그룹에 저장된 순서).
+     *   관심그룹은 상단 메뉴 「관심그룹」에서 묶는다 — 여기서는 «불러와서 깊게 본다»(담기·미리보기는 그대로).
+     *   둘 다 같은 경로(action=watch · &g=)·같은 행 모양이라 렌더러는 여전히 하나다. */
+    /* ★같은 날 2차 — 「보유종목」도 이 셀렉트의 한 줄이 됐다(사용자 지시 · 관심그룹 화면의 고정 그룹과 같은 차림:
+     *   보유종목 · Top-Pick · 내 그룹). 가운데 목록에는 «담은 종목»(단타 풀)만 남는다.
+     *   보유종목은 따로 받지 않는다 — 화면이 매 tick 받아 두는 module=dt held_list 를 그대로 그린다
+     *   (그래서 이 줄만 장중 10초로 돈다 · 수집 대상이라 실시간 시세가 오는 종목들이다). */
+    $topOpts = '<option value="held">★ 보유종목</option><option value="watch">★ Top-Pick</option>'
+              /* 최근조회 = 단타 화면에서 열어 본 종목(HTS 의 「최근조회」 자리) — 동시에 «열어 봐서 분봉이 쌓이는» 목록이다 */
+              . '<option value="recent">★ 최근조회</option>';
+    try {
+        $wgx = new Wg($pdo);
+        if ($wgx->ready()) {
+            foreach ($wgx->groups() as $g) {
+                $topOpts .= '<option value="g' . (int)$g['id'] . '">' . pf_h($g['name']) . ' (' . (int)$g['n'] . ')</option>';
+            }
+        }
+    } catch (Throwable $e) { /* 관심그룹 표가 없어도 단타는 뜬다 */ }
     echo '<div id="dt-shell"><aside id="dt-top">';
     echo '<div class="dt-top-head">'
-       . '<span class="dt-seg" id="dtTopSort"><button type="button" data-s="watch" class="on" '
-       . 'title="관심종목 (포트폴리오 > 관심종목과 같은 목록)">관심</button>'
-       . '<button type="button" data-s="cap">시총</button></span>'
+       . '<select id="dtTopSel" title="목록 — 보유종목 · Top-Pick · 최근조회 · 관심그룹 하나">' . $topOpts . '</select>'
        . '<span class="sub" id="dtTopSub">—</span>'
-       . '<span class="pg" id="dtTopPg" style="display:none">'
-       . '<button type="button" class="dt-chip" id="dtTopFirst" disabled>처음</button>'
-       . '<button type="button" class="dt-chip" id="dtTopNext">다음</button></span></div>';
+       /* 마감 변동 리포트로 가는 문(2026-09-04) — 상단 메뉴엔 없다(매일 저녁 한 번 보는 화면). Pushover 링크와 같은 곳으로 간다 */
+       /* ★2026-10-07 — 📊 는 «지금 고른 목록»의 마감 변동을 연다(사용자 지시 — 「해당 리스트의 종목들로 분석되었으면」).
+        *   예전엔 늘 알림 기록(보유·최근조회·Top-Pick 을 한데 섞은 것)으로 가서, 어느 목록에서 눌러도 같은 결과였다.
+        *   주소는 화면이 목록을 고를 때마다 맞춘다(아래 JS moveHref) · 알림 기록은 그 화면의 「알림 기록」 칩으로 간다. */
+       . '<a id="dtMove" href="/stock/index.php?mode=move" title="📊 마감 변동 — 지금 고른 목록에서 오늘 ±'
+       . Thr::pct(Thr::EOD_MOVE_PCT) . '% 넘게 움직인 종목의 뉴스와 미니 일봉">📊</a>'
+       . '<a class="dt-chip" href="/stock/index.php?mode=wgroup" style="text-decoration:none"'
+       . ' title="관심그룹 화면 — 그룹·종목·기준가를 여기서 편집합니다">그룹 편집</a></div>';
+    /* 종목 검색 — 목록에 없는 종목도 바로 열어 본다. 「담기」가 아니다(2026-10-07 — 직접 담는 목록을 없앴다):
+     * 열어서 잠시 머물면 스스로 「최근조회」에 올라가 10거래일을 받는다(Dt::touch). */
+    echo '<div class="dt-side-head">'
+       . '<input id="dtQ" placeholder="종목 검색 — 바로 열어 보기" autocomplete="off"><div id="dtSug"></div></div>';
     echo '<div id="dtTopList"><div class="dt-top-msg">불러오는 중…</div></div>';
-    echo '<button type="button" class="dt-hnd" id="dtTopHnd" title="「관심종목」 패널 접기/펴기">◀</button>';
-    echo '</aside>';
-
-    /* ── 좌: 종목 리스트 (한 목록 · 등락률순 — 2026-08-26 구획을 다시 걷어냄) ───────────
-     * 사용자: 「단타든 보유든 어떤 종목이 올랐나·내렸나가 중요하다」 — 단타+보유를 «한 목록»으로
-     * 합쳐 등락률순으로 세우고, 보유 종목은 «초록 바탕»(.dt-it.hld)과 「보유」 배지로만 가른다.
-     * 「보유」는 살아있는 포지션(pf_position status<>'closed')을 종목 단위로 접은 목록이다.
-     * ★dt_pool 에 «담지» 않는다 — 그 표는 상한 20 을 FIFO 로 지우는 표라, 보유가 섞이면
-     *   탐색하다 「＋」 한 번 누른 것이 내가 산 종목의 봉을 통째로 지운다(Dt::targetCodes 주석).
-     * ★두 출처가 «원장 하나»(dt_min)를 나눠 본다 — 겹치는 종목도 봉은 한 벌뿐이라 따로 놀 수 없다. */
-    echo '<aside id="dt-side">';
-    echo '<div class="dt-side-head">';
-    echo '<input id="dtQ" placeholder="종목명·코드로 추가 (Enter)" autocomplete="off">';
-    /* 마감 변동 리포트로 가는 문(2026-09-04) — 처음엔 차트 도구모음 칩이었는데 지표 바 뒤에 묻혀 안 보였다(사용자 실화면)
-     * → 목록 머리줄 검색칸 오른쪽(사용자가 짚은 자리). 상단 메뉴엔 없다(매일 저녁 한 번 보는 화면). Pushover 링크와 같은 곳으로 간다 */
-    echo '<a id="dtMove" href="/stock/index.php?mode=move" title="📊 마감 변동 리포트 — 관심·단타·보유 중 ±'
-       . Thr::pct(Thr::EOD_MOVE_PCT) . '% 넘은 종목의 뉴스와 미니 일봉">📊</a>';
-    echo '<div id="dtSug"></div></div>';
-    echo '<div id="dtList"><div class="dt-empty">불러오는 중…</div></div>';
     echo '<div class="dt-side-foot" id="dtFoot">보관 창 <b id="dtWin">—</b><br>'
        . '<span id="dtFootMsg">'
-       . ($hasKey ? '키움 연결됨 · 등록하면 10거래일을 받아 옵니다'
+       . ($hasKey ? '키움 연결됨 · 종목을 열어 ' . Dt::VIEW_DWELL_SEC . '초 머물면 10거래일을 받아 옵니다'
                   : '<span style="color:#e0a44a">키움 키 없음(env/kiwoom.inc) — 오늘 분봉만 보입니다</span>')
-       . '</span></div></aside>';
+       . '</span></div>';
+    echo '<button type="button" class="dt-hnd" id="dtTopHnd" title="목록 패널 접기/펴기">◀</button>';
+    echo '</aside>';
+
+    /* ★가운데의 「단타 목록」(#dt-side)은 2026-10-07 에 없앴다(사용자 결정 · A안 — 「단타를 따로 리스트로 관리하지 않는다」).
+     *   보유는 왼쪽 「보유종목」, 직접 담던 종목은 「최근조회」(열어 본 것이 스스로 쌓인다)로 갔다.
+     *   분봉은 원장 하나(dt_min)다 — 항상 수집 = 보유 ∪ Top-Pick · 그 밖은 열어 머문 것만(Dt::targetCodes 주석). */
 
     /* ── 가운데: 뉴스 ────────────────────────────────────────────────
      * 종목 목록과 차트 «사이»에 둔다(2026-08-05 사용자 지시) — 종목을 고르고 나서
@@ -15499,10 +16138,7 @@ CSS;
     echo '<span class="dt-seg" id="dtSpan"><button type="button" data-m="today" class="on">당일</button>'
        . '<button type="button" data-m="5">5일</button>'
        . '<button type="button" data-m="all">전체</button></span>';
-    /* 미리보기 중에만 뜨는 담기 버튼 — 「＋」는 상위 목록에도 있지만, 차트를 보다가
-     * 「이건 계속 봐야겠다」고 마음먹는 자리는 여기다. 손이 목록으로 돌아가지 않게 한다. */
-    echo '<button type="button" id="dtAdd" class="dt-chip" style="display:none"'
-       . ' title="단타에 담기 — 10거래일 1분봉을 받아 원장에 쌓습니다">＋ 담기</button>';
+    /* 「＋ 담기」 칩은 2026-10-07 에 없앴다 — 열어서 잠시 머물면 스스로 10거래일을 받는다(아래 JS armView) */
     if ($F['chart.live']) {
         /* ★주기를 손으로 적지 않는다 — Dt::TICK_SEC 이 화면 타이머 둘·서버 신선도 창·이 글자를
          *   함께 정한다. 넷이 갈리면 한 화면이 두 값을 말한다(2026-08-06 그래서 묶었다). */
@@ -15511,7 +16147,7 @@ CSS;
            . Dt::TICK_SEC . '초</span>';
     }
     // 옆 패널 접기 — 차트 폭이 아까운 화면이라 둘 다 끌 수 있어야 한다(기본은 펴짐)
-    echo '<button type="button" id="dtTopTgl" class="dt-chip on" title="맨 왼쪽 「관심종목」 패널 접기/펴기">관심</button>';
+    echo '<button type="button" id="dtTopTgl" class="dt-chip on" title="왼쪽 목록 패널 접기/펴기">목록</button>';
     echo '<button type="button" id="dtNewsTgl" class="dt-chip on" title="「뉴스」 패널 접기/펴기">뉴스</button>';
 
     echo '<span id="dtMainIBar"></span>';
@@ -15557,6 +16193,7 @@ CSS;
     echo '<script src="/style/dailychart.js?v=62"></script>';
     // 목록 배지(ETF 편입 수·퀀트) — 그리기·색의 단일본(사이트 공통 모듈)
     echo '<script src="/style/quantbadge.js?v=6"></script>';   // v6 = SUE 라벨 축약·종목명 옆 배치 (2026-08-12)
+    echo '<script src="/style/stockrow.js?v=1"></script>';     // 목록의 한 행(3줄) — 관심그룹 화면과 나눠 쓰는 공용 모듈
     pf_acnav_js();                                        // 종목 추가 검색창의 ↓/↑ 이동
     echo ChartFeat::boot('short', $pdo);
     /* 배지 표시 설정(설정 > 신호분석 설정 · BadgeFeat) — 세 목록(상위·내 목록·보유)이 같은 스위치를 본다.
@@ -15565,7 +16202,10 @@ CSS;
     echo '<script>var DT_DAYS=' . json_encode($days) . ';'
        . 'var DT_TODAY=' . json_encode(date('Y-m-d')) . ';'
        . 'var DT_HASKEY=' . ($hasKey ? 1 : 0) . ';'
-       . 'var DT_MAX=' . Dt::POOL_MAX . ';'
+       . 'var DT_MAX=' . Dt::POOL_MAX . ';'                 // 「최근조회」 상한
+       /* ?code= 로 들어온 종목(멀티차트·마감 변동의 제목 클릭) — 목록에 없어도 그 종목을 연다. 이름은 여기서 붙인다 */
+       . 'var DT_WANT=' . json_encode($want, JSON_UNESCAPED_UNICODE) . ';'
+       . 'var DT_DWELL=' . (Dt::VIEW_DWELL_SEC * 1000) . ';'   // 이만큼 머문 종목만 「최근조회」에 오른다
        /* 장중 갱신 주기 — 화면 타이머 둘과 서버 신선도(Dt::refreshQuotesLive)가 <b>한 숫자</b>다. */
        . 'var DT_TICK=' . (Dt::TICK_SEC * 1000) . ';</script>';
 
@@ -15662,57 +16302,74 @@ CSS;
       .catch(function(){ return []; });
   }
 
-  /* ── 맨 왼쪽: 관심종목 + 시총 (탐색) ──────────────────────────────
-   * 기본은 관심종목(action=watch · 상승률 순 전부 · 페이징 없음 — 2026-08-20 상승률 목록 교체).
-   * 시총은 기존 경로 그대로 — action=top30(커서 페이징). 행 모양이 같아 렌더러는 하나다.
-   * 여기서 담고 오른쪽 내 목록에서 본다. 배지·시총·회전율은 두 목록이 같은 단일본을 쓴다.
+  /* ── 종목 목록 — 왼쪽 패널 «하나» (보유종목 · Top-Pick · 최근조회 · 관심그룹) ───────────────────
+   * ★2026-10-07 사용자 결정(A안) — 가운데의 「단타 목록」(＋ 로 담고 × 로 빼던 20칸)을 없앴다.
+   *   「단타를 따로 리스트로 관리하지 않는다」. 목록은 셀렉트 하나로 고르고, 분봉은 이렇게 쌓인다:
+   *     · 보유종목·Top-Pick 은 «항상» 수집된다(서버 Dt::alwaysCodes).
+   *     · 그 밖의 종목은 열어서 잠시 머물면(DT_DWELL) 스스로 「최근조회」에 올라가 10거래일을 받는다(아래 armView).
+   *     · 10거래일 동안 다시 안 열면 크론이 내린다(Dt::expireViews) — 손으로 빼는 자리는 없다.
+   *   훑어보는 클릭은 여전히 아무것도 쌓지 않는다(단타 규칙 11) — 쌓는 것은 «머문 것»뿐이다.
+   * 원천: 보유종목 = heldRows · 최근조회 = poolRows(둘 다 module=dt · 장중 10초) ·
+   *       Top-Pick = action=watch(☆ 목록 · 상승률 순 · 보유 제외) · 관심그룹 = action=watch&g=<id>(저장된 순서).
    * ★접혀 있으면 부르지 않는다 — 이 화면의 「끄면 네트워크 호출까지 사라진다」 원칙. */
-  var TOP_KEY = 'dt_top_on', TOP_API = '/stock_analysis_api.php?module=stock&action=top30';
+  var TOP_KEY = 'dt_top_on', TOP_SRC_KEY = 'dt_top_src';
   var WATCH_API = '/stock_analysis_api.php?module=stock&action=watch';
-  var topSort = 'watch', topStart = 0, topCursor = null, topRows = [], topSeq = 0;
-  /* 이미 «원장을 가진» 종목 둘 — renderList 가 갱신한다.
-     poolSet = 내가 담은 것 · heldSet = 포트폴리오가 보유한 것.
-     ★둘 다 매일 수집된다(Dt::targetCodes) — 그래서 미리보기 판정(state.owned)은 «합집합»이다. */
-  var poolSet = {}, heldSet = {};
+  /* topSrc = 'held'(보유종목) | 'watch'(Top-Pick) | 'recent'(최근조회) | 'g<id>'(관심그룹 하나).
+     마지막에 고른 원천은 localStorage 에 둔다(시세가 아니라 «내 화면 취향»이다). 그 그룹이 지워졌으면 첫 줄로 돌아간다. */
+  var topSrc = 'held', topStart = 0, topRows = [], topSeq = 0;      // 기본 = 셀렉트 첫 줄(보유종목)
+  (function(){
+    var sel = $('dtTopSel'), v = null;
+    try { v = localStorage.getItem(TOP_SRC_KEY); } catch (e) {}
+    if (v && sel.querySelector('option[value="' + v + '"]')) { sel.value = v; topSrc = v; }
+  })();
+  var poolRows = [], heldRows = [], poolMax = DT_MAX;
+  /* poolSet·heldSet = 그 목록에 있나 · poolBy·heldBy = 코드 → 그 행(실시간 시세·수집 상태·포지션 배지의 재료) ·
+     ledger = 원장(dt_min)에 봉이 쌓여 있는 종목(코드 → {days,bars}) — 「10거래일 그림을 그릴 수 있나」의 답이다 ·
+     listsLoaded = 두 목록을 한 번이라도 받았나 */
+  var poolSet = {}, heldSet = {}, poolBy = {}, heldBy = {}, ledger = {}, listsLoaded = false;
+  /* 보유 종목의 초기 10거래일을 «화면이 열릴 때» 당겨 오는 자리 (2026-08-05 사용자 선택).
+     heldFilling = 지금 받고 있는 코드(하나) · heldTried = 이 세션에서 이미 시도한 코드들. */
+  var heldFilling = null, heldTried = {};
 
   function topOn(){ return !$('dt-top').classList.contains('col'); }
 
-  /* ★「받는 중이면 무시」가 아니라 «번호표»를 쓴다 — 전자는 「다음」 직후 「시총」을 누르면
-     버튼만 시총으로 바뀌고 목록은 상승률인 채 남는다(요청이 조용히 버려진다).
-     번호표면 늘 마지막 요청이 이기고, 늦게 온 응답은 스스로 물러난다(뉴스와 같은 규칙). */
-  function loadTop(cursor, start){
+  /* 처음 한 번 — 주소의 ?code=(멀티차트·마감 변동의 제목 클릭)가 있으면 그 종목, 없으면 보이는 목록의 맨 위.
+     목록이 비었으면 fallback(보유 → 최근조회)의 맨 위 — 차트가 빈 채로 열리지 않게. */
+  var autoDone = false;
+  function autoPick(fallback){
+    if (autoDone || state.code) return;
+    if (DT_WANT && DT_WANT.code) { autoDone = true; pick(DT_WANT); return; }
+    var rows = topRows.length ? topRows : (fallback || []);
+    if (rows.length) { autoDone = true; pick({ code: rows[0].code, name: rows[0].name }); }
+  }
+
+  /* ★「받는 중이면 무시」가 아니라 «번호표»를 쓴다 — 전자는 목록을 잇달아 바꾸면 셀렉트만 바뀌고 목록은 옛것인 채
+     남는다(요청이 조용히 버려진다). 번호표면 늘 마지막 요청이 이기고, 늦게 온 응답은 스스로 물러난다(뉴스와 같은 규칙). */
+  function loadTop(){
     if (!topOn()) return;
+    if (topSrc === 'held')   { ++topSeq; heldToTop();   return; }
+    if (topSrc === 'recent') { ++topSeq; recentToTop(); return; }
     var my = ++topSeq;
-    /* 관심종목은 상승률 순으로 «전부» 온다 — 커서가 없다(페이징은 시총에서만 보인다) */
-    var isWatch = topSort === 'watch';
-    var u = isWatch ? WATCH_API : TOP_API + '&sort=' + topSort;
-    if (!isWatch && cursor) u += '&before=' + encodeURIComponent(cursor.val) + '&before_code=' + encodeURIComponent(cursor.code);
+    /* 두 원천 모두 «전부» 온다 — 커서·페이징이 없다(Top-Pick 은 상승률 순 · 그룹은 그룹에 저장된 순서) */
+    var isGroup = topSrc.charAt(0) === 'g';
+    var u = WATCH_API + (isGroup ? '&g=' + encodeURIComponent(topSrc.slice(1)) : '');
     fetch(u, { credentials:'same-origin' })
       .then(function(r){ return r.json(); })
       .then(function(rows){
         if (my !== topSeq) return;
         rows = Array.isArray(rows) ? rows : [];
-        $('dtTopPg').style.display = isWatch ? 'none' : '';
-        if (isWatch){
-          topRows = rows; topStart = 0; topCursor = null;
-          $('dtTopSub').textContent = rows.length + '종목';
-          if (!rows.length){
-            $('dtTopList').innerHTML = '<div class="dt-top-msg">관심종목이 없습니다.<br>'
-              + '포트폴리오의 관심종목 화면(☆)에서 담으면 여기에 나옵니다.</div>';
-            return;
-          }
-          renderTop();
+        topRows = rows; topStart = 0;
+        $('dtTopSub').textContent = rows.length + '종목';
+        if (!rows.length){
+          // 빈 칸에는 «왜 비었는지»와 «어디서 채우는지»를 적는다(원천마다 답이 다르다)
+          $('dtTopList').innerHTML = '<div class="dt-top-msg">' + (isGroup
+            ? '이 그룹에 종목이 없습니다.<br>상단 메뉴 「관심그룹」에서 담으면 여기에 나옵니다.'
+            : 'Top-Pick 이 비어 있습니다.<br>재무분석·퀀트 화면의 ☆ 로 담으면 여기에 나옵니다.') + '</div>';
+          autoPick(heldRows.length ? heldRows : poolRows);
           return;
         }
-        // 빈 응답 = 더 없음. 지금 보이는 쪽을 그대로 두고 「다음」만 막는다
-        if (!rows.length) { $('dtTopNext').disabled = true; return; }
-        topRows = rows; topStart = start;
-        var last = rows[rows.length - 1];
-        topCursor = { val: last[topSort], code: last.code };
-        $('dtTopSub').textContent = (start + 1) + '–' + (start + rows.length) + '위';
-        $('dtTopFirst').disabled = (start === 0);
-        $('dtTopNext').disabled  = (rows.length < 30);
         renderTop();
+        autoPick();
       })
       .catch(function(){
         if (my !== topSeq) return;
@@ -15720,89 +16377,120 @@ CSS;
       });
   }
 
+  /* module=dt 의 행(보유·최근조회) → 탐색 목록의 행 모양. 렌더러(renderTop)가 원천을 가리지 않게 여기서 맞춘다 */
+  function asTop(r){
+    return { code: r.code, name: r.name || r.code, price: r.price, rate: r.rate, cap: r.cap,
+             tradeEok: r.amt_eok, kind: 'stock', etfTop: r.etf_top, q: r.q };
+  }
+  /* 「보유종목」 — 따로 받지 않는다. loadPool 이 매 tick 받아 두는 heldRows(module=dt held_list)를 그대로 그린다.
+     그래서 장중 10초로 돈다. 순서는 등락률 내림차순(「어떤 종목이 올랐나·내렸나」). */
+  function heldToTop(){
+    topStart = 0;
+    if (!listsLoaded) return;                // 첫 응답 전 — 「불러오는 중…」을 그대로 둔다(빈 목록으로 읽히지 않게)
+    topRows = heldRows.map(asTop).sort(function(a, b){ return (Number(b.rate) || 0) - (Number(a.rate) || 0); });
+    $('dtTopSub').textContent = topRows.length + '종목';
+    if (!topRows.length) {
+      $('dtTopList').innerHTML = '<div class="dt-top-msg">보유 종목이 없습니다.<br>포트폴리오에 편입하면 여기에 나옵니다.</div>';
+      autoPick(poolRows);
+      return;
+    }
+    renderTop();
+    autoPick();
+  }
+  /* 「최근조회」 — 단타 화면에서 열어 본 종목(서버 dt_pool · 최근에 본 순). HTS 의 「최근조회」와 같은 자리이고,
+     동시에 «열어 봐서 분봉이 쌓이는 종목»의 목록이다. 손으로 담거나 빼지 않는다 — 열면 올라오고 10거래일 안 열면 내려간다. */
+  function recentToTop(){
+    topStart = 0;
+    if (!listsLoaded) return;
+    topRows = poolRows.map(asTop);           // 순서는 서버가 준 그대로(최근에 본 순)
+    $('dtTopSub').textContent = topRows.length + '/' + poolMax + '종목';
+    if (!topRows.length) {
+      $('dtTopList').innerHTML = '<div class="dt-top-msg">최근에 연 종목이 없습니다.<br>다른 목록에서 종목을 열어 잠시 머물면 여기에 쌓이고,'
+        + '<br>10거래일 동안 다시 열지 않으면 빠집니다.</div>';
+      autoPick(heldRows);
+      return;
+    }
+    renderTop();
+    autoPick();
+  }
+
+  /* 보유 배지·수집 상태·행의 여섯 칸은 공용 모듈 style/stockrow.js 가 그린다(StockRow) —
+     관심그룹 화면의 종목 리스트와 «같은 행»이다(2026-10-07). 여기에 다시 적지 않는다. */
+
+  /* 목록의 행 = listRow() 하나다 (같은 날 사용자 지시 — 「단타처럼 맞춰 줘 · 현재가 표시 등」).
+   * 여기서는 «행의 재료»만 맞춘다:
+   *   · 「N일 M봉」은 원장에 봉이 있는 종목이면 어느 목록에서든 적는다(ledger).
+   *   · 보유·최근조회에 있는 종목은 시세를 «그 행에서» 가져온다 — 그 둘은 10초로 도는데 Top-Pick·관심그룹 목록의 값은
+   *     그보다 느리게 읽으니, 같은 종목이 목록을 바꿀 때마다 다른 현재가를 말하게 두지 않는다. */
+  function topRow(s){
+    var h = heldBy[s.code], p = poolBy[s.code], own = p || h, lg = ledger[s.code];
+    var r = { code: s.code, name: s.name, kind: s.kind, q: s.q, etf_top: s.etfTop,
+              price: s.price, rate: s.rate, cap: s.cap, amt_eok: s.tradeEok };
+    if (lg) { r.days = lg.days; r.bars = lg.bars; }
+    if (own) {
+      r.holes = own.holes;
+      if (own.days !== undefined) { r.days = own.days; r.bars = own.bars; }
+      if (own.price) { r.price = own.price; r.rate = own.rate; }
+      if (Number(own.cap) > 0) r.cap = own.cap;
+      if (Number(own.amt_eok) > 0) r.amt_eok = own.amt_eok;
+      if (own.q) r.q = own.q;
+    }
+    if (p) { r._pool = 1; r.init_status = p.init_status; }
+    if (h) { r._held = 1; r.pos_id = h.pos_id; r.pf_names = h.pf_names; r.pf_n = h.pf_n; r.open = h.open; }
+    return r;
+  }
   function renderTop(){
     var box = $('dtTopList');
     if (!topRows.length) { box.innerHTML = '<div class="dt-top-msg">목록이 없습니다.</div>'; return; }
     box.innerHTML = '';
-    topRows.forEach(function(s, i){
-      var el = document.createElement('div');
-      el.className = 'dt-tr qb-sm' + (s.code === state.code ? ' on' : '');
-      el.dataset.code = s.code;
-      var cap = Number(s.cap) || 0, tv = Number(s.tradeEok) || 0;
-      var turn = cap > 0 ? (tv / cap * 100) : 0;
-      var isEtf = s.kind === 'etf', has = !!poolSet[s.code], hasHeld = !!heldSet[s.code];
-      /* ★ETF 는 담지 않는다 — 단타 목록의 이름·현재가·시총은 all_stock_info 에서 오는데
-         ETF 는 그 표에 없다. 담기면 빈 행이 되어 「고장난 것처럼」 보인다.
-         ★보유 종목도 담지 않는다 — 이미 매일 수집되므로(Dt::targetCodes) 담아 봐야
-         20칸 하나를 먹고 남의 종목을 FIFO 로 밀어낼 뿐이다. 내 목록에 보유로 이미 있다. */
-      var btn = isEtf
-        ? '<button class="ad" type="button" disabled title="ETF 는 단타 목록에 담지 않습니다 (시세 원천이 다릅니다)">·</button>'
-        : hasHeld
-          ? '<button class="ad has" type="button" disabled title="보유 종목 — 담지 않아도 매일 수집됩니다 (내 목록에 보유로 있습니다)">✓</button>'
-          : has
-            ? '<button class="ad has" type="button" disabled title="이미 단타에 담긴 종목">✓</button>'
-            : '<button class="ad" type="button" title="단타에 담기 — 10거래일 분봉을 받아 옵니다">＋</button>';
-      el.innerHTML =
-        '<div class="n1"><span class="rk">' + (topStart + i + 1) + '</span>'
-          + '<span class="t">' + QuantBadge.esc(s.name) + '</span>'
-          + (isEtf ? '<span class="dt-bdg etf">ETF</span>' : '')
-          + (hasHeld ? '<span class="dt-bdg held" title="포트폴리오에 있는 종목입니다">보유</span>' : '')
-          + (BF.etf ? QuantBadge.etf(s.etfTop) : '') + '</div>' +
-        '<div class="v1 ' + rateCls(s.rate) + '">' + rateTxt(s.rate) + '</div>' +
-        btn +
-        // SUE 는 코드 바로 옆(2026-08-20 사용자 — 종목명 옆은 이름을 밀어냈다) — 묶음(BFq)에서는 빠져 있다
-        '<div class="n2">' + s.code
-          + (BF.sue && s.q && s.q.sue ? QuantBadge.sue(s.q.sue) : '')
-          + QuantBadge.quant(s.q, BFq) + '</div>' +
-        // 시총·회전율(BF.cap) — 칸은 남긴다(그리드 자리) · 내용만 비운다
-        '<div class="v2">' + (!BF.cap ? '' : (cap > 0 ? QuantBadge.eok(cap) : '—')
-          + (turn > 0 ? ' · ' + turn.toFixed(1) + '%' : '')) + '</div>';
-      var ad = el.querySelector('.ad');
-      if (!isEtf && !has && !hasHeld) ad.onclick = function(e){
-        e.stopPropagation();
-        ad.disabled = true; ad.textContent = '…';
-        addCode(s.code, s.name);
-      };
-      /* 행 클릭 — 담지 않은 종목도 «미리보기»로 열린다(오늘 분봉 + 일봉).
-         담기는 오른쪽 「＋」가 하는 명시적 행동이라, 보는 것과 담는 것을 섞지 않는다. */
-      el.onclick = function(){ pick({ code:s.code, name:s.name }); };
-      box.appendChild(el);
-    });
+    var plain = topSrc === 'held';           // 전부 보유인 목록에서는 초록 바탕을 칠하지 않는다(가르는 것이 없다)
+    topRows.forEach(function(s){ box.appendChild(listRow(topRow(s), plain)); });
   }
 
-  seg('dtTopSort', 'data-s', function(v){ topSort = v; topCursor = null; loadTop(null, 0); });
-  $('dtTopFirst').onclick = function(){ loadTop(null, 0); };
-  $('dtTopNext').onclick  = function(){ if (topCursor) loadTop(topCursor, topStart + topRows.length); };
+  /* 한 행 — 어느 목록이든 이 함수 하나가 그리고, 칸의 내용·CSS 는 공용 모듈(StockRow.cells)이 만든다.
+     ★행 모양을 고칠 때는 style/stockrow.js 한 곳만 고친다 — 관심그룹 화면도 같이 바뀐다. */
+  function listRow(r, plain){
+    var el = document.createElement('div');
+    // srow  = 공용 모듈의 칸 CSS 가 먹는 표식 · qb-sm = 좁은 목록용 축소 배지(크기 규칙은 style/quantbadge.js 소유)
+    // hld   = 보유 종목의 초록 바탕 — 섞인 목록 안에서 보유를 가르는 표시(배지와 같은 색 계열)
+    el.className = 'dt-it srow qb-sm' + (r._held && !plain ? ' hld' : '') + (r.code === state.code ? ' on' : '');
+    el.dataset.code = r.code;
+    el.innerHTML = StockRow.cells(r, { bf: BF, filling: heldFilling });
+    var a = el.querySelector('a.dt-bdg');
+    if (a) a.onclick = function(e){ e.stopPropagation(); };   // 배지는 포지션 상세로, 행은 종목 고르기로
+    el.onclick = function(){ pick(r); };
+    return el;
+  }
 
-  // 차트를 보다가 「계속 봐야겠다」 싶을 때 — 목록으로 손이 돌아가지 않게 여기서도 담는다
-  $('dtAdd').onclick = function(){
-    if (!state.code) return;
-    this.disabled = true;
-    addCode(state.code, state.name);
+  /* 📊 의 주소 — 지금 고른 목록의 마감 변동(mode=move&g=). 목록의 이름은 관심그룹과 같은 key 를 쓴다:
+     보유종목 held · Top-Pick top · 최근조회 recent · 내 그룹은 그 id. from=short 는 「단타에서 왔다」 —
+     그 화면이 메뉴 하이라이트와 돌아가는 문을 단타 쪽으로 맞춘다. */
+  function moveHref(){
+    var k = topSrc === 'watch' ? 'top' : (topSrc.charAt(0) === 'g' ? topSrc.slice(1) : topSrc);
+    $('dtMove').href = '/stock/index.php?mode=move&g=' + encodeURIComponent(k) + '&from=short';
+  }
+  moveHref();
+
+  $('dtTopSel').onchange = function(){
+    topSrc = this.value;
+    moveHref();
+    try { localStorage.setItem(TOP_SRC_KEY, topSrc); } catch (e) {}
+    $('dtTopList').innerHTML = '<div class="dt-top-msg">불러오는 중…</div>';
+    loadTop();
+    /* 최근조회는 «본 순서»라 방금 본 것이 맨 위여야 한다 — 고르는 순간 한 번 더 받아 온다
+       (머문 종목이 이미 목록에 있던 것이면 서버의 순서만 바뀌고 화면은 다음 tick 까지 옛 순서다) */
+    if (topSrc === 'recent') loadPool();
   };
 
   panel('dt-top', 'dtTopHnd', 'dtTopTgl', TOP_KEY, function(){
-    if (!topRows.length) loadTop(null, 0);        // 접혀 있던 동안엔 안 받아 왔다
+    loadTop();                                   // 접혀 있던 동안엔 안 그렸다
   });
 
-  /* ── 종목 목록 — 단타+보유 «한 목록» · 등락률순 (2026-08-26 사용자 지시) ──────────
-   * 「단타든 보유든 어떤 종목이 올랐나·내렸나가 중요하다」 — 구분을 걷어내고 등락률로 세운다.
-   * 보유 종목은 초록 바탕(.hld)과 「보유」 배지로만 가른다 · 겹치는 종목(담았고 보유이기도)은
-   * 한 행으로 접되 양쪽 성질을 다 갖는다(_pool → ×빼기 가능 · _held → 보유 배지·바탕).
-   * ★드래그 정렬은 없다 — 등락률이 순서의 주인이라 손으로 옮긴 순서가 설 자리가 없다
-   *   (dt_pool.sort_no 는 담은 순 그대로 남아 FIFO 우선순위 역할만 한다).
-   * ★보유 목록은 여전히 따로 받아 온다 — 미리보기 판정(state.owned)과
-   *   상위 목록의 「보유」 표시가 그 집합을 보기 때문이다.
-   * ★두 출처가 원장 하나(dt_min)를 나눠 본다 — 겹치는 종목도 봉은 한 벌뿐이라 따로 놀 수 없다. */
-  var poolRows = [], heldRows = [], poolMax = DT_MAX;
-  /* 보유 종목의 초기 10거래일을 «화면이 열릴 때» 당겨 오는 자리 (2026-08-05 사용자 선택).
-     heldFilling = 지금 받고 있는 코드(하나) · heldTried = 이 세션에서 이미 시도한 코드들. */
-  var heldFilling = null, heldTried = {};
-
-  function loadPool(keep){
+  /* 두 목록(최근조회·보유)과 원장 현황을 받는다 — 화면의 «사실»은 전부 여기서 온다.
+     보유 목록이 실패해도 화면은 떠야 한다 — 곁다리가 본체를 죽이지 않는다. */
+  function loadPool(){
     var pool = fetch(API + 'pool_list', { credentials:'same-origin' })
                  .then(function(r){ return r.json(); });
-    // 보유 목록이 실패해도 단타 목록은 떠야 한다 — 곁다리가 본체를 죽이지 않는다
     var held = fetch(API + 'held_list', { credentials:'same-origin' })
                  .then(function(r){ return r.json(); })
                  .catch(function(){ return { rows: [] }; });
@@ -15814,123 +16502,28 @@ CSS;
       poolRows = d.rows || [];
       heldRows = h.rows || [];
       poolMax  = d.max || DT_MAX;
-      /* 두 집합을 여기서 «다시» 만든다 — 목록을 그릴 때마다 만들므로 세 패널이 어긋날 수 없다
-         (상위 종목의 ✓/보유 표시가 이것만 본다). */
-      poolSet = {}; poolRows.forEach(function(r){ poolSet[r.code] = 1; });
-      heldSet = {}; heldRows.forEach(function(r){ heldSet[r.code] = 1; });
-      if (topRows.length) renderTop();
-      renderList();
-      if (!keep && !state.code) {
-        /* ?code= 로 들어오면 그 종목부터(멀티 차트의 제목 클릭 · 2026-09-04) — 목록에 없으면 첫 행 */
-        var all = mergedRows(), first = all[0];
-        var want = new URLSearchParams(location.search).get('code') || '';
-        for (var i = 0; want && i < all.length; i++) if (all[i].code === want) { first = all[i]; break; }
-        if (first) pick(first);
+      ledger   = d.ledger || {};
+      /* 집합을 여기서 «다시» 만든다 — 받을 때마다 만들므로 목록과 차트가 어긋날 수 없다 */
+      poolSet = {}; poolBy = {};
+      poolRows.forEach(function(r){ poolSet[r.code] = 1; poolBy[r.code] = r; });
+      heldSet = {}; heldBy = {};
+      heldRows.forEach(function(r){ heldSet[r.code] = 1; heldBy[r.code] = r; });
+      listsLoaded = true;
+      /* 보이는 목록을 방금 받은 것으로 다시 세운다. Top-Pick·관심그룹은 제 주기로 따로 읽으니
+         여기서는 배지·시세만 다시 얹는다. 접혀 있으면 그리지 않는다. */
+      if (topOn()) {
+        if (topSrc === 'held') heldToTop();
+        else if (topSrc === 'recent') recentToTop();
+        else if (topRows.length) renderTop();
+      } else {
+        autoPick(heldRows.length ? heldRows : poolRows);   // 패널이 접혀 있어도 차트가 빈 채로 열리지 않게
       }
       return d;
     });
   }
 
-  /* 단타+보유를 한 벌로 접는다 — 겹치는 종목은 «보유 행»을 바탕으로(포지션 배지에 pos_id 가
-     필요하다) 단타 쪽 수집 상태(init_status)를 얹는다. 정렬은 등락률 내림차순 하나. */
-  function mergedRows(){
-    var by = {}, out = [];
-    heldRows.forEach(function(r){
-      var m = { _held: 1 };
-      for (var k in r) m[k] = r[k];
-      by[r.code] = m;
-    });
-    poolRows.forEach(function(r){
-      var m = by[r.code];
-      if (m) {
-        m._pool = 1;
-        m.init_status = r.init_status;
-        if ((r.holes || 0) > (m.holes || 0)) m.holes = r.holes;
-      } else {
-        m = { _pool: 1 };
-        for (var k in r) m[k] = r[k];
-        by[r.code] = m;
-      }
-    });
-    for (var c in by) out.push(by[c]);
-    out.sort(function(a, b){ return (Number(b.rate) || 0) - (Number(a.rate) || 0); });
-    return out;
-  }
-
-  function renderList(){
-    var box  = $('dtList');
-    var rows = mergedRows();
-    if (!rows.length) {
-      box.innerHTML = '<div class="dt-empty">종목이 없습니다.<br>위 칸에서 담거나,<br>포트폴리오에 편입하면 나타납니다.</div>';
-    } else {
-      box.innerHTML = '';
-      rows.forEach(function(r){ box.appendChild(listRow(r)); });
-    }
-    $('dtQ').placeholder = '종목 추가 (' + poolRows.length + '/' + poolMax + ')';
-  }
-
-  /* 한 행 — 단타·보유가 «같은 함수»를 지난다. 배지·열 모양을 출처마다 따로 적으면
-     하나를 고칠 때 다른 하나가 조용히 옛말을 한다(서버의 finishRows 와 같은 이유). */
-  function listRow(r){
-    var el = document.createElement('div');
-    // qb-sm = 좁은 사이드바용 축소 배지 (크기 규칙도 style/quantbadge.js 소유)
-    // hld  = 보유 종목의 초록 바탕 — 한 목록 안에서 보유를 가르는 표시(배지와 같은 색 계열)
-    el.className = 'dt-it qb-sm' + (r._held ? ' hld' : '') + (r.code === state.code ? ' on' : '');
-    el.dataset.code = r.code;
-
-    /* 수집 상태 — 「보유」에는 init_status 가 없다(담은 적이 없으니 「받는 중」도 없다).
-       대신 봉이 아직 없으면 «왜 비었는지»를 적는다 — 빈 칸은 고장으로 읽힌다.
-       초기 10거래일은 크론의 «구멍 치유» 단계가 메운다(담기의 pool_init 에 해당하는 자리). */
-    var bdg = '';
-    if (r._held && heldFilling === r.code)    bdg = '<span class="dt-bdg wait">받는 중</span>';
-    else if (r._pool && r.init_status === 1)  bdg = '<span class="dt-bdg wait">받는 중</span>';
-    else if (r._pool && r.init_status === 9)  bdg = '<span class="dt-bdg fail">수집 실패</span>';
-    else if (r.holes > 0)                     bdg = '<span class="dt-bdg hole">구멍 ' + r.holes + '</span>';
-    else if (r._held && !r.bars)              bdg = '<span class="dt-bdg wait" title="다음 수집(평일 16:45)이'
-                                                  + ' 10거래일을 채웁니다">채우는 중</span>';
-
-    /* 보유 배지 — 사이트 공통 어휘 그대로다(「보유」=돈이 들어감 · 「편입됨」=자리만 있음).
-       바탕색과 «함께» 단다 — 색약·인쇄에서도 배지가 말한다. 눌러서 포지션 상세로. */
-    var hb = '';
-    if (r._held) {
-      hb = '<a class="dt-bdg ' + (r.open ? 'held' : 'slot')
-         + '" href="/stock/index.php?mode=position&id=' + (Number(r.pos_id) || 0)
-         + '" title="' + QuantBadge.esc((r.pf_names || '') + ' · 눌러서 포지션 상세로') + '">'
-         + (r.open ? '보유' : '편입됨') + (r.pf_n > 1 ? ' ' + r.pf_n : '') + '</a>';
-    }
-
-    /* 배지·시총·회전율은 왼쪽 「상위 종목」 목록과 «같은 것»이다 —
-       판정은 서버(stock/lib/quant.php), 그리기는 공용 모듈. 여기서 다시 세우지 않는다.
-       회전율 = 거래대금 ÷ 시가총액 (둘 다 억원) — 파생값이라 저장하지 않는다. */
-    var cap = Number(r.cap)||0, amt = Number(r.amt_eok)||0;
-    var turn = cap > 0 ? (amt / cap * 100) : 0;
-    // 배지 표시 설정(BF) — 상위 목록과 «같은 스위치»를 본다. 칸은 남기고 내용만 비운다
-    var mk = !BF.cap ? ''
-           : (cap > 0 ? QuantBadge.eok(cap) : '—') + (turn > 0 ? ' · ' + turn.toFixed(1) + '%' : '');
-    el.innerHTML =
-      '<div class="nm"><span class="t">' + QuantBadge.esc(r.name||r.code) + '</span>'
-        + (BF.etf ? QuantBadge.etf(r.etf_top) : '') + hb + bdg + '</div>' +
-      '<div class="px ' + rateCls(r.rate) + '">' + (r.price ? fmt(r.price) : '—') + '</div>' +
-      // SUE 는 코드 바로 옆(탐색 패널과 같은 자리·같은 스위치 · 2026-08-20) — sg 칩 묶음(BFq)에서는 빠진다
-      '<div class="cd">' + r.code
-        + (BF.sue && r.q && r.q.sue ? QuantBadge.sue(r.q.sue) : '')
-        + ' · ' + r.days + '일 ' + fmt(r.bars) + '봉</div>' +
-      '<div class="rt ' + rateCls(r.rate) + '">' + (r.price ? rateTxt(r.rate) : '') + '</div>' +
-      '<div class="sg">' + QuantBadge.quant(r.q, BFq) + '</div>' +
-      '<div class="mk" title="시가총액 · 회전율(거래대금÷시가총액)">' + mk + '</div>' +
-      // × 빼기는 단타 탭에만 — 보유는 여기서 뺄 수 있는 것이 아니다(포트폴리오가 정한다)
-      // × 빼기는 «담은» 종목에만 — 보유만인 행은 여기서 뺄 수 있는 것이 아니다(포트폴리오가 정한다)
-      (r._pool ? '<button class="x" type="button" title="단타 종목에서 빼기">×</button>' : '');
-    var x = el.querySelector('.x');
-    if (x) x.onclick = function(e){ e.stopPropagation(); removeCode(r); };
-    var a = el.querySelector('a.dt-bdg');
-    if (a) a.onclick = function(e){ e.stopPropagation(); };   // 배지는 포지션 상세로, 행은 종목 고르기로
-    el.onclick = function(){ pick(r); };
-    return el;
-  }
-
   /* ── 보유 종목의 초기 10거래일을 «화면이 열릴 때» 당겨 온다 (2026-08-05 사용자 선택) ──
-   * 보유엔 「＋를 누르는 순간」이 없다. 크론의 ③ 구멍 치유가 결국 메우지만 그건 «다음 16:45» 라,
+   * 보유엔 「여는 순간」을 기다릴 이유가 없다. 크론의 ③ 구멍 치유가 결국 메우지만 그건 «다음 16:45» 라,
    * 편입한 날 분봉을 못 본다. 그래서 이 자리에 뒀다 — 훅이 <b>단타 화면 한 곳</b>뿐이라
    * 포트폴리오 저장 경로(Pf::positionSave)를 키움에 매달지 않는다(그쪽이 느려지거나 같이 죽는다).
    *
@@ -15950,48 +16543,82 @@ CSS;
     var code = next.code;
     heldTried[code] = 1;
     heldFilling = code;
-    renderList();                                // 「채우는 중」 → 「받는 중」
+    if (topSrc === 'held' && topOn()) heldToTop();   // 「채우는 중」 → 「받는 중」
 
     var done = function(){
       heldFilling = null;
       /* 목록을 다시 읽어야 봉 수가 바뀐다. ★기다린 «뒤에» 다음 종목으로 넘어간다 —
          heldRows 가 아직 옛것이면 방금 채운 종목을 또 고른다(heldTried 가 막지만 헛돈다). */
-      return loadPool(true).then(function(){
+      return loadPool().then(function(){
         if (state.code === code) pick({ code: code, name: state.name });
         fillHeld();
       });
     };
-    fetch(API + 'held_init&code=' + encodeURIComponent(code), { credentials:'same-origin' })
+    /* ★적재는 «한 줄»(initChain)에 선다 — 아래 「열어 본 종목의 적재」와 같은 줄이다.
+       키움은 1 req/s 라, 화면을 열자마자 보유를 채우는 것과 내가 연 종목을 받는 것이 겹치면 서로 실패한다. */
+    initChain = initChain.then(function(){
+      return fetch(API + 'held_init&code=' + encodeURIComponent(code), { credentials:'same-origin' })
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          // 성공은 조용히 — 목록의 봉 수가 곧 답이다. 실패만 말한다(왜 안 채워졌는지 알아야 한다)
+          if (!d || !d.ok) toast(code + ' — ' + ((d && d.msg) || '분봉을 못 받았습니다') + ' (크론이 다시 시도합니다)');
+          return done();
+        })
+        .catch(function(){ return done(); });
+    });
+  }
+
+  /* ── 「최근조회」에 올리기 — 「＋ 담기」를 대신한다 (2026-10-07) ──────────────
+   * 종목을 열고 DT_DWELL(3초) 머물면 서버에 «봤다»고 알린다(action=view). 그 종목이 최근조회에 올라가고,
+   * 원장에 봉이 없으면 10거래일을 이어서 받는다(pool_init · 약 5초) — 받는 동안엔 오늘 분봉이 보이고,
+   * 끝나면 그 자리에서 10거래일 그림으로 바뀐다.
+   * ★훑어보는 클릭은 타이머가 끝나기 전에 다른 종목으로 넘어가므로 아무것도 쌓지 않는다.
+   * ★적재는 <b>한 번에 하나씩</b> 줄을 세운다(initChain) — 키움은 1 req/s 라 겹치면 서로 실패한다.
+   * ★같은 종목을 10분 안에 다시 알리지 않는다 — 종목을 오갈 때마다 서버를 두드릴 이유가 없다.
+   * ★키움 키가 없으면 적재를 부르지 않는다(오늘치만 보인다 — 발치의 안내와 같은 말). */
+  var viewT = null, viewedAt = {}, initChain = Promise.resolve();
+  function armView(code, name){
+    clearTimeout(viewT);
+    viewT = setTimeout(function(){ if (state.code === code) markViewed(code, name); }, DT_DWELL);
+  }
+  function markViewed(code, name){
+    if (viewedAt[code] && Date.now() - viewedAt[code] < 600000) return;
+    viewedAt[code] = Date.now();
+    fetch(API + 'view&code=' + encodeURIComponent(code) + '&name=' + encodeURIComponent(name),
+          { credentials:'same-origin' })
       .then(function(r){ return r.json(); })
       .then(function(d){
-        // 성공은 조용히 — 목록의 봉 수가 곧 답이다. 실패만 말한다(왜 안 채워졌는지 알아야 한다)
-        if (!d || !d.ok) toast(code + ' — ' + ((d && d.msg) || '분봉을 못 받았습니다') + ' (크론이 다시 시도합니다)');
-        return done();
+        if (!d || !d.ok) { delete viewedAt[code]; return; }
+        // 무엇을 내렸는지는 반드시 말한다 — 조용히 지우면 「종목이 사라졌다」가 된다
+        if (d.evicted && d.evicted.length) {
+          toast('최근조회 상한 ' + (d.max || poolMax) + '종목 — 가장 오래 안 본 ' + d.evicted.join(' · ') + ' 을(를) 내렸습니다.');
+        }
+        if (d.need_init && DT_HASKEY) {
+          loadPool();                              // 「받는 중」 배지가 먼저 뜬다
+          initChain = initChain.then(function(){ return initLoad(code); });
+        } else if (d.added || topSrc === 'recent') {
+          loadPool();                              // 최근조회의 순서·구성이 바뀌었다
+        }
       })
-      .catch(function(){ return done(); });
+      .catch(function(){ delete viewedAt[code]; });
+  }
+  function initLoad(code){
+    if (ledger[code]) return Promise.resolve();   // 줄을 서 있는 사이 다른 길(보유 초기 적재)이 이미 채웠다 — 두 번 받지 않는다
+    if (state.code === code) $('dtNote').textContent = '10거래일 분봉을 받는 중… (약 5초)';
+    return fetch(API + 'pool_init&code=' + encodeURIComponent(code), { credentials:'same-origin' })
+      .then(function(r){ return r.json(); })
+      .then(function(x){
+        if (!x || !x.ok) toast(code + ' — ' + ((x && x.msg) || '분봉을 못 받았습니다') + ' (다음 수집 때 다시 시도합니다)');
+        /* ★목록을 «기다린 뒤에» 다시 고른다 — ledger 가 아직 옛것이면 pick 이 여전히 오늘치만 그린다(비동기 순서 함정).
+           보고 있던 종목이 그 자리에서 10거래일 그림으로 바뀐다. */
+        return loadPool().then(function(){
+          if (state.code === code) pick({ code: code, name: state.name });
+        });
+      })
+      .catch(function(){ return loadPool(); });
   }
 
-  function removeCode(r){
-    /* ★보유 종목이면 «봉은 남는다» — 단타에서 빠져도 여전히 수집 대상이다(Dt::poolRemove).
-       빠지는 것은 슬롯 하나뿐이니 겁주는 문구를 그대로 쓰면 거짓말이 된다. */
-    var msg = r.held
-      ? r.name + ' 을(를) 단타 목록에서 뺍니다.\n\n보유 종목이라 분봉은 그대로 두고 매일 수집도 이어집니다.'
-              + '\n(목록에는 보유 종목으로 계속 보입니다)'
-      : r.name + ' 을(를) 단타에서 뺍니다.\n\n쌓아 둔 분봉도 함께 지웁니다. (재등록하면 10거래일을 다시 받습니다)';
-    if (!confirm(msg)) return;
-    fetch(API + 'pool_remove&code=' + r.code, { credentials:'same-origin' })
-      .then(function(x){ return x.json(); })
-      .then(function(d){
-        if (r.code === state.code) { state.code=''; state.name=''; }
-        toast(d.msg || '뺐습니다.');
-        loadPool(true);
-      });
-  }
-
-  /* 드래그 정렬은 없앴다(2026-08-26) — 목록의 순서가 등락률이 되면서 손으로 옮긴 순서가
-     설 자리가 없다. dt_pool.sort_no 는 담은 순 그대로 남아 FIFO(맨 아래 밀어내기) 우선순위만 정한다. */
-
-  // ── 종목 추가 ──────────────────────────────────────────────────────
+  // ── 종목 검색 — 목록에 없는 종목도 바로 열어 본다(담는 것이 아니다 · 머물면 최근조회에 오른다) ──
   var sugT = null;
   $('dtQ').addEventListener('input', function(){
     clearTimeout(sugT);
@@ -16020,39 +16647,15 @@ CSS;
         list.slice(0, 12).forEach(function(s){
           var el = document.createElement('div');
           el.className = 's';
-          el.innerHTML = '<span>' + s.name + '</span><span class="c">' + s.code + '</span>';
-          el.onclick = function(){ addCode(s.code, s.name); };
+          el.innerHTML = '<span>' + QuantBadge.esc(s.name) + '</span><span class="c">' + QuantBadge.esc(s.code) + '</span>';
+          el.onclick = function(){
+            $('dtSug').style.display='none';
+            $('dtQ').value = '';
+            pick({ code: s.code, name: s.name });
+          };
           box.appendChild(el);
         });
         box.style.display = 'block';
-      });
-  }
-
-  function addCode(code, name){
-    $('dtSug').style.display='none';
-    $('dtQ').value = '';
-    fetch(API + 'pool_add&code=' + encodeURIComponent(code) + '&name=' + encodeURIComponent(name),
-          { credentials:'same-origin' })
-      .then(function(r){ return r.json(); })
-      .then(function(d){
-        // 실패하면 상위 종목 패널의 「담기」 버튼을 원래대로 되돌린다(눌린 채 「…」로 굳지 않게)
-        if (d.error || !d.ok) { toast(d.error || d.msg || '담지 못했습니다.'); renderTop(); return; }
-        toast(d.msg);
-        loadPool(true);
-        // 초기 적재는 5초쯤 걸린다 — 버튼을 잡아 두지 않고 «받는 중» 배지로 알린다
-        fetch(API + 'pool_init&code=' + encodeURIComponent(code), { credentials:'same-origin' })
-          .then(function(r){ return r.json(); })
-          .then(function(x){
-            toast(code + ' — ' + (x.msg || '완료'));
-            /* ★적재가 «끝난 뒤에» 다시 고른다 — 담기 직후(적재 전)에 바꾸면 빈 차트가 잠깐 뜬다.
-               미리보기로 보고 있던 종목이 그 자리에서 10거래일 그림으로 바뀐다.
-               ★loadPool 을 «기다린 뒤에» 부른다 — poolSet 이 아직 안 채워졌으면 pick 이
-                 여전히 미리보기로 판정한다(비동기 순서 함정). */
-            loadPool(true).then(function(){
-              if (state.code === code) pick({ code: code, name: state.name });
-            });
-          })
-          .catch(function(){ loadPool(true); });
       });
   }
 
@@ -16060,23 +16663,19 @@ CSS;
   function pick(r){
     if (!r || !r.code) return;
     state.code = r.code; state.name = r.name || r.code;
-    /* ★owned = 「원장(dt_min)에 10거래일이 쌓이는 종목인가」다 — 담은 것 «∪» 보유한 것.
-       보유 종목도 크론이 매일 수집하므로(Dt::targetCodes) 미리보기로 판정하면 거짓말이 된다. */
-    state.owned = !!(poolSet[r.code] || heldSet[r.code]);
+    /* ★owned = 「원장(dt_min)에 봉이 쌓여 있는 종목인가」다 — 목록 소속이 아니라 «실제로 있나»를 본다(ledger).
+       방금 편입했거나 처음 여는 종목은 수집 대상이어도 아직 봉이 없다 — 그때는 오늘치(미리보기)가 정직한 그림이다. */
+    state.owned = !!ledger[r.code];
     $('dtTitle').innerHTML = QuantBadge.esc(state.name)
       + '<span class="c" id="dtCode">' + r.code + '</span>'
-      + (state.owned ? '' : '<span class="dt-bdg prev" title="담지 않은 종목 — 오늘 분봉과 일봉만 보입니다">미리보기</span>');
-    $('dtAdd').style.display = state.owned ? 'none' : '';
-    $('dtAdd').disabled = false;
+      + (state.owned ? '' : '<span class="dt-bdg prev" title="아직 10거래일을 받지 않은 종목 — 오늘 분봉과 일봉만 보입니다'
+                          + (DT_HASKEY ? ' (잠시 머물면 받아 옵니다)' : '') + '">미리보기</span>');
     syncSpan();
-    // 두 구획을 함께 짚는다 — 겹치는 종목(담았고 보유이기도)은 양쪽 다 켜진다(같은 종목이니 맞는 그림)
-    Array.prototype.forEach.call($('dtList').querySelectorAll('.dt-it'), function(el){
-      el.classList.toggle('on', el.dataset.code === r.code);
-    });
-    // 상위 종목 패널도 같은 종목을 짚어 준다 — 두 목록에 같은 종목이 있을 때 눈이 헤매지 않게
+    // 목록에서 같은 종목을 짚어 준다
     Array.prototype.forEach.call($('dtTopList').children, function(el){
       if (el.classList) el.classList.toggle('on', el.dataset.code === r.code);
     });
+    armView(r.code, state.name);   // 머물면 최근조회에 오른다(훑어보는 클릭은 여기서 끝난다)
     drawFills();     // 마커 원본을 먼저 받아 둔다 — 각 패널이 봉을 실은 뒤 스스로 얹는다
     drawMain();
     drawSub();
@@ -16242,7 +16841,7 @@ CSS;
     Array.prototype.forEach.call($('dtSpan').querySelectorAll('button'), function(b){
       var m = b.getAttribute('data-m');
       b.disabled = pv && m !== 'today';
-      b.title = b.disabled ? '담아야 여러 날을 볼 수 있습니다 (미리보기는 오늘치뿐)' : '';
+      b.title = b.disabled ? '10거래일을 받은 뒤에 볼 수 있습니다 (지금은 오늘치뿐)' : '';
       if (pv) b.classList.toggle('on', m === 'today');
     });
   }
@@ -16262,7 +16861,7 @@ CSS;
         applySpan();
         applyFills();
         $('dtNote').textContent = rows.length
-          ? '미리보기 · 오늘 ' + rows.length + '봉 — 담으면 10거래일이 쌓입니다'
+          ? '오늘 ' + rows.length + '봉' + (DT_HASKEY ? ' — 잠시 머물면 10거래일을 받아 옵니다' : '')
           : '오늘 분봉이 없습니다 (휴장일이거나 장 시작 전) — 아래 일봉은 그대로 보입니다';
       });
       return;
@@ -16300,7 +16899,7 @@ CSS;
     if (!state.owned) {
       state.subRows = [];
       sub.setData([], true);
-      $('dtSubNote').textContent = '담으면 보입니다 — 10거래일 원장이 필요합니다';
+      $('dtSubNote').textContent = '10거래일을 받으면 보입니다' + (DT_HASKEY ? ' (잠시 머물면 받아 옵니다)' : '');
       return;
     }
     var code = state.code, from = fromOf(10);
@@ -16482,7 +17081,10 @@ CSS;
       /* ★state.live 를 함께 본다 — 「LIVE 꺼짐」은 이제 차트뿐 아니라 <b>목록 시세</b>도 뜻한다
        *   (배지 설명이 그렇게 적혀 있다). 끄고도 뒤에서 콜이 나가면 그 글자가 거짓이 된다. */
       if (!state.live || !isOpen()) return;   // 장 밖에서는 값이 안 변한다 — 서버도 같은 판정으로 막는다
-      loadPool(true).then(fillHeld);
+      loadPool().then(fillHeld);
+      /* Top-Pick 도 이제 «항상 수집» 대상이라(2026-10-07) 시세가 10초로 온다 — 보고 있을 때만 목록을 다시 읽는다.
+         관심그룹은 여전히 느린 시계(아래 60초)다: 그 목록의 종목은 실시간 대상이 아니다(열어 본 것만 최근조회로 온다). */
+      if (topSrc === 'watch') loadTop();
     }, DT_TICK);
     /* ★느린 시계는 그대로 둔다 — 하는 일이 다르다.
      *   빠른 시계(위): 시세를 새로 «받는다» · 장중에만
@@ -16490,12 +17092,12 @@ CSS;
      *   여기서 나타난다(heldTried 가 되풀이를 막는다). 장 밖에서도 돌아야 하는 이유가 그것이다.
      *   탐색 패널(관심·시총)은 전종목 표(크론 주기)를 읽는 목록이라 촘촘히 할 값어치가 없다. */
     setInterval(function(){
-      if (!state.live || !isOpen()) loadPool(true).then(fillHeld);
-      if (topStart === 0) loadTop(null, 0);
+      if (!state.live || !isOpen()) loadPool().then(fillHeld);
+      if (topSrc !== 'held' && topSrc !== 'recent') loadTop();   // 보유·최근조회는 loadPool 이 이미 다시 세웠다
     }, 60000);
 
-    loadPool(false).then(fillHeld);
-    loadTop(null, 0);
+    loadPool().then(fillHeld);
+    loadTop();
   });
 })();
 </script>
@@ -16503,33 +17105,7 @@ JS;
     echo '</body></html>';
 }
 
-// ══════════════════════════════════════════════════════════════════════
-//  멀티차트 (2026-09-04 · 상단 메뉴 독립 항목 — 처음 하루는 단타 하위탭이었다)
-// ══════════════════════════════════════════════════════════════════════
-/**
- * 단타에 등록된 종목(단타 풀 ∪ 보유 — Dt::targetCodes 와 같은 집합)의 일봉을 <b>가로×세로 격자</b>로 한눈에.
- * HTS 의 「멀티 차트」 자리다(2026-09-04 사용자 별첨2). 상단에서 칸 수를 고르고 일봉/주봉을 바꾼다.
- * 상단 메뉴 「모닝브리핑·단타·멀티차트·포트폴리오」의 독립 항목이다(같은 날 사용자 지시 — 단타 «옆»이지 «안»이 아니다).
- *
- * ★차트는 단타 일봉 패널 <b>그대로</b>다 — 구성 ④(다크 관찰용) · 차트틀·지표 키 'short'(단타와 나눠 쓴다).
- *   기간은 «이 화면»이 따로 기억한다(chart_pref.view_json 의 'multi' 행 — 기간의 주인은 화면이다) ·
- *   격자(열×행)는 주소(&c=&r=)가 상태이고 마지막 선택은 쿠키(mc_grid)에 남는다.
- * ★분류 「전체 · 보유 · 단타」(같은 날 2차 · 사용자 제안) — 주소(&f=)가 상태 · 마지막 선택은 쿠키(mc_filter) ·
- *   둘 다 없으면 <b>보유</b>(이 화면을 여는 이유는 대개 「내가 산 것이 어떤가」다). 분류는 «보는 범위»일 뿐이라
- *   판정도 수집 대상도 바꾸지 않는다. 겹치는 종목(보유이면서 단타에도 담김)은 두 분류에 다 나온다.
- * ★격자보다 종목이 많으면 <b>쪽</b>으로 넘긴다(&p= · ‹ › 버튼·←→ 키 · HTS 멀티차트 방식). 처음엔 아래로
- *   스크롤하게 두었는데 보이지 않는 종목이 «없는 종목»으로 읽혔다(사용자 — 「나머지는 어떻게 보나」).
- *   칸은 전부 만들어 두고 다른 쪽은 숨긴다 — 바 하나가 전부를 조종하려면 차트가 처음부터 바에 묶여 있어야 한다.
- *   ★숨긴 채(폭 0) 잡힌 봉 간격은 뜻이 없다 — 쪽을 펴는 순간 그 쪽 차트의 창을 다시 잰다(setViewDays 재적용).
- * ★기간 바·지표 바는 <b>하나</b>가 격자 전체를 조종한다(갤러리와 같은 방식) — 차트마다 달면 바가 N개다.
- *   그래서 전체화면·범례는 기본 꺼짐(ChartFeat::SCREENS['multi']) — 범례는 켜면 칸 머리줄에 붙는다.
- * ★일봉은 기존 경로 그대로(action=daily · 새 수집 없음). 대상 종목이라 <b>키움(1 req/s · 버스트 2)</b>으로
- *   오므로 «둘씩» 차례로 받는다 — 한꺼번에 쏘면 429 로 서로 밀어낸다. <b>보이는 쪽부터</b> 받고 나머지는
- *   뒤이어 받아 둔다(쪽을 넘기면 그 쪽이 큐 맨 앞으로) — 그래서 두 번째 넘김부터는 기다림이 없다.
- * ★480일을 받는다(단타 일봉은 1000) — 키움 <b>한 콜(600봉)</b>로 끝나 종목당 1초 안에 온다.
- *   96주까지 「전체」 안에 든다. 더 긴 구간은 제목을 눌러 단타에서 본다.
- * ★새 판정을 세우지 않는다(단타 규칙 9) — 보는 자리다. 목록 접기·정렬은 단타 mergedRows() 와 같다.
- */
+/* (멀티차트 화면 pf_page_multi 는 2026-10-07 에 삭제 — 격자 배열은 관심그룹 화면 stock/lib/wgroup.php 가 물려받았다) */
 /* ═══════════════════════════════════════════════════════════════════
  *  마감 변동 리포트 (mode=move · 2026-09-04)
  *  15:50 dart_eod 끝의 📊 마감 변동 알림(pf_alert_move)이 «쏜 그 목록»(표 pf_move_hit)을 종목 카드로 편다 —
@@ -16545,7 +17121,30 @@ function pf_page_move(PDO $pdo, Pf $pf): void
     require_once __DIR__ . '/lib/alert.php';
     $F   = ChartFeat::vals('move', $pdo);
     $dq  = (string)($_GET['d'] ?? '');
-    $mv  = pf_move_hits($pdo, preg_match('/^\d{4}-\d{2}-\d{2}$/', $dq) ? $dq : null);
+
+    /* ── 관심그룹 보기 (2026-10-07 · &g=held|top|<id>) — 관심그룹 화면의 📊 가 여는 문 ──
+     * 「그 그룹에서 오늘 ±N% 넘게 움직인 종목」을 알림 기록과 «같은 카드»로 편다.
+     * ★알림 기록(pf_move_hit)이 아니다 — 그 표는 15:50 알림이 «쏜 것»만 담는다(보유·단타·Top-Pick).
+     *   그룹 보기는 그룹의 종목을 «지금» 시세(all_stock_info 의 오늘 등락률)로 거른다. 그래서 날짜 이동이 없고(오늘뿐)
+     *   아무것도 기록하지 않는다.
+     * ★판정은 같다 — pf_move_scan(…, 그 그룹의 종목) · 임계 Thr::EOD_MOVE_PCT · 오늘 갱신된 행만 · 같은 정렬·같은 꼬리표.
+     *   여기서 임계나 식을 다시 적지 않는다. */
+    $grp = null;
+    $gq  = $_GET['g'] ?? '';
+    if (is_scalar($gq) && (string)$gq !== '') {
+        try {
+            $wgm = new Wg($pdo);
+            $gid = Wg::gidOf((string)$gq);
+            foreach ($wgm->groupsAll() as $g) if ($g['id'] === $gid) $grp = $g;
+            if ($grp) {
+                $scan  = pf_move_scan($pdo, $wgm->codes($gid));
+                $today = date('Y-m-d');
+                $mv = ['date' => $today, 'n' => $scan['n'], 'prev' => null, 'next' => null, 'last' => $today,
+                       'rows' => array_map(fn($r) => ['price' => (int)round($r['price'])] + $r, $scan['rows'])];
+            }
+        } catch (Throwable $e) { $grp = null; }   // 관심그룹 표가 없으면 알림 기록 보기로 떨어진다
+    }
+    if (!$grp) $mv = pf_move_hits($pdo, preg_match('/^\d{4}-\d{2}-\d{2}$/', $dq) ? $dq : null);
     $rows = $mv['rows'];
     $thr  = Thr::pct(Thr::EOD_MOVE_PCT);
     $up   = count(array_filter($rows, fn($r) => $r['rate'] >= 0));
@@ -16559,7 +17158,7 @@ function pf_page_move(PDO $pdo, Pf $pf): void
     }
 
     echo '<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8">';
-    echo '<title>마감 변동 · ' . pf_h($mv['date'] ?? '기록 없음') . ' · 주식 포트폴리오</title>';
+    echo '<title>마감 변동 · ' . pf_h($grp ? $grp['name'] : ($mv['date'] ?? '기록 없음')) . ' · 주식 포트폴리오</title>';
     echo '<meta name="viewport" content="width=device-width, initial-scale=1">';
     echo '<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css"/>';
     pf_css();
@@ -16644,10 +17243,21 @@ body.dt-dark{background:var(--bg);color:var(--ink);display:flex;flex-direction:c
 CSS;
 
     echo '</head><body class="dt-dark">';
-    pf_topbar('short');   // 단타의 곁 화면 — 메뉴 하이라이트는 단타에 둔다(상단 메뉴에 자기 항목이 없다)
+    // 곁 화면이라 상단 메뉴에 자기 항목이 없다 — 들어온 문 쪽에 하이라이트를 둔다(알림 기록 = 단타 · 그룹 보기 = 관심그룹)
+    $fromShort = ((string)($_GET['from'] ?? '') === 'short');   // 단타의 📊 로 들어왔다 — 돌아가는 문도 단타다
+    pf_topbar($grp && !$fromShort ? 'wgroup' : 'short');
 
     echo '<div id="mv-bar">';
-    echo '<span class="dt-t">📊 마감 변동<span class="c">' . pf_h($mv['date'] ?? '기록 없음') . '</span></span>';
+    echo '<span class="dt-t">📊 마감 변동<span class="c">'
+       . pf_h($grp ? $grp['name'] . ' · ' . $mv['date'] : ($mv['date'] ?? '기록 없음')) . '</span></span>';
+    if ($grp) {
+        // 그룹 보기 — 날짜 이동 대신 «돌아가는 문»과 «알림 기록으로 가는 문»
+        echo '<span class="mv-nav">' . ($fromShort
+            ? '<a class="dt-chip" href="/stock/index.php?mode=short" title="단타 화면으로 돌아갑니다">‹ 단타</a>'
+            : '<a class="dt-chip" href="/stock/index.php?mode=wgroup&g=' . pf_h($grp['key'])
+              . '" title="관심그룹 화면으로 돌아갑니다">‹ ' . pf_h($grp['name']) . '</a>')
+           . '<a class="dt-chip" href="/stock/index.php?mode=move" title="15:50 알림이 쏜 기록(보유·최근조회·Top-Pick) — 날짜별로 봅니다">알림 기록</a></span>';
+    } else {
     /* 날짜 이동 — «기록이 있는 날»로만. 없으면 비활성(빈 날을 한 장씩 넘기게 하지 않는다) */
     $nav = function (?string $to, string $label, string $none) {
         return '<a class="dt-chip' . ($to ? '' : ' dis') . '" href="' . ($to ? '/stock/index.php?mode=move&d=' . pf_h($to) : '#')
@@ -16656,9 +17266,10 @@ CSS;
     echo '<span class="mv-nav">' . $nav($mv['prev'], '‹ 이전', '이전 기록 없음') . $nav($mv['next'], '다음 ›', '다음 기록 없음');
     if (!$isLast && $mv['last']) echo '<a class="dt-chip" href="/stock/index.php?mode=move" title="마지막 발생일 ' . pf_h($mv['last']) . '">최근으로</a>';
     echo '</span>';
+    }
     if ($rows) {
-        // 알림 머리말과 같은 문장 — 「감시 N종목 중 ±5%↑ M건 (▲a ▼b)」
-        echo '<span class="mv-sum">감시 <b>' . (int)$mv['n'] . '</b>종목 중 ±' . $thr . '%↑ <b>' . count($rows) . '</b>건 '
+        // 알림 머리말과 같은 문장 — 「감시 N종목 중 ±5%↑ M건 (▲a ▼b)」 (그룹 보기에서는 그 그룹의 종목 수가 N 이다)
+        echo '<span class="mv-sum">' . ($grp ? '그룹' : '감시') . ' <b>' . (int)$mv['n'] . '</b>종목 중 ±' . $thr . '%↑ <b>' . count($rows) . '</b>건 '
            . '(<span class="up">▲' . $up . '</span> <span class="down">▼' . $dn . '</span>)</span>';
     }
     if ($F['overlay.intraday_ref']) {
@@ -16668,26 +17279,39 @@ CSS;
     /* 도구모음은 모듈이 그린다 — 바 «하나»가 카드 전체를 조종한다(멀티차트·갤러리 방식). 여기에 버튼을 손으로 적지 않는다. */
     echo '<span id="mvPBar"></span><span id="mvIBar"></span>';
     echo '<a class="dt-chip" href="/stock/index.php?mode=short" title="단타 화면으로">단타</a>'
-       . '<a class="dt-chip" href="/stock/index.php?mode=multi" title="멀티차트로">멀티차트</a>';
-    echo '<span class="dt-note" id="mvNote" title="종목 목록만 그 날의 기록이고, 차트와 뉴스는 열 때마다 새로 받습니다">차트·뉴스는 지금 기준</span>';
+       . '<a class="dt-chip" href="/stock/index.php?mode=wgroup" title="관심그룹 화면으로 (그룹 종목의 일봉 격자)">관심그룹</a>';
+    echo $grp
+       ? '<span class="dt-note" id="mvNote" title="알림 기록이 아닙니다 — 이 그룹의 종목을 지금 시세(오늘 등락률)로 거른 것이라 열 때마다 달라질 수 있습니다">목록·차트·뉴스 모두 지금 기준</span>'
+       : '<span class="dt-note" id="mvNote" title="종목 목록만 그 날의 기록이고, 차트와 뉴스는 열 때마다 새로 받습니다">차트·뉴스는 지금 기준</span>';
     echo '</div>';
 
     echo '<div id="mv-list">';
     if (!$rows) {
         // 빈 칸에는 「왜 비었는지」를 적는다 — 기록이 아예 없는 것과 그 날만 없는 것을 가른다
-        if ($mv['last'] === null) {
-            echo '<div class="mv-empty">아직 기록이 없습니다.<br>평일 15:50 마감 뒤 관심·단타·보유 종목 중 ±' . $thr
+        if ($grp) {
+            // 그룹 보기 — 「움직인 종목이 없다」와 「그룹이 비었다」를 가른다. 장 시작 전·휴장일엔 오늘 시세가 없어 늘 0건이다
+            echo '<div class="mv-empty">' . ((int)$mv['n'] === 0
+                ? '「' . pf_h($grp['name']) . '」 그룹에 종목이 없습니다.'
+                : '「' . pf_h($grp['name']) . '」 ' . (int)$mv['n'] . '종목 중 오늘 ±' . $thr . '% 넘게 움직인 종목이 없습니다.<br>'
+                  . '<span style="font-size:12px">(오늘 갱신된 시세만 봅니다 — 장 시작 전이나 휴장일에는 비어 있습니다)</span>')
+               . '<br>' . ($fromShort
+                    ? '<a href="/stock/index.php?mode=short">단타로 돌아가기</a>'
+                    : '<a href="/stock/index.php?mode=wgroup&g=' . pf_h($grp['key']) . '">관심그룹으로 돌아가기</a>') . '</div>';
+        } elseif ($mv['last'] === null) {
+            echo '<div class="mv-empty">아직 기록이 없습니다.<br>평일 15:50 마감 뒤 Top-Pick·최근조회·보유 종목 중 ±' . $thr
                . '% 를 넘은 종목이 있으면<br>Pushover 알림과 함께 여기 쌓입니다.</div>';
         } else {
             echo '<div class="mv-empty">' . pf_h($mv['date']) . ' 에는 기록이 없습니다.<br>'
                . '<a href="/stock/index.php?mode=move">마지막 발생 ' . pf_h($mv['last']) . ' 보기</a></div>';
         }
     }
-    $BDG = ['보유' => 'held', '단타' => 'pool', '관심' => 'watch'];
+    /* 이름표는 알림이 쏜 그대로(pf_move_hit.tags)다. ☆ 목록은 2026-10-07 에 「관심」→「Top-Pick」으로 바뀌어
+     * 옛 기록에는 「관심」이 남아 있다 — 기록은 두고 «보여 줄 때만» 지금 이름으로 읽는다(pf_move_tag_label). */
+    $BDG = ['보유' => 'held', pf_pool_label() => 'pool', pf_watch_label() => 'watch'];
     foreach ($rows as $i => $r) {
         $c    = $r['code'];
         $cls  = $r['rate'] >= 0 ? 'up' : 'down';
-        $tags = $r['tags'] !== '' ? explode('·', $r['tags']) : [];
+        $tags = $r['tags'] !== '' ? array_map('pf_move_tag_label', explode('·', $r['tags'])) : [];
         echo '<section class="mv-card' . (in_array('보유', $tags, true) ? ' hld' : '') . '" data-code="' . pf_h($c) . '">';
         echo '<div class="mv-head">';
         echo '<span class="ar ' . $cls . '">' . ($cls === 'up' ? '▲' : '▼') . '</span>';
@@ -16791,352 +17415,6 @@ CSS;
         .then(next);
     }
     next(); next();
-  });
-})();
-</script>
-JS;
-    echo '</body></html>';
-}
-
-function pf_page_multi(PDO $pdo, Pf $pf): void
-{
-    $dt = new Dt($pdo);
-    $dt->ensureTables();
-    // 머리줄의 현재가·등락률 — 단타 목록(pool_list)과 같은 경로로 «보는 종목만» 새로 받는다. 실패해도 격자는 뜬다
-    try { $dt->refreshQuotesLive(); } catch (Throwable $e) { /* 낡은 값으로 계속 */ }
-    $F = ChartFeat::vals('multi', $pdo);
-
-    /* 격자 — 주소가 상태다(&c=열 &r=행). 없으면 마지막 선택(쿠키), 그것도 없으면 3×2. */
-    $ck = (string)($_COOKIE['mc_grid'] ?? '');
-    [$cc, $cr] = preg_match('/^(\d)x(\d)$/', $ck, $m) ? [(int)$m[1], (int)$m[2]] : [3, 2];
-    $cols = max(1, min(6, (int)($_GET['c'] ?? $cc)));
-    $rows = max(1, min(4, (int)($_GET['r'] ?? $cr)));
-
-    /* 분류 — 주소(&f=) → 쿠키(mc_filter) → «보유». 모르는 값은 보유로 본다(빈 화면을 만들지 않는다) */
-    $FILTERS = ['all' => '전체', 'held' => '보유', 'pool' => '단타'];
-    $fck = (string)($_COOKIE['mc_filter'] ?? '');
-    $f   = (string)($_GET['f'] ?? (isset($FILTERS[$fck]) ? $fck : 'held'));
-    if (!isset($FILTERS[$f])) $f = 'held';
-
-    /* 목록 — 단타 화면의 mergedRows() 와 같은 접기(겹치면 «보유 행»을 바탕으로 두고 단타 깃발만 더한다) ·
-     * 등락률 내림차순. 분류는 두 깃발(held·pool)로 거른다 — 합집합이 「전체」다. */
-    $by = [];
-    foreach ($dt->heldList() as $r) { $r['held'] = 1; $r['pool'] = 0; $by[$r['code']] = $r; }
-    foreach ($dt->poolList() as $r) {
-        if (isset($by[$r['code']])) { $by[$r['code']]['pool'] = 1; continue; }
-        $r['held'] = 0; $r['pool'] = 1; $by[$r['code']] = $r;
-    }
-    $all = array_values($by);
-    usort($all, fn($a, $b) => ((float)($b['rate'] ?? 0)) <=> ((float)($a['rate'] ?? 0)));
-    $cnt = ['all' => count($all), 'held' => 0, 'pool' => 0];
-    foreach ($all as $r) { if ($r['held']) $cnt['held']++; if ($r['pool']) $cnt['pool']++; }
-    $list  = ($f === 'all') ? $all : array_values(array_filter($all, fn($r) => !empty($r[$f])));
-    $items = array_map(fn($r) => [
-        'code'  => (string)$r['code'],
-        'name'  => (string)($r['name'] ?? $r['code']),
-        'price' => $r['price'] ?? null,
-        'rate'  => $r['rate'] ?? null,
-        'held'  => (int)($r['held'] ?? 0),
-        'pool'  => (int)($r['pool'] ?? 0),
-        'open'  => !empty($r['open']) ? 1 : 0,
-    ], $list);
-
-    /* 쪽 — 격자(열×행)보다 많으면 넘긴다. 쪽도 주소(&p=)에 남긴다(북마크하면 그 쪽이 열린다). */
-    $per   = $cols * $rows;
-    $pages = max(1, (int)ceil(count($items) / $per));
-    $page  = max(1, min($pages, (int)($_GET['p'] ?? 1)));
-    $base  = '/stock/index.php?mode=multi&f=' . $f . '&c=' . $cols . '&r=' . $rows;
-
-    echo '<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8">';
-    echo '<title>멀티 차트 · 주식 포트폴리오</title>';
-    echo '<meta name="viewport" content="width=device-width, initial-scale=1">';
-    echo '<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css"/>';
-    pf_css();
-
-    /* 팔레트는 단타와 같은 값(차트 모듈 dark 테마·차트설정 갤러리와 같다) — 화면을 오가도 눈이 다시 적응하지 않게 */
-    echo <<<'CSS'
-<style>
-:root{
-  --bg:#0e1320; --panel:#141b2b; --panel-2:#1b2335; --line:#26304a;
-  --ink:#dfe6f2; --ink-dim:#8893ab; --ink-mute:#5b6884;
-  --up:#e8493f; --down:#2f7bd6; --accent:#d9a441;
-  --mono:'SFMono-Regular',ui-monospace,Consolas,'Roboto Mono',monospace;
-}
-html,body{height:100%;margin:0;overflow:hidden}
-body.dt-dark{background:var(--bg);color:var(--ink);display:flex;flex-direction:column}
-.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
-.up{color:var(--up)} .down{color:var(--down)} .flat{color:var(--ink-mute)}
-
-/* 도구모음 — 단타 .dt-bar 와 같은 모양(지표 바가 길어 줄을 바꾼다) */
-#mc-bar{flex:0 0 auto;display:flex;align-items:center;gap:9px;padding:6px 11px;
-  background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap;row-gap:5px}
-.dt-t{font-size:13.5px;font-weight:800;letter-spacing:-.01em}
-.dt-t .c{color:var(--ink-mute);font-family:var(--mono);font-size:11.5px;font-weight:600;margin-left:5px}
-.dt-chip{background:var(--panel-2);color:var(--ink-mute);border:1px solid var(--line);border-radius:6px;
-  padding:2px 9px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit}
-.dt-chip:hover{color:var(--ink)}
-.dt-chip.on{background:var(--accent);color:#0b1020;border-color:var(--accent)}
-.dt-chip:disabled{opacity:.35;cursor:default}
-.dt-note{font-size:11.5px;color:var(--ink-mute);margin-left:auto;font-family:var(--mono)}
-.mc-pick{font-size:11.5px;color:var(--ink-dim);white-space:nowrap}
-.mc-pick select{background:var(--panel-2);color:var(--ink);border:1px solid var(--line);border-radius:6px;
-  padding:2px 4px;font-size:12px;font-family:inherit;font-weight:700}
-/* 분류 칩 — 「전체 · 보유 · 단타」. 숫자는 그 분류의 종목 수(부분합이 전체와 맞는지 눈으로 확인된다) */
-.mc-filt{display:inline-flex;gap:4px}
-.mc-filt .dt-chip b{font-family:var(--mono);font-weight:700;margin-left:4px;opacity:.75}
-.mc-filt .dt-chip.on b{opacity:.85}
-/* 쪽 넘김 — ‹ 1/3 › · 한 쪽뿐이면 아예 안 그린다 */
-.mc-pg{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;color:var(--ink-dim)}
-.mc-pg .dt-chip{padding:1px 8px;font-size:13px;line-height:1.2}
-.mc-pg .no{font-family:var(--mono);font-variant-numeric:tabular-nums;min-width:34px;text-align:center}
-
-/* 격자 — 칸 높이는 JS 가 «보이는 영역 ÷ 행 수»로 잰다. 다른 쪽의 칸은 숨긴다(hidden) */
-#mc-grid{flex:1;min-height:0;overflow-y:auto;display:grid;gap:1px;background:var(--line);align-content:start}
-.mc-cell{display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--bg)}
-.mc-cell[hidden]{display:none}
-.mc-head{flex:0 0 auto;display:flex;align-items:baseline;gap:6px;padding:4px 9px 3px;white-space:nowrap;
-  overflow:hidden;font-size:12.5px;background:var(--panel)}
-/* 보유 종목 — 단타 목록의 초록 바탕(.dt-it.hld)과 같은 계열 · 배지와 «함께» 단다 */
-.mc-cell.hld .mc-head{background:rgba(64,178,104,.22)}
-.mc-head .nm{font-weight:800;color:var(--ink);text-decoration:none;overflow:hidden;text-overflow:ellipsis;min-width:0}
-.mc-head .nm:hover{color:var(--accent)}
-.mc-head .cd{font-family:var(--mono);font-size:11px;color:var(--ink-mute)}
-.mc-head .px{margin-left:auto;font-family:var(--mono);font-weight:700;font-variant-numeric:tabular-nums}
-.mc-head .rt{font-family:var(--mono);font-size:11.5px;font-variant-numeric:tabular-nums}
-.mc-head .st{font-size:10.5px;color:var(--ink-mute);font-family:var(--mono)}
-.mc-head .dc-leg-dark{font-size:10.5px}
-.mc-head .dc-leg-dark:empty{display:none}
-.mc-host{flex:1;min-height:0}
-.dt-bdg{display:inline-block;padding:0 5px;border-radius:4px;font-size:10px;font-weight:800;border:1px solid;
-  vertical-align:1px;flex:0 0 auto}
-.dt-bdg.held{color:#5dd58a;border-color:#1e5c3a;background:#12341f}
-.dt-bdg.slot{color:#93a4c3;border-color:#2c3a55;background:#1e2637}
-.mc-empty{grid-column:1/-1;display:flex;align-items:center;justify-content:center;min-height:240px;
-  color:var(--ink-mute);font-size:13px;text-align:center;line-height:1.8;background:var(--bg)}
-.mc-empty a{color:var(--accent)}
-</style>
-CSS;
-
-    echo '</head><body class="dt-dark">';
-    pf_topbar('multi');   // 상단 메뉴의 독립 항목(단타 다음 · 2026-09-04)
-
-    echo '<div id="mc-bar">';
-    echo '<span class="dt-t">멀티 차트<span class="c" id="mcCnt">' . count($items) . '종목</span></span>';
-    /* 분류 칩 — 고르면 주소로 간다(쪽은 1로 돌아간다). 숫자 = 그 분류의 종목 수 */
-    $tips = ['all' => '단타 풀과 보유를 합친 전부', 'held' => '포트폴리오에 살아 있는 포지션(보유·편입됨)',
-             'pool' => '단타에 ＋ 로 담은 종목(보유 중인 것도 포함)'];
-    echo '<span class="mc-filt" id="mcF">';
-    foreach ($FILTERS as $k => $lab) {
-        echo '<button type="button" class="dt-chip' . ($k === $f ? ' on' : '') . '" data-f="' . $k . '" title="' . pf_h($tips[$k]) . '">'
-           . $lab . '<b>' . $cnt[$k] . '</b></button>';
-    }
-    echo '</span>';
-    /* 쪽 넘김 — 격자보다 많을 때만. ←/→ 키로도 넘긴다 */
-    echo '<span class="mc-pg" id="mcPg"' . ($pages <= 1 ? ' hidden' : '') . '>'
-       . '<button type="button" class="dt-chip" id="mcPrev" title="이전 쪽 (←)">‹</button>'
-       . '<span class="no" id="mcPgNo">' . $page . '/' . $pages . '</span>'
-       . '<button type="button" class="dt-chip" id="mcNext" title="다음 쪽 (→)">›</button></span>';
-    echo '<span class="mc-pick" title="가로 × 세로 칸 수 — 넘치는 종목은 다음 쪽으로 넘어갑니다">격자 ';
-    echo '<select id="mcC">';
-    for ($i = 1; $i <= 6; $i++) echo '<option value="' . $i . '"' . ($i === $cols ? ' selected' : '') . '>' . $i . '</option>';
-    echo '</select> × <select id="mcR">';
-    for ($i = 1; $i <= 4; $i++) echo '<option value="' . $i . '"' . ($i === $rows ? ' selected' : '') . '>' . $i . '</option>';
-    echo '</select></span>';
-    if ($F['overlay.intraday_ref']) {
-        // 단타 일봉 패널과 같은 두 칩 — 격자 전체에 한꺼번에 먹는다
-        echo '<button type="button" id="mcTH" class="dt-chip on"'
-           . ' title="당일 기준 전고점(직전 60봉 최고가) 수평선 — 관찰용 기준선">당일전고</button>'
-           . '<button type="button" id="mcCP" class="dt-chip" title="현재가격선 표시/숨김">현재가</button>';
-    }
-    /* 도구모음은 모듈이 그린다 — 기간 바(일봉/주봉·160/240/480/전체·±)와 지표 바(차트틀·차트저장·＋지표).
-     * 바 «하나»가 격자 전체를 조종한다(갤러리 방식). 여기에 버튼을 손으로 적지 않는다. */
-    echo '<span id="mcPBar"></span><span id="mcIBar"></span>';
-    echo '<span class="dt-note" id="mcNote"></span></div>';
-
-    echo '<div id="mc-grid" style="grid-template-columns:repeat(' . $cols . ',1fr)">';
-    if (!$items) {
-        // 빈 칸에는 「왜 비었는지」를 적는다 — 분류마다 이유가 다르고, 다른 분류엔 있으면 그 길을 준다
-        $why = [
-            'all'  => '종목이 없습니다.<br><a href="/stock/index.php?mode=short">단타</a>에서 담거나 포트폴리오에 편입하면 나타납니다.',
-            'held' => '보유 종목이 없습니다.<br>포트폴리오에 편입하면 나타납니다.',
-            'pool' => '단타에 담은 종목이 없습니다.<br><a href="/stock/index.php?mode=short">단타</a>에서 ＋ 로 담으면 나타납니다.',
-        ][$f];
-        if ($f !== 'all' && $cnt['all'] > 0) {
-            $why .= '<br><a href="/stock/index.php?mode=multi&f=all&c=' . $cols . '&r=' . $rows . '">「전체」로 보기 — ' . $cnt['all'] . '종목</a>';
-        }
-        echo '<div class="mc-empty">' . $why . '</div>';
-    }
-    foreach ($items as $i => $it) {
-        $c    = $it['code'];
-        $rate = $it['rate'];
-        $cls  = ($rate === null) ? 'flat' : ($rate > 0 ? 'up' : ($rate < 0 ? 'down' : 'flat'));
-        $onPg = intdiv($i, $per) + 1 === $page;
-        echo '<div class="mc-cell' . ($it['held'] ? ' hld' : '') . '" data-code="' . pf_h($c) . '"' . ($onPg ? '' : ' hidden') . '>';
-        echo '<div class="mc-head">';
-        // 제목 = 단타로 가는 문(그 종목을 짚은 채 열린다) — 여기서 깊게 보려면 저기다
-        echo '<a class="nm" href="/stock/index.php?mode=short&code=' . pf_h($c) . '" title="단타에서 이 종목 보기">'
-           . pf_h($it['name']) . '</a>';
-        echo '<span class="cd">' . pf_h($c) . '</span>';
-        if ($it['held']) {
-            // 사이트 공통 어휘 — 「보유」=돈이 들어감 · 「편입됨」=자리만 있음
-            echo $it['open'] ? '<span class="dt-bdg held">보유</span>' : '<span class="dt-bdg slot">편입됨</span>';
-        }
-        if ($F['legend.values']) echo '<span class="dc-leg-dark" id="lg_' . pf_h($c) . '"></span>';
-        echo '<span class="px ' . $cls . '">' . ($it['price'] !== null ? number_format((float)$it['price']) : '—') . '</span>';
-        echo '<span class="rt ' . $cls . '">'
-           . ($rate !== null ? (($rate > 0 ? '+' : '') . number_format((float)$rate, 2) . '%') : '') . '</span>';
-        echo '<span class="st" id="st_' . pf_h($c) . '"></span>';
-        echo '</div>';
-        echo '<div class="mc-host" id="mc_' . pf_h($c) . '"></div>';
-        echo '</div>';
-    }
-    echo '</div>';
-
-    echo '<script src="/style/dailychart.js?v=62"></script>';
-    echo ChartFeat::boot('multi', $pdo);   // DC_SCREEN·DC_FEATS·DC_VIEW — 기간 기억은 'multi' 행
-    echo '<script>var MC_ITEMS=' . json_encode($items, JSON_UNESCAPED_UNICODE)
-       . ';var MC_COLS=' . $cols . ',MC_ROWS=' . $rows . ',MC_PAGE=' . $page . ',MC_F=' . json_encode($f)
-       . ',MC_BASE=' . json_encode($base) . ';</script>';
-
-    echo <<<'JS'
-<script>
-(function(){
-  var F = DailyChart.feats;
-  var $ = function(id){ return document.getElementById(id); };
-  var grid = $('mc-grid');
-
-  /* 격자 — 고르면 주소로 간다(주소가 상태다 · 북마크·공유). 쿠키에 남겨 다음엔 그대로 열린다. 분류는 유지·쪽은 1로. */
-  function pickGrid(){
-    var c = $('mcC').value, r = $('mcR').value;
-    document.cookie = 'mc_grid=' + c + 'x' + r + ';path=/stock;max-age=31536000;samesite=lax';
-    location.href = '/stock/index.php?mode=multi&f=' + MC_F + '&c=' + c + '&r=' + r;
-  }
-  $('mcC').onchange = pickGrid;
-  $('mcR').onchange = pickGrid;
-
-  /* 분류 — 칩을 누르면 쿠키에 남기고 주소로 간다(격자는 유지·쪽은 1로) */
-  Array.prototype.forEach.call(document.querySelectorAll('#mcF .dt-chip'), function(b){
-    b.onclick = function(){
-      var f = b.getAttribute('data-f');
-      document.cookie = 'mc_filter=' + f + ';path=/stock;max-age=31536000;samesite=lax';
-      location.href = '/stock/index.php?mode=multi&f=' + f + '&c=' + MC_COLS + '&r=' + MC_ROWS;
-    };
-  });
-
-  /* 칸 높이 = 보이는 영역 ÷ 행 수. 창 크기가 바뀌면 다시 잰다(차트는 ResizeObserver 로 따라온다) */
-  function fitRows(){
-    grid.style.gridAutoRows = Math.max(110, Math.floor(grid.clientHeight / MC_ROWS)) + 'px';
-  }
-  fitRows();
-  window.addEventListener('resize', fitRows);
-
-  function chip(id, fn){
-    var b = $(id);
-    if (!b) return;
-    b.onclick = function(){
-      var on = !b.classList.contains('on');
-      b.classList.toggle('on', on);
-      fn(on);
-    };
-  }
-
-  if (!MC_ITEMS.length) return;
-
-  /* ── 쪽 — 격자(열×행)보다 많으면 넘긴다 ──
-   * 칸은 전부 만들어 두고 다른 쪽은 hidden 으로 숨긴다(바 하나가 전부를 조종하려면 처음부터 묶여야 한다).
-   * 쪽은 주소(&p=)에 남긴다(replaceState — 새로고침·북마크하면 그 쪽). 넘기면 그 쪽 종목이 큐 맨 앞으로 간다. */
-  var per = MC_COLS * MC_ROWS, pages = Math.max(1, Math.ceil(MC_ITEMS.length / per)), page = MC_PAGE;
-  var cells = Array.prototype.slice.call(grid.querySelectorAll('.mc-cell'));
-  var onShown = null;                                   // 쪽을 편 뒤 할 일(차트가 준비되면 채워진다)
-  function pageOf(i){ return Math.floor(i / per) + 1; }
-  function showPage(p, first){
-    p = Math.max(1, Math.min(pages, p));
-    page = p;
-    cells.forEach(function(el, i){ el.hidden = pageOf(i) !== p; });
-    $('mcPgNo').textContent = p + '/' + pages;
-    $('mcPrev').disabled = p <= 1;
-    $('mcNext').disabled = p >= pages;
-    if (!first) {
-      try { history.replaceState(null, '', MC_BASE + '&p=' + p); } catch (e) {}
-      if (onShown) onShown(p);
-    }
-  }
-  $('mcPrev').onclick = function(){ showPage(page - 1); };
-  $('mcNext').onclick = function(){ showPage(page + 1); };
-  document.addEventListener('keydown', function(e){
-    var t = e.target && e.target.tagName;
-    if (t === 'INPUT' || t === 'SELECT' || t === 'TEXTAREA' || e.altKey || e.ctrlKey || e.metaKey) return;
-    if (e.key === 'ArrowLeft'  || e.key === 'PageUp')   { showPage(page - 1); e.preventDefault(); }
-    if (e.key === 'ArrowRight' || e.key === 'PageDown') { showPage(page + 1); e.preventDefault(); }
-  });
-  showPage(page, true);
-
-  DailyChart.load().then(function(){
-    var ref = F('overlay.intraday_ref');
-    var dcs = [], byCode = {};
-    /* 단타 일봉 패널과 같은 create() 옵션 세트(구성 ④) — screen:'' 이라 높이는 기억하지 않는다
-       (칸 높이는 격자가 정한다). 차트틀·지표 키는 'short' 라 단타에서 저장한 차트가 그대로 실린다. */
-    MC_ITEMS.forEach(function(it){
-      var host = $('mc_' + it.code);
-      if (!host) return;
-      var dc = DailyChart.create(host, { theme:'dark', key:'short', screen:'', resize:false,
-                                         todayHigh: ref,
-                                         curPrice: ref ? '#d9a441' : null,
-                                         legend: F('legend.values') ? ('lg_' + it.code) : null });
-      dcs.push(dc); byCode[it.code] = dc;
-    });
-    // 기간 바 — 기억 키는 DC_SCREEN('multi') · 전체화면은 차트가 여럿이라 없다
-    DailyChart.periodBar('mcPBar', dcs, {
-      theme:'dark', defaultIndex:0, fullscreen:false,
-      onChange: function(info){ $('mcNote').textContent = (info.tf === 'week' ? '주봉' : '일봉') + ' · ' + info.label; }
-    });
-    DailyChart.indicatorBar('mcIBar', dcs, { theme:'dark', key:'short', preset: F('preset.select') });
-    chip('mcTH', function(on){ dcs.forEach(function(dc){ dc.setTodayHigh(on); }); });
-    chip('mcCP', function(on){ dcs.forEach(function(dc){ dc.setCurPrice(on); }); });
-
-    /* 둘씩 차례로 받는다 — 대상 종목의 일봉은 키움(1 req/s · 버스트 2)에서 온다.
-       한꺼번에 쏘면 서로 429 로 밀어내고, 하나씩이면 17종목에 17초다. «보이는 쪽»부터 채우고 나머지는 뒤이어 받아 둔다. */
-    var queue = MC_ITEMS.map(function(it, i){ return { it: it, i: i }; }), total = queue.length, done = 0, fail = 0;
-    function prioritize(p){                               // 그 쪽의 종목을 큐 맨 앞으로(순서는 유지)
-      var head = [], tail = [];
-      queue.forEach(function(q){ (pageOf(q.i) === p ? head : tail).push(q); });
-      queue = head.concat(tail);
-    }
-    prioritize(page);
-    function prog(){
-      $('mcCnt').textContent = total + '종목' + ((done + fail) < total ? ' · ' + (done + fail) + '/' + total : '')
-                             + (fail ? ' · 실패 ' + fail : '');
-    }
-    function next(){
-      var q = queue.shift();
-      if (!q) return;
-      var it = q.it, dc = byCode[it.code], st = $('st_' + it.code);
-      if (!dc) { next(); return; }
-      st.textContent = '불러오는 중…';
-      dc.setCode(it.code);                                  // SUE 공시 마커·수평선은 모듈이 스스로 얹는다
-      DailyChart.fetchDaily(it.code, 480).then(function(rows){
-        if (!rows.length) { st.textContent = '데이터 없음'; fail++; return; }
-        dc.setData(rows);                                   // fit 하지 않는다 — 보이는 구간의 주인은 기간 바다
-        var r = dc.range();
-        st.textContent = r ? (r.from + ' ~ ' + r.to) : '';
-        done++;
-      }).catch(function(){ st.textContent = '일봉을 불러오지 못했습니다'; fail++; })
-        .then(function(){ prog(); next(); });
-    }
-    prog();
-    next(); next();
-
-    /* 쪽을 펴면 ①그 쪽부터 받고 ②숨어 있던 차트의 창을 다시 잰다 — 폭 0 인 채 잡힌 봉 간격은 뜻이 없어
-       그대로 두면 「전체」처럼 퍼져 보인다. ResizeObserver 가 폭을 잡은 뒤(한 프레임 뒤) 되적용한다. */
-    onShown = function(p){
-      prioritize(p);
-      setTimeout(function(){
-        MC_ITEMS.forEach(function(it, i){
-          var dc = byCode[it.code];
-          if (pageOf(i) === p && dc && dc.barCount()) dc.setViewDays(dc.viewDays());
-        });
-      }, 60);
-    };
   });
 })();
 </script>

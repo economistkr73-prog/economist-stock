@@ -185,7 +185,7 @@ function quote_sources(): array
                      . '(<code>Dt::refreshQuotesLive()</code> → 키움 <code>ka10095</code> · '
                      . '100종목까지 한 요청 · 실패하면 네이버 폴백). '
                      . '<b>포트폴리오 계열</b>(현황·포트폴리오 상세·보유종목·종목상세·매매히스토리 — '
-                     . '<code>pf_load_calc()</code>)과 <b>관심종목</b>은 화면에 들어올 때 보유 종목만 '
+                     . '<code>pf_load_calc()</code>)과 <b>Top-Pick</b>은 화면에 들어올 때 보유 종목만 '
                      . '네이버로 메운다(<code>Pf::refreshQuotes()</code> · 신선도 '
                      . NaverFinanceAPI::QUOTE_MAX_AGE . '초)',
             'keep'  => '스냅샷이라 보관 개념이 없다 — 덮어쓴다',
@@ -194,7 +194,7 @@ function quote_sources(): array
                 '★<b>사이트 전 주가의 단일 원천</b>이다. 네이버가 막히면 다섯 화면이 함께 멈춘다.',
                 '★정규 경로에 <b>DELETE … NOT IN</b> 이 있다 — 그래서 가드가 둘이다(2026-09-04): '
                 . '①한 시장이라도 못 받은 회차는 <b>삭제를 건너뛴다</b>(페이지 하나가 실패하면 그 시장이 통째로 빈다) '
-                . '②<b>지켜보는 종목</b>(포트폴리오·보유·관심·단타 풀 = <code>NaverFinanceAPI::keepCodes()</code>)은 '
+                . '②<b>지켜보는 종목</b>(포트폴리오·보유·Top-Pick·최근조회 = <code>NaverFinanceAPI::keepCodes()</code>)은 '
                 . '목록에 없어도 지우지 않는다.',
                 '★★<b>네이버 전종목 목록은 상장 종목을 빠뜨린다</b> — 실측 2026-09-04 유니트론텍 142210 '
                 . '(네이버 종목 페이지엔 KOSDAQ·거래중인데 marketValue 목록엔 없다) · 헝셩그룹 900270 · '
@@ -398,8 +398,8 @@ function quote_sources(): array
 
         'pf_daily' => [
             'label' => 'pf_daily',
-            'title' => '보유·관심 종목 일봉 이력',
-            'what'  => '(종목, 날짜) 당 OHLCV. <b>보유 + 관심 종목만</b> (전종목이 아니다)',
+            'title' => '보유·Top-Pick 종목 일봉 이력',
+            'what'  => '(종목, 날짜) 당 OHLCV. <b>보유 + Top-Pick 종목만</b> (전종목이 아니다)',
             'grain' => '일별 · 약 3년',
             'src'   => '네이버 일봉 (종목당 1콜 · 증분)',
             'tasks' => ['dart_eod', 'dart_daily'],
@@ -418,19 +418,21 @@ function quote_sources(): array
             'label' => 'dt_min · dt_min_log · dt_pool',
             'title' => '단타 1분봉 원장',
             'what'  => '(종목, 봉 시작시각) 당 OHLCV. <code>dt_min_log</code> 는 일자별 수집 상태, '
-                     . '<code>dt_pool</code> 은 단타 풀(상한 20)',
+                     . '<code>dt_pool</code> 은 「최근조회」(단타 화면에서 열어 본 종목 · 상한 ' . Dt::POOL_MAX . ')',
             'grain' => '1분봉',
             'src'   => '키움 REST <code>ka10080</code> → 실패 시 네이버 (당일치)',
             'tasks' => ['dt_min'],
-            'ui'    => '보유 종목의 초기 10거래일은 <b>단타 화면을 열 때</b> 화면이 하나씩 당겨 온다(<code>held_init</code>)',
+            'ui'    => '보유 종목의 초기 10거래일은 <b>단타 화면을 열 때</b> 화면이 하나씩 당겨 온다(<code>held_init</code>) · '
+                     . '그 밖의 종목은 <b>열어서 ' . Dt::VIEW_DWELL_SEC . '초 머물면</b> 받는다(<code>view</code> → <code>pool_init</code>)',
             'keep'  => '★<b>최근 10거래일만</b> — 매일 그 밖을 지운다',
             'probe' => 'dt_min',
             'warn'  => [
                 '★★<b>보관 창이 10거래일뿐이다.</b> 그 밖의 분봉은 매일 지워지고, 네이버는 7거래일까지만 주며 '
                 . '그 뒤로는 어떤 파라미터로도 못 받는다. 장기 분봉이 필요해지면 「지금부터」 따로 쌓아야 한다.',
-                '★수집 대상은 「단타 풀」이 아니라 <b>「풀 ∪ 보유」</b>다(<code>Dt::targetCodes()</code>). '
-                . '보유를 <code>dt_pool</code> 에 <b>담지 않는다</b> — 그 표는 상한 20 을 FIFO 로 지우는 표라 '
-                . '「＋」 한 번이 내가 산 종목의 봉을 통째로 지운다.',
+                '★수집 대상 = <b>「최근조회 ∪ 보유 ∪ Top-Pick」</b>이다(<code>Dt::targetCodes()</code> · 2026-10-07). '
+                . '직접 담는 단타 목록은 없앴다 — 보유·Top-Pick 은 <b>항상</b>, 그 밖은 <b>열어 본 것만</b> 쌓이고 '
+                . '보관 창(10거래일) 동안 다시 안 열면 크론이 내린다(<code>Dt::expireViews</code>). '
+                . '최근조회에서 내려가도 보유·Top-Pick 의 봉은 지우지 않는다(<code>Dt::poolRemove</code>).',
                 '★<b>봉 시각은 「시작」</b>이다(<code>Kiwoom::TS_BASE=\'start\'</code> · 실측 확정). '
                 . '잘못 잡으면 전 데이터가 1분씩 밀리고 <b>조용히</b> 깨진다.',
                 '★거래량 기준도 하나다 — <code>KIWOOM_NO_SOR=true</code>(KRX 단독). '
@@ -510,11 +512,11 @@ function quote_screens(): array
                  '★서버가 응답 전에 <code>Dt::refreshQuotesLive()</code> 를 지난다 — '
                  . '<b>수집 대상만</b> 키움 <code>ka10095</code> 한 요청(실측 34종목 0.03초)',
                  Dt::TICK_SEC . '초 (<code>Dt::TICK_SEC</code>)'],
-                ['메인 1분봉 · 보조 3분봉 (담은 종목)', 'dt_min',
+                ['메인 1분봉 · 보조 3분봉 (원장에 봉이 있는 종목)', 'dt_min',
                  '크론 <code>dt_min</code>(전일까지) + 장중엔 <b>키움 <code>ka10080</code></b> 으로 당일분을 덧댐'
                  . '(<code>Dt::todayBars()</code> · 메인·보조가 캐시를 나눠 써 <b>콜 1회</b>)',
                  '원장 전일까지 · 당일분 ' . Dt::TICK_SEC . '초 (보조는 60초)'],
-                ['미리보기 분봉 (안 담은 종목)', 'live:네이버 당일 1분봉',
+                ['미리보기 분봉 (아직 10거래일을 안 받은 종목)', 'live:네이버 당일 1분봉',
                  '<code>stock_analysis_api.php?module=stock&action=minute</code>', '즉시 (당일치뿐)'],
                 ['일봉 패널', 'live:<b>키움 <code>ka10081</code></b>(대상 종목) / 네이버(그 밖)',
                  '<code>…&action=daily</code> — <b>경로는 그대로</b>이고 안에서 소스만 가른다. '
@@ -550,13 +552,13 @@ function quote_screens(): array
         ],
 
         'fund' => [
-            'label' => '재무분석 · 관심종목',
+            'label' => '재무분석 · Top-Pick',
             'href'  => '/stock/index.php?mode=fund',
             'note'  => '한 줄에 <b>세 시계</b>가 섞여 있다 — 재무(분기)·상장주식수(T+1)·현재가(지금). '
                      . 'PER 이 이상하면 대개 분모(상장주식수)가 낡은 것이다.',
             'rows'  => [
                 ['현재가 · 시가총액', 'all_stock_info',
-                 '크론 + 관심종목 화면은 진입할 때 담은 종목만 갱신', "{$age}초 / 크론 주기"],
+                 '크론 + Top-Pick 화면은 진입할 때 담은 종목만 갱신', "{$age}초 / 크론 주기"],
                 ['PER·PBR 분모(상장주식수) · 거래종목 판정', 'krx_daily', '크론 <code>dart_krx</code> (매일 13:05)',
                  'T+1 (전 거래일 확정치)'],
                 ['매출·영업이익·순이익·자본', 'stock_financial', '크론 <code>dart_fresh</code> (평일 08:05)',
@@ -877,7 +879,7 @@ function quote_probe_all(PDO $pdo): array
                                              . ' (' . Dt::WINDOW_DAYS . '거래일)' : '—'],
         ['오늘 봉',      (int)($today['n'] ?? 0)
                             ? number_format((int)$today['n']) . '봉 / ' . (int)$today['c'] . '종목' : '없음'],
-        ['단타 풀',      (int)($pool['a'] ?? 0) . '종목 (상한 ' . Dt::POOL_MAX . ')'],
+        ['최근조회',     (int)($pool['a'] ?? 0) . '종목 (상한 ' . Dt::POOL_MAX . ')'],
         ['행 수 (추정)', quote_rows($meta, 'dt_min')],
         ['표 크기',      quote_size($meta, 'dt_min')],
     ]];

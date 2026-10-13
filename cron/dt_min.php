@@ -22,6 +22,7 @@
  *   init    code=005930  한 종목 10거래일 초기 적재
  *   diag    code=005930  ★키움 시각 기준·거래량 기준을 네이버와 대조 [V-1][V-4]
  *   status  적재 현황
+ *   flow    일별 수급(외인비·외인 순매수)을 손으로 받는다 — [code=005930] [pages=6]  (★크론에는 없다 — 받는 문은 재무분석의 「외인비」 버튼)
  *
  * SSH 실행 예
  *   php cron/dt_min.php job=diag code=005930
@@ -162,22 +163,42 @@ switch ($job) {
 
     // ══ 구멍 치유 ═══════════════════════════════════════════════════════
     case 'heal': {
-        $holes = $dt->holes(40);
+        $holes = $dt->holes(max(1, (int)($_GET['n'] ?? 40)));     // 종목 수 (n= 으로 한 번에 더 많이)
         if (!$holes) { say('구멍 없음 — 보관 창이 꽉 찼습니다.'); break; }
         $from = $dt->windowFrom();
-        $done = [];
-        foreach ($holes as $h) {
-            if (isset($done[$h['code']])) continue;      // 종목당 한 번이면 그 종목의 창이 다 채워진다
-            $done[$h['code']] = 1;
+        say('구멍 ' . count($holes) . '종목 (창 ' . $from . ' ~)');
+        foreach ($holes as $h) {                                  // 종목당 한 줄 — 한 번 받으면 그 종목의 창이 다 채워진다
             if (cron_bg_over()) { say('시간 예산 도달 — 나머지는 다음 실행에서'); break; }
             $r = dt_fetch_save($dt, $kw, $h['code'], $from);
             say('  치유 ' . $h['code'] . ' — ' . number_format($r['bars']) . '봉'
                 . ($r['err'] ? ' · ' . $r['err'] : ''));
-            if ($r['bars'] === 0) {
-                $dt->logSave($h['code'], $h['d'], 0, 'fail', null, $r['err'], null, null, true);
-            }
+            $dt->healMark($h['code'], $r['bars'] === 0 ? $r['err'] : null);   // 시도 횟수 — 끝내 안 메워지는 칸을 영원히 다시 받지 않게
             usleep(Kiwoom::GAP_USEC);
         }
+        break;
+    }
+
+    // ══ 일별 수급 — 외인비·투자자별 (수동) ══════════════════════════════
+    /* ★매일 도는 수집은 없다(2026-10-08 사용자 결정 — 외인비는 재무분석 상세의 버튼으로만 받는다 · classes/KwFlow.class).
+     *   여기는 표를 만들거나 손으로 받을 때 — code= 한 종목 · pages= 되짚을 콜 수(20거래일씩). */
+    case 'flow': {
+        $fl = new KwFlow($pdo);
+        $fl->ensureTable();
+        if (!$kw->hasKey()) { say('키움 인증키가 없습니다 (env/kiwoom.inc).'); break; }
+        $list  = $code !== '' ? [$code] : $dt->targetCodes();
+        $pages = max(0, (int)($_GET['pages'] ?? 0));
+        say('── 일별 수급 (' . count($list) . '종목' . ($pages ? ' · ' . $pages . '콜씩' : '') . ')');
+        $ok = 0; $bad = 0;
+        foreach ($list as $c) {
+            if (cron_bg_over()) { say('  시간 예산 도달 — 나머지는 다음 실행에서'); break; }
+            try {
+                $r = $fl->collect($kw, $c, $pages);
+                $ok++;
+                if ($r['first'] || $code !== '') say(sprintf('  %s %3d일%s', $c, $r['rows'], $r['first'] ? ' (처음 — 되짚음)' : ''));
+            } catch (Throwable $e) { $bad++; say('  ' . $c . ' 실패 — ' . $e->getMessage()); }
+            usleep(Kiwoom::GAP_USEC);
+        }
+        say("수급 — 성공 {$ok} · 실패 {$bad}");
         break;
     }
 
@@ -193,12 +214,14 @@ switch ($job) {
          * 보유 종목을 dt_pool 에 «담지» 않는 이유는 그 함수 주석에 있다(FIFO 가 봉을 지운다).
          * 아래 ③④⑤ 도 같은 단일본을 보므로 여기만 넓히면 어긋날 자리가 없다. */
         $codes = $dt->targetCodes();
-        if (!$codes) { say('수집할 종목이 없습니다 (단타 풀·보유 포지션 모두 비었습니다).'); break; }
+        if (!$codes) { say('수집할 종목이 없습니다 (최근조회·보유·Top-Pick 모두 비었습니다).'); break; }
+        /* ★2026-10-07 — 대상 = 최근조회(열어 본 것 · dt_pool) ∪ 항상 수집(보유 ∪ Top-Pick). 단일본은 여전히 Dt::targetCodes 다 */
         $nPool = count($dt->activeCodes());
         $nHeld = count($dt->heldCodes());
+        $nTop  = count($dt->topCodes());
         $from  = $dt->windowFrom();
-        say('── ① 당일 수집 (' . count($codes) . '종목 = 단타 ' . $nPool . ' + 보유 ' . $nHeld
-            . ' − 겹침 ' . max(0, $nPool + $nHeld - count($codes)) . ' · 창 ' . $from . ' ~)');
+        say('── ① 당일 수집 (' . count($codes) . '종목 = 최근조회 ' . $nPool . ' + 보유 ' . $nHeld . ' + Top-Pick ' . $nTop
+            . ' − 겹침 ' . max(0, $nPool + $nHeld + $nTop - count($codes)) . ' · 창 ' . $from . ' ~)');
 
         $ok = 0; $fail = 0; $errs = [];
         foreach ($codes as $c) {
@@ -214,18 +237,21 @@ switch ($job) {
         $p = $dt->prune();
         say('── ② 만료 삭제 — 봉 ' . number_format($p['bars']) . '행 · 로그 ' . $p['logs']
             . '행 · 해지종목 잔여 ' . $p['dead'] . '행 (창 시작 ' . $p['from'] . ')');
+        /* ②-b 최근조회 만료 — 보관 창(10거래일) 동안 한 번도 안 연 종목을 내린다(봉도 함께 · 항상 수집되는 종목의 봉은 남는다).
+         * ★수집 «다음»이다(②와 같은 자리) — 앞에 두면 방금 받을 종목을 받기 전에 지운다. */
+        $ex = $dt->expireViews();
+        say('   최근조회 만료 — ' . count($ex) . '종목' . ($ex ? ': ' . implode(' · ', $ex) : ''));
 
         // ── ③ 구멍 치유 ─────────────────────────────────────────────
+        /* ★2026-10-08 — 대상은 «종목» 수다(예전엔 (종목,날짜) 40칸이라 거래가 얇은 종목의 partial 이 자리를 다 먹었다).
+         *   무엇이 구멍인지는 Dt::holes() 한 곳이 정한다 — 거래한 날만 · 빈 칸 먼저 · 장 끝에 닿은 partial 은 온전한 하루. */
         $holes = $dt->holes(40);
-        say('── ③ 구멍 치유 — 대상 ' . count($holes) . '건');
-        $done = [];
+        say('── ③ 구멍 치유 — 대상 ' . count($holes) . '종목');
         foreach ($holes as $h) {
-            if (isset($done[$h['code']])) continue;
-            $done[$h['code']] = 1;
             if (cron_bg_over()) { say('  시간 예산 도달 — 나머지는 내일'); break; }
             $r = dt_fetch_save($dt, $kw, $h['code'], $from);
             say('  ' . $h['code'] . ' — ' . number_format($r['bars']) . '봉' . ($r['err'] ? ' · ' . $r['err'] : ''));
-            if ($r['bars'] === 0) $dt->logSave($h['code'], $h['d'], 0, 'fail', null, $r['err'], null, null, true);
+            $dt->healMark($h['code'], $r['bars'] === 0 ? $r['err'] : null);   // 시도 횟수 — 끝내 안 메워지는 칸을 영원히 다시 받지 않게
             usleep(Kiwoom::GAP_USEC);
         }
 

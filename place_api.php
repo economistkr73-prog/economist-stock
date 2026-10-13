@@ -391,6 +391,50 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
             break;
         }
 
+        // ── 🔖 북마크(가고 싶은 곳) — 소유자 전용(게스트 화이트리스트에 없다) ──
+        //  목록의 단일본은 이 응답이다 — 화면은 켜고 끌 때마다 bookmark_list 를 다시 받아 마커·목록·개수를 함께 그린다.
+        case 'bookmark_list': {
+            $feats = $place->bookmarkFeatures();
+            echo json_encode(['ok' => true, 'count' => count($feats), 'features' => $feats], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+        // 있는 장소를 켜고 끈다. memo 를 보내면 메모도 바꾸고(빈 값=지움), 안 보내면 그대로 둔다. url 은 출처로 붙는다.
+        case 'bookmark_set': {
+            $id = (int)($_POST['id'] ?? $_GET['id'] ?? 0);
+            if ($id <= 0) {
+                http_response_code(400);
+                echo json_encode(['ok' => false, 'msg' => 'id 가 필요합니다.']);
+                return;
+            }
+            $on   = (string)($_POST['on'] ?? $_GET['on'] ?? '1') !== '0';
+            $memo = isset($_POST['memo']) ? (string)$_POST['memo'] : (isset($_GET['memo']) ? (string)$_GET['memo'] : null);
+            $url  = trim((string)($_POST['url'] ?? $_GET['url'] ?? ''));
+            $now  = $place->bookmarkSet($id, $on, $memo);
+            if ($now && $url !== '') $place->bookmarkAddLink($id, $url);
+            echo json_encode(['ok' => true, 'id' => $id, 'on' => $now], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+        // 지도에 없는 곳(검색으로 찾은 곳)을 새로 등록하며 북마크 — SNS 에서 본 곳을 담는 길.
+        case 'bookmark_add': {
+            $name     = trim((string)($_POST['name'] ?? $_GET['name'] ?? ''));
+            $category = trim((string)($_POST['category'] ?? $_GET['category'] ?? 'travel'));
+            $hasCoord = (isset($_GET['lat']) || isset($_POST['lat'])) && (isset($_GET['lng']) || isset($_POST['lng']));
+            if ($name === '' || !$hasCoord) {
+                http_response_code(400);
+                echo json_encode(['ok' => false, 'msg' => '이름과 좌표가 필요합니다.']);
+                return;
+            }
+            $lat = (float)($_POST['lat'] ?? $_GET['lat']);
+            $lng = (float)($_POST['lng'] ?? $_GET['lng']);
+            $address = trim((string)($_POST['address'] ?? $_GET['address'] ?? ''));
+            $memo    = trim((string)($_POST['memo'] ?? $_GET['memo'] ?? ''));
+            $url     = trim((string)($_POST['url'] ?? $_GET['url'] ?? ''));
+            $newId = $place->bookmarkAddPlace($name, $category, $lat, $lng, $address, $memo !== '' ? $memo : null);
+            if ($newId > 0 && $url !== '') $place->bookmarkAddLink($newId, $url);
+            echo json_encode(['ok' => $newId > 0, 'id' => $newId], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+
         // ── 장소 삭제 (소유자 전용) — place_ref 는 FK CASCADE 로 함께 삭제 ──
         case 'place_delete': {
             $id = (int)($_GET['id'] ?? $_POST['id'] ?? 0);
@@ -769,6 +813,22 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
             $trip = $place->tripByToken($token);
             if (!$trip) { http_response_code(404); echo json_encode(['ok' => false, 'msg' => '공유 여행지도를 찾을 수 없습니다.']); return; }
             echo json_encode(['ok' => true, 'trip' => $trip], JSON_UNESCAPED_UNICODE);
+            break;
+        }
+
+        // ── 📋 장소 목록 문서(place_list.php) 링크 발급 (소유자 전용) ──
+        //  ids = 화면 좌측 리스트의 장소 id(콤마 · 보이던 순서 그대로). 문서는 열 때마다 place 에서 읽는다.
+        case 'list_share': {
+            $ids   = array_filter(array_map('intval', explode(',', (string)($_POST['ids'] ?? ''))), fn($n) => $n > 0);
+            $title = trim((string)($_POST['title'] ?? ''));
+            $ttl   = (int)($_POST['ttl'] ?? 2592000);   // 기본 30일
+            $res   = $ids ? $place->listShareCreate($title, $ids, $ttl) : null;
+            if ($res === null) {
+                http_response_code(400);
+                echo json_encode(['ok' => false, 'msg' => '담을 장소가 없습니다.'], JSON_UNESCAPED_UNICODE);
+                return;
+            }
+            echo json_encode(['ok' => true] + $res, JSON_UNESCAPED_UNICODE);
             break;
         }
 

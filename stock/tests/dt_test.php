@@ -120,7 +120,7 @@ t(!preg_match('/[^0-9A-Za-z]/', Dt::cleanCode("005930'; DROP TABLE")), '결과�
 t_head('statusOfBars');
 t(Dt::statusOfBars(381) === 'ok',      '381봉 = ok');
 t(Dt::statusOfBars(375) === 'ok',      '375봉 = ok (거래 없는 분이 빠질 수 있어 여유)');
-t(Dt::statusOfBars(200) === 'partial', '200봉 = partial (치유 대상)');
+t(Dt::statusOfBars(200) === 'partial', '200봉 = partial (치유 대상은 마지막 봉이 장 끝에 못 닿은 날뿐 — Dt::holes)');
 t(Dt::statusOfBars(0)   === 'none',    '0봉 = none (치유 대상)');
 
 // ══ 결과 ════════════════════════════════════════════════════════════════

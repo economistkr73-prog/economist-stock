@@ -784,6 +784,135 @@ class Place
         return ['type' => 'FeatureCollection', 'features' => $features];
     }
 
+    // ══ 🔖 북마크(가고 싶은 곳) — 장소에 붙는 표시 한 줄 ══
+    //  ★「찜」(rtPicks · travel_trip.picks_json)과 다르다 — 찜은 «이 여행»에 담은 것, 북마크는 «언젠가 갈 곳».
+    //  ★스냅샷을 뜨지 않는다 — place_id 참조만 갖는다(장소를 고치면 북마크도 함께 바뀐다).
+    //  DDL 은 «쓰는» 경로에서 표가 없을 때만 돈다. 읽기는 표가 없으면 빈 것으로 본다.
+    private function ensureBookmarkTable(): void {
+        $this->pdo->exec("CREATE TABLE IF NOT EXISTS place_bookmark (
+            place_id   BIGINT UNSIGNED NOT NULL,
+            memo       VARCHAR(500)    NULL,
+            created_at DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (place_id),
+            CONSTRAINT fk_place_bookmark FOREIGN KEY (place_id) REFERENCES place(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+    }
+    private static function isNoTable(\Throwable $e): bool {
+        return $e instanceof PDOException && $e->getCode() === '42S02';
+    }
+
+    /** 북마크 전부 → GeoJSON features (featureById 와 같은 properties + bm_memo·bm_at). 최근 담은 순. */
+    public function bookmarkFeatures(): array {
+        $sql = "SELECT p.id, p.name, p.category, p.lat, p.lng, p.phone,
+                       p.address, p.region_lv1, p.region_lv2,
+                       p.period_start, p.period_end, p.attributes, p.updated_at,
+                       b.memo AS bm_memo, b.created_at AS bm_at,
+                       (SELECT COUNT(*) FROM place_ref r WHERE r.place_id = p.id) AS ref_count,
+                       (SELECT GROUP_CONCAT(t.tag ORDER BY t.tag SEPARATOR ',') FROM place_tag t WHERE t.place_id = p.id AND t.kind <> 'month') AS tags,
+                       (SELECT GROUP_CONCAT(CONCAT(g.guide, ':', COALESCE(g.grade, '')) ORDER BY g.guide SEPARATOR ',') FROM place_guide g WHERE g.place_id = p.id) AS guides
+                FROM place_bookmark b
+                JOIN place p ON p.id = b.place_id
+                WHERE p.is_active = 1 AND p.lat IS NOT NULL AND p.lng IS NOT NULL
+                ORDER BY b.created_at DESC, p.id DESC";
+        try {
+            $rows = $this->pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC);
+        } catch (\Throwable $e) {
+            if (self::isNoTable($e)) return [];
+            throw $e;
+        }
+        $features = [];
+        foreach ($rows as $row) {
+            $features[] = [
+                'type' => 'Feature',
+                'geometry' => ['type' => 'Point', 'coordinates' => [(float)$row['lng'], (float)$row['lat']]],
+                'properties' => [
+                    'id'           => (int)$row['id'],
+                    'name'         => $row['name'],
+                    'category'     => $row['category'],
+                    'phone'        => $row['phone'],
+                    'address'      => $row['address'],
+                    'region_lv1'   => $row['region_lv1'],
+                    'region_lv2'   => $row['region_lv2'],
+                    'period_start' => $row['period_start'],
+                    'period_end'   => $row['period_end'],
+                    'attributes'   => $row['attributes'] ? json_decode($row['attributes'], true) : null,
+                    'updated_at'   => $row['updated_at'],
+                    'ref_count'    => (int)$row['ref_count'],
+                    'tags'         => $row['tags'] ? explode(',', $row['tags']) : [],
+                    'guides'       => self::parseGuides($row['guides'] ?? null),
+                    'bm_memo'      => $row['bm_memo'],
+                    'bm_at'        => $row['bm_at'],
+                ],
+            ];
+        }
+        return $features;
+    }
+
+    /** 북마크 켜기/끄기. $memo 가 null 이면 메모는 건드리지 않는다(켜기만). @return bool 지금 북마크인가 */
+    public function bookmarkSet(int $placeId, bool $on, ?string $memo = null): bool {
+        if ($placeId <= 0) return false;
+        if (!$on) {
+            try {
+                $this->pdo->prepare("DELETE FROM place_bookmark WHERE place_id = ?")->execute([$placeId]);
+            } catch (\Throwable $e) {
+                if (!self::isNoTable($e)) throw $e;
+            }
+            return false;
+        }
+        if ($memo !== null) { $memo = trim($memo); if (mb_strlen($memo) > 500) $memo = mb_substr($memo, 0, 500); }
+        $run = function () use ($placeId, $memo) {
+            $st = $this->pdo->prepare("INSERT INTO place_bookmark (place_id, memo) VALUES (:p, :m)
+                ON DUPLICATE KEY UPDATE memo = IF(:has = 1, VALUES(memo), memo)");
+            $st->execute([':p' => $placeId, ':m' => ($memo === '' ? null : $memo), ':has' => ($memo !== null ? 1 : 0)]);
+        };
+        try { $run(); }
+        catch (\Throwable $e) {
+            if (!self::isNoTable($e)) throw $e;
+            $this->ensureBookmarkTable();
+            $run();
+        }
+        return true;
+    }
+
+    /**
+     * 지도에 없는 곳을 새로 등록하며 북마크(SNS 에서 본 곳). 이름+시군구로 dedup — 이미 있으면 그 장소에 붙는다.
+     * @return int place id
+     */
+    public function bookmarkAddPlace(string $name, string $category, float $lat, float $lng, string $address = '', ?string $memo = null): int {
+        $allowed = ['travel', 'stay', 'restaurant', 'camping', 'etc'];
+        if (!in_array($category, $allowed, true)) $category = 'travel';
+        // 주소 앞 두 토큰 = 시도·시군구 — 이름만으로 dedup 하면 다른 도시의 동명 장소가 한 행으로 합쳐진다
+        $tok = preg_split('/\s+/u', trim($address)) ?: [];
+        $id = $this->upsertPlace([
+            'name'           => $name,
+            'category'       => $category,
+            'lat'            => $lat,
+            'lng'            => $lng,
+            'address'        => ($address !== '' ? $address : null),
+            'region_lv1'     => (($tok[0] ?? '') !== '' ? $tok[0] : null),
+            'region_lv2'     => (($tok[1] ?? '') !== '' ? $tok[1] : null),
+            'geocode_status' => 'ok',
+        ]);
+        if ($id > 0) $this->bookmarkSet($id, true, $memo);
+        return $id;
+    }
+
+    /** 북마크에 붙이는 링크(SNS·영상·블로그) → 출처 한 줄. 종류는 주소로 가른다. */
+    public function bookmarkAddLink(int $placeId, string $url): bool {
+        $url = trim($url);
+        if ($placeId <= 0 || !preg_match('#^https?://#i', $url)) return false;
+        $host = strtolower((string)parse_url($url, PHP_URL_HOST));
+        $host = preg_replace('/^(www|m)\./', '', $host);
+        $type = 'manual'; $title = $host;
+        if (strpos($host, 'youtube.') !== false || $host === 'youtu.be')            { $type = 'youtube'; $title = '유튜브'; }
+        elseif (strpos($host, 'blog.naver') !== false || strpos($host, 'tistory') !== false) { $type = 'blog'; $title = '블로그'; }
+        elseif (strpos($host, 'instagram') !== false)                               { $title = '인스타그램'; }
+        elseif (strpos($host, 'tiktok') !== false)                                  { $title = '틱톡'; }
+        elseif (strpos($host, 'threads.') !== false)                                { $title = '스레드'; }
+        elseif ($host === 'x.com' || strpos($host, 'twitter') !== false)            { $title = 'X'; }
+        return $this->addRef($placeId, ['source_type' => $type, 'title' => $title . ' 저장 링크', 'url' => $url]);
+    }
+
     // ══ 여행지도 저장함(트립) — 경로(route)+찜(picks)을 이름 붙여 여러 개 저장 ══
     private static $tripTableReady = false;
     private function ensureTripTable(): void {
@@ -1513,6 +1642,14 @@ class Place
         if (!(int)$chk->fetchColumn()) return ['ok' => false, 'msg' => '대표 장소를 찾을 수 없습니다'];
 
         $in = implode(',', $fromIds);   // 모두 정수로 정제됨 — 주입 위험 없음
+        // 북마크 이관 — 합쳐져 사라지는 쪽이 북마크였으면 대표가 물려받는다(안 하면 CASCADE 로 조용히 사라진다).
+        //  트랜잭션 «밖»이다: 표가 아직 없으면 예외가 나는데 그것이 병합을 통째로 되돌리면 안 된다.
+        try {
+            $this->pdo->exec(
+                "INSERT IGNORE INTO place_bookmark (place_id, memo, created_at)
+                 SELECT {$toId}, memo, created_at FROM place_bookmark WHERE place_id IN ({$in}) ORDER BY created_at LIMIT 1"
+            );
+        } catch (Throwable $e) {}
         $this->pdo->beginTransaction();
         try {
             // 기사 이관 (대표에 같은 URL 있으면 uq_place_url 충돌 → UPDATE IGNORE 스킵, from 삭제 시 CASCADE 정리)
@@ -1806,5 +1943,109 @@ class Place
         );
         $st->execute($args);
         return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    // ══ 📋 장소 목록 문서(place_list.php) ═════════════════════════
+    //  지도 좌측 리스트를 «읽는 문서»로 내보낸다 — 이름·주소·Claude 리뷰. 링크 하나로 로그인 없이 읽는다.
+    //  ★담는 것은 «어느 장소를 어떤 순서로»(id 목록)와 제목뿐이다 — 이름·주소·리뷰는 열 때마다 place 에서 읽는다.
+    //    (요약을 다시 만들거나 주소를 고치면 문서도 따라온다. 지운 장소는 문서에서 빠진다.)
+    //  ★DDL 은 «만드는» 경로에서 표가 없을 때만 — 읽기는 표가 없으면 「없는 링크」다.
+    const LIST_MAX = 1000;   // 문서 한 장에 담는 장소 수 상한
+
+    private function ensureListTable(): void {
+        $this->pdo->exec("CREATE TABLE IF NOT EXISTS place_list_share (
+            id         INT AUTO_INCREMENT PRIMARY KEY,
+            token      VARCHAR(64)  NOT NULL,
+            title      VARCHAR(200) NOT NULL DEFAULT '',
+            ids_json   MEDIUMTEXT   NOT NULL,
+            expires_at DATETIME     NOT NULL,
+            created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_place_list_token (token)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+    }
+
+    /** 목록 문서 링크 발급. $ids = 화면에 보이던 순서 그대로. @return array|null {token, expires_at, count} */
+    public function listShareCreate(string $title, array $ids, int $ttlSeconds = 2592000): ?array {
+        $clean = []; $seen = [];
+        foreach ($ids as $v) {
+            $n = (int)$v;
+            if ($n > 0 && !isset($seen[$n])) { $seen[$n] = 1; $clean[] = $n; }
+            if (count($clean) >= self::LIST_MAX) break;
+        }
+        if (!$clean) return null;
+        $title = trim($title);
+        if (mb_strlen($title) > 200) $title = mb_substr($title, 0, 200);
+        $ttl   = max(3600, min($ttlSeconds, 365 * 24 * 3600));   // 1시간~1년 클램프
+        $token = bin2hex(random_bytes(16));
+        $run = function () use ($token, $title, $clean, $ttl) {
+            $this->pdo->prepare("INSERT INTO place_list_share (token, title, ids_json, expires_at)
+                                 VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL ? SECOND))")
+                      ->execute([$token, $title, json_encode($clean), $ttl]);
+        };
+        try { $run(); }
+        catch (\Throwable $e) {
+            if (!self::isNoTable($e)) throw $e;
+            $this->ensureListTable();
+            $run();
+        }
+        $st = $this->pdo->prepare("SELECT expires_at FROM place_list_share WHERE token = ? LIMIT 1");
+        $st->execute([$token]);
+        return ['token' => $token, 'expires_at' => $st->fetchColumn() ?: null, 'count' => count($clean)];
+    }
+
+    /** 토큰으로 목록 문서 조회(미만료만). @return array|null {title, ids, expires_at, created_at} */
+    public function listShareGet(string $token): ?array {
+        if (!preg_match('/^[0-9a-f]{32}$/', $token)) return null;
+        try {
+            $st = $this->pdo->prepare("SELECT title, ids_json, expires_at, created_at FROM place_list_share
+                                       WHERE token = ? AND expires_at > NOW() LIMIT 1");
+            $st->execute([$token]);
+            $r = $st->fetch(PDO::FETCH_ASSOC);
+        } catch (\Throwable $e) {
+            if (self::isNoTable($e)) return null;
+            throw $e;
+        }
+        if (!$r) return null;
+        $ids = json_decode((string)$r['ids_json'], true);
+        return [
+            'title'      => (string)$r['title'],
+            'ids'        => is_array($ids) ? array_map('intval', $ids) : [],
+            'expires_at' => $r['expires_at'],
+            'created_at' => $r['created_at'],
+        ];
+    }
+
+    /** 문서용 장소 행 — $ids 순서 그대로(없는·비활성 장소는 빠진다). GeoJSON 이 아니라 평평한 행이다. */
+    public function listRows(array $ids): array {
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids), fn($n) => $n > 0)));
+        if (!$ids) return [];
+        $by = [];
+        foreach (array_chunk($ids, 300) as $chunk) {
+            $in = implode(',', array_fill(0, count($chunk), '?'));
+            $st = $this->pdo->prepare(
+                "SELECT p.id, p.name, p.category, p.address, p.phone, p.attributes,
+                        (SELECT COUNT(*) FROM place_ref r WHERE r.place_id = p.id) AS ref_count,
+                        (SELECT GROUP_CONCAT(t.tag ORDER BY t.tag SEPARATOR '\n') FROM place_tag t WHERE t.place_id = p.id AND t.kind <> 'month') AS tags,
+                        (SELECT GROUP_CONCAT(CONCAT(g.guide, ':', COALESCE(g.grade, '')) ORDER BY g.guide SEPARATOR ',') FROM place_guide g WHERE g.place_id = p.id) AS guides
+                   FROM place p
+                  WHERE p.is_active = 1 AND p.id IN ($in)");
+            $st->execute($chunk);
+            foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $by[(int)$row['id']] = [
+                    'id'         => (int)$row['id'],
+                    'name'       => (string)$row['name'],
+                    'category'   => (string)$row['category'],
+                    'address'    => (string)($row['address'] ?? ''),
+                    'phone'      => (string)($row['phone'] ?? ''),
+                    'attributes' => $row['attributes'] ? (json_decode($row['attributes'], true) ?: []) : [],
+                    'ref_count'  => (int)$row['ref_count'],
+                    'tags'       => ($row['tags'] ?? '') !== '' ? explode("\n", $row['tags']) : [],
+                    'guides'     => self::parseGuides($row['guides'] ?? null),
+                ];
+            }
+        }
+        $out = [];
+        foreach ($ids as $id) if (isset($by[$id])) $out[] = $by[$id];
+        return $out;
     }
 }

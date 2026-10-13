@@ -42,6 +42,12 @@ try {
         case 'fav':      api_fav($action, $pdo);           break;
         case 'bx':       api_bx($action, $pdo);            break;
         case 'badge':    api_badge($action, $pdo);         break;
+        // 관심그룹 — 구현은 lib/wgroup_api.php (DB 는 classes/Wg.class)
+        case 'wg':       require_once __DIR__ . '/lib/wgroup_api.php'; api_wg($action, $pdo); break;
+        // 외인비 — 구현은 lib/flow_api.php (DB 는 classes/KwFlow.class · 받는 문은 여기 하나다)
+        case 'flow':     require_once __DIR__ . '/lib/flow_api.php'; api_flow($action, $pdo); break;
+        // 시장 변수(환율·유가·금리…) — 관심그룹의 테마 변수. 구현은 lib/mv_api.php (DB·수집은 classes/Mv.class)
+        case 'mv':       require_once __DIR__ . '/lib/mv_api.php'; api_mv($action, $pdo); break;
         default:         pf_api_fail('알 수 없는 module 입니다.');
     }
 } catch (Throwable $e) {
@@ -1165,17 +1171,17 @@ function api_watch(string $action, PDO $pdo, Pf $pf): void
             if (!preg_match('/^\w{6}$/', $code)) pf_api_done($back, 'err', '종목코드가 올바르지 않습니다.');
             $label = $name !== '' ? $name : $code;
             if ($pf->watchDel($code)) {
-                pf_api_done($back, 'ok', "{$label} 을 관심종목에서 뺐습니다.");
+                pf_api_done($back, 'ok', "{$label} 을 Top-Pick에서 뺐습니다.");
             }
             // src = 어느 화면의 ☆ 인가 (quant/earn/fund) — 채널별 성과 측정의 씨앗
             $src = preg_replace('/[^a-z]/', '', (string)($_POST['src'] ?? ''));
             $pf->watchAdd($code, trim((string)($_POST['memo'] ?? '')), $src);
-            pf_api_done($back, 'ok', "{$label} 을 관심종목에 담았습니다.");
+            pf_api_done($back, 'ok', "{$label} 을 Top-Pick에 담았습니다.");
 
         case 'del':
             if (!preg_match('/^\w{6}$/', $code)) pf_api_done($back, 'err', '종목코드가 올바르지 않습니다.');
             $pf->watchDel($code);
-            pf_api_done($back, 'ok', '관심종목에서 뺐습니다.');
+            pf_api_done($back, 'ok', 'Top-Pick에서 뺐습니다.');
 
         // 편입 대기만 해제 — 관심종목 목록에는 남는다 (종목추가 하단 「편입 관심종목」의 삭제 버튼)
         case 'unadopt':
@@ -1303,7 +1309,7 @@ function api_dt(string $action, PDO $pdo): void
         };
 
         /* ── 장중 실시간 시세 (2026-08-06) ────────────────────────────────
-         * 두 목록이 응답을 만들기 «전에» 지난다. 대상은 Dt::targetCodes()(단타 풀 ∪ 보유)뿐이고
+         * 두 목록이 응답을 만들기 «전에» 지난다. 대상은 Dt::targetCodes()(최근조회 ∪ 보유 ∪ Top-Pick)뿐이고
          * 키움 ka10095 가 100종목을 한 요청에 주므로 실측 34종목이 1콜·0.03초다.
          *
          * ★새 판정을 세우지 않는다 — 알맹이는 Dt::refreshQuotesLive() 단일본이고,
@@ -1336,6 +1342,9 @@ function api_dt(string $action, PDO $pdo): void
                     'haskey' => (new Kiwoom($pdo))->hasKey(),
                     'tick'   => Dt::TICK_SEC,
                     'qsrc'   => $lv['src'] ?? 'none',   // 화면의 LIVE 배지가 소스를 밝힌다
+                    /* 원장에 봉이 «쌓여 있는» 종목(코드 → 일수·봉수) — 화면이 「10거래일 그림을 그릴 수 있나」를
+                     * 목록 소속이 아니라 이것으로 가른다(2026-10-07 · Dt::ledgerMap 주석) */
+                    'ledger' => $dt->ledgerMap(),
                 ]);
             }
 
@@ -1378,22 +1387,23 @@ function api_dt(string $action, PDO $pdo): void
                 $out(['rows' => $rows]);
             }
 
-            // ── 담기 (즉시 응답 · 적재는 pool_init 이 이어받는다) ──
-            case 'pool_add': {
-                if ($code === '') $out(['error' => '종목을 고르세요.'], 200);
-                /* ★보유 종목은 담지 않는다 — 이미 targetCodes() 에 들어 있어 매일 수집된다.
-                 *   담아 봐야 20칸 하나를 먹고 남의 종목을 FIFO 로 밀어낼 뿐이다. */
-                if (in_array($code, $dt->heldCodes(), true)) {
-                    $out(['ok' => false, 'code' => $code,
-                          'msg' => '보유 종목이라 이미 자동으로 수집됩니다 — 「보유」 탭에서 보세요.']);
-                }
-                $r = $dt->poolAdd($code, trim((string)($_REQUEST['name'] ?? '')));
-                $out($r + ['code' => $code]);
+            /* ── 「최근조회」에 올리기 (2026-10-07 — 「＋ 담기」를 대신한다) ──
+             * 단타 화면이 종목을 «열어 잠시 머물렀을 때»(Dt::VIEW_DWELL_SEC) 부른다. 즉시 응답하고,
+             * 원장에 봉이 없으면(need_init) 화면이 pool_init 을 이어서 부른다.
+             * ★보유·Top-Pick 도 받는다 — 「최근조회」는 «본 기록»이다. 그것들은 여기서 내려가도 봉을 잃지 않는다(Dt::poolRemove). */
+            case 'view': {
+                if ($code === '') $out(['ok' => false, 'msg' => '종목을 고르세요.']);
+                $out($dt->touch($code, trim((string)($_REQUEST['name'] ?? ''))) + ['code' => $code, 'max' => Dt::POOL_MAX]);
             }
 
             // ── 초기 적재 (10거래일) ────────────────────────────────
             case 'pool_init': {
                 if ($code === '') $out(['error' => '종목을 고르세요.'], 200);
+                /* ★수집 대상(최근조회 ∪ 보유 ∪ Top-Pick)인지 확인한다 — 아니면 이 문이 「아무 종목이나 원장에 쌓는 문」이 되어
+                 *   보관 창·상한을 우회한다(held_init 과 같은 문지기). 화면은 늘 view 로 먼저 올린 뒤에 부른다. */
+                if (!in_array($code, $dt->targetCodes(), true)) {
+                    $out(['ok' => 0, 'msg' => '수집 대상이 아닌 종목입니다.']);
+                }
                 $out($initLoad($code, true));
             }
 
@@ -1411,15 +1421,8 @@ function api_dt(string $action, PDO $pdo): void
                 $out($initLoad($code, false));
             }
 
-            case 'pool_remove':
-                if ($code === '') $out(['error' => '대상을 찾지 못했습니다.'], 200);
-                $dt->poolRemove($code);
-                $out(['ok' => 1, 'msg' => '단타 종목에서 뺐습니다 (쌓아 둔 분봉도 함께 지웠습니다).']);
-
-            case 'pool_sort':
-                $codes = $_POST['codes'] ?? $_GET['codes'] ?? [];
-                if (!is_array($codes)) $codes = explode(',', (string)$codes);
-                $out(['ok' => 1, 'n' => $dt->poolSort($codes)]);
+            /* pool_add · pool_remove · pool_sort 는 2026-10-07 에 걷어냈다 — 직접 담고 빼는 목록이 없어졌다.
+             * 올리는 길은 view(열어 머문 것), 내리는 길은 크론(Dt::expireViews · 10거래일 안 본 것)과 상한(LRU)뿐이다. */
 
             // ── 시세 ────────────────────────────────────────────────
             case 'series': {

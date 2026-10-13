@@ -288,7 +288,14 @@ class KrxAmt
      * 이 잠정치(src='n')로 채우고, 다음날 13:05 `dart_krx` 크론의 이관이 확정값(src='k')으로
      * 덮어쓴다 — `stock_daily_range`(당일 1줄 + 다음날 보정)와 같은 패턴.
      *
-     * ★ 휴장일 차단이 공짜다 — uDate 가 오늘인 행만 쓰므로 휴장일엔 저절로 0건이다.
+     * ★★ <b>오늘 실제로 장이 선 것이 확인됐을 때만</b> 쓴다 (2026-10-08 · NaverFinanceAPI::tradedToday).
+     *   예전 주석은 「uDate 가 오늘인 행만 쓰므로 휴장일엔 저절로 0건」이라 했는데 <b>거짓</b>이었다 —
+     *   시세 크론은 평일 휴장일에도 돌아 uDate 를 오늘로 찍는다. 그래서 휴장일마다 직전 거래일의 복사본이
+     *   「오늘 행」으로 들어갔고, KRX 는 휴장일 값을 주지 않으니 <b>확정값에 덮이지도 않고 영영 남았다</b>
+     *   (실측: 2026-08-17 · 09-24 · 09-25 · 10-05 — 각 2,630행 안팎). 이 표는 사이트의 «거래일 달력»이라
+     *   유령 하루가 분봉 보관 창·120거래일 창·일일 결산을 전부 하루씩 민다.
+     *   확인하지 못한 날(null)도 <b>쓰지 않는다</b> — 안 쓴 날은 내일 13:05 확정값이 채우지만 잘못 쓴 날은 못 지운다.
+     *   이 함수가 «오늘 행»을 만드는 유일한 자리라 문지기를 여기 둔다(부르는 쪽이 잊어도 유령이 안 생긴다).
      * ★ KRX 확정값(src='k')이 이미 있으면 <b>절대 덮지 않는다</b>(IF 가드).
      * ★ 단위: stock_vol_cap(거래대금)·stock_cap(시총)은 <b>억원</b>이라 ×1e8 로 원 단위로 맞춘다.
      * ★ o/h/l/list_shrs 는 네이버 스냅샷에 없다 — NULL 로 두면 다음날 확정값이 채운다.
@@ -296,6 +303,7 @@ class KrxAmt
     public function provisionalFromSnapshot(): int
     {
         $today = date('Y-m-d');
+        if (NaverFinanceAPI::tradedToday() !== true) return 0;     // 휴장일(false)·확인 불가(null) — 위 ★★
         try {
             $src = $this->pdo->query("
                 SELECT stock_code, stock_price, stock_vol, stock_vol_cap, stock_cap

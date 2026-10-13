@@ -39,6 +39,7 @@ class Kiwoom
         'ka10080' => '/api/dostk/chart',
         'ka10081' => '/api/dostk/chart',
         'ka10095' => '/api/dostk/stkinfo',
+        'ka10086' => '/api/dostk/mrkcond',     // 일별주가(외인비·투자자별 순매수·신용비) — 조회
     ];
 
     /**
@@ -247,6 +248,86 @@ class Kiwoom
             'upd_stkpc_tp' => '1',
         ], $body), $hdr);
     }
+    // ══ 일별주가 (ka10086) — 외인비·투자자별 ═══════════════════════════
+    /** 원본 응답 그대로 — 필드·단위 확인용. qry_dt 는 그 날까지 되짚는 기준일, indc_tp 0=수량 1=금액(백만원) */
+    public function flowRaw(string $code, string $qryDt = '', string $indc = '0', string $contYn = 'N', string $nextKey = ''): array
+    {
+        return $this->call('ka10086', [
+            'stk_cd'  => Dt::cleanCode($code),
+            'qry_dt'  => $qryDt !== '' ? str_replace('-', '', $qryDt) : date('Ymd'),
+            'indc_tp' => $indc,
+        ], [
+            'authorization: Bearer ' . $this->token(),
+            'api-id: ka10086',
+            'cont-yn: ' . ($contYn === 'Y' ? 'Y' : 'N'),
+            'next-key: ' . $nextKey,
+        ]);
+    }
+
+    /**
+     * 일별 수급 — 외인비·투자자별 순매수·신용비 (HTS 「일별주가」 화면과 같은 값).
+     *
+     * ══ 실측으로 확정한 것 (2026-10-08 · 005930 실호출) ══════════════════
+     *   경로   POST /api/dostk/mrkcond · api-id ka10086 · 본문 stk_cd · qry_dt(YYYYMMDD) · indc_tp
+     *   목록   응답 키 <b>daly_stkpc</b> · <b>한 콜 20거래일</b>(최신 → 과거) · cont-yn/next-key 로 더
+     *   필드   date · <b>for_rt(외인비 %)</b> · ind/orgn(개인·기관 순매수) · for_qty(외인 순매수 «수량») ·
+     *          frgn(외국계) · prm(프로그램) · crd_rt(신용비 %) · trde_qty · amt_mn(백만원)
+     *   부호   <b>음수는 "--123", 양수는 "+123"</b> — 가격 필드의 "-"(하락 표시)와 달리 여기선 진짜 부호다
+     *   단위   indc_tp=0 이면 ind·orgn·frgn·prm 이 <b>주</b>, 1 이면 백만원. for_qty 는 어느 쪽이든 주.
+     *          → 0(수량)만 받는다. 금액은 종가를 곱해 어림할 수 있지만 수량은 되돌릴 수 없다.
+     *   ★거래량·거래대금은 krx_amt 와 일치하지만 <b>close_pric 은 KRX 종가와 다르다</b>(10-07 269,000 vs 268,500 — 장 마감 뒤 값).
+     *     그래서 가격은 여기서 꺼내지 않는다. 가격의 주인은 krx_amt 다.
+     *   ★<b>당일 신용비는 0 으로 온다</b>(다음 날 채워진다) · 당일 외인 수치도 저녁에 굳는다 → 부르는 쪽이 최근 며칠을 «다시» 덮는다.
+     *
+     * @param  int $pages 몇 콜(20거래일씩) 되짚나
+     * @return array [['d'=>'Y-m-d','for_rt'=>?float,'for_net'=>int,'orgn_net'=>int,'ind_net'=>int,'frgn_net'=>int,'prm_net'=>int,'crd_rt'=>?float], …] 최신순
+     */
+    public function flow(string $code, int $pages = 1, string $qryDt = ''): array
+    {
+        /* $qryDt(Y-m-d) 를 주면 «그 날부터» 과거로 되짚는다(그 날 포함) — 이어 받기에 쓴다. 비우면 오늘부터. */
+        $code = Dt::cleanCode($code);
+        if ($code === '') return [];
+        $sig = static function ($v): int {                       // "--1755574" → -1755574 · "+372168" → 372168
+            $s = (string)$v;
+            $n = (int)preg_replace('/[^0-9]/', '', $s);
+            return strpos($s, '-') !== false ? -$n : $n;
+        };
+        $pct = static function ($v): ?float {
+            $s = preg_replace('/[^0-9.]/', '', (string)$v);
+            return $s === '' ? null : (float)$s;
+        };
+        $out = []; $cont = 'N'; $next = '';
+        $this->flowMore = false;
+        for ($i = 0; $i < max(1, min(30, $pages)); $i++) {
+            if ($i > 0) usleep($this->gap);
+            $res  = $this->flowRaw($code, $qryDt, '0', $cont, $next);
+            $list = $res['body']['daly_stkpc'] ?? [];
+            if (!is_array($list) || !$list) { $this->flowMore = false; break; }
+            foreach ($list as $r) {
+                $d = (string)($r['date'] ?? '');
+                if (strlen($d) !== 8) continue;
+                $out[] = [
+                    'd'        => substr($d, 0, 4) . '-' . substr($d, 4, 2) . '-' . substr($d, 6, 2),
+                    'for_rt'   => $pct($r['for_rt'] ?? ''),
+                    'for_net'  => $sig($r['for_qty'] ?? 0),
+                    'orgn_net' => $sig($r['orgn'] ?? 0),
+                    'ind_net'  => $sig($r['ind'] ?? 0),
+                    'frgn_net' => $sig($r['frgn'] ?? 0),
+                    'prm_net'  => $sig($r['prm'] ?? 0),
+                    'crd_rt'   => $pct($r['crd_rt'] ?? ''),
+                ];
+            }
+            $cont = strtoupper(trim((string)($res['head']['cont-yn'] ?? '')));
+            $next = trim((string)($res['head']['next-key'] ?? ''));
+            $this->flowMore = ($cont === 'Y' && $next !== '');
+            if (!$this->flowMore) break;
+        }
+        return $out;
+    }
+
+    /** 방금 flow() 가 끝난 자리보다 «더 과거»가 남아 있나 — false 면 그 종목의 이력 끝(상장일)에 닿은 것이다 */
+    public bool $flowMore = false;
+
     // ══ 일봉 (ka10081) ══════════════════════════════════════════════════
     /**
      * 일봉을 받는다 — <b>거래대금까지 한 번에</b>.

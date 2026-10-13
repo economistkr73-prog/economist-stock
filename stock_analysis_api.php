@@ -2,6 +2,7 @@
 // stock_analysis_api.php — 시세·차트 공용 데이터 API (module=stock)
 //   action=top30   상승률/시총 상위 30 → [{code,name,price,rate,tradeEok,q:퀀트배지|null}, ...]
 //   action=watch   관심종목(pf_watchlist) → top30 과 같은 행 모양 · 상승률 순 · 페이징 없음
+//                  &g=<id> 를 주면 관심그룹(wg_item) 하나를 그룹 순서대로 (단타 탐색 패널 · 2026-10-07)
 //   action=news    종목 뉴스       → [{title,url,date}, ...]   (?code=005930)
 //   action=daily   일봉            → [{t:"YYYY-MM-DD",o,h,l,c,v}, ...]  (?code=&days=)
 //   action=minute  당일 1분봉      → [{t:"YYYY-MM-DD HH:MM",o,h,l,c,v}, ...] (?code=)
@@ -119,9 +120,36 @@ function api_stock(string $action, PDO $pdo): void
         //   ★판정을 여기서 새로 내리지 않는다 — 배지는 top30 과 같은 quant_augment 단일본이다.
         //   ★보유 종목은 뺀다(2026-08-26 사용자 지시) — 오른쪽 「보유」 탭이 이미 그 종목들을 보여 주므로
         //     탐색 목록에 겹치면 자리만 먹는다. 보유 판정은 Dt::heldCodes() 단일본(수집 대상과 같은 기준).
+        //   ⊕&g=<관심그룹 id> (2026-10-07) — 그 그룹(wg_item)의 종목을 «그룹에 저장된 순서»로 준다.
+        //     행 모양·배지는 같다(렌더러 하나). 그룹은 내가 세운 순서가 뜻이라 상승률로 다시 세우지 않고,
+        //     보유 종목도 빼지 않는다(빼면 그룹이 «이가 빠진» 목록으로 보인다 — 보유는 배지가 말한다).
         case 'watch': {
+            $gid  = (int)($_GET['g'] ?? 0);
             $held = [];
             try { $held = array_flip((new Dt($pdo))->heldCodes()); } catch (Throwable $e) { /* 판정 실패 시 전체 표시 */ }
+            if ($gid > 0) {
+                $held  = [];                                   // 그룹 목록에서는 보유를 빼지 않는다
+                $codes = [];
+                try { $codes = (new Wg($pdo))->codes($gid); } catch (Throwable $e) { /* 표가 없으면 빈 목록 */ }
+                $rows = [];
+                if ($codes) {
+                    $ph = implode(',', array_fill(0, count($codes), '?'));
+                    $st = $pdo->prepare("
+                        SELECT s.stock_code AS code, s.stock_name AS name, s.stock_price AS price,
+                               s.stock_rate AS rate, s.stock_cap AS cap, s.stock_vol_cap AS tradeEok,
+                               COALESCE(sh.top_rank_count, 0) AS etfTop, COALESCE(sh.etf_count, 0) AS etfCnt
+                          FROM all_stock_info s
+                          LEFT JOIN all_stock_holdings_info sh ON sh.stock_code = s.stock_code
+                         WHERE s.stock_code IN ($ph)");
+                    $st->execute($codes);
+                    $by = [];
+                    foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) $by[(string)$r['code']] = $r;
+                    foreach ($codes as $c) {
+                        $rows[] = $by[$c] ?? ['code' => $c, 'name' => '', 'price' => 0, 'rate' => 0, 'cap' => 0,
+                                              'tradeEok' => 0, 'etfTop' => 0, 'etfCnt' => 0];
+                    }
+                }
+            } else
             $rows = $pdo->query("
                 SELECT w.stock_code AS code,
                        COALESCE(s.stock_name, '') AS name,

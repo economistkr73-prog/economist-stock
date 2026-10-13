@@ -1,0 +1,1036 @@
+<?php
+/**
+ * classes/Wg.class — 관심그룹 (DB 전담 · 2026-10-07)
+ *
+ * 키움 HTS 의 관심그룹처럼 종목을 그룹으로 묶어 두고, 종목마다 «기준가»를 적어
+ * 「기준 시점 대비 얼마나 움직였나」를 보는 화면(/stock/index.php?mode=wgroup)의 원장이다.
+ *
+ * ★기존 관심종목(pf_watchlist)과 <b>별개</b>다(사용자 결정). 저 표는 ☆ 담기·트리거 관제탑·알림·
+ *   편입 관심종목·시세 수집 보호가 함께 읽는 «판정의 재료»이고, 이 표는 «내가 보려고 묶은 목록»이다.
+ *   그래서 여기 담는다고 알림이 울리거나 수집 대상이 늘지 않는다.
+ * ★사용자 구분(user_id)이 없다 — 주식 섹션의 다른 표(pf_·dt_·chart_)와 같다(사용자 결정).
+ * ★종목명을 저장하지 않는다 — StockName(stock_master) 단일본이 그때그때 잇는다(사명 변경이 저절로 반영된다).
+ * ★기준가의 주인은 «그룹-종목»이다 — 같은 종목이라도 그룹마다 다른 기준가를 가질 수 있다.
+ * ★DDL 은 요청 경로에서 부르지 않는다 — api `module=wg&action=schema` 또는 CLI 에서만.
+ */
+class Wg
+{
+    public const NAME_MAX  = 30;
+    public const LABEL_MAX = 50;
+    public const MEMO_MAX  = 500;
+    public const BASE_MIN  = 1;
+    public const BASE_MAX  = 100000000;
+    /** 장중 시세를 한 번에 받는 상한 — 키움 ka10095 가 한 요청에 100종목이다(넘으면 콜이 둘이 된다) */
+    public const QUOTE_MAX = 100;
+    /**
+     * 한 그룹에 담는 종목 수 상한 (2026-10-08 사용자 결정 — 「30개로 제한해보자」). 구분행은 세지 않는다.
+     * 고정 그룹(보유종목·Top-Pick·최근조회)은 제 주인이 정하는 목록이라 이 상한과 무관하다.
+     * ★이 숫자 덕에 «보고 있는 그룹»은 언제나 키움 한 콜(QUOTE_MAX) 안이다 — 그룹을 누르면 그 그룹 전체가 최신이 되고
+     *   평균 등락에 낡은 값이 섞이지 않는다. 상한보다 많이 담긴 옛 그룹은 그대로 둔다(지우지 않는다 — 더 담기만 막는다).
+     */
+    public const ITEM_MAX = 30;
+    /** 그룹 목록의 「평균 등락」을 다시 읽는 주기(초). 고정 그룹의 시세도 이보다 낡았을 때만 다시 받는다(module=wg group_stats) */
+    public const STAT_SEC = 60;
+
+    /**
+     * ★고정 그룹 (2026-10-07 사용자 지시 — HTS 관심그룹의 「보유종목」처럼 늘 있는 기본 목록).
+     *   그룹 목록 맨 위에 서고 <b>고칠 수 없다</b> — 이름·삭제·순서·종목 추가/삭제·기준가 전부 잠금.
+     * ★<b>복사하지 않는다 — 비춘다(참조)</b>. 보유종목의 주인은 pf_position, Top-Pick 의 주인은 pf_watchlist 다.
+     *   wg_item 에 복사해 두면 청산했는데·☆를 뺐는데 그룹에는 남는 「따로 노는」 상태가 생긴다.
+     * id 는 음수다(진짜 그룹의 AUTO_INCREMENT 와 겹칠 수 없다) · 주소·쿠키에는 key 를 쓴다(&g=held).
+     *   Top-Pick  = ☆ 로 담은 종목 중 <b>보유하지 않은 것</b>(담은 순). ★보유 중인 종목은 뺀다(같은 날 사용자 결정 —
+     *               「빼는 게 맞다」: 그 종목은 「보유종목」에 있다. 단타 화면의 Top-Pick 목록과 같은 말이 된다 · 판정은 Dt::heldCodes).
+     *               재무분석 > Top-Pick 화면은 여전히 전부 보여 준다(거기는 ☆ 를 관리하는 자리다).
+     *               기준가 = 담을 때 가격 · 기준일 = 담은 날 → 기준대비가 그 화면의 「담은뒤」와 같은 수다.
+     *   보유종목  = 살아있는 포지션(Dt::heldList — 단타·멀티차트의 「보유」와 같은 집합). 기준가는 없다.
+     */
+    public const G_HELD   = -1;
+    public const G_TOP    = -2;
+    /** 최근조회(2026-10-07 사용자 지시) = 단타 화면에서 최근에 열어 본 종목(Dt 의 dt_pool · 본 순). 주인은 Dt 다 — 여기선 비추기만 한다 */
+    public const G_RECENT = -3;
+    public const BUILTIN = [
+        self::G_HELD   => ['key' => 'held',   'name' => '보유종목'],
+        self::G_TOP    => ['key' => 'top',    'name' => 'Top-Pick'],
+        self::G_RECENT => ['key' => 'recent', 'name' => '최근조회'],
+    ];
+
+    public static function isBuiltin(int $gid): bool
+    {
+        return isset(self::BUILTIN[$gid]);
+    }
+
+    /** 주소·쿠키의 값(&g=held · &g=top · &g=12) → 그룹 id. 모르는 값은 0 */
+    public static function gidOf(string $v): int
+    {
+        foreach (self::BUILTIN as $id => $b) if ($b['key'] === $v) return $id;
+        return preg_match('/^\d+$/', $v) ? (int)$v : 0;
+    }
+
+    private PDO $pdo;
+
+    public function __construct(PDO $pdo)
+    {
+        $this->pdo = $pdo;
+    }
+
+    // ══ 스키마 ══════════════════════════════════════════════════════════
+    public function ensureTables(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS wg_group (
+              id         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+              name       VARCHAR(30) NOT NULL COMMENT '그룹명',
+              sort_no    INT NOT NULL DEFAULT 0 COMMENT '표시 순서',
+              created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+              UNIQUE KEY uq_name (name),
+              KEY idx_sort (sort_no)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='관심그룹'
+        ");
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS wg_item (
+              id         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+              group_id   INT UNSIGNED NOT NULL,
+              item_type  ENUM('stock','sep') NOT NULL DEFAULT 'stock' COMMENT 'sep = 구분행',
+              stock_code CHAR(6) NULL COMMENT '구분행이면 NULL',
+              label      VARCHAR(50) NULL COMMENT '구분행 이름',
+              dir        TINYINT NULL COMMENT '구분행의 방향 — 1 변수가 오를 때 유리 · -1 내릴 때 유리',
+              base_price INT UNSIGNED NULL COMMENT '기준가(원)',
+              base_date  DATE NULL COMMENT '기준가를 적은 날',
+              memo       VARCHAR(500) NULL,
+              memo_at    DATETIME NULL,
+              sort_no    INT NOT NULL DEFAULT 0,
+              created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+              UNIQUE KEY uq_group_stock (group_id, stock_code),
+              KEY idx_group_sort (group_id, sort_no),
+              CONSTRAINT fk_wg_item_group FOREIGN KEY (group_id)
+                REFERENCES wg_group(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='관심그룹 종목·구분행'
+        ");
+        /* 2026-10-12 — 구분행의 «방향»(테마 그룹: 「변수가 오를 때 유리」·「내릴 때 유리」). 옛 표에는 컬럼을 더한다.
+         * ★이 컬럼은 코드보다 먼저 올린다 — items() 가 이 컬럼을 읽는다. */
+        $this->pdo->exec("ALTER TABLE wg_item ADD COLUMN IF NOT EXISTS dir TINYINT NULL
+                          COMMENT '구분행의 방향 — 1 변수가 오를 때 유리 · -1 내릴 때 유리' AFTER label");
+        /* 2026-10-12 — 종목별 «같이 볼 변수»(mv_var.id). 그룹의 변수와 별개로 그 종목 차트에만 한 줄 더 겹친다.
+         * FK 를 걸지 않는다(변수 표가 없는 날에도 이 표는 만들어져야 한다) — 변수를 지울 때 Mv::varDelete 가 비운다. */
+        $this->pdo->exec("ALTER TABLE wg_item ADD COLUMN IF NOT EXISTS var_id INT UNSIGNED NULL
+                          COMMENT '같이 볼 변수(mv_var.id) — 그 종목 차트에만 겹친다' AFTER dir");
+    }
+
+    /** 표가 있나 — 화면은 DDL 을 하지 않으므로 없으면 「만들기」 안내를 띄운다 */
+    public function ready(): bool
+    {
+        try {
+            $st = $this->pdo->prepare(
+                "SELECT COUNT(*) FROM information_schema.TABLES
+                  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('wg_group','wg_item')");
+            $st->execute();
+            return (int)$st->fetchColumn() === 2;
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
+    // ══ 그룹 ════════════════════════════════════════════════════════════
+    /** 그룹 목록 — n = 종목 수(구분행 제외) */
+    public function groups(): array
+    {
+        $rows = $this->pdo->query("
+            SELECT g.id, g.name,
+                   (SELECT COUNT(*) FROM wg_item i WHERE i.group_id = g.id AND i.item_type = 'stock') AS n
+              FROM wg_group g
+             ORDER BY g.sort_no, g.id
+        ")->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($rows as &$r) { $r['id'] = (int)$r['id']; $r['n'] = (int)$r['n']; }
+        unset($r);
+        return $rows;
+    }
+
+    /**
+     * 화면용 그룹 목록 — 고정 그룹 둘이 맨 위, 그 아래가 내가 만든 그룹.
+     * fixed=1 이면 화면이 편집 손잡이를 전부 잠근다. key 는 주소·쿠키에 쓰는 값이다.
+     */
+    public function groupsAll(): array
+    {
+        $out = []; $codes = [];
+        foreach (self::BUILTIN as $id => $b) {
+            $codes[$id] = $this->codes($id);
+            $out[] = ['id' => $id, 'name' => $b['name'], 'n' => count($codes[$id]), 'fixed' => 1, 'key' => $b['key']];
+        }
+        /* 테마 그룹 — 시장 변수(환율·유가…)를 연결한 그룹은 주 변수의 이름을 꼬리표로 단다(classes/Mv.class).
+         * 곁들이는 정보다 — 변수 표가 아직 없어도 목록은 뜬다. */
+        $tags = [];
+        try { $tags = (new Mv($this->pdo))->groupTags(); } catch (Throwable $e) { /* 표가 없으면 꼬리표 없이 */ }
+        foreach ($this->groups() as $g) {
+            $out[] = $g + ['fixed' => 0, 'key' => (string)$g['id'], 'var' => (string)($tags[(int)$g['id']] ?? '')];
+        }
+        return $this->withStats($out, $codes);
+    }
+
+    /**
+     * 그룹마다 <b>«평균 등락»</b>을 얹는다 (2026-10-08 · 그룹 목록의 숫자).
+     *   avg   = 그 그룹 종목의 오늘 등락률 <b>단순 평균</b>(%) — 시세가 있는 종목만 센다(하나도 없으면 null)
+     *   up·dn = 오른·내린 종목 수 · cnt = 평균에 든 종목 수
+     *   age   = 그중 <b>가장 오래된</b> 시세가 몇 초 전 것인가 · asof = 그 시각(Y-m-d H:i)
+     *
+     * ★<b>읽기만 한다 — 이 숫자를 위해 시세를 받지 않는다.</b> all_stock_info 에 이미 있는 등락률을 한 번 읽어 PHP 에서 나눈다
+     *   (그 표는 utf8mb3 라 SQL 로 조인하지 않는다). 그래서 신선도가 그룹마다 다르다 — 보고 있는 그룹은 10초(quote_batch),
+     *   고정 그룹은 STAT_SEC(group_stats), 그 밖의 내 그룹은 크론 주기. 그 차이를 감추지 않으려고 age·asof 를 함께 보낸다:
+     *   화면이 장중에 낡은 숫자를 흐리게 그리고 기준 시각을 적는다.
+     * ★「평균 등락」이지 <b>«수익률»이 아니다</b> — 보유종목의 단순 평균은 금액 비중을 보지 않아 포트폴리오 현황 카드의
+     *   수익률과 다른 수다. 그 이름을 쓰면 두 화면이 다른 말을 한다(포트폴리오의 돈 셈은 계산 엔진을 지나야 한다).
+     *
+     * @param array $groups groupsAll 의 행들
+     * @param array $codes  [그룹 id => 종목코드[]] — 고정 그룹분(이미 읽어 둔 것). 내 그룹은 여기서 한 번에 읽는다
+     */
+    private function withStats(array $groups, array $codes): array
+    {
+        try {
+            foreach ($this->pdo->query("SELECT group_id, stock_code FROM wg_item WHERE item_type = 'stock'")
+                         ->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                $codes[(int)$r['group_id']][] = (string)$r['stock_code'];
+            }
+        } catch (Throwable $e) { /* 표가 없으면 고정 그룹만 */ }
+
+        $all = [];
+        foreach ($codes as $list) foreach ($list as $c) $all[(string)$c] = 1;
+        $rate = [];                                              // 코드 => [등락률, 시세 시각(유닉스)]
+        if ($all) {
+            $list = array_map('strval', array_keys($all));       // ★숫자로만 된 키는 정수가 된다 — 다시 문자열로
+            $ph   = implode(',', array_fill(0, count($list), '?'));
+            try {
+                $st = $this->pdo->prepare(
+                    "SELECT stock_code, stock_price, stock_rate, uDate FROM all_stock_info WHERE stock_code IN ($ph)");
+                $st->execute($list);
+                foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                    if ((float)$r['stock_price'] <= 0) continue; // 값이 없는 것을 0% 로 세지 않는다
+                    $rate[(string)$r['stock_code']] = [(float)$r['stock_rate'],
+                                                       $r['uDate'] !== null ? (int)strtotime((string)$r['uDate']) : 0];
+                }
+            } catch (Throwable $e) { /* 시세 표가 없어도 목록은 뜬다 */ }
+        }
+
+        $now = time();
+        foreach ($groups as &$g) {
+            $sum = 0.0; $n = 0; $up = 0; $dn = 0; $old = 0;
+            foreach ($codes[(int)$g['id']] ?? [] as $c) {
+                $q = $rate[(string)$c] ?? null;
+                if ($q === null) continue;
+                $sum += $q[0]; $n++;
+                if ($q[0] > 0) $up++; elseif ($q[0] < 0) $dn++;
+                if ($q[1] > 0 && ($old === 0 || $q[1] < $old)) $old = $q[1];
+            }
+            $g['avg']  = $n ? round($sum / $n, 2) : null;
+            $g['up']   = $up;
+            $g['dn']   = $dn;
+            $g['cnt']  = $n;
+            $g['age']  = $old ? max(0, $now - $old) : null;
+            $g['asof'] = $old ? date('Y-m-d H:i', $old) : null;
+        }
+        unset($g);
+        return $groups;
+    }
+
+    public function groupExists(int $id): bool
+    {
+        $st = $this->pdo->prepare("SELECT COUNT(*) FROM wg_group WHERE id = ?");
+        $st->execute([$id]);
+        return (int)$st->fetchColumn() > 0;
+    }
+
+    private function cleanName(string $name, int $exceptId = 0): string
+    {
+        $name = trim(preg_replace('/\s+/u', ' ', $name));
+        $len  = mb_strlen($name);
+        if ($len < 1 || $len > self::NAME_MAX) {
+            throw new InvalidArgumentException('그룹 이름은 1~' . self::NAME_MAX . '자로 적어 주세요.');
+        }
+        foreach (self::BUILTIN as $b) {
+            if (mb_strtolower($b['name']) === mb_strtolower($name)) {
+                throw new InvalidArgumentException('「' . $b['name'] . '」은(는) 고정 그룹의 이름입니다.');
+            }
+        }
+        $st = $this->pdo->prepare("SELECT COUNT(*) FROM wg_group WHERE name = ? AND id <> ?");
+        $st->execute([$name, $exceptId]);
+        if ((int)$st->fetchColumn() > 0) {
+            throw new InvalidArgumentException('같은 이름의 그룹이 이미 있습니다.');
+        }
+        return $name;
+    }
+
+    /** 새 그룹 — 목록 맨 아래에 붙는다 */
+    public function groupCreate(string $name): int
+    {
+        $name = $this->cleanName($name);
+        $no   = (int)$this->pdo->query("SELECT COALESCE(MAX(sort_no), 0) + 1 FROM wg_group")->fetchColumn();
+        $st   = $this->pdo->prepare("INSERT INTO wg_group (name, sort_no) VALUES (?, ?)");
+        $st->execute([$name, $no]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public function groupRename(int $id, string $name): void
+    {
+        if (!$this->groupExists($id)) throw new InvalidArgumentException('그룹을 찾지 못했습니다.');
+        $st = $this->pdo->prepare("UPDATE wg_group SET name = ? WHERE id = ?");
+        $st->execute([$this->cleanName($name, $id), $id]);
+    }
+
+    /** 그룹 삭제 — 담긴 종목·기준가·메모도 함께 간다(FK CASCADE) */
+    public function groupDelete(int $id): void
+    {
+        $st = $this->pdo->prepare("DELETE FROM wg_group WHERE id = ?");
+        $st->execute([$id]);
+    }
+
+    /** 그룹 순서 — 보낸 id 순서대로 1..N. 빠진 그룹은 원래 순서로 뒤에 붙인다(조용히 사라지지 않게) */
+    public function groupReorder(array $ids): void
+    {
+        $have  = array_map('intval', $this->pdo->query(
+            "SELECT id FROM wg_group ORDER BY sort_no, id")->fetchAll(PDO::FETCH_COLUMN));
+        $order = self::mergeOrder($ids, $have);
+        $st = $this->pdo->prepare("UPDATE wg_group SET sort_no = ? WHERE id = ?");
+        $this->pdo->beginTransaction();
+        try {
+            foreach ($order as $i => $id) $st->execute([$i + 1, $id]);
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+    }
+
+    /** 보낸 순서 중 «실제로 있는 것»만 앞에, 빠진 것은 원래 순서로 뒤에 */
+    private static function mergeOrder(array $want, array $have): array
+    {
+        $set = array_flip($have);
+        $out = [];
+        foreach ($want as $id) {
+            $id = (int)$id;
+            if (isset($set[$id]) && !isset($out[$id])) $out[$id] = $id;
+        }
+        foreach ($have as $id) if (!isset($out[$id])) $out[$id] = $id;
+        return array_values($out);
+    }
+
+    // ══ 아이템 ══════════════════════════════════════════════════════════
+    /** 그룹의 아이템 원본(저장된 순서) */
+    public function items(int $gid): array
+    {
+        $st = $this->pdo->prepare("
+            SELECT id, group_id, item_type, stock_code, label, dir, var_id, base_price, base_date, memo, memo_at
+              FROM wg_item WHERE group_id = ? ORDER BY sort_no, id");
+        $st->execute([$gid]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 그룹의 종목코드(저장된 순서 · 구분행 제외). 고정 그룹은 제 주인(pf_position · pf_watchlist)에서 읽는다 */
+    public function codes(int $gid): array
+    {
+        if ($gid === self::G_HELD) {
+            try { return array_map('strval', (new Dt($this->pdo))->heldCodes()); }
+            catch (Throwable $e) { return []; }
+        }
+        if ($gid === self::G_TOP) {
+            try {
+                $all = array_map('strval', $this->pdo->query(
+                    "SELECT stock_code FROM pf_watchlist ORDER BY added_at DESC")->fetchAll(PDO::FETCH_COLUMN));
+            } catch (Throwable $e) { return []; }
+            // 보유 중인 종목은 「보유종목」의 것이다 — Top-Pick 에서는 뺀다(판정 실패 시엔 전부: 빈 목록보다 겹침이 낫다)
+            try { $held = array_flip(array_map('strval', (new Dt($this->pdo))->heldCodes())); } catch (Throwable $e) { $held = []; }
+            return array_values(array_filter($all, static fn($c) => !isset($held[$c])));
+        }
+        if ($gid === self::G_RECENT) {
+            try { return array_map('strval', (new Dt($this->pdo))->activeCodes()); }
+            catch (Throwable $e) { return []; }
+        }
+        $st = $this->pdo->prepare("
+            SELECT stock_code FROM wg_item
+             WHERE group_id = ? AND item_type = 'stock' ORDER BY sort_no, id");
+        $st->execute([$gid]);
+        return array_map('strval', $st->fetchAll(PDO::FETCH_COLUMN));
+    }
+
+    /**
+     * 여러 종목의 시세 — all_stock_info 를 <b>따로</b> 읽는다.
+     * (그 표는 char(6) utf8mb3 라 utf8mb4 표와 SQL 로 조인하면 콜레이션이 어긋난다.)
+     * 거래대금 amt = 억원(stock_vol_cap). 화면은 십억 원으로 접어 보인다.
+     */
+    public function quotes(array $codes): array
+    {
+        $codes = array_values(array_unique(array_filter(array_map('strval', $codes))));
+        if (!$codes) return [];
+        $ph = implode(',', array_fill(0, count($codes), '?'));
+        $out = [];
+        try {
+            $st = $this->pdo->prepare("
+                SELECT stock_code, stock_price, stock_rate, stock_yrate, stock_vol_cap, stock_cap
+                  FROM all_stock_info WHERE stock_code IN ($ph)");
+            $st->execute($codes);
+            foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                $price = (float)$r['stock_price'];
+                if ($price <= 0) continue;                 // 값이 없는 것을 0원으로 그리지 않는다
+                $out[(string)$r['stock_code']] = [
+                    'price' => $price,
+                    'rate'  => (float)$r['stock_rate'],
+                    'diff'  => (float)$r['stock_yrate'],
+                    'amt'   => (float)$r['stock_vol_cap'],
+                    'cap'   => (float)$r['stock_cap'],        // 시가총액(억) — 회전율(거래대금÷시총)의 분모
+                ];
+            }
+        } catch (Throwable $e) { /* 시세 표가 없어도 목록은 뜬다 */ }
+        return $out;
+    }
+
+    /**
+     * 화면용 행 — 아이템 + 종목명(StockName) + 시세·배지의 재료(decorate).
+     * 기준대비(%)는 저장하지 않는다(파생값) — 화면이 현재가로 그때그때 만든다.
+     */
+    public function rows(int $gid): array
+    {
+        if (self::isBuiltin($gid)) return $this->builtinRows($gid);
+        $items = $this->items($gid);
+        $codes = [];
+        foreach ($items as $it) if ($it['item_type'] === 'stock') $codes[] = (string)$it['stock_code'];
+        $names = $codes ? StockName::many($this->pdo, $codes) : [];
+
+        $out = [];
+        foreach ($items as $it) {
+            $c = (string)($it['stock_code'] ?? '');
+            $out[] = [
+                'id'        => (int)$it['id'],
+                'type'      => $it['item_type'],
+                'code'      => $c,
+                'name'      => $it['item_type'] === 'stock' ? ($names[$c] ?? $c) : '',
+                'label'     => (string)($it['label'] ?? ''),
+                'dir'       => ($it['item_type'] === 'sep' && $it['dir'] !== null) ? (int)$it['dir'] : 0,
+                // 종목이면 «같이 볼 변수», 구분행이면 «그 방향을 적은 변수»(방향은 변수 하나에 대한 말이다)
+                'var_id'    => $it['var_id'] !== null ? (int)$it['var_id'] : 0,
+                'base'      => $it['base_price'] !== null ? (int)$it['base_price'] : null,
+                'base_date' => $it['base_date'],
+                'memo'      => (string)($it['memo'] ?? ''),
+                'memo_at'   => $it['memo_at'],
+            ];
+        }
+        return $this->decorate($out);
+    }
+
+    /**
+     * 행에 «시세와 목록 배지의 재료»를 얹는다 — 단타 목록의 행과 <b>같은 정보</b>를 보이기 위해서다
+     * (2026-10-07 밤 사용자 지시 — 「관심종목 리스트의 정보를 단타에 있는 것처럼 동일하게」 · 그리는 쪽은 style/stockrow.js).
+     *   price·rate·diff·amt(억)·cap(시총 억) · etf_top(상위 편입 ETF 수) · q(퀀트 배지) ·
+     *   days·bars·holes(1분봉 원장의 수집 상태) · held·slot·pf·pf_n·pos_id(보유 배지와 포지션 링크).
+     * ★판정을 여기서 내리지 않는다 — 배지는 quant_badge_many()(stock/lib/quant.php 단일본), 보유는 Dt::heldList(),
+     *   원장은 Dt::ledgerMap() 을 읽기만 한다.
+     * ★곁들이는 정보다 — 어느 하나가 실패해도 목록은 뜬다(각각 try).
+     */
+    private function decorate(array $rows): array
+    {
+        $codes = [];
+        foreach ($rows as $r) if ($r['type'] === 'stock' && (string)$r['code'] !== '') $codes[] = (string)$r['code'];
+        $codes = array_values(array_unique($codes));
+        $q = $this->quotes($codes);
+
+        $etf = []; $held = []; $ledger = []; $qm = [];
+        if ($codes) {
+            $ph = implode(',', array_fill(0, count($codes), '?'));
+            try {
+                $st = $this->pdo->prepare("SELECT stock_code, top_rank_count FROM all_stock_holdings_info WHERE stock_code IN ($ph)");
+                $st->execute($codes);
+                foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $x) $etf[(string)$x['stock_code']] = (int)$x['top_rank_count'];
+            } catch (Throwable $e) { /* ETF 편입 수 없이 */ }
+            try {
+                $dt = new Dt($this->pdo);
+                foreach ($dt->heldList() as $h) $held[(string)$h['code']] = $h;
+                $ledger = $dt->ledgerMap();
+            } catch (Throwable $e) { /* 보유·원장 정보 없이 */ }
+            try {
+                if (!function_exists('quant_badge_many')) {
+                    $f = ($_SERVER['DOCUMENT_ROOT'] ?? '') . '/stock/lib/quant.php';
+                    if (is_file($f)) require_once $f;
+                }
+                if (function_exists('quant_badge_many')) {
+                    $items = [];
+                    foreach ($codes as $c) {
+                        $items[$c] = ['price'  => (float)($q[$c]['price'] ?? 0), 'rate' => (float)($q[$c]['rate'] ?? 0),
+                                      'amtEok' => (float)($q[$c]['amt'] ?? 0)];
+                    }
+                    $qm = quant_badge_many($this->pdo, $items);
+                }
+            } catch (Throwable $e) { $qm = []; }   // 배지는 부가정보 — 원장(krx_amt·krx_surge)이 없어도 목록은 뜬다
+        }
+
+        foreach ($rows as &$r) {
+            $stock = ($r['type'] === 'stock');
+            $c  = (string)$r['code'];
+            $x  = $stock ? ($q[$c] ?? null) : null;
+            $h  = $stock ? ($held[$c] ?? null) : null;
+            $lg = $stock ? ($ledger[$c] ?? null) : null;
+            $r['price']   = $x ? $x['price'] : null;
+            $r['rate']    = $x ? $x['rate']  : null;
+            $r['diff']    = $x ? $x['diff']  : null;
+            $r['amt']     = $x ? $x['amt']   : null;
+            $r['cap']     = $x ? $x['cap']   : null;
+            $r['etf_top'] = $stock ? (int)($etf[$c] ?? 0) : 0;
+            $r['q']       = $stock ? ($qm[$c] ?? null) : null;
+            // 「N일 M봉」 — 보유는 봉이 없어도 0 으로 적는다(「채우는 중」의 근거) · 그 밖은 원장에 봉이 있을 때만
+            $r['days']    = $h ? (int)($h['days'] ?? 0)  : ($lg ? (int)$lg['days'] : null);
+            $r['bars']    = $h ? (int)($h['bars'] ?? 0)  : ($lg ? (int)$lg['bars'] : null);
+            $r['holes']   = $h ? (int)($h['holes'] ?? 0) : 0;
+            $r['held']    = $h ? 1 : 0;
+            $r['slot']    = ($h && empty($h['open'])) ? 1 : 0;
+            $r['pf']      = $h ? (string)($h['pf_names'] ?? '') : '';
+            $r['pf_n']    = $h ? (int)($h['pf_n'] ?? 1) : 0;
+            $r['pos_id']  = $h ? (int)($h['pos_id'] ?? 0) : 0;
+        }
+        unset($r);
+        return $rows;
+    }
+
+    /**
+     * 고정 그룹의 화면용 행 — rows() 와 <b>같은 모양</b>이다(화면의 렌더러가 하나라야 한다).
+     * id 는 음수(-1, -2, …) — wg_item 의 행이 아니라서 고치는 API 에 넘겨도 「대상 없음」으로 끝난다.
+     *
+     * ★목록을 여기서 다시 정하지 않는다 — 보유는 Dt::heldList()(단타와 같은 접기), Top-Pick 은 Pf::watchList()
+     *   (재무분석 > Top-Pick 화면과 같은 순서 · 보유는 뺀다), 최근조회는 Dt::poolList() 를 그대로 읽는다.
+     * $deco=false 면 시세·배지를 얹지 않는다(copyFromBuiltin — 기준가·메모만 필요하다).
+     */
+    private function builtinRows(int $gid, bool $deco = true): array
+    {
+        $src = [];
+        if ($gid === self::G_HELD) {
+            try { $list = (new Dt($this->pdo))->heldList(); } catch (Throwable $e) { $list = []; }
+            foreach ($list as $r) {
+                $src[] = ['code' => (string)$r['code'], 'name' => (string)($r['name'] ?? $r['code']),
+                          'base' => null, 'base_date' => null, 'memo' => ''];
+            }
+        } elseif ($gid === self::G_TOP) {
+            try { $list = (new Pf($this->pdo))->watchList(); } catch (Throwable $e) { $list = []; }
+            $held = [];
+            try { $held = array_flip((new Dt($this->pdo))->heldCodes()); } catch (Throwable $e) { /* 판정 실패 시 전부 */ }
+            foreach ($list as $r) {
+                $c = (string)$r['stock_code'];
+                if (isset($held[$c])) continue;          // 보유 중인 종목은 「보유종목」에 있다 — 여기서는 뺀다(codes() 와 같은 규칙)
+                $p = (int)round((float)($r['added_price'] ?? 0));
+                $src[] = ['code' => $c, 'name' => (string)($r['stock_name'] ?: $c),
+                          'base' => $p > 0 ? $p : null,
+                          'base_date' => $p > 0 ? substr((string)$r['added_at'], 0, 10) : null,
+                          'memo' => (string)($r['memo'] ?? '')];
+            }
+        } elseif ($gid === self::G_RECENT) {
+            // 최근조회 — Dt::poolList() 그대로(단타 화면의 「최근조회」 목록과 같은 종목·같은 순서 = 최근에 본 순). 기준가는 없다
+            try { $list = (new Dt($this->pdo))->poolList(); } catch (Throwable $e) { $list = []; }
+            foreach ($list as $r) {
+                $src[] = ['code' => (string)$r['code'], 'name' => (string)($r['name'] ?? $r['code']),
+                          'base' => null, 'base_date' => null, 'memo' => ''];
+            }
+        }
+        $out = [];
+        foreach ($src as $i => $r) {
+            $out[] = [
+                'id' => -($i + 1), 'type' => 'stock', 'code' => $r['code'], 'name' => $r['name'], 'label' => '', 'dir' => 0, 'var_id' => 0,
+                'base' => $r['base'], 'base_date' => $r['base_date'], 'memo' => $r['memo'], 'memo_at' => null,
+            ];
+        }
+        return $deco ? $this->decorate($out) : $out;
+    }
+
+    /**
+     * 고정 그룹의 종목을 내 그룹으로 <b>복사</b>한다(이동은 없다 — 고정 그룹에서는 뺄 수 없다).
+     * Top-Pick 의 기준가(담을 때 가격·담은 날)·메모는 함께 간다 — 복사한 뒤로는 내 그룹의 것이라 고칠 수 있다.
+     *
+     * @return array ['done'=>int, 'skip'=>int, 'over'=>int 그룹이 차서 못 담은 수]
+     */
+    public function copyFromBuiltin(int $srcGid, array $codes, int $targetGid): array
+    {
+        if (!$this->groupExists($targetGid)) throw new InvalidArgumentException('대상 그룹을 찾지 못했습니다.');
+        $want = array_flip(array_map('strval', $codes));
+        $have = array_flip($this->codes($targetGid));
+        $room = max(0, self::ITEM_MAX - count($have));
+        $no   = $this->nextSort($targetGid);
+        $ins  = $this->pdo->prepare("
+            INSERT INTO wg_item (group_id, item_type, stock_code, base_price, base_date, memo, memo_at, sort_no)
+            VALUES (?, 'stock', ?, ?, ?, ?, ?, ?)");
+        $res  = ['done' => 0, 'skip' => 0, 'over' => 0];
+        foreach ($this->builtinRows($srcGid, false) as $r) {
+            $c = (string)$r['code'];
+            if (!isset($want[$c]) || strlen($c) !== 6) continue;
+            if (isset($have[$c])) { $res['skip']++; continue; }
+            if ($room <= 0)       { $res['over']++; continue; }     // 그룹이 찼다(ITEM_MAX)
+            $memo = $r['memo'] !== '' ? mb_substr($r['memo'], 0, self::MEMO_MAX) : null;
+            $ins->execute([$targetGid, $c, $r['base'], $r['base_date'], $memo, $memo !== null ? date('Y-m-d H:i:s') : null, $no++]);
+            $have[$c] = 1;
+            $room--;
+            $res['done']++;
+        }
+        return $res;
+    }
+
+    private function nextSort(int $gid): int
+    {
+        $st = $this->pdo->prepare("SELECT COALESCE(MAX(sort_no), 0) + 1 FROM wg_item WHERE group_id = ?");
+        $st->execute([$gid]);
+        return (int)$st->fetchColumn();
+    }
+
+    /**
+     * 종목 추가(단건·일괄 공용) — 그룹 맨 아래에 붙인다.
+     * 이름을 못 찾는 코드는 담지 않는다(없는 종목이 목록에 코드로 서는 것을 막는다).
+     *
+     * ★그룹당 ITEM_MAX 종목까지다 — 넘는 것은 담지 않고 <b>무엇을 못 담았는지</b> 돌려준다(over). 앞에서부터 자리가 되는 만큼만 담는다.
+     *
+     * @return array ['added'=>[code…], 'dup'=>[code…], 'miss'=>[code…], 'over'=>[code…]]
+     */
+    public function itemAdd(int $gid, array $codes): array
+    {
+        if (!$this->groupExists($gid)) throw new InvalidArgumentException('그룹을 찾지 못했습니다.');
+        $want = [];
+        foreach ($codes as $c) {
+            $c = strtoupper(Dt::cleanCode((string)$c));
+            if (strlen($c) === 6) $want[$c] = 1;
+        }
+        // ★PHP 는 숫자로만 된 배열 키("142210")를 정수로 바꾼다 — 코드는 문자열이어야 화면의 === 비교가 맞는다
+        $want = array_map('strval', array_keys($want));
+        $res  = ['added' => [], 'dup' => [], 'miss' => [], 'over' => []];
+        if (!$want) return $res;
+
+        $known = StockName::many($this->pdo, $want);
+        $have  = array_flip($this->codes($gid));
+        $room  = max(0, self::ITEM_MAX - count($have));
+        $no    = $this->nextSort($gid);
+        $st    = $this->pdo->prepare(
+            "INSERT INTO wg_item (group_id, item_type, stock_code, sort_no) VALUES (?, 'stock', ?, ?)");
+        foreach ($want as $c) {
+            if (!isset($known[$c])) { $res['miss'][] = $c; continue; }
+            if (isset($have[$c]))   { $res['dup'][]  = $c; continue; }
+            if ($room <= 0)         { $res['over'][] = $c; continue; }
+            $st->execute([$gid, $c, $no++]);
+            $res['added'][] = $c;
+            $room--;
+        }
+        return $res;
+    }
+
+    /** 구분행 추가 — beforeId 가 있으면 그 행 «위»에, 없으면 맨 아래 */
+    public function sepAdd(int $gid, string $label, int $beforeId = 0): int
+    {
+        if (!$this->groupExists($gid)) throw new InvalidArgumentException('그룹을 찾지 못했습니다.');
+        $label = $this->cleanLabel($label);
+        $st = $this->pdo->prepare(
+            "INSERT INTO wg_item (group_id, item_type, label, sort_no) VALUES (?, 'sep', ?, ?)");
+        $st->execute([$gid, $label, $this->nextSort($gid)]);
+        $id = (int)$this->pdo->lastInsertId();
+
+        if ($beforeId > 0) {
+            $ids = array_map('intval', array_column($this->items($gid), 'id'));
+            $ids = array_values(array_diff($ids, [$id]));
+            $at  = array_search($beforeId, $ids, true);
+            if ($at !== false) {
+                array_splice($ids, $at, 0, [$id]);
+                $this->renumber($gid, $ids);
+            }
+        }
+        return $id;
+    }
+
+    private function cleanLabel(string $label): string
+    {
+        $label = trim(preg_replace('/\s+/u', ' ', $label));
+        $len   = mb_strlen($label);
+        if ($len < 1 || $len > self::LABEL_MAX) {
+            throw new InvalidArgumentException('구분행 이름은 1~' . self::LABEL_MAX . '자로 적어 주세요.');
+        }
+        return $label;
+    }
+
+    private function renumber(int $gid, array $ids): void
+    {
+        $st = $this->pdo->prepare("UPDATE wg_item SET sort_no = ? WHERE id = ? AND group_id = ?");
+        $this->pdo->beginTransaction();
+        try {
+            foreach ($ids as $i => $id) $st->execute([$i + 1, (int)$id, $gid]);
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+    }
+
+    /** 순서 저장 — 그룹의 «전체 id 배열»을 받아 1..N 으로 다시 매긴다 */
+    public function itemReorder(int $gid, array $ids): void
+    {
+        $have = array_map('intval', array_column($this->items($gid), 'id'));
+        $this->renumber($gid, self::mergeOrder($ids, $have));
+    }
+
+    public function itemGet(int $id): ?array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM wg_item WHERE id = ?");
+        $st->execute([$id]);
+        $r = $st->fetch(PDO::FETCH_ASSOC);
+        return $r ?: null;
+    }
+
+    /** 기준가 검증 — 범위 밖이면 저장하지 않는다(화면은 칸을 빨갛게 둔다) */
+    public static function cleanBase($v): int
+    {
+        $n = (int)preg_replace('/[^0-9]/', '', (string)$v);
+        if ($n < self::BASE_MIN || $n > self::BASE_MAX) {
+            throw new InvalidArgumentException(
+                '기준가는 ' . number_format(self::BASE_MIN) . ' ~ ' . number_format(self::BASE_MAX) . ' 사이의 정수입니다.');
+        }
+        return $n;
+    }
+
+    /**
+     * 한 행 고치기 — 키가 «있는» 것만 손댄다.
+     *   base_price : 숫자 = 저장(+기준일 오늘) · null/'' = 지우기
+     *   memo       : 글 = 저장(+작성 시각) · '' = 지우기
+     *   label      : 구분행 이름
+     *   dir        : 구분행의 방향 — 1(변수가 오를 때 유리) · -1(내릴 때 유리) · 0/null = 없음
+     *   var_id     : 종목이면 «같이 볼 변수», 구분행이면 «방향을 적은 변수»(등록된 변수 id) · 0/null = 없음
+     *                ★구분행의 방향은 변수 하나에 대한 말이다(「환율이 오를 때 유리」) — 주 변수를 바꿔도 그 변수를 따라야 한다.
+     *                  var_id 가 빈 옛 구분행만 그룹의 주 변수를 따른다.
+     */
+    public function itemUpdate(int $id, array $f): void
+    {
+        $it = $this->itemGet($id);
+        if (!$it) throw new InvalidArgumentException('대상을 찾지 못했습니다.');
+
+        if (array_key_exists('base_price', $f)) {
+            if ($it['item_type'] !== 'stock') throw new InvalidArgumentException('구분행에는 기준가가 없습니다.');
+            if ($f['base_price'] === null || $f['base_price'] === '') {
+                $this->pdo->prepare("UPDATE wg_item SET base_price = NULL, base_date = NULL WHERE id = ?")
+                          ->execute([$id]);
+            } else {
+                $this->pdo->prepare("UPDATE wg_item SET base_price = ?, base_date = CURDATE() WHERE id = ?")
+                          ->execute([self::cleanBase($f['base_price']), $id]);
+            }
+        }
+        if (array_key_exists('memo', $f)) {
+            $memo = trim((string)$f['memo']);
+            if (mb_strlen($memo) > self::MEMO_MAX) {
+                throw new InvalidArgumentException('메모는 ' . self::MEMO_MAX . '자까지입니다.');
+            }
+            if ($memo === '') {
+                $this->pdo->prepare("UPDATE wg_item SET memo = NULL, memo_at = NULL WHERE id = ?")->execute([$id]);
+            } else {
+                $this->pdo->prepare("UPDATE wg_item SET memo = ?, memo_at = NOW() WHERE id = ?")->execute([$memo, $id]);
+            }
+        }
+        if (array_key_exists('label', $f)) {
+            if ($it['item_type'] !== 'sep') throw new InvalidArgumentException('구분행만 이름을 바꿀 수 있습니다.');
+            $this->pdo->prepare("UPDATE wg_item SET label = ? WHERE id = ?")
+                      ->execute([$this->cleanLabel((string)$f['label']), $id]);
+        }
+        if (array_key_exists('dir', $f)) {
+            if ($it['item_type'] !== 'sep') throw new InvalidArgumentException('방향은 구분행에만 적습니다.');
+            $d = (int)$f['dir'];
+            $this->pdo->prepare("UPDATE wg_item SET dir = ? WHERE id = ?")
+                      ->execute([$d > 0 ? 1 : ($d < 0 ? -1 : null), $id]);
+        }
+        if (array_key_exists('var_id', $f)) {
+            $v = (int)$f['var_id'];
+            if ($v > 0) {
+                $ck = $this->pdo->prepare("SELECT COUNT(*) FROM mv_var WHERE id = ?");
+                $ck->execute([$v]);
+                if (!(int)$ck->fetchColumn()) throw new InvalidArgumentException('등록되지 않은 변수입니다.');
+            }
+            $this->pdo->prepare("UPDATE wg_item SET var_id = ? WHERE id = ?")->execute([$v > 0 ? $v : null, $id]);
+        }
+    }
+
+    /**
+     * 기준가 일괄 — mode 'current'(= 현재가) | 'clear'(지우기).
+     * sectionId 가 있으면 그 구분행 «아래 ~ 다음 구분행 앞»의 종목만.
+     * ★현재가가 없는 종목은 건너뛴다 — 0 을 기준가로 적지 않는다.
+     *
+     * @return int 바뀐 종목 수
+     */
+    public function bulkBase(int $gid, string $mode, int $sectionId = 0): int
+    {
+        $ids = []; $codeOf = [];
+        $in  = ($sectionId === 0);
+        foreach ($this->items($gid) as $it) {
+            if ($it['item_type'] === 'sep') {
+                if ($sectionId > 0) $in = ((int)$it['id'] === $sectionId);
+                continue;
+            }
+            if (!$in) continue;
+            $ids[] = (int)$it['id'];
+            $codeOf[(int)$it['id']] = (string)$it['stock_code'];
+        }
+        if (!$ids) return 0;
+
+        if ($mode === 'clear') {
+            $ph = implode(',', array_fill(0, count($ids), '?'));
+            $st = $this->pdo->prepare(
+                "UPDATE wg_item SET base_price = NULL, base_date = NULL WHERE group_id = ? AND id IN ($ph)");
+            $st->execute(array_merge([$gid], $ids));
+            return count($ids);
+        }
+        if ($mode !== 'current') throw new InvalidArgumentException('알 수 없는 방식입니다.');
+
+        $q  = $this->quotes(array_values($codeOf));
+        $st = $this->pdo->prepare("UPDATE wg_item SET base_price = ?, base_date = CURDATE() WHERE id = ? AND group_id = ?");
+        $n  = 0;
+        $this->pdo->beginTransaction();
+        try {
+            foreach ($ids as $id) {
+                $p = (int)round((float)($q[$codeOf[$id]]['price'] ?? 0));
+                if ($p < self::BASE_MIN || $p > self::BASE_MAX) continue;
+                $st->execute([$p, $id, $gid]);
+                $n++;
+            }
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+        return $n;
+    }
+
+    public function itemDelete(array $ids): int
+    {
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        if (!$ids) return 0;
+        $ph = implode(',', array_fill(0, count($ids), '?'));
+        $st = $this->pdo->prepare("DELETE FROM wg_item WHERE id IN ($ph)");
+        $st->execute($ids);
+        return $st->rowCount();
+    }
+
+    /**
+     * 다른 그룹으로 복사·이동 — 기준가·메모(와 그 날짜)가 함께 간다.
+     * 대상 그룹에 이미 있는 종목은 건너뛴다(이동이어도 원래 자리에 남는다 — 대상의 기준가를 덮지 않는다).
+     * 구분행은 옮기지 않는다. 대상 그룹이 차면(ITEM_MAX) 남은 것은 담지 않는다 — 이동이어도 원래 자리에 남는다(over).
+     *
+     * @return array ['done'=>int, 'skip'=>int, 'over'=>int]
+     */
+    public function transfer(array $ids, int $targetGid, bool $move): array
+    {
+        if (!$this->groupExists($targetGid)) throw new InvalidArgumentException('대상 그룹을 찾지 못했습니다.');
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        $res = ['done' => 0, 'skip' => 0, 'over' => 0];
+        if (!$ids) return $res;
+
+        $ph = implode(',', array_fill(0, count($ids), '?'));
+        $st = $this->pdo->prepare(
+            "SELECT * FROM wg_item WHERE id IN ($ph) AND item_type = 'stock' ORDER BY sort_no, id");
+        $st->execute($ids);
+        $src  = $st->fetchAll(PDO::FETCH_ASSOC);
+        $have = array_flip($this->codes($targetGid));
+        $room = max(0, self::ITEM_MAX - count($have));
+        $no   = $this->nextSort($targetGid);
+        $ins  = $this->pdo->prepare("
+            INSERT INTO wg_item (group_id, item_type, stock_code, base_price, base_date, memo, memo_at, sort_no)
+            VALUES (?, 'stock', ?, ?, ?, ?, ?, ?)");
+        $del  = $this->pdo->prepare("DELETE FROM wg_item WHERE id = ?");
+
+        $this->pdo->beginTransaction();
+        try {
+            foreach ($src as $it) {
+                $c = (string)$it['stock_code'];
+                if ((int)$it['group_id'] === $targetGid || isset($have[$c])) { $res['skip']++; continue; }
+                if ($room <= 0) { $res['over']++; continue; }
+                $ins->execute([$targetGid, $c, $it['base_price'], $it['base_date'], $it['memo'], $it['memo_at'], $no++]);
+                $have[$c] = 1;
+                $room--;
+                if ($move) $del->execute([(int)$it['id']]);
+                $res['done']++;
+            }
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+        return $res;
+    }
+
+    // ══ 일괄 등록 미리보기 ══════════════════════════════════════════════
+    /**
+     * 붙여넣은 글에서 종목을 알아본다 — 줄바꿈·탭·콤마로 자르고,
+     * 토막에 6자리 코드가 있으면 그것을 먼저 믿고, 없으면 종목명 «정확 일치»만 받는다.
+     * (비슷한 이름으로 맞추지 않는다 — 틀린 종목을 담는 것보다 「미인식」으로 남기는 편이 낫다.)
+     *
+     * @return array ['ok'=>[['code','name','dup'=>0|1]…], 'miss'=>[원문…], 'room'=>int 그 그룹에 남은 자리(새 그룹이면 ITEM_MAX)]
+     */
+    public function parse(string $text, int $gid = 0): array
+    {
+        $tokens = [];
+        foreach (preg_split('/[\r\n\t,]+/u', $text) as $t) {
+            $t = trim($t);
+            if ($t !== '') $tokens[] = mb_substr($t, 0, 60);
+        }
+        $tokens = array_slice($tokens, 0, 300);
+
+        $asCode = [];
+        foreach ($tokens as $i => $t) {
+            /* 5번째 자리가 문자인 코드(0004V0 — 신규상장·인적분할)도 보통주다. 문자가 있다고 거르지 않는다 */
+            if (preg_match('/(?<![0-9A-Za-z])(\d{4}[0-9A-Za-z]{2})(?![0-9A-Za-z])/', $t, $m)) $asCode[$i] = strtoupper($m[1]);
+        }
+
+        $names  = $asCode ? StockName::many($this->pdo, array_values(array_unique($asCode))) : [];
+        $byName = $this->codesByName(array_values(array_unique($tokens)));
+        $have   = $gid > 0 ? array_flip($this->codes($gid)) : [];
+
+        $ok = []; $miss = []; $seen = [];
+        foreach ($tokens as $i => $t) {
+            $code = '';
+            if (isset($asCode[$i]) && isset($names[$asCode[$i]])) $code = $asCode[$i];
+            elseif (isset($byName[$t]))                           $code = $byName[$t];
+            if ($code === '') { $miss[] = $t; continue; }
+            if (isset($seen[$code])) continue;                 // 같은 종목을 두 번 적은 것
+            $seen[$code] = 1;
+            $ok[] = ['code' => $code,
+                     'name' => $names[$code] ?? StockName::one($this->pdo, $code),
+                     'dup'  => isset($have[$code]) ? 1 : 0];
+        }
+        return ['ok' => $ok, 'miss' => $miss, 'room' => max(0, self::ITEM_MAX - count($have))];
+    }
+
+    /**
+     * «표»로 붙여넣은 글 읽기 (2026-10-12) — 「종목 (코드) │ 근거 │ 같이 볼 변수」 같은 표를 통째로 붙이면
+     * 종목은 종목으로, 나머지 칸은 그 종목의 <b>메모</b>로, 「① 환율 상승 때 유리한 종목」 같은 한 줄은 <b>구분행</b>(방향 포함)으로 읽는다.
+     *   칸은 탭 또는 | 로 가른다(화면의 표를 긁으면 탭, 마크다운이면 |). 첫 칸에서 종목을 찾는다 — 6자리 코드가 먼저, 없으면 이름 정확 일치
+     *   (한 칸에 「기아 (000270) · 현대차 (005380)」처럼 여럿이면 같은 메모를 나눠 갖는다).
+     *   머리줄(「종목 …」)의 칸 이름은 셋째 칸부터 메모 앞에 붙인다(「같이 볼 변수: 유가」).
+     *   방향 — 「상승·오를·인상·↑」이 먼저 나오면 +1, 「하락·내릴·인하·↓」가 먼저면 −1(「불리·피해」면 뒤집는다). 못 읽으면 0.
+     * 표가 아니면(메모가 될 칸도 구분행도 없으면) null — 그때는 parse() 가 예전처럼 읽는다.
+     *
+     * @return array|null ['secs'=>[['label','dir','rows'=>[['code','name','memo','dup']…]]…], 'miss'=>[원문…]]
+     */
+    public function parseTable(string $text, int $gid = 0): ?array
+    {
+        $RE = '/(?<![0-9A-Za-z])(\d{4}[0-9A-Za-z]{2})(?![0-9A-Za-z])/';
+        $lines = [];
+        foreach (preg_split('/\r\n|\r|\n/', $text) as $ln) {
+            $ln = (string)preg_replace('/^[ \x{00A0}]+|[ \x{00A0}]+$/u', '', $ln);   // ★trim() 은 바이트 단위라 한글의 끝 바이트(0xA0)를 깎는다
+            if ($ln === '' || preg_match('/^[\s|:\-]+$/', $ln)) continue;             // 빈 줄 · 마크다운 구분줄
+            $cells = strpos($ln, "\t") !== false ? explode("\t", $ln) : explode('|', trim($ln, '|'));
+            $cells = array_map(static fn($c) => trim(preg_replace('/\s+/u', ' ', $c)), $cells);
+            $lines[] = $cells;
+            if (count($lines) >= 200) break;
+        }
+        // 1차 — 첫 칸의 코드·이름 후보를 모아 한 번에 확인한다
+        $cand = []; $nameTok = [];
+        foreach ($lines as $i => $cells) {
+            if (preg_match_all($RE, $cells[0], $m)) { $cand[$i] = array_map('strtoupper', $m[1]); continue; }
+            if (count($cells) < 2) continue;                                            // 한 칸짜리 줄은 구분행 후보다
+            foreach (preg_split('/\s*[·,\/]\s*/u', preg_replace('/^\(참고\)\s*/u', '', $cells[0])) as $t) {
+                $t = trim($t);
+                if ($t !== '' && mb_strlen($t) <= 30) $nameTok[$i][] = $t;
+            }
+        }
+        $allCodes = [];
+        foreach ($cand as $cs) foreach ($cs as $c) $allCodes[$c] = 1;
+        $names  = $allCodes ? StockName::many($this->pdo, array_map('strval', array_keys($allCodes))) : [];
+        $allTok = [];
+        foreach ($nameTok as $ts) foreach ($ts as $t) $allTok[$t] = 1;
+        $byName = $allTok ? $this->codesByName(array_map('strval', array_keys($allTok))) : [];
+        $have   = $gid > 0 ? array_flip($this->codes($gid)) : [];
+
+        $secs = [['label' => '', 'dir' => 0, 'rows' => []]];
+        $hdr = []; $miss = []; $seen = []; $memos = 0;
+        foreach ($lines as $i => $cells) {
+            $codes = [];
+            foreach ($cand[$i] ?? [] as $c) if (isset($names[$c])) $codes[] = $c;
+            if (!$codes) foreach ($nameTok[$i] ?? [] as $t) if (isset($byName[$t])) $codes[] = (string)$byName[$t];
+            if ($codes) {
+                $parts = [];
+                foreach (array_slice($cells, 1, null, true) as $k => $c) {
+                    if ($c === '') continue;
+                    $parts[] = ($k >= 2 && ($hdr[$k] ?? '') !== '' ? $hdr[$k] . ': ' : '') . $c;
+                }
+                $memo = mb_substr(implode(' · ', $parts), 0, self::MEMO_MAX);
+                foreach ($codes as $c) {
+                    if (isset($seen[$c])) continue;
+                    $seen[$c] = 1;
+                    if ($memo !== '') $memos++;
+                    $secs[count($secs) - 1]['rows'][] = ['code' => $c, 'name' => $names[$c] ?? StockName::one($this->pdo, $c),
+                                                         'memo' => $memo, 'dup' => isset($have[$c]) ? 1 : 0];
+                }
+                continue;
+            }
+            $first = $cells[0];
+            if (preg_match('/^종목/u', $first)) { $hdr = $cells; continue; }           // 머리줄
+            if (count(array_filter($cells, static fn($c) => $c !== '')) === 1 && mb_strlen($first) <= self::LABEL_MAX + 6) {
+                $label = trim(preg_replace('/^[\s#①-⑳\d.\)]+/u', '', $first));
+                if ($label === '') continue;
+                $up = preg_match('/상승|오를|인상|↑/u', $label, $a, PREG_OFFSET_CAPTURE) ? $a[0][1] : -1;
+                $dn = preg_match('/하락|내릴|인하|↓/u', $label, $b, PREG_OFFSET_CAPTURE) ? $b[0][1] : -1;
+                $dir = ($up < 0 && $dn < 0) ? 0 : (($dn < 0 || ($up >= 0 && $up < $dn)) ? 1 : -1);
+                if (preg_match('/불리|피해/u', $label)) $dir = -$dir;
+                $secs[] = ['label' => mb_substr($label, 0, self::LABEL_MAX), 'dir' => $dir, 'rows' => []];
+                continue;
+            }
+            if (count($cells) >= 2 && $first !== '') $miss[] = mb_substr($first, 0, 60);   // 표의 줄인데 종목을 못 찾았다
+        }
+        $secs = array_values(array_filter($secs, static fn($s) => $s['rows']));
+        $named = count(array_filter($secs, static fn($s) => $s['label'] !== ''));
+        if (!$secs || (!$memos && !$named)) return null;
+        return ['secs' => $secs, 'miss' => $miss, 'memos' => $memos];
+    }
+
+    /**
+     * 표로 담기 — parseTable 이 읽은 대로: 구분행(방향) → 그 아래 종목 → 메모.
+     * ★이미 그룹에 있는 종목은 건드리지 않는다(그 종목의 메모를 덮지 않는다). 새로 담긴 종목에만 메모를 적는다.
+     * ★그룹당 ITEM_MAX — 자리가 되는 만큼 앞에서부터 담고 못 담은 것은 over 로 돌려준다. 새 종목이 하나도 없는 섹션은 구분행도 만들지 않는다.
+     *
+     * @return array ['added'=>[code…], 'dup'=>[…], 'over'=>[…], 'miss'=>[원문…], 'seps'=>int, 'memos'=>int]
+     */
+    public function tableAdd(int $gid, string $text): array
+    {
+        if (!$this->groupExists($gid)) throw new InvalidArgumentException('그룹을 찾지 못했습니다.');
+        $t = $this->parseTable($text, $gid);
+        if (!$t) throw new InvalidArgumentException('표로 읽을 수 없는 글입니다.');
+        $res = ['added' => [], 'dup' => [], 'over' => [], 'miss' => $t['miss'], 'seps' => 0, 'memos' => 0];
+        $upd = $this->pdo->prepare("UPDATE wg_item SET memo = ?, memo_at = NOW() WHERE group_id = ? AND stock_code = ? AND memo IS NULL");
+        foreach ($t['secs'] as $s) {
+            $fresh = array_values(array_filter($s['rows'], static fn($r) => !$r['dup']));
+            foreach ($s['rows'] as $r) if ($r['dup']) $res['dup'][] = $r['code'];
+            if (!$fresh) continue;
+            $room = self::ITEM_MAX - count($this->codes($gid));
+            if ($room <= 0) { foreach ($fresh as $r) $res['over'][] = $r['code']; continue; }
+            if ($s['label'] !== '') {
+                $sid = $this->sepAdd($gid, $s['label']);
+                if ($s['dir']) {
+                    // 방향은 «지금의 주 변수»에 대한 말로 적어 둔다 — 나중에 주 변수를 바꿔도 이 변수를 따른다(변수가 없으면 비워 둔다)
+                    $f = ['dir' => $s['dir']];
+                    try { $gv = (new Mv($this->pdo))->groupVars($gid); if ($gv) $f['var_id'] = (int)$gv[0]['id']; } catch (Throwable $e) { /* 변수 표 없이 */ }
+                    $this->itemUpdate($sid, $f);
+                }
+                $res['seps']++;
+            }
+            $r = $this->itemAdd($gid, array_column($fresh, 'code'));
+            $memo = array_column($fresh, 'memo', 'code');
+            foreach ($r['added'] as $c) {
+                $res['added'][] = $c;
+                $m = (string)($memo[$c] ?? '');
+                if ($m !== '') { $upd->execute([$m, $gid, $c]); $res['memos']++; }
+            }
+            foreach ($r['over'] as $c) $res['over'][] = $c;
+        }
+        return $res;
+    }
+
+    /** 종목명 → 코드(정확 일치). 마스터(stock_master)가 먼저, 없으면 시세 표. */
+    private function codesByName(array $names): array
+    {
+        $out = [];
+        if (!$names) return $out;
+        $ph = implode(',', array_fill(0, count($names), '?'));
+        foreach ([["stock_master", "name", "code"], ["all_stock_info", "stock_name", "stock_code"]] as [$t, $n, $c]) {
+            try {
+                $st = $this->pdo->prepare("SELECT {$n} AS n, {$c} AS c FROM {$t} WHERE {$n} IN ($ph)");
+                $st->execute($names);
+                foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                    $k = (string)$r['n'];
+                    if (!isset($out[$k]) && strlen((string)$r['c']) === 6) $out[$k] = (string)$r['c'];
+                }
+            } catch (Throwable $e) { /* 표가 없으면 다음 원천 */ }
+        }
+        return $out;
+    }
+}
+?>

@@ -54,7 +54,7 @@ class BadgeFeat
             'desc' => '新박스 · 박스안 · 돌파✓ · 계단지지 · 지지이탈↓ … + 단타의 ⚡신박스(장중 잠정) — ★박스 상향돌파(5조건) 박스에 한함',
             'src'  => '판정 KrxAmt::boxStatusMany() / boxbrk_live() · 그리기 화면 / QuantBadge'],
         'trigger' => ['g' => 'quant', 'label' => '트리거',
-            'desc' => '🟢 돌파확인 · 🟢 계단지지 — 검증된 매수 두 자리. 관심종목(관제탑)의 존재 이유라 끌 수 없다',
+            'desc' => '🟢 돌파확인 · 🟢 계단지지 — 검증된 매수 두 자리. Top-Pick(관제탑)의 존재 이유라 끌 수 없다',
             'src'  => '판정 pf_page_watch 인라인(2-a×2-b) · 그리기 .wl-go'],
         'etf' => ['g' => 'aux', 'label' => 'ETF 편입 수',
             'desc' => '이 종목을 상위 편입한 ETF 수 — 20/50/100 티어, 100↑ 💎',
@@ -79,15 +79,19 @@ class BadgeFeat
         'quant' => ['label' => '퀀트 목록', 'url' => '/stock/index.php?mode=quant',
             'badges' => ['qsig', 'bxgrade', 'qpath', 'mom', 'held'], 'lock' => ['held'],
             'note' => '신호·경로 열은 담긴 배지를 전부 끄면 열째로 사라집니다'],
-        'watch' => ['label' => '관심종목', 'url' => '/stock/index.php?mode=watch',
+        'watch' => ['label' => 'Top-Pick', 'url' => '/stock/index.php?mode=watch',
             'badges' => ['mkt', 'sue', 'qsig', 'qpath', 'trigger', 'mom', 'held', 'tag'], 'lock' => ['trigger', 'held'],
             'note' => '트리거는 이 화면(관제탑)의 존재 이유라 잠금'],
         'earn' => ['label' => '어닝 서프라이즈', 'url' => '/stock/index.php?mode=earn',
             'badges' => ['sue', 'qpath', 'held', 'tag'], 'lock' => ['sue', 'held'],
             'note' => 'SUE 는 이 화면의 알맹이라 잠금 — 끌 수 있는 것은 박스 열뿐'],
-        'short' => ['label' => '단타 (상위·내 목록·보유)', 'url' => '/stock/index.php?mode=short',
+        'short' => ['label' => '단타 (목록)', 'url' => '/stock/index.php?mode=short',
             'badges' => ['etf', 'qsig', 'qpath', 'mom', 'sue', 'cap', 'held'], 'lock' => ['held'],
-            'note' => '세 목록이 같은 스위치를 본다 — 수집상태 배지(받는 중·구멍 N)는 기능 표시라 설정 대상이 아님'],
+            'note' => '어느 목록(보유종목·Top-Pick·최근조회·관심그룹)이든 같은 스위치를 본다 — 수집상태 배지(받는 중·구멍 N)는 기능 표시라 설정 대상이 아님'],
+        /* 관심그룹의 종목 리스트(2026-10-07) — 행은 단타 목록과 «같은 행»이다(style/stockrow.js). 스위치는 화면마다 따로 둔다 */
+        'wgroup' => ['label' => '관심그룹 (종목 리스트)', 'url' => '/stock/index.php?mode=wgroup',
+            'badges' => ['etf', 'qsig', 'qpath', 'mom', 'sue', 'cap', 'held'], 'lock' => ['held'],
+            'note' => '행의 모양은 단타 목록과 같다(공용 모듈) — 대금·기준가·기준대비는 배지가 아니라 열이라 설정 대상이 아님'],
     ];
 
     /** 설정 대상이 아닌 화면 — 지도에서 «안 빠지게» 남긴다 (ChartFeat::BARELESS 와 같은 자리) */
