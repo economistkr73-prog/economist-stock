@@ -4494,6 +4494,13 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeModal();closeV
     loadTravelBars();        // 여행 기간 막대 로드 (읽기전용)
     restorePos();  // localStorage에서 위치/뷰 복원 (없으면 오늘 기준 그대로)
     if (S.view==='dashboard') S.view='month';   // 구버전(대시보드=뷰) 잔재 보정
+    // 폰 위젯에서 들어온 주소: ?d=YYYY-MM-DD → 그 달 월간뷰 + 그 날 선택 / &new=1 → 그 날 새 일정 입력
+    const _qp = new URLSearchParams(location.search), _qd = _qp.get('d');
+    if (_qd && /^\d{4}-\d{2}-\d{2}$/.test(_qd)) {
+        S.view='month'; S.year=+_qd.slice(0,4); S.month=+_qd.slice(5,7); _selDay=_qd;
+        if (_qp.get('new')==='1') setTimeout(()=>openNew(_qd+'T09:00'), 300);
+        history.replaceState(null, '', location.pathname);   // 새로고침해도 다시 열리지 않게
+    }
     // 저장된 뷰로 화면 전환 (탭 활성화 + display)
     ['month','week','day','list'].forEach(n=>{
         document.getElementById(`view-${n}`).style.display = n===S.view ? (n==='list'?'block':'flex') : 'none';
