@@ -746,9 +746,11 @@ https://economist.kr/market/crawl.php?key=econ-mkt-7x3k&report=1&notify=1&bg=1
 지금은 `dart_eod` 가 휴장일에 **묶음을 통째로 건너뛰고**(`오늘은 휴장일입니다 …` 한 줄), `KrxAmt::provisionalFromSnapshot()` 은
 `tradedToday() === true` 일 때만 쓰며, `Dt::isTradingDay()` 의 오늘 폴백도 그것을 묻는다(이 크론은 휴장일에 `거래일이 아닙니다` 로 끝난다).
 ★확인 불가(null)면 `dart_eod` 는 **원장 잠정 적재만** 건너뛰고 나머지는 진행한다 — 안 쓴 날은 다음날 13:05 확정값이 채우지만 잘못 쓴 날은 못 지운다.
-★유령 나흘은 `D:\tmp\wg_e2e\run_clean.ps1 -Mode go`(백업 → `krx_amt`·`pf_value_daily`·`dt_min_log` 그 날짜 삭제 → `krx_amt.php job=surge` ·
-`dart_collect.php job=pfvalue` 로 캐시 재생성)로 지운다 — **2026-10-08 현재 아직 남아 있다**. 남아 있는 동안 보관 창 10일 중 2일이 빈 날이고
-③치유가 그 빈 날 때문에 매일 최대 40종목을 다시 받는다(`tries` 5회에서 멎는다).
+★★**유령 나흘은 2026-10-26 에 지웠다**(`D:\tmp\wg_e2e\run_clean.ps1 -Mode go` → 백업 → `krx_amt`·`pf_value_daily`·`dt_min_log` 그 날짜 삭제 →
+`krx_amt.php job=surge` · `dart_collect.php job=pfvalue` 로 캐시 재생성 → `post` 검증). 실측 `krx_amt` **10,515행** · 결산 19 · 로그 79 ·
+백업 `D:\tmp\ghost_bak\ghost_bak.json`. **신호 캐시가 601 → 587건으로 바뀌었고 그것이 올바른 값이다**(유령이 「직전 119거래일 최고」 창에 끼어 있었다) ·
+살아있는 포지션의 기준 박스 영향 **0건**. 자세한 것은 CLAUDE.md 단타 규칙 2.
+★그동안 ③치유가 그 빈 날 때문에 매일 최대 40종목을 다시 받던 일(`tries` 5회에서 멎음)도 함께 끝났다 — 다만 그 넷은 이미 보관 창 밖으로 지나간 뒤였다.
 
 **★마감 뒤여야 하는 이유 (타이밍 의존)** — 「오늘이 거래일인가」를 `krx_amt` 의 오늘 행으로 판정하는데,
 그 행은 **15:50 `dart_eod`** 가 `all_stock_info` 스냅샷에서 넣는다(`src='n'`). 앞에 두면 매일 「휴장일」로
