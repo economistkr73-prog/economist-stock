@@ -274,6 +274,53 @@ function pf_avg_cost(array $trades, array $p = []): ?float
     return $cost / $qty;
 }
 
+/**
+ * 이론 누적단가 — 「지금까지 실제로 산 것 + 남은 차수를 계획대로(이론가에) 산다면」 차수마다의 누적단가.
+ * (2026-10-15 사용자 — 「이 종목을 이론대로 했을 때 최종 매수단가가 얼마인지」)
+ *
+ *   출발 = 지금 보유(수량 filled_qty · 원가 avg_cost × 수량 — avg_cost 는 수수료 포함 · 매도 뒤에도 이동평균이라 불변)
+ *   도달 차수까지(n ≤ cur_step)는 실제 값(avg_cost_upto) 그대로.
+ *   그 뒤 차수마다 누적목표(catch-up) 규칙을 그대로 따른다:
+ *     매수금액 = 누적목표(n) − 투입액 · 수량 = FLOOR(매수금액 ÷ 그 차수 이론가) · 투입액 += 수량 × 이론가
+ *   첫 미체결 차수의 매수금액은 표의 「과부족」(gap) 과 같은 값이다(투입액의 출발 = plan_cum + gap).
+ *   ★「매수수량 ≈N」 칸은 «지금 바로 그 차수로 뛰면»의 수량이라 둘째 미체결 차수부터는 이 함수의 수량과 다르다
+ *     — 여기는 앞 차수를 계획대로 샀다고 «쌓아 가는» 값이다.
+ *
+ * $qtyRun(선택) 에는 차수마다의 «그때 보유 수량»(실제 구간은 null)을 돌려준다 — 이론 자동매도가의 구간 수수료용.
+ *
+ * @return array step_no => ?float (실제 구간은 avg_cost_upto, 그 뒤는 이론 누적단가)
+ */
+function pf_theory_avg_run(array $c, array $p = [], ?array &$qtyRun = null): array
+{
+    $p   = pf_params($p);
+    $cur = (int)($c['cur_step'] ?? 0);
+    $qty = (int)($c['filled_qty'] ?? 0);
+    $avg = $c['avg_cost'] ?? null;
+    $cost = ($qty > 0 && $avg !== null) ? (float)$avg * $qty : 0.0;
+    $invested = null;
+
+    $out = [];
+    $qtyRun = [];
+    foreach ($c['steps'] as $n => $s) {
+        if ($n <= $cur) { $out[$n] = $s['avg_cost_upto'] ?? null; $qtyRun[$n] = null; continue; }
+        if ($invested === null) $invested = (float)$s['plan_cum'] + (float)$s['gap'];   // = 지금 투입액(표와 같은 기준)
+        $tp  = (float)($s['theory_price'] ?? 0);
+        $amt = (float)$s['plan_cum'] - $invested;
+        if ($tp > 0 && $amt > 0) {
+            $q = (int)floor(round($amt / $tp, 6));
+            if ($q > 0) {
+                $buy       = $q * $tp;
+                $cost     += $buy + pf_buy_cost($buy, $p);
+                $qty      += $q;
+                $invested += $buy;
+            }
+        }
+        $out[$n]    = $qty > 0 ? $cost / $qty : null;
+        $qtyRun[$n] = $qty;
+    }
+    return $out;
+}
+
 // ── §2.5 자동매도가 ───────────────────────────────────────────────────
 /**
  * 자동매도가 = CEIL( 누적단가 × (1 + 목표수익률) ÷ (1 - sell_cost_rate) / tick ) × tick
@@ -1548,6 +1595,9 @@ function pf_stdev(array $v): ?float
  * @param array      $bars [['d','o','h','l','c','v'], ...] 날짜 오름차순
  * @param float|null $last 장중 현재가. 주면 마지막 봉의 종가를 이 값으로 갈아 오늘을 반영한다.
  *                         (일봉은 하루 한 번 받으므로 이걸 안 하면 장중에는 어제 상태만 보인다)
+ *                         ★★마지막 봉이 «오늘»이어야 한다 — 장중엔 pf_daily 의 마지막 봉이 어제라 그대로 갈면 어제가 사라지고
+ *                         chg 가 이틀치가 된다(2026-10-16 발견). 그래서 지표 화면은 Pf::dailyMap(…, live: true) 로 오늘 봉을
+ *                         먼저 덧붙여 넘긴다(['live' => true] — 그때 intraday 가 켜진다). 덧붙인 봉의 거래량은 그때까지의 누적이다.
  */
 function pf_indicators(array $bars, ?float $last = null): array
 {
@@ -1578,6 +1628,7 @@ function pf_indicators(array $bars, ?float $last = null): array
         $closes[$n - 1]  = $last;
         $out['intraday'] = true;
     }
+    if (!empty($b[$n - 1]['live'])) $out['intraday'] = true;   // 덧붙인 오늘 봉(Pf::dailyMap live) — 값이 이미 현재가다
 
     $out['n']     = $n;
     $out['date']  = $b[$n - 1]['d'] ?? null;
@@ -1680,7 +1731,8 @@ function pf_liquidity(array $bars, int $planQty = 0, ?float $sd20 = null, float 
     ];
 
     // 정지일은 제외한다 — 거래량 0 이 평균에 섞이면 유동성을 실제보다 낮게 본다
-    $b = array_values(array_filter($bars, 'pf_bar_valid'));
+    // ⊕장중에 덧붙인 오늘 봉(['live'] · Pf::dailyMap)도 뺀다 — 하루의 일부라 평균거래대금을 깎고 아침엔 「1억 미만인 날」로 잡힌다
+    $b = array_values(array_filter($bars, fn($x) => pf_bar_valid($x) && empty($x['live'])));
     $n = count($b);
     if ($n < 5) return $out;
     $out['n'] = $n;

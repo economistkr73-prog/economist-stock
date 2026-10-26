@@ -411,14 +411,16 @@ class Mv
             $ck->execute($ids);
             if ((int)$ck->fetchColumn() !== count($ids)) throw new InvalidArgumentException('등록되지 않은 변수가 있습니다.');
         }
-        $this->pdo->beginTransaction();
+        /* 이미 트랜잭션 안이면(관심그룹 테마 가져오기 Wg::themeApply 가 쥔 것) 그 안에서 돈다 — PDO 는 중첩 트랜잭션이 없다 */
+        $own = !$this->pdo->inTransaction();
+        if ($own) $this->pdo->beginTransaction();
         try {
             $this->pdo->prepare("DELETE FROM wg_group_var WHERE group_id = ?")->execute([$gid]);
             $ins = $this->pdo->prepare("INSERT INTO wg_group_var (group_id, var_id, sort_no) VALUES (?,?,?)");
             foreach ($ids as $i => $id) $ins->execute([$gid, $id, $i + 1]);
-            $this->pdo->commit();
+            if ($own) $this->pdo->commit();
         } catch (Throwable $e) {
-            $this->pdo->rollBack();
+            if ($own) $this->pdo->rollBack();
             throw $e;
         }
     }

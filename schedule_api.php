@@ -111,6 +111,11 @@ function api_calendar(string $action, PDO $pdo): void {
 
             $projectId = isset($_GET['project_id']) && $_GET['project_id'] !== '' ? (int)$_GET['project_id'] : null;
             $events   = $sch->listByRange($start, $end, $projectId);
+            // 리서치 일정(2026-10-26) — 날짜가 «일»로 정해진 것만 비춘다(복사 아님 · Rs::calendarEvents · event_type 'research').
+            // 누르면 리서치 일정 탭(schedule.php 의 openView/openEdit 가 url 로 보낸다). 표가 없으면 조용히 빠진다.
+            if ($projectId === null) {
+                try { $events = array_merge($events, (new Rs($pdo))->calendarEvents($start, $end)); } catch (Throwable $e) { }
+            }
             try {
                 $hApi     = new HolidayAPI($pdo);
                 $holidays = $hApi->getAsEvents($start, $end);

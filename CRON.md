@@ -348,7 +348,7 @@ if (class_exists('Notify')) {
 |-----|------|---------|-----------|-------------|------|
 | `fresh` | 매일 1회 | **최신 5슬롯**(사업연도×보고서) 재무제표를 통째로 재수집 | DART OpenAPI `opendart.fss.or.kr` (100종목 묶음) | `stock_financial` | **78초** → `bg=1` 필수 |
 | `krx` | **매일 13:05 (오후 1회)** | 최근 거래일 전종목 **상장주식수**+시세, ★`krx_amt` **전종목 이관**(확정 src='k' · 잠정치 괴리 로그 · 2026-07-31~) + 신고가 신호 재계산(`krx_surge` 캐시), 오래된 기준일 정리 | KRX 오픈API `data-dbg.krx.co.kr` (시장 2개 = 2콜) | `krx_daily` → `krx_amt`, `krx_surge` | 8.9~19.8초 (+신호 수초) |
-| `eod` | 평일 15:50 | `quotes` + `range`(오늘분) + `daily`(일봉) + ★`krx_amt` **당일 잠정 적재**(src='n' · 퀀트 거래대금 신고가 T+0 · 2026-07-31~) + 오늘 신호 계산(`krx_surge` 캐시 — 화면이 8초 안 내게) **묶음** | 네이버 폴링API | `all_stock_info`, `stock_daily_range`, `stock_price_range`, `pf_daily`, `krx_amt`, `krx_surge` | 2.5~3초 (+신호 수초) |
+| `eod` | 평일 15:50 | `quotes` + `range`(오늘분) + `daily`(일봉 · ⊕2026-10-16 끝에 **`Pf::dailySyncKrx()`** — 최근 30일 지난 봉의 종가·고저·거래량을 `krx_amt` 로 맞춤: 네이버 일봉이 2026-09 무렵부터 NXT 시간외가 섞인 종가·고저를 준다 · 시가가 KRX 와 다른 행 = 수정주가 구간은 둠 · 콜 0 · 그 전 구간은 손으로 `job=dailykrx&from=…`(미리보기 → `&go=1`)) + ★`krx_amt` **당일 잠정 적재**(src='n' · 퀀트 거래대금 신고가 T+0 · 2026-07-31~) + 오늘 신호 계산(`krx_surge` 캐시 — 화면이 8초 안 내게) **묶음** | 네이버 폴링API | `all_stock_info`, `stock_daily_range`, `stock_price_range`, `pf_daily`, `krx_amt`, `krx_surge` | 2.5~3초 (+신호 수초) |
 | `quotes` | (eod에 포함) | NXT 크론이 못 훑은 종목의 낡은 시세 메우기 | `polling.finance.naver.com/api/realtime/domestic/stock/{코드,…}` 100종목/회 = 28회 | `all_stock_info` | 1.1초 |
 | `range` | (eod에 포함) | 오늘 고·저 1줄 추가 + 6개월 집계 재계산 + 오래된 행 정리 | 위와 같은 폴링API | `stock_daily_range`, `stock_price_range` | 1.5초 |
 | `range&full=1` | **SSH 1회** | 일별 고·저 **씨 뿌리기**(종목마다 일봉 1회) | `api.finance.naver.com/siseJson.naver` × 2,766 | `stock_daily_range` | **340초** |

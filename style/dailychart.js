@@ -35,6 +35,9 @@
  *              ★실린 봉이 오늘치뿐이면(미리보기) 직전이 없다 — 선을 그리지 않는다.
  *   code       종목코드 6자리 — 주면 SUE 공시 마커(▲어닝서프라이즈·▼어닝쇼크)를 모듈이 스스로 얹는다.
  *              종목이 바뀌는 화면은 dc.setCode(code). 차트설정의 overlay.sue_markers 로 켜고 끈다.
+ *              같은 code 로 리서치 층(📑 깃발 + 한 버전의 매수 구간·시나리오 가격)도 얹는다 — overlay.research 를
+ *              켠 화면에서만(기본 꺼짐 · 2026-10-15).
+ *   rsFocus    리서치 층이 가격을 그릴 버전 id (기본 = 최신) — 리서치 상세가 고른 버전. dc.setResearchFocus(id)
  *
  * 주봉: dc.setTf('week') — 보관해 둔 일봉을 주 단위로 접어 다시 그린다(월요일 기준,
  *       시가=주 첫 봉, 고저=주 내 최대·최소, 종가=주 마지막 봉, 거래량=합).
@@ -227,6 +230,39 @@
         'font-size:10.5px;font-weight:800;line-height:1.5;white-space:nowrap;font-variant-numeric:tabular-nums;' +
         'font-family:Pretendard,-apple-system,sans-serif;box-shadow:0 1px 3px rgba(10,25,45,.28)}' +
       '.dc-ref-lab small{font-size:9px;font-weight:700;opacity:.85;margin-right:3px}' +
+      /* ── 리서치 층 (2026-10-15) — 뒤(가격 띠·선·세로선)는 박스와 같은 바닥, 앞(깃발)은 마커 칩 위.
+       * 뒤 층이 캔들 «아래»라 띠가 봉을 가리지 않고, 깃발의 펼침 카드는 SUE 칩에 덮이지 않는다. */
+      '.dc-rs-back{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:1}' +
+      '.dc-rs-front{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:4}' +
+      '.dc-rs-zone{position:absolute;left:0;box-sizing:border-box;border-top:1px solid;border-bottom:1px solid}' +
+      '.dc-rs-line{position:absolute;left:0;height:0;border-top:2px solid}' +
+      '.dc-rs-line.dash{border-top-style:dashed;border-top-width:2px}' +
+      '.dc-rs-vl{position:absolute;top:0;width:0;border-left:1px dashed;opacity:.42}' +
+      '.dc-rs-vl.on{opacity:.8}' +
+      '.dc-rs-lab{position:absolute;left:4px;transform:translateY(-50%);padding:1px 6px;border-radius:4px;color:#fff;' +
+        'font-size:10.5px;font-weight:800;line-height:1.5;white-space:nowrap;font-variant-numeric:tabular-nums;' +
+        'font-family:Pretendard,-apple-system,sans-serif;opacity:.94}' +
+      '.dc-rs-flag{position:absolute;transform:translateX(-50%);padding:0 7px 0 5px;border-radius:9px;color:#fff;' +
+        'font-size:10.5px;font-weight:800;line-height:18px;white-space:nowrap;cursor:pointer;pointer-events:auto;' +
+        'font-variant-numeric:tabular-nums;font-family:Pretendard,-apple-system,sans-serif;box-shadow:0 1px 3px rgba(10,25,45,.28)}' +
+      '.dc-rs-flag>i{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:4px;vertical-align:0;' +
+        'box-shadow:0 0 0 1.5px rgba(255,255,255,.9)}' +
+      '.dc-rs-flag.on{outline:2px solid rgba(255,255,255,.95);outline-offset:-1px}' +
+      '.dc-rs-flag:hover{z-index:2}' +
+      '.dc-rs-card{display:none;position:absolute;top:20px;left:50%;transform:translateX(-50%);width:258px;white-space:normal;' +
+        'background:#fff;color:#22303f;border:1px solid #d7e0ea;border-radius:9px;padding:8px 10px;font-size:11.5px;' +
+        'font-weight:600;line-height:1.5;box-shadow:0 6px 18px rgba(15,35,60,.2);cursor:pointer}' +
+      '.dc-rs-flag.r .dc-rs-card{left:auto;right:-6px;transform:none}' +
+      '.dc-rs-flag.l .dc-rs-card{left:-6px;transform:none}' +
+      '.dc-rs-flag:hover .dc-rs-card{display:block}' +
+      '.dc-rs-card b{display:block;font-size:12px;font-weight:800;margin-bottom:3px}' +
+      '.dc-rs-card .op{display:inline-block;color:#fff;border-radius:4px;padding:0 5px;margin-right:5px;font-size:10.5px;font-weight:800}' +
+      '.dc-rs-card .hl{display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;margin:4px 0;' +
+        'font-weight:500}' +
+      '.dc-rs-card .kv{display:block;color:#5f7183;font-size:11px}' +
+      '.dc-rs-card .go{display:block;margin-top:4px;font-size:10.5px;font-weight:800}' +
+      '.dc-rs-card.dark{background:#1b2335;color:#dfe6f2;border-color:#26304a}' +
+      '.dc-rs-card.dark .kv{color:#8893ab}' +
       '.dc-hl-layer{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:3}' +
       '.dc-hl-layer.draw{pointer-events:auto;cursor:crosshair}' +
       '.dc-hl{position:absolute;left:0;right:0;height:11px;margin-top:-5px;pointer-events:auto;' +
@@ -1072,6 +1108,9 @@
       _sueMarks: [],        // SUE 공시 마커 — 모듈이 스스로 받아 얹는 층 (setCode 참조)
       _sueOn: true, _sueCode: '', _sueRaw: [], _sueFit: 0,   // _sueFit = 실린 봉 안에 «자리가 있는» 공시 수
       _mkLayer: null, _mkVisible: 0,
+      /* 리서치 층 — 모듈이 스스로 받아 얹는다(setCode · overlay.research). _rsRaw 는 오래된 버전이 앞.
+       * _rsFocus = 가격을 그릴 버전 id (0 = 최신) — 리서치 상세가 고른 버전을 넘긴다 */
+      _rsCode: '', _rsRaw: [], _rsOn: true, _rsFocus: +opts.rsFocus || 0, _rsBack: null, _rsFront: null,
       /* 수평선 — 종목의 것이라 화면·축과 무관하다(표 chart_hline). 층은 HTML 이라 가격축에 안 잡힌다 */
       _code: '', _hlines: [], _hlLayer: null, _hlDraw: false, _hlTools: null,
       _th: null,            // 당일전고선 상태 {obj, show}
@@ -2138,6 +2177,7 @@
         drawBoxes();
         hlDraw();
         refDraw();
+        rsDraw();
       });
     }
     chart.timeScale().subscribeVisibleLogicalRangeChange(overlaysSoon);
@@ -2350,6 +2390,7 @@
       render(fit);
       // 봉이 늦게 왔으면 SUE 마커 자리를 다시 잡는다 (스냅은 봉이 있어야 가능)
       if (self._sueRaw && self._sueRaw.length) sueSnap();
+      if (self._rsRaw && self._rsRaw.length) rsButton();   // 리서치 깃발 수도 «실린 봉 안»의 수다
       return self;
     };
     self.setTf = function (tf) {
@@ -2641,6 +2682,236 @@
       bar._mkBtn.style.display = n ? '' : 'none';
     }
     self._mkSyncBtn = markButton;
+
+    /* ── 리서치 층 — 종목의 «판단 기록»(2026-10-15 · 표 rs_* · stock/api.php?module=rs&action=marks) ──
+     * 리서치한 날마다 위 가장자리에 깃발(📑 날짜 의견) + 아래로 옅은 세로 점선, 그리고 «한 버전»의 가격 —
+     * 매수 구간(초록 · 범위면 띠, 한 가격이면 선) · 시나리오(보라 점선 · 비관/기본/낙관)를 HTML 층으로 얹는다.
+     * 화면은 종목코드만 넘긴다(SUE 공시와 같은 «모듈 소유» — 어느 차트든 ChartFeat 에서 켜기만 하면 된다).
+     * ★깃발은 캔들 옆이 아니라 위 가장자리에 산다 — 리서치는 실적 직후에 하는 일이 많아 SUE 배지와 같은 봉에 몰린다.
+     * ★가격은 가격축 계산에서 뺀다(참조선과 같은 규칙) — 42만 선 하나가 캔들을 납작하게 누르지 않게.
+     *   보이는 범위 밖의 가격은 안 그린다(그 위치는 화면의 리서치 카드가 위치 막대로 말한다).
+     * ★어느 버전의 가격을 그리나 = 최신(기본). 리서치 상세는 고른 버전을 넘긴다(opts.rsFocus · setResearchFocus).
+     *   옛 버전들의 가격을 계단으로 겹치지 않는다 — 재무분석 차트엔 이미 H/L 계단선이 있어 두 벌이면 못 읽는다.
+     * ★분봉 축에는 얹지 않는다 — 리서치 날짜는 «날»이라 초 단위 time 과 견줄 수 없다(SUE 와 같은 규칙). */
+    function rsTheme() {
+      return opts.theme === 'dark'
+        ? { flag: '#8b5cf6', scen: '#a78bfa', zone: '#4ade80', fill: 'rgba(74,222,128,.12)', card: ' dark' }
+        : { flag: '#7c3aed', scen: '#7c3aed', zone: '#16a34a', fill: 'rgba(22,163,74,.09)', card: '' };
+    }
+    function rsMan(v) {                        // 174000 → 17.4만 · 180000 → 18만 · 9500 → 9,500
+      v = +v || 0;
+      if (v < 10000) return v.toLocaleString();
+      var m = Math.floor(v / 1000) / 10;
+      return (m % 1 === 0 ? String(m) : m.toFixed(1)) + '만';
+    }
+    function rsRange(L) {                      // 한 가격 · 「15만대」 · 범위
+      if (L.lo === L.hi) return rsMan(L.lo);
+      if (L.lo % 10000 === 0 && L.hi - L.lo === 9999) return rsMan(L.lo) + '대';
+      return rsMan(L.lo) + '~' + rsMan(L.hi);
+    }
+    function rsFocusNote() {
+      var a = self._rsRaw || [];
+      if (!a.length) return null;
+      if (self._rsFocus) for (var i = 0; i < a.length; i++) if (a[i].id === self._rsFocus) return a[i];
+      return a[a.length - 1];                  // 오래된 것이 앞 — 마지막이 최신
+    }
+    /* 리서치 날짜 → 그 날 이후의 첫 봉(주봉이면 그 주의 봉). 실린 일봉보다 앞이면 자리가 없다(null),
+     * 마지막 봉보다 뒤면(오늘 올린 리서치·휴장일) 마지막 봉에 — SUE 공시 스냅과 같은 결 */
+    function rsSnap(d, fb) {
+      var first = self._bars.length ? self._bars[0].time : null;
+      if (!first || typeof first !== 'string' || d < first) return null;
+      for (var i = 0; i < fb.length; i++) if (fb[i].time >= d) return fb[i].time;
+      return fb[fb.length - 1].time;
+    }
+    function rsFitCount() {
+      var first = self._bars.length ? self._bars[0].time : null;
+      if (!first || typeof first !== 'string') return 0;
+      return (self._rsRaw || []).filter(function (n) { return n.d >= first; }).length;
+    }
+    function rsLayers() {
+      if (!self._rsBack) {
+        anchorHost();
+        self._rsBack = document.createElement('div');
+        self._rsBack.className = 'dc-rs-back';
+        self._rsFront = document.createElement('div');
+        self._rsFront.className = 'dc-rs-front';
+        host.appendChild(self._rsBack);
+        host.appendChild(self._rsFront);
+      }
+    }
+    function rsUrl(n) {
+      return '/stock/index.php?mode=research&code=' + encodeURIComponent(self._rsCode) + '&id=' + n.id;
+    }
+    function rsGo(n) {
+      // 리서치 상세에서 같은 종목을 보고 있으면 그 자리에서 버전만 바꾼다 — 아니면 리서치 창 하나를 재사용한다
+      if (/[?&]mode=research(&|$)/.test(location.search) && location.search.indexOf(self._rsCode) >= 0) {
+        location.href = rsUrl(n);
+      } else {
+        window.open(rsUrl(n), 'rsView');
+      }
+    }
+    function rsCard(n, C) {                    // 깃발에 마우스를 올리면 펴지는 상자 — 글자는 전부 textContent(남의 HTML 을 끼우지 않는다)
+      var c = document.createElement('div');
+      c.className = 'dc-rs-card' + C.card;
+      var b = document.createElement('b');
+      b.textContent = n.title || '리서치';
+      c.appendChild(b);
+      var op = document.createElement('span');
+      op.className = 'op';
+      op.style.background = n.color || '#8496a6';
+      op.textContent = n.op || '의견 없음';
+      c.appendChild(op);
+      c.appendChild(document.createTextNode(n.d));
+      if (n.headline) {
+        var hl = document.createElement('span');
+        hl.className = 'hl';
+        hl.style.display = '-webkit-box';
+        hl.textContent = n.headline;
+        c.appendChild(hl);
+      }
+      var sc = [], zn = [];
+      (n.levels || []).forEach(function (L) {
+        if (L.kind === 'scen') sc.push(L.label + ' ' + rsMan(L.lo));
+        if (L.kind === 'zone') zn.push(L.label + ' ' + rsRange(L));
+      });
+      [['시나리오', sc], ['매수 구간', zn]].forEach(function (r) {
+        if (!r[1].length) return;
+        var kv = document.createElement('span');
+        kv.className = 'kv';
+        kv.textContent = r[0] + ' · ' + r[1].join(' · ');
+        c.appendChild(kv);
+      });
+      var go = document.createElement('span');
+      go.className = 'go';
+      go.style.color = C.flag;
+      go.textContent = '누르면 리서치 상세 →';
+      c.appendChild(go);
+      return c;
+    }
+    function rsLab(lay, y, color, text) {
+      var el = document.createElement('span');
+      el.className = 'dc-rs-lab';
+      el.style.top = y + 'px';
+      el.style.background = color;
+      el.textContent = text;
+      lay.appendChild(el);
+    }
+    function rsDraw() {
+      if (!self._rsBack && !(self._rsRaw && self._rsRaw.length)) return;   // 리서치를 쓴 적 없는 차트엔 층도 없다
+      rsLayers();
+      self._rsBack.textContent = '';
+      self._rsFront.textContent = '';
+      var notes = self._rsRaw || [];
+      if (!self._rsOn || !notes.length || !self._main || self._tf === 'min') return;
+      var fb = fullBars();
+      if (!fb.length) return;
+      var C = rsTheme(), ts = chart.timeScale();
+      var axisW = 0, axisH = 0;
+      try { axisW = chart.priceScale('right').width() || 0; } catch (e) { axisW = 0; }
+      try { axisH = ts.height() || 0; } catch (e) { axisH = 0; }
+      var paneW = Math.max(0, host.clientWidth - axisW), paneH = Math.max(0, host.clientHeight - axisH);
+      var focus = rsFocusNote(), back = self._rsBack, front = self._rsFront;
+
+      // ① 가격 — 그 버전의 매수 구간(띠·선)과 시나리오(점선). 축 밖은 그리지 않는다
+      (focus ? focus.levels || [] : []).forEach(function (L) {
+        if (L.kind === 'zone') {
+          var y1 = self._main.priceToCoordinate(L.hi), y2 = self._main.priceToCoordinate(L.lo);
+          if (y1 === null || y2 === null) return;
+          var top = Math.min(y1, y2), bot = Math.max(y1, y2);
+          if (bot < 0 || top > paneH) return;
+          var el = document.createElement('div');
+          if (bot - top >= 3) {                // 범위 → 띠
+            el.className = 'dc-rs-zone';
+            el.style.top = Math.max(0, top) + 'px';
+            el.style.height = (Math.min(paneH, bot) - Math.max(0, top)) + 'px';
+            el.style.background = C.fill;
+            el.style.borderColor = C.zone;
+          } else {                             // 한 가격 → 선
+            el.className = 'dc-rs-line';
+            el.style.top = top + 'px';
+            el.style.borderTopColor = C.zone;
+          }
+          el.style.width = paneW + 'px';
+          back.appendChild(el);
+          rsLab(back, Math.max(8, top), C.zone, L.label + ' ' + rsRange(L));
+        } else if (L.kind === 'scen') {
+          var y = self._main.priceToCoordinate(L.lo);
+          if (y === null || y < 0 || y > paneH) return;
+          var ln = document.createElement('div');
+          ln.className = 'dc-rs-line dash';
+          ln.style.top = y + 'px';
+          ln.style.width = paneW + 'px';
+          ln.style.borderTopColor = C.scen;
+          back.appendChild(ln);
+          rsLab(back, y, C.scen, L.label + ' ' + rsMan(L.lo));
+        }
+      });
+
+      // ② 깃발 — 겹치면 아래 줄로 내려 세 줄까지 쌓는다
+      var placed = [];
+      notes.forEach(function (n) {
+        var t = rsSnap(n.d, fb);
+        if (t === null) return;
+        var x = ts.timeToCoordinate(t);
+        if (x === null || x < 0 || x > paneW) return;
+        var on = !!(focus && n.id === focus.id);
+        var vl = document.createElement('div');
+        vl.className = 'dc-rs-vl' + (on ? ' on' : '');
+        vl.style.left = x + 'px';
+        vl.style.height = paneH + 'px';
+        vl.style.borderLeftColor = C.flag;
+        back.appendChild(vl);
+
+        var txt = '📑 ' + n.d.slice(5).replace('-', '/') + (n.op ? ' ' + n.op : '');
+        var half = vw(txt) * 3.3 + 12, row = 0;
+        var cx = Math.max(half, Math.min(paneW - half, x));
+        while (row < 3 && placed.some(function (p) { return p.row === row && Math.abs(p.x - cx) < p.half + half + 2; })) row++;
+        placed.push({ x: cx, half: half, row: row });
+        var chip = document.createElement('div');
+        chip.className = 'dc-rs-flag' + (on ? ' on' : '') + (cx > paneW - 140 ? ' r' : (cx < 140 ? ' l' : ''));
+        chip.style.left = cx + 'px';
+        chip.style.top = (4 + row * 22) + 'px';
+        chip.style.background = C.flag;
+        var dot = document.createElement('i');
+        dot.style.background = n.color || '#8496a6';
+        chip.appendChild(dot);
+        chip.appendChild(document.createTextNode(txt));
+        chip.appendChild(rsCard(n, C));
+        chip.onclick = function (ev) { ev.stopPropagation(); rsGo(n); };
+        front.appendChild(chip);
+      });
+    }
+    /* 토글은 기간 바에 산다(SUE 공시와 같은 자리·같은 규칙) — 바 하나가 차트 여럿을 조종하면 버튼도 하나 */
+    function rsButton() {
+      var pb = self._pbar;
+      if (!pb || !pb.el) return;
+      var bar = pb.el;
+      if (!bar._rsDcs) bar._rsDcs = [];
+      if (bar._rsDcs.indexOf(self) < 0) bar._rsDcs.push(self);
+      var n = 0;
+      bar._rsDcs.forEach(function (dc) { n = Math.max(n, dc._rsFitN ? dc._rsFitN() : 0); });
+      if (!bar._rsBtn) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'on';
+        b.onclick = function () {
+          var on = !b.classList.contains('on');
+          b.classList.toggle('on', on);
+          bar._rsDcs.forEach(function (dc) { dc.setResearch(on); });
+        };
+        bar.appendChild(b);
+        bar._rsBtn = b;
+      }
+      bar._rsBtn.textContent = '리서치 ' + n;
+      bar._rsBtn.title = '📑 리서치한 날의 깃발 + 한 버전(기본 최신)의 매수 구간(초록)·시나리오(보라) 가격 — 끄고 켭니다';
+      bar._rsBtn.style.display = n ? '' : 'none';
+    }
+    self._rsFitN = rsFitCount;
+    self._rsSyncBtn = rsButton;
+    self.setResearch = function (on) { self._rsOn = !!on; rsDraw(); return self; };
+    self.setResearchFocus = function (id) { self._rsFocus = +id || 0; rsDraw(); return self; };
+    self.researchNotes = function () { return (self._rsRaw || []).slice(); };
+
     /* 이 차트가 보고 있는 종목. 기능이 꺼져 있으면 부르지도 않는다(=조회 0회).
      * 층이 둘 붙는다 — SUE 공시 마커(위)와 사용자 수평선(아래). 둘은 서로를 모른다. */
     self.setCode = function (code) {
@@ -2657,6 +2928,19 @@
         hlReload(code).then(function () { if (self._code === code) hlDraw(); });
       } else {
         hlDraw();                                   // 목록이 비었으니 층도 비운다
+      }
+
+      /* ── 리서치 층 — 그 종목의 버전들. 기능이 꺼진 화면은 조회조차 안 한다(기본 꺼짐 · DC_FEATS 가 없어도 꺼짐) ── */
+      self._rsCode = code;
+      self._rsRaw = [];
+      rsDraw();
+      if (code && self._tf !== 'min' && feats('overlay.research', false)) {
+        rsLoad(code).then(function (notes) {
+          if (self._rsCode !== code) return;        // 그 사이 다른 종목으로 바뀌었으면 버린다
+          self._rsRaw = notes;
+          rsButton();
+          rsDraw();
+        });
       }
 
       self._sueCode = code;
@@ -3072,6 +3356,7 @@
       if (dc._sueSyncBtn) dc._sueSyncBtn();   // 마커가 바보다 먼저 도착했으면 이제 버튼을 단다
       if (dc._mkSyncBtn)  dc._mkSyncBtn();    // 체결 토글도 마찬가지 (setMarkers 가 바보다 먼저일 수 있다)
       if (dc._refSyncBtn) dc._refSyncBtn();   // 참조선(차수가격) 토글도
+      if (dc._rsSyncBtn)  dc._rsSyncBtn();    // 리서치 토글도
     });
     apply();
     return ctl;
@@ -3162,6 +3447,8 @@
       if (on('fullscreen')) { div(pb); btn(pb, '⛶', false); }
       // SUE 공시 토글도 이 바에 산다 (모듈이 붙인다 — 공시가 있는 종목에서만 보인다)
       if (on('overlay.sue_markers')) btn(pb, 'SUE 공시 ' + (cfg.sueCount || 6), true);
+      // 리서치 토글 — 리서치가 있는 종목에서만 보인다(모듈이 붙인다)
+      if (on('overlay.research')) btn(pb, '리서치 2', true);
       // 차수가격(이론) 토글 — 기본이 «꺼짐»이라 미리보기도 꺼진 모습
       if (on('overlay.step_lines')) btn(pb, '차수가격 7', false);
       r1.appendChild(pb);
@@ -3213,6 +3500,7 @@
     if (on('overlay.step_lines'))     layers.push('차수가격(이론) 선 — 토글로 켰을 때');
     if (on('overlay.trade_markers'))  layers.push('체결 마커 — 「체결 N」 으로 끌 수 있다');
     if (on('overlay.sue_markers'))    layers.push('SUE 공시 마커');
+    if (on('overlay.research'))       layers.push('리서치 깃발·매수 구간·시나리오 가격');
     if (on('overlay.intraday_ref'))   layers.push('당일전고선·현재가선');
     if (on('draw.hline'))             layers.push('수평선 도구(왼쪽 위 ─)');
     if (on('overlay.box_ladder'))     layers.push('박스 후보선·선택 지지선');
@@ -3330,6 +3618,19 @@
     var n = parseInt(m[1], 16);
     var l = 0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255);
     return l > 168 ? '#20160a' : '#fff';
+  }
+
+  /* ── 리서치 버전 — 종목당 한 번만 받아 캐시 (관심그룹처럼 차트 여럿이 같은 종목을 보면 한 번) ──
+   * 원천은 stock/api.php?module=rs&action=marks (표 rs_* · 클래스 Rs). 실패하면 조용히 빈 층이다. */
+  var _rsCache = {};
+  function rsLoad(code) {
+    if (_rsCache[code]) return _rsCache[code];
+    _rsCache[code] = fetch('/stock/api.php?module=rs&action=marks&code=' + encodeURIComponent(code),
+                           { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) { return (j && j.ok && j.data && Array.isArray(j.data.notes)) ? j.data.notes : []; })
+      .catch(function () { return []; });
+    return _rsCache[code];
   }
 
   function sueLoad(code) {

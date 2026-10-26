@@ -1,0 +1,786 @@
+<?php
+/**
+ * classes/Rs.class — 리서치 (2026-10-15 신설) · DB 전담 + 올릴 때 한 번 하는 AI 추출
+ *
+ * claude.ai 에서 만든 종목 분석 문서(Claude Docs → Markdown 내보내기)를 올리면 **종목별 버전**으로 쌓고,
+ * 화면(리서치 메뉴 · 재무분석 상세 카드 · 차트의 리서치 층)이 그 값을 읽는다. 규칙 정본은 CLAUDE.md 「/stock 리서치」 절.
+ *
+ * ══ 구조 ═══
+ *   rs_note   리서치 한 건(버전) — 종목·기준일·제목·의견·한 줄 결론·기준가·원문(Markdown)·AI 추출 원본
+ *   rs_level  가격 하나 — zone(매수 구간) · scen(시나리오: 비관/기본/낙관) · target(증권사 목표가)
+ *   rs_item   글 한 줄 — event(이벤트 캘린더) · check(확인 신호 · 사용자가 확인 표시) · risk(리스크)
+ *
+ * ══ 규칙 ═══
+ * ★ 주인은 «종목»이고 문서는 «버전»이다 — 덮어쓰지 않고 쌓는다(append-only · 고치는 것은 그 버전의 값뿐).
+ * ★ 원문은 Markdown 텍스트로 DB 에 둔다(PDF 파일을 두지 않는다 · 사용자 결정 2026-10-15 — 같은 문서가 PDF 59KB / MD 9KB).
+ *   같은 원문은 두 번 담지 않는다(body_md5 UNIQUE).
+ * ★ AI 호출은 «올릴 때 한 번»(extract)뿐이다 — 크론에 걸지 않는다(아덴트 비용 사고의 교훈). 실패해도 손으로 채워 저장할 수 있다.
+ *   모델은 사용자가 고른 Haiku(MODEL). 추출값은 미리보기이고 «확인 폼»을 거친 값만 저장된다 — 원본은 ai_json 에 남긴다.
+ * ★ 의견은 OPINIONS 다섯 단계뿐이다 — 어휘·색의 단일본(화면·AI 프롬프트·차트가 전부 여기서 읽는다).
+ * ★ 파생값(지금 가격 대비·구간 상태·재점검 필요)은 저장하지 않는다 — 화면이 볼 때 만든다(stock/lib/research.php).
+ * ★ DDL 은 ensureTables()(api schema · CLI)에서만 — 요청 경로에서 부르지 않는다.
+ */
+class Rs
+{
+    /** 의견 다섯 단계 — 한국식 색(빨강 = 사는 쪽 · 파랑 = 파는 쪽) */
+    const OPINIONS = [
+        'buy'    => ['label' => '매수',     'color' => '#c62828', 'desc' => '지금 사도 된다'],
+        'accum'  => ['label' => '분할매수', 'color' => '#e8590c', 'desc' => '나눠서 일부만 먼저 산다'],
+        'hold'   => ['label' => '관망',     'color' => '#5f7183', 'desc' => '지켜본다 · 확인 뒤 판단'],
+        'reduce' => ['label' => '비중축소', 'color' => '#1e88e5', 'desc' => '일부 판다'],
+        'sell'   => ['label' => '매도',     'color' => '#0d47a1', 'desc' => '판다 · 피한다'],
+    ];
+    const SCENS     = ['비관', '기본', '낙관'];
+    /** 날짜의 정밀도 — 「11월 초」는 month, 「2027년 하반기」는 half */
+    const PRECS     = ['day' => '일', 'month' => '월', 'quarter' => '분기', 'half' => '반기', 'year' => '연'];
+    const LEVEL_KINDS = ['zone' => '매수 구간', 'scen' => '시나리오', 'target' => '증권사 목표가'];
+    const ITEM_KINDS  = ['check' => '확인 신호', 'event' => '이벤트', 'risk' => '리스크'];
+
+    const MODEL        = 'claude-haiku-5-5';
+    const BODY_MAX     = 300000;   // 원문 상한(바이트) — 4쪽 분석이 9KB 다
+    const AI_MAX_CHARS = 60000;    // AI 에 보내는 글자 상한
+    const STALE_DAYS   = 90;       // 이보다 오래된 리서치는 「재점검」
+    const NEAR_PCT     = 0.02;     // 한 가격으로 적힌 매수 구간(「18만원 안팎」)의 「부근」 폭 — 표시용(판정이 아니다)
+    const LIMITS = ['scen' => 3, 'zone' => 6, 'target' => 10, 'check' => 12, 'event' => 12, 'risk' => 12];
+
+    private PDO $pdo;
+
+    public function __construct(PDO $pdo)
+    {
+        $this->pdo = $pdo;
+    }
+
+    // ══ 스키마 ══════════════════════════════════════════════════════════
+    public function ensureTables(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS rs_note (
+              id          INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+              code        CHAR(6)       NOT NULL,
+              d           DATE          NOT NULL COMMENT '기준일(문서의 날짜)',
+              title       VARCHAR(200)  NOT NULL DEFAULT '',
+              opinion     VARCHAR(8)    NOT NULL DEFAULT '' COMMENT 'buy|accum|hold|reduce|sell — Rs::OPINIONS',
+              headline    VARCHAR(600)  NOT NULL DEFAULT '' COMMENT '한 줄 결론',
+              review      VARCHAR(1000) NOT NULL DEFAULT '' COMMENT '지난 판단 점검(재점검 문서일 때)',
+              biz         VARCHAR(600)  NOT NULL DEFAULT '' COMMENT '사업 개요 — 무엇을 만들어 누구에게 파나(1~2문장)',
+              tags        VARCHAR(400)  NOT NULL DEFAULT '' COMMENT '사업 키워드 «#A #B» — 그 버전의 스냅샷(종목 태그 사전과 별개)',
+              price_ref   INT UNSIGNED  NULL COMMENT '문서가 말한 기준 주가(원)',
+              price_ref_d DATE          NULL,
+              body        MEDIUMTEXT    NOT NULL COMMENT '원문 Markdown',
+              body_md5    CHAR(32)      NOT NULL,
+              src_name    VARCHAR(200)  NOT NULL DEFAULT '' COMMENT '올린 파일 이름',
+              ai_json     MEDIUMTEXT    NULL COMMENT 'AI 추출 원본(확인 폼 이전) + 사용 토큰',
+              ai_model    VARCHAR(40)   NOT NULL DEFAULT '',
+              created_at  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_at  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+              UNIQUE KEY uq_md5 (body_md5),
+              KEY ix_code_d (code, d)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='리서치 — 종목별 버전(append-only)'
+        ");
+        // 2026-10-16 사업 개요·태그 — 먼저 만든 표에 붙인다(★읽는 컬럼은 코드보다 먼저 올린다)
+        $this->pdo->exec("ALTER TABLE rs_note
+            ADD COLUMN IF NOT EXISTS biz  VARCHAR(600) NOT NULL DEFAULT '' COMMENT '사업 개요 — 무엇을 만들어 누구에게 파나(1~2문장)' AFTER review,
+            ADD COLUMN IF NOT EXISTS tags VARCHAR(400) NOT NULL DEFAULT '' COMMENT '사업 키워드 «#A #B» — 그 버전의 스냅샷(종목 태그 사전과 별개)' AFTER biz");
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS rs_level (
+              id       INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+              note_id  INT UNSIGNED NOT NULL,
+              kind     VARCHAR(8)   NOT NULL COMMENT 'zone|scen|target',
+              label    VARCHAR(40)  NOT NULL DEFAULT '',
+              lo       INT UNSIGNED NULL COMMENT '원 — scen·target 은 lo 하나',
+              hi       INT UNSIGNED NULL,
+              d        DATE         NULL COMMENT 'target 의 날짜',
+              memo     VARCHAR(300) NOT NULL DEFAULT '' COMMENT 'zone=비중·이유 · scen=가정 · target=이전 목표가 등',
+              basis    VARCHAR(40)  NOT NULL DEFAULT '' COMMENT 'scen 의 기준(예: 2027E)',
+              prev     INT UNSIGNED NULL COMMENT 'target 의 이전 목표가',
+              sort     TINYINT UNSIGNED NOT NULL DEFAULT 0,
+              KEY ix_note (note_id),
+              CONSTRAINT fk_rs_level_note FOREIGN KEY (note_id) REFERENCES rs_note(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='리서치 가격(매수 구간·시나리오·증권사 목표가)'
+        ");
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS rs_item (
+              id       INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+              note_id  INT UNSIGNED NOT NULL,
+              kind     VARCHAR(8)   NOT NULL COMMENT 'check|event|risk',
+              d        DATE         NULL COMMENT '날짜(정밀도는 prec)',
+              prec     VARCHAR(8)   NOT NULL DEFAULT '' COMMENT 'day|month|quarter|half|year · 날짜 없으면 빈 값',
+              text     VARCHAR(400) NOT NULL DEFAULT '',
+              done     TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '확인 신호 — 사용자가 확인함',
+              done_at  DATETIME     NULL,
+              sort     TINYINT UNSIGNED NOT NULL DEFAULT 0,
+              KEY ix_note (note_id),
+              CONSTRAINT fk_rs_item_note FOREIGN KEY (note_id) REFERENCES rs_note(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='리서치 글 한 줄(확인 신호·이벤트·리스크)'
+        ");
+    }
+
+    /** 표가 있나 — 화면은 없으면 「표 만들기」를 보인다(DDL 을 스스로 하지 않는다) */
+    public function ready(): bool
+    {
+        try {
+            $this->pdo->query("SELECT 1 FROM rs_note LIMIT 1");
+            $this->pdo->query("SELECT 1 FROM rs_level LIMIT 1");
+            $this->pdo->query("SELECT 1 FROM rs_item LIMIT 1");
+            return true;
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
+    // ══ 값 다듬기 ═══════════════════════════════════════════════════════
+    /** 줄바꿈·BOM 을 맞춘 원문 — 해시와 저장이 같은 글자를 본다 */
+    public static function normBody(string $s): string
+    {
+        if (strncmp($s, "\xEF\xBB\xBF", 3) === 0) $s = substr($s, 3);
+        $s = str_replace(["\r\n", "\r"], "\n", $s);
+        return trim($s);
+    }
+
+    public static function opinionLabel(string $op): string
+    {
+        return self::OPINIONS[$op]['label'] ?? '';
+    }
+
+    public static function opinionColor(string $op): string
+    {
+        return self::OPINIONS[$op]['color'] ?? '#8496a6';
+    }
+
+    /** 'YYYY-MM-DD' 만 통과 — 나머지는 빈 값 */
+    public static function cleanDate($v): string
+    {
+        $v = trim((string)$v);
+        if (!preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $v, $m)) return '';
+        return checkdate((int)$m[2], (int)$m[3], (int)$m[1]) ? $v : '';
+    }
+
+    public static function cleanCode($v): string
+    {
+        $v = strtoupper(trim((string)$v));
+        return preg_match('/^[0-9]{5}[0-9A-Z]$/', $v) ? $v : '';
+    }
+
+    /** 원 단위 정수 — 콤마·'원' 이 섞여 와도 숫자만 */
+    public static function cleanWon($v): int
+    {
+        if (is_int($v) || is_float($v)) return max(0, (int)round($v));
+        $n = (int)preg_replace('/[^0-9]/', '', (string)$v);
+        return max(0, min(2000000000, $n));
+    }
+
+    /** 사업 태그 — 배열이든 「#A #B」 글이든. 규칙(구분자·30자·12개·대소문자 중복)은 종목 태그의 단일본 pf_tag_parse 그대로 */
+    public static function cleanTags($v): array
+    {
+        if (!function_exists('pf_tag_parse')) require_once __DIR__ . '/../stock/lib/note.php';
+        if (is_array($v)) $v = implode(' ', array_filter($v, 'is_scalar'));
+        return pf_tag_parse((string)$v);
+    }
+
+    /** 저장된 「#A #B」 → ['A','B'] */
+    public static function tagList(string $s): array
+    {
+        return $s === '' ? [] : self::cleanTags($s);
+    }
+
+    private static function cut($v, int $n): string
+    {
+        $v = trim(preg_replace('/\s+/u', ' ', (string)$v));
+        return mb_substr($v, 0, $n);
+    }
+
+    /**
+     * 초안(AI 추출 결과 또는 확인 폼이 보낸 값)을 저장할 수 있는 모양으로 — 형식이 틀린 칸은 버린다.
+     * 반환 키: stock_name stock_code as_of title opinion headline review biz tags[] price_ref price_ref_date
+     *          scenarios[] zones[] targets[] checks[] events[] risks[]
+     */
+    public static function normalizeDraft(array $p): array
+    {
+        $out = [
+            'stock_name'     => self::cut($p['stock_name'] ?? '', 60),
+            'stock_code'     => self::cleanCode($p['stock_code'] ?? ''),
+            'as_of'          => self::cleanDate($p['as_of'] ?? ''),
+            'title'          => self::cut($p['title'] ?? '', 200),
+            'opinion'        => isset(self::OPINIONS[$p['opinion'] ?? '']) ? (string)$p['opinion'] : '',
+            'headline'       => self::cut($p['headline'] ?? '', 600),
+            'review'         => self::cut($p['review'] ?? '', 1000),
+            'biz'            => self::cut($p['biz'] ?? '', 600),
+            'tags'           => self::cleanTags($p['tags'] ?? []),
+            'price_ref'      => self::cleanWon($p['price_ref'] ?? 0),
+            'price_ref_date' => self::cleanDate($p['price_ref_date'] ?? ''),
+            'scenarios' => [], 'zones' => [], 'targets' => [], 'checks' => [], 'events' => [], 'risks' => [],
+        ];
+
+        $seen = [];
+        foreach ((array)($p['scenarios'] ?? []) as $s) {
+            if (!is_array($s)) continue;
+            $label = trim((string)($s['label'] ?? ''));
+            $v = self::cleanWon($s['value'] ?? 0);
+            if (!in_array($label, self::SCENS, true) || $v <= 0 || isset($seen[$label])) continue;
+            $seen[$label] = 1;
+            $out['scenarios'][] = ['label' => $label, 'value' => $v,
+                                   'basis' => self::cut($s['basis'] ?? '', 40), 'note' => self::cut($s['note'] ?? '', 300)];
+        }
+        usort($out['scenarios'], fn($a, $b) => array_search($a['label'], self::SCENS) <=> array_search($b['label'], self::SCENS));
+
+        foreach ((array)($p['zones'] ?? []) as $z) {
+            if (!is_array($z) || count($out['zones']) >= self::LIMITS['zone']) continue;
+            $lo = self::cleanWon($z['lo'] ?? 0);
+            $hi = self::cleanWon($z['hi'] ?? 0);
+            if ($lo <= 0 && $hi <= 0) continue;               // 가격 없는 차수는 확인 신호 쪽이다
+            if ($lo <= 0) $lo = $hi;
+            if ($hi <= 0) $hi = $lo;
+            if ($lo > $hi) [$lo, $hi] = [$hi, $lo];
+            $out['zones'][] = ['label' => self::cut($z['label'] ?? '', 40) ?: (count($out['zones']) + 1) . '차',
+                               'lo' => $lo, 'hi' => $hi,
+                               'weight' => self::cut($z['weight'] ?? '', 40), 'note' => self::cut($z['note'] ?? '', 300)];
+        }
+
+        foreach ((array)($p['targets'] ?? []) as $t) {
+            if (!is_array($t) || count($out['targets']) >= self::LIMITS['target']) continue;
+            $price = self::cleanWon($t['price'] ?? 0);
+            $broker = self::cut($t['broker'] ?? '', 40);
+            if ($price <= 0 || $broker === '') continue;
+            $out['targets'][] = ['broker' => $broker, 'date' => self::cleanDate($t['date'] ?? ''),
+                                 'price' => $price, 'prev' => self::cleanWon($t['prev'] ?? 0)];
+        }
+
+        foreach (['checks' => 'check', 'events' => 'event'] as $k => $kind) {
+            foreach ((array)($p[$k] ?? []) as $e) {
+                if (!is_array($e) || count($out[$k]) >= self::LIMITS[$kind]) continue;
+                $text = self::cut($e['text'] ?? '', 400);
+                if ($text === '') continue;
+                $d = self::cleanDate($e['date'] ?? '');
+                $prec = (string)($e['prec'] ?? '');
+                if ($d === '') $prec = '';
+                elseif (!isset(self::PRECS[$prec])) $prec = 'day';
+                $out[$k][] = ['text' => $text, 'date' => $d, 'prec' => $prec];
+            }
+        }
+        foreach ((array)($p['risks'] ?? []) as $r) {
+            if (count($out['risks']) >= self::LIMITS['risk']) break;
+            $text = self::cut(is_array($r) ? ($r['text'] ?? '') : $r, 400);
+            if ($text !== '') $out['risks'][] = $text;
+        }
+        return $out;
+    }
+
+    // ══ 종목 찾기 ═══════════════════════════════════════════════════════
+    /** AI 가 읽은 이름·코드 → 실제 종목. 못 찾으면 code 가 빈 값(화면이 검색칸으로 고르게 한다) */
+    public function resolveStock(string $name, string $code): array
+    {
+        $code = self::cleanCode($code);
+        if ($code !== '') {
+            $n = StockName::one($this->pdo, $code, '');
+            if ($n !== '') return ['code' => $code, 'name' => $n];
+        }
+        $name = trim($name);
+        if ($name === '') return ['code' => '', 'name' => ''];
+        // 종목 마스터(주인) → 시세 스냅샷(보험) 순 · 이름이 정확히 같은 것만 — 비슷한 이름을 고르면 남의 종목에 쌓인다
+        foreach (["SELECT code, name FROM stock_master WHERE name = ? ORDER BY last_seen DESC LIMIT 1",
+                  "SELECT stock_code AS code, stock_name AS name FROM all_stock_info WHERE stock_name = ? LIMIT 1"] as $sql) {
+            try {
+                $st = $this->pdo->prepare($sql);
+                $st->execute([$name]);
+                $r = $st->fetch(PDO::FETCH_ASSOC);
+                if ($r && self::cleanCode($r['code']) !== '') return ['code' => (string)$r['code'], 'name' => (string)$r['name']];
+            } catch (Throwable $e) { /* 표가 없으면 다음 */ }
+        }
+        return ['code' => '', 'name' => $name];
+    }
+
+    // ══ AI 추출 (Haiku · 올릴 때 한 번) ══════════════════════════════════
+    private static function schema(): array
+    {
+        $str = ['type' => 'string'];
+        $int = ['type' => 'integer'];
+        $dated = ['type' => 'object', 'additionalProperties' => false, 'required' => ['text', 'date', 'prec'],
+                  'properties' => ['text' => $str, 'date' => $str,
+                                   'prec' => ['type' => 'string', 'enum' => array_merge(array_keys(self::PRECS), [''])]]];
+        return [
+            'type' => 'object', 'additionalProperties' => false,
+            'required' => ['stock_name', 'stock_code', 'as_of', 'title', 'opinion', 'headline', 'review', 'biz', 'tags',
+                           'price_ref', 'price_ref_date', 'scenarios', 'zones', 'checks', 'events', 'risks', 'targets'],
+            'properties' => [
+                'stock_name' => $str, 'stock_code' => $str, 'as_of' => $str, 'title' => $str,
+                'opinion' => ['type' => 'string', 'enum' => array_keys(self::OPINIONS)],
+                'headline' => $str, 'review' => $str, 'biz' => $str, 'tags' => ['type' => 'array', 'items' => $str],
+                'price_ref' => $int, 'price_ref_date' => $str,
+                'scenarios' => ['type' => 'array', 'items' => [
+                    'type' => 'object', 'additionalProperties' => false, 'required' => ['label', 'value', 'basis', 'note'],
+                    'properties' => ['label' => ['type' => 'string', 'enum' => self::SCENS], 'value' => $int,
+                                     'basis' => $str, 'note' => $str]]],
+                'zones' => ['type' => 'array', 'items' => [
+                    'type' => 'object', 'additionalProperties' => false, 'required' => ['label', 'lo', 'hi', 'weight', 'note'],
+                    'properties' => ['label' => $str, 'lo' => $int, 'hi' => $int, 'weight' => $str, 'note' => $str]]],
+                'checks' => ['type' => 'array', 'items' => $dated],
+                'events' => ['type' => 'array', 'items' => $dated],
+                'risks'  => ['type' => 'array', 'items' => $str],
+                'targets' => ['type' => 'array', 'items' => [
+                    'type' => 'object', 'additionalProperties' => false, 'required' => ['broker', 'date', 'price', 'prev'],
+                    'properties' => ['broker' => $str, 'date' => $str, 'price' => $int, 'prev' => $int]]],
+            ],
+        ];
+    }
+
+    private static function prompt(): string
+    {
+        $ops = [];
+        foreach (self::OPINIONS as $k => $o) $ops[] = "  {$k} = {$o['label']} ({$o['desc']})";
+        return "당신은 주식 리서치 문서(Markdown)에서 화면에 표시할 값을 뽑는 담당입니다. 정해진 JSON 스키마로만 답합니다.\n\n"
+             . "규칙:\n"
+             . "- 문서에 적힌 것만 옮깁니다. 추측해서 채우지 않습니다 — 없으면 문자열은 \"\", 숫자는 0, 목록은 [] 입니다.\n"
+             . "- 가격은 원 단위 정수입니다. 예) 18만원 → 180000 · 17.4만원 → 174000 · 17만9900원 → 179900 · 33만원 → 330000.\n"
+             . "- 날짜는 YYYY-MM-DD 입니다. 연도가 없는 날짜(예: 10/12)는 문서 기준일의 연도로 채웁니다.\n"
+             . "  날짜가 달까지만 있으면 그 달 1일 + prec \"month\"(예: 「11월 초」), 분기면 그 분기 첫날 + \"quarter\",\n"
+             . "  상·하반기면 1월 1일 또는 7월 1일 + \"half\"(「중·하반기」는 하반기), 해만 있으면 1월 1일 + \"year\", 정확한 날이면 \"day\" 입니다.\n"
+             . "- stock_name·stock_code: 분석 대상 종목의 이름과 6자리 코드(코드가 문서에 없으면 \"\").\n"
+             . "- as_of: 문서의 기준일(제목이나 첫머리의 날짜). title: 문서 맨 위 제목 그대로.\n"
+             . "- opinion: 문서 결론을 아래 다섯 중 하나로 고릅니다.\n" . implode("\n", $ops) . "\n"
+             . "  예) 「1차 분할매수는 가능, 비중 확대는 확인 후」 → accum.\n"
+             . "- headline: 한 줄 결론 — 문서의 결론을 2문장 이내로, 문서의 표현을 살려서.\n"
+             . "- review: 「지난 판단 점검」 같은 절이 있으면 그 요지 2~3문장, 없으면 \"\".\n"
+             . "- biz: 「사업 개요」 절이 있으면 그 내용을 1~2문장으로(무엇을 만들어 누구에게 파는가 · 매출 비중이 큰 사업).\n"
+             . "  절이 없으면 문서 본문이 회사의 사업을 설명한 부분에서 1~2문장. 사업 설명이 전혀 없으면 \"\".\n"
+             . "- tags: 사업 키워드 — 문서에 「#반도체 #HBM」 같은 태그 줄이 있으면 그대로(# 는 빼고), 없으면 문서에 나온\n"
+             . "  제품·산업·테마 낱말 3~6개. 한 태그는 띄어쓰기 없는 짧은 명사(예: 라면 · 수출 · K푸드). 종목명·의견·숫자는 넣지 않습니다.\n"
+             . self::tagHint()
+             . "- price_ref·price_ref_date: 문서가 말하는 현재(기준) 주가와 그 날짜.\n"
+             . "- scenarios: 적정가치(주당 가치) 시나리오 — label 은 비관/기본/낙관. 값이 하나뿐이면 기본 하나만. basis 는 기준(예: 2027E), note 는 가정 한 줄.\n"
+             . "- zones: 매수 구간(차수). label 은 1차·2차…, lo~hi 는 가격 범위(원). 한 가격(「18만원 안팎」)이면 lo=hi=그 값,\n"
+             . "  「15만원대」 같은 대역이면 150000~159999. 가격이 없이 조건뿐인 차수(「확인 신호 이후」)는 zones 에 넣지 말고 checks 에 넣습니다.\n"
+             . "  weight 는 계획 비중(예: 1/3), note 는 이유 한 줄.\n"
+             . "- checks: 매수·비중 확대 전에 확인할 신호. text 에 수치 기준을 함께(예: 4분기 매출 1,448억·영업이익 513억 회복). 시점이 있으면 date·prec.\n"
+             . "- events: 이벤트 캘린더(실적 발표·컨퍼런스·사업 일정). 날짜는 date·prec 에 넣고 text 에는 내용만 적되,\n"
+             . "  날짜의 원래 표현이 더 자세하면(「11월 초」·「중·하반기」) text 끝에 괄호로 덧붙입니다. 예) 3분기 실적 발표 (11월 초 · 작년은 11월 4일).\n"
+             . "- risks: 리스크 항목 — 짧은 문장 그대로.\n"
+             . "- targets: 증권사 목표가 — broker(증권사), date, price(원), prev(이전 목표가 · 없으면 0).";
+    }
+
+    /** 사이트의 종목 태그 사전(많이 쓰는 순 80개) — 있으면 그 표기를 우선 쓰게 한다 */
+    private static function tagHint(): string
+    {
+        global $pdo;
+        if (!($pdo instanceof PDO)) return '';
+        try {
+            $rows = $pdo->query("SELECT t.name FROM stock_tag t JOIN stock_tag_map m ON m.tag_id = t.id
+                                   GROUP BY t.id ORDER BY COUNT(*) DESC, t.name LIMIT 80")->fetchAll(PDO::FETCH_COLUMN);
+        } catch (Throwable $e) { return ''; }
+        return $rows ? "  같은 뜻이면 이미 쓰는 표기를 그대로 씁니다: " . implode(' · ', $rows) . "\n" : '';
+    }
+
+    /**
+     * 원문 → 초안. ['ok'=>bool, 'draft'=>[], 'msg'=>'', 'usage'=>[], 'model'=>'']
+     * ★실패는 예외가 아니라 ok=false — 화면은 빈 폼으로 손 입력을 이어 간다.
+     */
+    public function extract(string $body): array
+    {
+        $inc = $_SERVER['DOCUMENT_ROOT'] . '/env/anthropic.inc';
+        if (is_file($inc)) require_once $inc;
+        $key = getenv('ANTHROPIC_API_KEY') ?: (defined('ANTHROPIC_API_KEY') ? ANTHROPIC_API_KEY : '');
+        if ($key === '') return ['ok' => false, 'msg' => 'AI 키(ANTHROPIC_API_KEY)가 없어 읽지 못했습니다 — 칸을 직접 채워 주세요.', 'draft' => []];
+
+        $text = mb_substr($body, 0, self::AI_MAX_CHARS);
+        $payload = json_encode([
+            'model'         => self::MODEL,
+            'max_tokens'    => 8000,
+            'system'        => self::prompt(),
+            'output_config' => ['effort' => 'low', 'format' => ['type' => 'json_schema', 'schema' => self::schema()]],
+            'messages'      => [['role' => 'user', 'content' =>
+                "오늘은 " . date('Y-m-d') . " 입니다. 다음 문서에서 값을 뽑아 주세요.\n\n<document>\n" . $text . "\n</document>"]],
+        ], JSON_UNESCAPED_UNICODE);
+
+        $ch = curl_init('https://api.anthropic.com/v1/messages');
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true, CURLOPT_POSTFIELDS => $payload,
+            CURLOPT_CONNECTTIMEOUT => 10, CURLOPT_TIMEOUT => 50,
+            CURLOPT_HTTPHEADER => ['x-api-key: ' . $key, 'anthropic-version: 2023-06-01', 'content-type: application/json'],
+        ]);
+        $resp = curl_exec($ch);
+        $http = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $cerr = curl_error($ch);
+        curl_close($ch);
+
+        if ($resp === false) return ['ok' => false, 'msg' => 'AI 호출 실패: ' . $cerr, 'draft' => []];
+        $j = json_decode((string)$resp, true);
+        if ($http !== 200 || !is_array($j)) {
+            return ['ok' => false, 'msg' => 'AI 오류: ' . ($j['error']['message'] ?? ('HTTP ' . $http)), 'draft' => []];
+        }
+        $stop = (string)($j['stop_reason'] ?? '');
+        if ($stop === 'refusal')    return ['ok' => false, 'msg' => 'AI 가 이 문서를 읽지 않았습니다 — 칸을 직접 채워 주세요.', 'draft' => []];
+        if ($stop === 'max_tokens') return ['ok' => false, 'msg' => '문서가 길어 끝까지 읽지 못했습니다 — 칸을 직접 채워 주세요.', 'draft' => []];
+        $out = '';
+        foreach (($j['content'] ?? []) as $b) {
+            if (($b['type'] ?? '') === 'text') $out .= $b['text'];
+        }
+        $p = json_decode(trim($out), true);
+        if (!is_array($p)) return ['ok' => false, 'msg' => 'AI 응답을 읽지 못했습니다 — 칸을 직접 채워 주세요.', 'draft' => []];
+        return ['ok' => true, 'msg' => '', 'draft' => self::normalizeDraft($p), 'raw' => $p,
+                'usage' => $j['usage'] ?? [], 'model' => (string)($j['model'] ?? self::MODEL)];
+    }
+
+    // ══ 저장 ═══════════════════════════════════════════════════════════
+    /** 같은 원문이 이미 있나 → ['id','code','d'] 또는 null */
+    public function byMd5(string $md5): ?array
+    {
+        $st = $this->pdo->prepare("SELECT id, code, d FROM rs_note WHERE body_md5 = ?");
+        $st->execute([$md5]);
+        $r = $st->fetch(PDO::FETCH_ASSOC);
+        return $r ?: null;
+    }
+
+    /**
+     * 확인 폼의 값으로 저장한다. $id = 0 이면 새 버전($body 필요), 아니면 그 버전의 값만 고친다(원문은 그대로).
+     * ★확인 신호의 「확인함」 표시는 고쳐도 남긴다(같은 글 기준) — 값을 다듬다가 체크가 풀리면 안 된다.
+     * @return int note id
+     */
+    public function save(array $draft, string $code, string $body = '', string $srcName = '', string $aiJson = '',
+                         string $aiModel = '', int $id = 0): int
+    {
+        $d = self::normalizeDraft($draft);
+        $code = self::cleanCode($code);
+        if ($code === '' || StockName::one($this->pdo, $code, '') === '') throw new InvalidArgumentException('종목을 골라 주세요.');
+        if ($d['as_of'] === '') throw new InvalidArgumentException('기준일을 넣어 주세요.');
+        if ($d['as_of'] > date('Y-m-d', strtotime('+1 day'))) throw new InvalidArgumentException('기준일이 미래입니다.');
+        if ($d['opinion'] === '') throw new InvalidArgumentException('의견(다섯 단계 중 하나)을 골라 주세요.');
+        if ($d['title'] === '') $d['title'] = StockName::one($this->pdo, $code, $code) . ' 리서치';
+
+        $tagText = $d['tags'] ? '#' . implode(' #', $d['tags']) : '';
+        $this->pdo->beginTransaction();
+        try {
+            $keepDone = [];
+            if ($id > 0) {
+                $st = $this->pdo->prepare("SELECT id FROM rs_note WHERE id = ? FOR UPDATE");
+                $st->execute([$id]);
+                if (!$st->fetchColumn()) throw new InvalidArgumentException('없는 리서치입니다.');
+                // 확인 표시는 «같은 글»에 이어 준다 — 확인 신호와 일정(일정 탭의 ✓ · 2026-10-26) 둘 다
+                $st = $this->pdo->prepare("SELECT kind, text, done_at FROM rs_item WHERE note_id = ? AND kind IN ('check','event') AND done = 1");
+                $st->execute([$id]);
+                foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) $keepDone[$r['kind'] . '|' . $r['text']] = $r['done_at'];
+                $this->pdo->prepare("UPDATE rs_note SET code=?, d=?, title=?, opinion=?, headline=?, review=?, biz=?, tags=?,
+                                            price_ref=?, price_ref_d=? WHERE id=?")
+                    ->execute([$code, $d['as_of'], $d['title'], $d['opinion'], $d['headline'], $d['review'], $d['biz'], $tagText,
+                               $d['price_ref'] ?: null, $d['price_ref_date'] ?: null, $id]);
+                $this->pdo->prepare("DELETE FROM rs_level WHERE note_id = ?")->execute([$id]);
+                $this->pdo->prepare("DELETE FROM rs_item WHERE note_id = ?")->execute([$id]);
+            } else {
+                $body = self::normBody($body);
+                if ($body === '') throw new InvalidArgumentException('원문이 비었습니다.');
+                if (strlen($body) > self::BODY_MAX) throw new InvalidArgumentException('원문이 너무 깁니다(300KB 까지).');
+                $md5 = md5($body);
+                if ($dup = $this->byMd5($md5)) throw new InvalidArgumentException('이미 올린 문서입니다(' . $dup['d'] . ').');
+                $this->pdo->prepare("INSERT INTO rs_note (code, d, title, opinion, headline, review, biz, tags, price_ref, price_ref_d,
+                                                          body, body_md5, src_name, ai_json, ai_model)
+                                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+                    ->execute([$code, $d['as_of'], $d['title'], $d['opinion'], $d['headline'], $d['review'], $d['biz'], $tagText,
+                               $d['price_ref'] ?: null, $d['price_ref_date'] ?: null,
+                               $body, $md5, mb_substr($srcName, 0, 200), $aiJson !== '' ? $aiJson : null, mb_substr($aiModel, 0, 40)]);
+                $id = (int)$this->pdo->lastInsertId();
+            }
+
+            $lv = $this->pdo->prepare("INSERT INTO rs_level (note_id, kind, label, lo, hi, d, memo, basis, prev, sort)
+                                       VALUES (?,?,?,?,?,?,?,?,?,?)");
+            foreach ($d['scenarios'] as $i => $s) {
+                $lv->execute([$id, 'scen', $s['label'], $s['value'], $s['value'], null, $s['note'], $s['basis'], null, $i]);
+            }
+            foreach ($d['zones'] as $i => $z) {
+                $memo = trim($z['weight'] . ($z['weight'] !== '' && $z['note'] !== '' ? ' · ' : '') . $z['note']);
+                $lv->execute([$id, 'zone', $z['label'], $z['lo'], $z['hi'], null, mb_substr($memo, 0, 300), '', null, $i]);
+            }
+            foreach ($d['targets'] as $i => $t) {
+                $lv->execute([$id, 'target', $t['broker'], $t['price'], $t['price'], $t['date'] ?: null, '', '',
+                              $t['prev'] ?: null, $i]);
+            }
+            $it = $this->pdo->prepare("INSERT INTO rs_item (note_id, kind, d, prec, text, done, done_at, sort)
+                                       VALUES (?,?,?,?,?,?,?,?)");
+            foreach (['checks' => 'check', 'events' => 'event'] as $k => $kind) {
+                foreach ($d[$k] as $i => $e) {
+                    $kk = $kind . '|' . $e['text'];
+                    $done = array_key_exists($kk, $keepDone);
+                    $it->execute([$id, $kind, $e['date'] ?: null, $e['prec'], $e['text'], $done ? 1 : 0,
+                                  $done ? $keepDone[$kk] : null, $i]);
+                }
+            }
+            foreach ($d['risks'] as $i => $r) $it->execute([$id, 'risk', null, '', $r, 0, null, $i]);
+
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+        return $id;
+    }
+
+    public function delete(int $id): ?string
+    {
+        $st = $this->pdo->prepare("SELECT code FROM rs_note WHERE id = ?");
+        $st->execute([$id]);
+        $code = $st->fetchColumn();
+        if ($code === false) return null;
+        $this->pdo->prepare("DELETE FROM rs_note WHERE id = ?")->execute([$id]);   // 가격·글은 FK CASCADE
+        return (string)$code;
+    }
+
+    /** 확인 신호 체크 — 확인 신호(check)만 바뀐다 */
+    public function setCheck(int $itemId, bool $done): bool
+    {
+        $st = $this->pdo->prepare("UPDATE rs_item SET done = ?, done_at = IF(? = 1, NOW(), NULL) WHERE id = ? AND kind = 'check'");
+        $st->execute([$done ? 1 : 0, $done ? 1 : 0, $itemId]);
+        return $st->rowCount() > 0 || $this->itemExists($itemId);
+    }
+
+    /**
+     * 일정 탭의 ✓·체크칸 — 확인 신호(check)와 일정(event)만 바뀐다(리스크는 날짜도 확인도 없다).
+     * @return int 대상 줄 수(이미 그 상태여도 센다)
+     */
+    public function setDoneMany(array $ids, bool $done): int
+    {
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids), fn($v) => $v > 0)));
+        if (!$ids) return 0;
+        $in = implode(',', array_fill(0, count($ids), '?'));
+        $this->pdo->prepare("UPDATE rs_item SET done = ?, done_at = IF(? = 1, NOW(), NULL)
+                             WHERE id IN ($in) AND kind IN ('check','event') AND done <> ?")
+            ->execute(array_merge([$done ? 1 : 0, $done ? 1 : 0], $ids, [$done ? 1 : 0]));
+        $st = $this->pdo->prepare("SELECT COUNT(*) FROM rs_item WHERE id IN ($in) AND kind IN ('check','event')");
+        $st->execute($ids);
+        return (int)$st->fetchColumn();
+    }
+
+    private function itemExists(int $itemId): bool
+    {
+        $st = $this->pdo->prepare("SELECT 1 FROM rs_item WHERE id = ? AND kind = 'check'");
+        $st->execute([$itemId]);
+        return (bool)$st->fetchColumn();
+    }
+
+    // ══ 읽기 ═══════════════════════════════════════════════════════════
+    const NOTE_COLS = "id, code, d, title, opinion, headline, review, biz, tags, price_ref, price_ref_d, src_name, ai_model, created_at, updated_at";
+
+    /** 버전 하나 — 원문(body)과 가격·글까지 */
+    public function get(int $id): ?array
+    {
+        $st = $this->pdo->prepare("SELECT " . self::NOTE_COLS . ", body FROM rs_note WHERE id = ?");
+        $st->execute([$id]);
+        $n = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$n) return null;
+        $rows = [$n];
+        $this->attach($rows);
+        return $rows[0];
+    }
+
+    /** 한 종목의 버전 전부 — 최신이 앞(원문 없이) */
+    public function versions(string $code): array
+    {
+        $st = $this->pdo->prepare("SELECT " . self::NOTE_COLS . " FROM rs_note WHERE code = ? ORDER BY d DESC, id DESC");
+        $st->execute([$code]);
+        $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+        $this->attach($rows);
+        return $rows;
+    }
+
+    /**
+     * 종목마다 최신 버전 하나 + 버전 수 + 바로 앞 버전의 의견 — 리서치 목록·재무분석 카드·링크 칩이 쓴다.
+     * @param ?array $codes null = 리서치가 있는 전 종목
+     * @return array code => note(+levels·items·n·prev_opinion·prev_id)
+     */
+    public function latestMany(?array $codes = null): array
+    {
+        $sql = "SELECT " . self::NOTE_COLS . " FROM rs_note";
+        $args = [];
+        if ($codes !== null) {
+            $codes = array_values(array_filter(array_map([self::class, 'cleanCode'], $codes)));
+            if (!$codes) return [];
+            $sql .= " WHERE code IN (" . implode(',', array_fill(0, count($codes), '?')) . ")";
+            $args = $codes;
+        }
+        $st = $this->pdo->prepare($sql . " ORDER BY code, d DESC, id DESC");
+        $st->execute($args);
+        $out = [];
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $c = strval($r['code']);
+            if (!isset($out[$c])) { $r['n'] = 1; $r['prev_opinion'] = ''; $r['prev_id'] = 0; $out[$c] = $r; continue; }
+            if ($out[$c]['n'] === 1) { $out[$c]['prev_opinion'] = (string)$r['opinion']; $out[$c]['prev_id'] = (int)$r['id']; }
+            $out[$c]['n']++;
+        }
+        $this->attach($out);
+        return $out;
+    }
+
+    /** 올린 순 — 최근에 올린 것이 앞(원문 없이) */
+    public function feed(int $limit = 80): array
+    {
+        $limit = max(1, min(300, $limit));
+        $rows = $this->pdo->query("SELECT " . self::NOTE_COLS . " FROM rs_note ORDER BY created_at DESC, id DESC LIMIT {$limit}")
+                          ->fetchAll(PDO::FETCH_ASSOC);
+        $this->attach($rows);
+        return $rows;
+    }
+
+    public function count(): int
+    {
+        return (int)$this->pdo->query("SELECT COUNT(*) FROM rs_note")->fetchColumn();
+    }
+
+    /**
+     * 차트의 리서치 층 — 한 종목의 버전들(오래된 것이 앞)과 그 가격. 원문·글은 싣지 않는다(가볍게).
+     */
+    public function marks(string $code): array
+    {
+        $out = [];
+        foreach (array_reverse($this->versions($code)) as $n) {
+            $lv = [];
+            foreach ($n['levels'] as $l) {
+                if ($l['kind'] === 'target') continue;
+                $lv[] = ['kind' => $l['kind'], 'label' => $l['label'], 'lo' => (int)$l['lo'], 'hi' => (int)$l['hi'],
+                         'memo' => $l['memo'], 'basis' => $l['basis']];
+            }
+            $out[] = ['id' => (int)$n['id'], 'd' => (string)$n['d'], 'title' => (string)$n['title'],
+                      'opinion' => (string)$n['opinion'], 'op' => self::opinionLabel((string)$n['opinion']),
+                      'color' => self::opinionColor((string)$n['opinion']), 'headline' => (string)$n['headline'],
+                      'price_ref' => $n['price_ref'] === null ? null : (int)$n['price_ref'], 'levels' => $lv];
+        }
+        return $out;
+    }
+
+    /** 버전들에 가격(levels)과 글(items)을 붙인다 — 한 번에 두 쿼리.
+     *  ★키가 종목코드인 배열도 받는다 — PHP 는 "145020" 같은 키를 정수로 바꾸므로 코드는 키가 아니라 행의 code 로 읽는다. */
+    private function attach(array &$rows): void
+    {
+        if (!$rows) return;
+        $pos = [];
+        foreach ($rows as $k => $r) {
+            $rows[$k]['levels'] = [];
+            $rows[$k]['items']  = [];
+            $pos[(int)$r['id']] = $k;
+        }
+        $in = implode(',', array_keys($pos));
+        foreach ($this->pdo->query("SELECT * FROM rs_level WHERE note_id IN ($in) ORDER BY kind, sort, id")->fetchAll(PDO::FETCH_ASSOC) as $l) {
+            $k = $pos[(int)$l['note_id']] ?? null;
+            if ($k !== null) $rows[$k]['levels'][] = $l;
+        }
+        foreach ($this->pdo->query("SELECT * FROM rs_item WHERE note_id IN ($in) ORDER BY kind, sort, id")->fetchAll(PDO::FETCH_ASSOC) as $i) {
+            $k = $pos[(int)$i['note_id']] ?? null;
+            if ($k !== null) $rows[$k]['items'][] = $i;
+        }
+    }
+
+    // ══ 일정 (2026-10-26) ════════════════════════════════════════════
+    /** 그 날짜(정밀도)가 끝나는 날 — 「11월」은 11월 말에야 «지났다» (research.php 의 rs_period_end 가 이것을 부른다) */
+    public static function periodEnd(string $d, string $prec): string
+    {
+        $t = strtotime($d);
+        $y = (int)date('Y', $t);
+        $m = (int)date('n', $t);
+        switch ($prec) {
+            case 'month':   return date('Y-m-t', $t);
+            case 'quarter': return date('Y-m-t', mktime(0, 0, 0, (intdiv($m - 1, 3) + 1) * 3, 1, $y));
+            case 'half':    return $y . ($m <= 6 ? '-06-30' : '-12-31');
+            case 'year':    return $y . '-12-31';
+            default:        return date('Y-m-d', $t);
+        }
+    }
+
+    /** 문서에 적힌 일정이 «살아 있나» — 기간이 문서 기준일 전에 끝난 것은 배경 설명이다(「2026-10」 월 일정은 10-01 로 저장돼도 10/16 문서에서 산다) */
+    public static function itemLive(array $it, string $noteD): bool
+    {
+        if (!in_array($it['kind'] ?? '', ['event', 'check'], true) || empty($it['d'])) return false;
+        return self::periodEnd((string)$it['d'], (string)($it['prec'] ?: 'day')) >= $noteD;
+    }
+
+    /**
+     * 리서치 일정 — 종목마다 «최신 버전»의 일정(event)·날짜 있는 확인 신호(check)를 (종목·날짜·정밀도)로 묶는다.
+     * 2026-10-26 사용자 — 「일정이 그 종목 리서치에 들어가야만 보인다 · 해당일에 체크하고 그때 Claude 에게 검증을 받고 싶다」.
+     * 옛 버전의 일정은 새 버전이 대신한다(새 리서치를 올리면 그 일정은 자연히 닫힌다).
+     * 묶음의 «확인함» = 일정이 있으면 일정이 전부 ✓ · 없으면(확인 신호만) 확인 신호가 전부 ✓.
+     * 읽는 곳 넷 — 리서치 «일정» 탭 · 아침 알림(rs_alert_events) · 캘린더(schedule_api) · 폰 위젯(schedule_widget).
+     * @return list<array{note_id:int,code:string,note_d:string,d:string,prec:string,end:string,items:list,done:bool}>  날짜 순
+     */
+    public function scheduleGroups(?array $codes = null): array
+    {
+        $g = [];
+        foreach ($this->latestMany($codes) as $n) {
+            foreach ($n['items'] ?? [] as $it) {
+                if (!self::itemLive($it, (string)$n['d'])) continue;
+                $prec = (string)$it['prec'] !== '' ? (string)$it['prec'] : 'day';
+                $k = $n['code'] . '|' . $it['d'] . '|' . $prec;
+                if (!isset($g[$k])) {
+                    $g[$k] = ['note_id' => (int)$n['id'], 'code' => strval($n['code']), 'note_d' => (string)$n['d'],
+                              'd' => (string)$it['d'], 'prec' => $prec, 'end' => self::periodEnd((string)$it['d'], $prec), 'items' => []];
+                }
+                $g[$k]['items'][] = ['id' => (int)$it['id'], 'kind' => (string)$it['kind'], 'text' => (string)$it['text'],
+                                     'done' => (int)$it['done'] === 1, 'done_at' => (string)($it['done_at'] ?? '')];
+            }
+        }
+        $rank = ['day' => 0, 'month' => 1, 'quarter' => 2, 'half' => 3, 'year' => 4];
+        foreach ($g as &$x) {
+            usort($x['items'], fn($a, $b) => ($a['kind'] === 'event' ? 0 : 1) <=> ($b['kind'] === 'event' ? 0 : 1));   // 일정 먼저
+            $ev = array_filter($x['items'], fn($i) => $i['kind'] === 'event');
+            $x['done'] = !array_filter($ev ?: $x['items'], fn($i) => !$i['done']);
+        }
+        unset($x);
+        usort($g, fn($a, $b) => [$a['d'], $rank[$a['prec']] ?? 9, $a['code']] <=> [$b['d'], $rank[$b['prec']] ?? 9, $b['code']]);
+        return $g;
+    }
+
+    /**
+     * 캘린더·폰 위젯에 «비추는» 리서치 일정 — 날짜가 «일»로 정해진 묶음만(「11월 중」은 칸이 없다 · 그건 리서치 일정 탭이 말한다).
+     * 복사하지 않는다(tbl_schedule 에 쓰지 않는다) — 새 리서치를 올리면 캘린더도 저절로 바뀐다.
+     * 모양은 HolidayAPI::getAsEvents 와 같은 일정 배열 · event_type 'research' · 누르면 url(리서치 일정 탭).
+     */
+    public function calendarEvents(string $start, string $end): array
+    {
+        $out = [];
+        $groups = array_values(array_filter($this->scheduleGroups(),
+            fn($x) => $x['prec'] === 'day' && $x['d'] >= $start && $x['d'] <= $end));
+        if (!$groups) return [];
+        $names = StockName::many($this->pdo, array_values(array_unique(array_column($groups, 'code'))));
+        foreach ($groups as $x) {
+            $nm = $names[$x['code']] ?? $x['code'];
+            $first = $x['items'][0]['text'];
+            $memo = implode("\n", array_map(fn($i) => ($i['kind'] === 'event' ? '· ' : ($i['done'] ? '☑ ' : '☐ ')) . $i['text'], $x['items']));
+            $out[] = [
+                'id'         => 'rs_' . $x['note_id'] . '_' . str_replace('-', '', $x['d']),
+                'event_type' => 'research',
+                'title'      => '📑 ' . $nm . ' · ' . (mb_strlen($first) > 40 ? mb_substr($first, 0, 39) . '…' : $first),
+                'start_dt'   => $x['d'] . ' 00:00:00',
+                'end_dt'     => null,
+                'due_dt'     => null,
+                'is_allday'  => 1,
+                'is_done'    => $x['done'] ? 1 : 0,
+                'color'      => '#7c3aed',
+                'category'   => '리서치',
+                'priority'   => 2,
+                'memo'       => $memo,
+                'recur_rule' => null,
+                'alert_mins' => [],
+                'is_holiday' => 0,
+                'code'       => $x['code'],
+                'url'        => '/stock/index.php?mode=research&view=cal#g' . $x['note_id'] . '-' . str_replace('-', '', $x['d']),
+            ];
+        }
+        return $out;
+    }
+
+    /** 버전 → 확인 폼에 다시 채울 초안(수정할 때) */
+    public static function toDraft(array $n): array
+    {
+        $d = ['stock_code' => (string)$n['code'], 'stock_name' => '', 'as_of' => (string)$n['d'], 'title' => (string)$n['title'],
+              'opinion' => (string)$n['opinion'], 'headline' => (string)$n['headline'], 'review' => (string)$n['review'],
+              'biz' => (string)($n['biz'] ?? ''), 'tags' => self::tagList((string)($n['tags'] ?? '')),
+              'price_ref' => (int)$n['price_ref'], 'price_ref_date' => (string)($n['price_ref_d'] ?? ''),
+              'scenarios' => [], 'zones' => [], 'targets' => [], 'checks' => [], 'events' => [], 'risks' => []];
+        foreach ($n['levels'] as $l) {
+            if ($l['kind'] === 'scen') $d['scenarios'][] = ['label' => $l['label'], 'value' => (int)$l['lo'], 'basis' => $l['basis'], 'note' => $l['memo']];
+            if ($l['kind'] === 'zone') $d['zones'][] = ['label' => $l['label'], 'lo' => (int)$l['lo'], 'hi' => (int)$l['hi'], 'weight' => '', 'note' => $l['memo']];
+            if ($l['kind'] === 'target') $d['targets'][] = ['broker' => $l['label'], 'date' => (string)($l['d'] ?? ''), 'price' => (int)$l['lo'], 'prev' => (int)$l['prev']];
+        }
+        foreach ($n['items'] as $i) {
+            $row = ['text' => $i['text'], 'date' => (string)($i['d'] ?? ''), 'prec' => (string)$i['prec']];
+            if ($i['kind'] === 'check') $d['checks'][] = $row;
+            if ($i['kind'] === 'event') $d['events'][] = $row;
+            if ($i['kind'] === 'risk')  $d['risks'][] = $i['text'];
+        }
+        return $d;
+    }
+}
+?>

@@ -116,6 +116,24 @@ class Wg
          * FK 를 걸지 않는다(변수 표가 없는 날에도 이 표는 만들어져야 한다) — 변수를 지울 때 Mv::varDelete 가 비운다. */
         $this->pdo->exec("ALTER TABLE wg_item ADD COLUMN IF NOT EXISTS var_id INT UNSIGNED NULL
                           COMMENT '같이 볼 변수(mv_var.id) — 그 종목 차트에만 겹친다' AFTER dir");
+        /* 2026-10-26 — 테마 md 가져오기 기록(원문 = 테마 노트 · 갈아끼우기 직전 백업 = 되돌리기). 그룹을 지워도 기록과 원문은 남는다 */
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS wg_import (
+              id           INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+              group_id     INT UNSIGNED NULL COMMENT '그룹이 지워지면 NULL — 기록과 원문은 남긴다',
+              group_name   VARCHAR(30) NOT NULL COMMENT '가져올 때의 그룹명',
+              mode         ENUM('new','append','replace','undo') NOT NULL,
+              asof         DATE NULL,
+              review_on    DATE NULL,
+              source_url   VARCHAR(500) NULL,
+              md           MEDIUMTEXT NOT NULL COMMENT '원문 — 테마 노트 표시',
+              summary_json TEXT NULL COMMENT '적용 결과 요약',
+              backup_json  MEDIUMTEXT NULL COMMENT 'replace 직전 wg_item·wg_group_var',
+              created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              KEY idx_group (group_id, id),
+              CONSTRAINT fk_wg_import_group FOREIGN KEY (group_id) REFERENCES wg_group(id) ON DELETE SET NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='관심그룹 테마 md 가져오기 기록'
+        ");
     }
 
     /** 표가 있나 — 화면은 DDL 을 하지 않으므로 없으면 「만들기」 안내를 띄운다 */
@@ -239,7 +257,8 @@ class Wg
         return (int)$st->fetchColumn() > 0;
     }
 
-    private function cleanName(string $name, int $exceptId = 0): string
+    /** 이름의 «모양»(길이 · 고정 그룹 이름) — 같은 이름이 있는지는 보지 않는다(테마 미리보기는 그것을 «덧붙이기» 자리로 쓴다) */
+    private function nameFormat(string $name): string
     {
         $name = trim(preg_replace('/\s+/u', ' ', $name));
         $len  = mb_strlen($name);
@@ -251,6 +270,12 @@ class Wg
                 throw new InvalidArgumentException('「' . $b['name'] . '」은(는) 고정 그룹의 이름입니다.');
             }
         }
+        return $name;
+    }
+
+    private function cleanName(string $name, int $exceptId = 0): string
+    {
+        $name = $this->nameFormat($name);
         $st = $this->pdo->prepare("SELECT COUNT(*) FROM wg_group WHERE name = ? AND id <> ?");
         $st->execute([$name, $exceptId]);
         if ((int)$st->fetchColumn() > 0) {
@@ -646,12 +671,14 @@ class Wg
     private function renumber(int $gid, array $ids): void
     {
         $st = $this->pdo->prepare("UPDATE wg_item SET sort_no = ? WHERE id = ? AND group_id = ?");
-        $this->pdo->beginTransaction();
+        /* 이미 트랜잭션 안이면(테마 가져오기 themeApply 가 쥔 것) 그 안에서 돈다 — PDO 는 중첩 트랜잭션이 없다 */
+        $own = !$this->pdo->inTransaction();
+        if ($own) $this->pdo->beginTransaction();
         try {
             foreach ($ids as $i => $id) $st->execute([$i + 1, (int)$id, $gid]);
-            $this->pdo->commit();
+            if ($own) $this->pdo->commit();
         } catch (Throwable $e) {
-            $this->pdo->rollBack();
+            if ($own) $this->pdo->rollBack();
             throw $e;
         }
     }
@@ -1029,6 +1056,860 @@ class Wg
                     if (!isset($out[$k]) && strlen((string)$r['c']) === 6) $out[$k] = (string)$r['c'];
                 }
             } catch (Throwable $e) { /* 표가 없으면 다음 원천 */ }
+        }
+        return $out;
+    }
+
+    // ══ 테마 md 가져오기 (2026-10-26) ═══════════════════════════════════
+    /*
+     * 채팅 Claude 가 만든 «테마 md»(머리말 `wg: theme/1`)를 붙여넣으면 「미리보기 → 확인 → 적용」으로 그룹 하나를 만들거나 갱신한다.
+     * 형식 = docs/wg-theme/테마md_형식_v1.md · 규칙 = CLAUDE.md 「/stock 관심그룹」 규칙 17.
+     *
+     * ★미리보기와 적용은 같은 계획(themePlan)이다 — 적용은 계획을 다시 만들어 미리보기의 sig 와 맞춰 본다.
+     *   그 사이 시세(잠정→확정)·그룹이 바뀌었으면 막는다(보여 준 것과 다른 것을 쓰지 않는다).
+     * ★적용은 트랜잭션 «하나»다(themeApply 가 혼자 쥔다) — 안에서 부르는 renumber·Mv::groupSet 은 그 트랜잭션에 합류한다.
+     *   DDL 도 네이버 콜도 없다(변수는 이미 등록된 것만 · 응답 30초 벽).
+     * ★자르지 않는다 — 원문 THEME_MAX_CHARS 초과·메모 500자 초과는 거절·제외하고 이유를 말한다(옛 붙여넣기의 조용한 컷과 다르다).
+     * ★기준가(base: close) = asof 이하 마지막 거래일의 krx_amt 종가. 확정(src='k')만 쓰고 잠정(src='n')은 «가장 최근 하루»일 때만 —
+     *   확정되지 못한 잠정 행 = 유령 거래일(휴장일에 잘못 들어간 복사본)을 거른다. 상장주식수가 크게 바뀐 종목(분할·병합)은 비운다
+     *   (krx_amt 는 수정주가가 아니다).
+     */
+    public const THEME_FMT       = 'theme/1';
+    public const THEME_MAX_CHARS = 30000;   // 원문 상한 — 넘으면 거절한다(자르지 않는다)
+    public const THEME_OLD_DAYS  = 30;      // asof 가 이보다 오래면 경고
+    public const THEME_SPLIT_HI  = 1.5;     // 기준일 뒤 상장주식수가 이 배수 이상·
+    public const THEME_SPLIT_LO  = 0.67;    //   이 배수 이하로 바뀌었으면 분할·병합 의심 → 기준가를 비운다
+    private const THEME_KEYS      = ['wg', 'group', 'asof', 'base', 'vars', 'review', 'source', 'rebase', 'made'];
+    private const THEME_MEMO_COLS = ['근거', '트리거', '무효', '메모'];   // 메모에 이 순서로 잇는다 — 근거만 칸 이름 없이(parseTable 과 같은 모양)
+    private const THEME_NUM_COLS  = ['트리거', '무효'];
+    private const THEME_TAGS      = ['[공시]', '[IR]', '[리포트]', '[기사]', '[단독]', '[추정]'];
+    private const THEME_DIR_WORDS = '/상승|하락|오를|내릴|인상|인하|↑|↓|불리|피해/u';
+    private const THEME_NOTE_SECS = ['노트', '일정', '출처'];
+    /** 거래일 달력 = 삼성전자의 krx_amt 행(일일 결산과 같은 약속) */
+    private const CAL_CODE = '005930';
+
+    /** 시험용 시계 — «오늘»과 «오늘 장이 섰나»를 정해 둔다. 운영 경로는 부르지 않는다(null = 진짜 시계) */
+    private ?string $clockYmd = null;
+    private ?bool $clockTraded = null;
+    public function setClock(?string $ymd, ?bool $tradedToday = null): void
+    {
+        $this->clockYmd    = $ymd;
+        $this->clockTraded = $tradedToday;
+    }
+    private function today(): string
+    {
+        return $this->clockYmd ?? date('Y-m-d');
+    }
+    private function tradedToday(): ?bool
+    {
+        if ($this->clockYmd !== null) return $this->clockTraded;
+        try { return NaverFinanceAPI::tradedToday(); } catch (Throwable $e) { return null; }
+    }
+
+    /** 가져오기 기록 표가 있나 — 화면·API 는 DDL 을 하지 않는다(module=wg&action=schema) */
+    public function themeReady(): bool
+    {
+        return $this->tableExists('wg_import');
+    }
+    private function tableExists(string $t): bool
+    {
+        try {
+            $st = $this->pdo->prepare("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?");
+            $st->execute([$t]);
+            return (int)$st->fetchColumn() === 1;
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
+    // ── 글자 도구 — ★trim() 은 바이트 단위라 한글 끝 바이트(0xA0)를 깎는다 · 유니코드는 /u 정규식으로 ──
+    private static function utrim(string $s): string
+    {
+        return (string)preg_replace('/^[\s\x{00A0}\x{FEFF}]+|[\s\x{00A0}\x{FEFF}]+$/u', '', $s);
+    }
+    private static function norm(string $s): string
+    {
+        return (string)preg_replace('/\s+/u', ' ', self::utrim($s));
+    }
+    /** 이름 대조용 — 공백을 없애고 대소문자를 무시한다 */
+    private static function nameKey(string $s): string
+    {
+        return mb_strtolower((string)preg_replace('/\s+/u', '', $s));
+    }
+    private static function isYmd(string $d): bool
+    {
+        return (bool)preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $d, $m) && checkdate((int)$m[2], (int)$m[3], (int)$m[1]);
+    }
+    /** 마크다운 표 한 줄 → 칸들(앞뒤 | 를 떼고 \| 는 글자로) */
+    private static function mdCells(string $row): array
+    {
+        $row = self::utrim($row);
+        if (strpos($row, '|') === 0) $row = substr($row, 1);
+        if (substr($row, -1) === '|' && substr($row, -2) !== '\\|') $row = substr($row, 0, -1);
+        return array_map(static fn($c) => self::norm(str_replace('\\|', '|', $c)), preg_split('/(?<!\\\\)\|/', $row));
+    }
+
+    /**
+     * 테마 md 읽기 — 글자만 본다(DB 없음). 머리말에 `wg:` 가 없으면 null(옛 표 붙여넣기 parseTable 로 떨어진다).
+     * ★읽는 곳은 「## 등록」 영역뿐이다 — 거기엔 `###` 구분행 · 표 · 빈 줄만 있어야 한다(그 밖의 줄은 오류).
+     *   옛 붙여넣기는 56자 이하의 한 칸짜리 줄을 전부 구분행으로 읽어 문장이 제목을 덮었다 — 여기서는 짐작하지 않는다.
+     *
+     * @return array|null ['meta'=>[키=>값], 'title'=>, 'secs'=>[['label','dir','var','line','rows'=>[…]]], 'errors'=>[], 'warns'=>[], 'cols'=>[모르는 칸=>1]]
+     */
+    public static function parseThemeMd(string $md): ?array
+    {
+        $md = str_replace(["\r\n", "\r"], "\n", $md);
+        if (strncmp($md, "\xEF\xBB\xBF", 3) === 0) $md = substr($md, 3);
+        $lines = explode("\n", $md);
+        $n = count($lines);
+        $i = 0;
+        while ($i < $n && self::utrim($lines[$i]) === '') $i++;
+        if ($i >= $n || self::utrim($lines[$i]) !== '---') return null;
+
+        $meta = []; $bad = []; $end = -1;
+        for ($j = $i + 1; $j < $n; $j++) {
+            $t = self::utrim($lines[$j]);
+            if ($t === '---') { $end = $j; break; }
+            if ($t === '') continue;
+            if (preg_match('/^([a-z_]+):\s*(.*)$/u', $t, $m)) $meta[$m[1]] = self::utrim($m[2]);
+            else $bad[] = $j + 1;
+        }
+        if (!isset($meta['wg'])) return null;          // 머리말이 있어도 wg 가 없으면 테마 md 가 아니다
+
+        $E = []; $W = [];
+        $res = ['meta' => $meta, 'title' => '', 'secs' => [], 'errors' => [], 'warns' => [], 'cols' => []];
+        if ($meta['wg'] !== self::THEME_FMT) $E[] = '형식 「wg: ' . $meta['wg'] . '」은 읽지 못합니다 — wg: ' . self::THEME_FMT . ' 만 읽습니다';
+        if ($end < 0) {
+            $E[] = '머리말이 닫히지 않았습니다(--- 줄이 하나 더 있어야 합니다)';
+            $res['errors'] = $E;
+            return $res;
+        }
+        foreach ($bad as $ln) $W[] = "머리말 {$ln}행을 읽지 못해 건너뜁니다(「키: 값」 꼴이 아님)";
+        foreach (array_keys($meta) as $k) if (!in_array($k, self::THEME_KEYS, true)) $W[] = "머리말의 모르는 키 「{$k}」 — 건너뜁니다";
+        foreach (['group', 'asof', 'base'] as $k) if (($meta[$k] ?? '') === '') $E[] = "머리말에 {$k} 가 없습니다";
+
+        // 「## 등록」 영역 — 그 줄부터 다음 «## » 줄(또는 끝)까지
+        $reg = -1; $regEnd = $n;
+        for ($k = $end + 1; $k < $n; $k++) {
+            $t = self::utrim($lines[$k]);
+            if ($reg < 0) {
+                if ($res['title'] === '' && preg_match('/^#\s+(.+)$/u', $t, $m)) $res['title'] = mb_substr(self::norm($m[1]), 0, 200);
+                if (preg_match('/^##\s+등록\s*$/u', $t)) $reg = $k;
+                continue;
+            }
+            if (preg_match('/^##\s/u', $t)) { $regEnd = $k; break; }
+        }
+        if ($reg < 0) {
+            $E[] = '「## 등록」 영역이 없습니다';
+            $res['errors'] = $E; $res['warns'] = $W;
+            return $res;
+        }
+
+        $secs = []; $hdr = null; $labels = [];
+        $cur = ['label' => '', 'dir' => 0, 'var' => '', 'line' => 0, 'rows' => []];
+        for ($k = $reg + 1; $k < $regEnd; $k++) {
+            $ln = $k + 1;
+            $t  = self::utrim($lines[$k]);
+            if ($t === '') continue;
+            if (preg_match('/^###\s+(.*)$/u', $t, $m)) {
+                $secs[] = $cur;
+                $cur = self::themeSecHead($m[1], $ln, $E, $W);
+                if ($cur['label'] !== '' && isset($labels[$cur['label']])) $W[] = "구분행 {$ln}행 — 같은 제목이 {$labels[$cur['label']]}행에도 있습니다";
+                $labels[$cur['label']] = $labels[$cur['label']] ?? $ln;
+                $hdr = null;
+                continue;
+            }
+            if ($t[0] === '|') {
+                if (strpos($t, '-') !== false && preg_match('/^[\s|:\-]+$/u', $t)) continue;      // 구분줄 |---|
+                $cells = self::mdCells($t);
+                if (preg_match('/^종목/u', $cells[0] ?? '')) { $hdr = $cells; continue; }        // 머리줄
+                if ($hdr === null) { $E[] = "표 머리줄(「| 종목 (코드) | 근거 | …」) 없이 시작한 행 ({$ln}행)"; continue; }
+                $cur['rows'][] = self::themeRow($cells, $hdr, $ln, $res['cols']);
+                continue;
+            }
+            $E[] = "등록 영역에 표·제목 외 줄 ({$ln}행): «" . mb_substr($t, 0, 30) . (mb_strlen($t) > 30 ? '…' : '') . '»';
+        }
+        $secs[] = $cur;
+        foreach ($secs as $s) {
+            if ($s['rows']) { $res['secs'][] = $s; continue; }
+            if ($s['label'] !== '') $W[] = "종목이 없는 구분행 「{$s['label']}」({$s['line']}행) — 만들지 않습니다";
+        }
+        if (!$res['secs'] && !$E) $E[] = '등록 영역에 종목 행이 없습니다';
+        $res['errors'] = $E; $res['warns'] = $W;
+        return $res;
+    }
+
+    /** `### 제목 {↑ 변수}` — 방향은 끝의 토큰으로만 읽는다(제목의 단어로 짐작하지 않는다) */
+    private static function themeSecHead(string $text, int $ln, array &$E, array &$W): array
+    {
+        $text = self::norm($text);
+        $dir = 0; $var = '';
+        if (preg_match('/\{\s*([↑↓])\s*([^{}]*)\}\s*$/u', $text, $m)) {
+            $dir  = ($m[1] === '↑') ? 1 : -1;
+            $var  = self::norm($m[2]);
+            $text = self::norm((string)preg_replace('/\{\s*[↑↓][^{}]*\}\s*$/u', '', $text));
+            if ($var === '') $E[] = "구분행 {$ln}행 — 방향 토큰에 변수 이름이 없습니다({↑ 변수} 꼴)";
+        } elseif (preg_match('/\{[^{}]*\}\s*$/u', $text)) {
+            $W[] = "구분행 {$ln}행 — 끝의 {…} 를 방향으로 읽지 못해 제목에 그대로 둡니다(↑ 또는 ↓ 로 시작해야 합니다)";
+        }
+        if ($text === '') $E[] = "구분행 {$ln}행 — 제목이 비었습니다";
+        elseif (mb_strlen($text) > self::LABEL_MAX) $E[] = "구분행 {$ln}행 — 제목이 " . mb_strlen($text) . '자, ' . self::LABEL_MAX . '자까지입니다';
+        if (preg_match('/^\d/u', $text)) $W[] = "구분행 {$ln}행 — 제목이 숫자로 시작합니다(옛 붙여넣기는 앞의 숫자를 떼어 읽습니다)";
+        if (preg_match(self::THEME_DIR_WORDS, $text)) {
+            $W[] = "구분행 {$ln}행 — 제목에 방향 단어가 있습니다(방향은 {↑ 변수} 토큰으로만 적습니다 · 옛 붙여넣기는 단어로 방향을 짐작합니다)";
+        }
+        return ['label' => $text, 'dir' => $dir, 'var' => $var, 'line' => $ln, 'rows' => []];
+    }
+
+    /** 표의 한 행 → 종목·메모. 칸은 머리줄 이름으로 읽고, 모르는 칸은 메모에 「칸이름: 값」으로 덧붙인다 */
+    private static function themeRow(array $cells, array $hdr, int $ln, array &$cols): array
+    {
+        $r = ['line' => $ln, 'code' => '', 'name_md' => '', 'memo' => '', 'errs' => [], 'warns' => []];
+        if (count($cells) > count($hdr)) $r['errs'][] = '칸 수(' . count($cells) . ')가 머리줄(' . count($hdr) . ')보다 많습니다';
+        $by = [];
+        foreach ($hdr as $k => $h) if ($k > 0) $by[$h] = $cells[$k] ?? '';
+
+        $sc = $cells[0] ?? '';
+        $nc = preg_match_all('/\(([0-9]{4}[0-9A-Za-z]{2})\)/u', $sc, $m);
+        if ($nc > 1) {
+            $r['errs'][] = '한 칸에 종목이 여럿입니다(한 행에 한 종목)';
+        } elseif ($nc === 1) {
+            $r['code']    = strtoupper($m[1][0]);
+            $r['name_md'] = self::norm((string)preg_replace('/\(\s*[0-9]{4}[0-9A-Za-z]{2}\s*\).*$/u', '', $sc));
+            if ($r['name_md'] === '') $r['errs'][] = '종목명이 없습니다(마스터와 대조합니다)';
+        } else {
+            $r['errs'][] = '종목코드가 없습니다 — 「종목명 (6자리 코드)」 꼴로 적어 주세요';
+        }
+        foreach (self::THEME_NUM_COLS as $c) {
+            $v = $by[$c] ?? '';
+            if ($v === '') continue;
+            $raw = (string)preg_replace('/[\s,원]/u', '', $v);
+            if (!preg_match('/^\d{1,9}$/', $raw) || (int)$raw < self::BASE_MIN || (int)$raw > self::BASE_MAX) {
+                $r['errs'][] = "{$c} 값 「{$v}」이 1 ~ 100,000,000 원 정수가 아닙니다";
+            } else {
+                $by[$c] = number_format((int)$raw);
+            }
+        }
+        $why = $by['근거'] ?? '';
+        if ($why !== '') {
+            $tag = false;
+            foreach (self::THEME_TAGS as $tg) if (strpos($why, $tg) === 0) $tag = true;
+            if (!$tag) $r['warns'][] = '근거가 ' . implode('·', self::THEME_TAGS) . ' 중 하나로 시작하지 않습니다';
+        }
+        $parts = [];
+        foreach (self::THEME_MEMO_COLS as $c) {
+            $v = $by[$c] ?? '';
+            if ($v !== '') $parts[] = ($c === '근거') ? $v : $c . ': ' . $v;
+        }
+        foreach ($hdr as $k => $h) {
+            if ($k === 0 || in_array($h, self::THEME_MEMO_COLS, true)) continue;
+            if ($h !== '') $cols[$h] = 1;
+            $v = $cells[$k] ?? '';
+            if ($v !== '') $parts[] = ($h !== '' ? $h . ': ' : '') . $v;
+        }
+        $r['memo'] = implode(' · ', $parts);
+        $ml = mb_strlen($r['memo']);
+        if ($ml > self::MEMO_MAX) $r['errs'][] = "메모가 {$ml}자 — " . self::MEMO_MAX . '자를 넘습니다(자르지 않습니다)';
+        return $r;
+    }
+
+    /**
+     * 기준가 — [code => ['price'=>int|null, 'date'=>?, 'src'=>'k'|'n'|'now'|'', 'warns'=>[]]] · 파일 단위 안내는 $W 에 더한다.
+     *   close = asof 이하 마지막 거래일 종가(확정만 · 잠정은 가장 최근 하루일 때만 · 오늘이고 아직 종가 전이면 비운다)
+     *   now   = all_stock_info 현재가 · 오늘(기존 「기준가 = 현재가」와 같은 값) · none = 비운다
+     */
+    private function themeBase(array $codes, string $mode, string $asof, array &$W): array
+    {
+        $out = [];
+        foreach ($codes as $c) $out[$c] = ['price' => null, 'date' => null, 'src' => '', 'warns' => []];
+        if (!$codes || $mode === 'none' || $mode === '') return $out;
+        if ($mode === 'now') {
+            $q = $this->quotes($codes);
+            foreach ($codes as $c) {
+                $p = (int)round((float)($q[$c]['price'] ?? 0));
+                if ($p >= self::BASE_MIN && $p <= self::BASE_MAX) $out[$c] = ['price' => $p, 'date' => $this->today(), 'src' => 'now', 'warns' => []];
+                else $out[$c]['warns'][] = '현재가가 없어 기준가를 비웁니다';
+            }
+            return $out;
+        }
+        if ($asof === '') return $out;
+        $one = function (string $sql, array $a): ?array {
+            $st = $this->pdo->prepare($sql);
+            $st->execute($a);
+            return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+        };
+        $lastK = (string)($one("SELECT MAX(d) AS d FROM krx_amt WHERE code = ? AND src = 'k'", [self::CAL_CODE])['d'] ?? '');
+        $cal   = $one("SELECT d FROM krx_amt WHERE code = ? AND d <= ? AND vol > 0 AND (src = 'k' OR d > ?) ORDER BY d DESC LIMIT 1",
+                      [self::CAL_CODE, $asof, $lastK]);
+        $T = (string)($cal['d'] ?? '');
+        if ($T < $asof) {
+            // asof 에 달력 행이 없다 — 휴장일이거나, 오늘인데 아직 종가 전(15:50 잠정 적재 전)
+            $wk = (int)date('N', (int)strtotime($asof));
+            if ($asof === $this->today() && $wk <= 5 && $this->tradedToday() !== false) {
+                $W[] = "asof {$asof} 의 종가가 아직 없습니다(평일 15:50 뒤 잠정치가 들어옵니다) — 기준가를 비웁니다";
+                foreach ($codes as $c) $out[$c]['warns'][] = '종가 전 — 기준가를 비웁니다';
+                return $out;
+            }
+            if ($T !== '') $W[] = "asof {$asof} 는 거래일이 아니어서 직전 거래일 {$T} 종가로 잡습니다";
+        }
+        if ($T === '') {
+            foreach ($codes as $c) $out[$c]['warns'][] = '종가 원장이 없어 기준가를 비웁니다';
+            return $out;
+        }
+        foreach ($codes as $c) {
+            $r = $one("SELECT d, c, src, list_shrs FROM krx_amt WHERE code = ? AND d <= ? AND vol > 0 AND c > 0 AND (src = 'k' OR d > ?)
+                        ORDER BY d DESC LIMIT 1", [$c, $T, $lastK]);
+            if (!$r) { $out[$c]['warns'][] = "{$T} 까지 종가가 없어 기준가를 비웁니다"; continue; }
+            $w = [];
+            if ((string)$r['d'] < $T) $w[] = "{$T} 에 거래가 없어(정지?) 마지막 거래일 {$r['d']} 종가입니다";
+            /* 상장주식수 — 잠정 행엔 없다(NULL) → 그 날 이전 마지막 확정 행. 지금 값 = 마지막 확정 행 */
+            $shB = $r['list_shrs'] !== null ? (int)$r['list_shrs']
+                 : (int)($one("SELECT list_shrs FROM krx_amt WHERE code = ? AND d <= ? AND src = 'k' AND list_shrs IS NOT NULL
+                                ORDER BY d DESC LIMIT 1", [$c, $r['d']])['list_shrs'] ?? 0);
+            $shN = (int)($one("SELECT list_shrs FROM krx_amt WHERE code = ? AND src = 'k' AND list_shrs IS NOT NULL ORDER BY d DESC LIMIT 1",
+                              [$c])['list_shrs'] ?? 0);
+            $p = (int)$r['c'];
+            if ($shB > 0 && $shN > 0 && $shN !== $shB) {
+                $x = $shN / $shB;
+                $txt = '상장주식수 ' . number_format($shB) . ' → ' . number_format($shN) . ' (×' . round($x, 2) . ')';
+                if ($x >= self::THEME_SPLIT_HI || $x <= self::THEME_SPLIT_LO) {
+                    $w[] = $txt . ' — 분할·병합 의심이라 기준가를 비웁니다(원장은 수정주가가 아닙니다)';
+                    $p = 0;
+                } else {
+                    $w[] = $txt . ' — 증자 등 · 기준가는 그대로';
+                }
+            }
+            if ($p < self::BASE_MIN || $p > self::BASE_MAX) { $out[$c]['warns'] = $w; continue; }
+            $out[$c] = ['price' => $p, 'date' => (string)$r['d'], 'src' => (string)$r['src'], 'warns' => $w];
+        }
+        return $out;
+    }
+
+    /** 미리보기 — 계획에서 쓰기용(ops)만 뺀 것. 테마 md 가 아니면 null */
+    public function themeParse(string $md, array $opt = []): ?array
+    {
+        $p = $this->themePlan($md, $opt);
+        if ($p === null) return null;
+        unset($p['ops']);
+        return $p;
+    }
+
+    /**
+     * 계획 — 미리보기와 적용이 함께 쓴다(DB 는 읽기만). 행 상태:
+     *   new 새로 담음 · keep 이미 있음(덧붙이기는 그대로 · 갈아끼우기는 다시 만듦) · fill 덧붙이기에서 «비어 있는 기준가만» 채움 ·
+     *   over 30종목 초과 · bad 제외(이유는 errs)
+     * @param array $opt ['mode'=>'new'|'append'|'replace'|'', 'name'=>그룹 이름(md 의 것 대신)]
+     */
+    private function themePlan(string $md, array $opt): ?array
+    {
+        $t = self::parseThemeMd($md);
+        if ($t === null) return null;
+        $E = $t['errors']; $W = $t['warns'];
+        $len = mb_strlen($md);
+        if ($len > self::THEME_MAX_CHARS) {
+            $E[] = '원문이 ' . number_format($len) . '자 — ' . number_format(self::THEME_MAX_CHARS) . '자까지 받습니다(자르지 않습니다)';
+        }
+        foreach (array_keys($t['cols']) as $c) $W[] = "표의 모르는 칸 「{$c}」 — 메모에 「{$c}: 값」으로 덧붙입니다";
+        $meta  = $t['meta'];
+        $today = $this->today();
+
+        // ── 머리말 값 ──
+        $asof = (string)($meta['asof'] ?? '');
+        if ($asof !== '' && !self::isYmd($asof)) { $E[] = "asof 「{$asof}」가 YYYY-MM-DD 날짜가 아닙니다"; $asof = ''; }
+        elseif ($asof !== '' && $asof > $today) { $E[] = "asof {$asof} 는 미래 날짜입니다"; $asof = ''; }
+        elseif ($asof !== '' && (strtotime($today) - strtotime($asof)) > self::THEME_OLD_DAYS * 86400) {
+            $W[] = "asof {$asof} 가 " . self::THEME_OLD_DAYS . '일보다 오래됐습니다 — 오래된 종가가 기준가가 됩니다';
+        }
+        $base = strtolower((string)($meta['base'] ?? ''));
+        if ($base !== '' && !in_array($base, ['close', 'now', 'none'], true)) { $E[] = "base 「{$meta['base']}」 — close · now · none 중 하나입니다"; $base = ''; }
+        $review = (string)($meta['review'] ?? '');
+        if ($review !== '' && !self::isYmd($review)) { $W[] = "review 「{$review}」가 날짜가 아니어서 건너뜁니다"; $review = ''; }
+        $source = (string)($meta['source'] ?? '');
+        if ($source !== '' && (!preg_match('~^https?://\S+$~i', $source) || strlen($source) > 500)) { $W[] = 'source 가 http(s) 주소가 아니어서 건너뜁니다'; $source = ''; }
+        $rb = strtolower((string)($meta['rebase'] ?? ''));
+        if (!in_array($rb, ['', 'yes', 'no'], true)) $W[] = "rebase 「{$meta['rebase']}」 — yes 가 아니면 기준가를 이어받습니다";
+        $rebase = ($rb === 'yes');
+
+        // ── 그룹 — 이름이 같은 그룹이 있으면 덧붙이기·갈아끼우기, 없으면 새 그룹 ──
+        $nameIn = self::norm((string)($opt['name'] ?? ''));
+        if ($nameIn === '') $nameIn = self::norm((string)($meta['group'] ?? ''));
+        $name = '';
+        if ($nameIn !== '') {
+            try { $name = $this->nameFormat($nameIn); } catch (InvalidArgumentException $e) { $E[] = 'group — ' . $e->getMessage(); }
+        }
+        $gid = 0;
+        if ($name !== '') {
+            $st = $this->pdo->prepare("SELECT id, name FROM wg_group WHERE name = ?");
+            $st->execute([$name]);
+            if ($g = $st->fetch(PDO::FETCH_ASSOC)) { $gid = (int)$g['id']; $name = (string)$g['name']; }
+        }
+        $modes = $gid ? ['append', 'replace'] : ['new'];
+        $mode  = (string)($opt['mode'] ?? '');
+        if (!$gid) $mode = 'new';
+        elseif ($mode === 'new') $E[] = "같은 이름의 그룹 「{$name}」이 있습니다 — 이름을 바꾸거나 «덧붙이기»·«갈아끼우기»를 고르세요";
+        elseif (!in_array($mode, ['append', 'replace'], true)) $mode = 'append';
+        $append = ($gid && $mode === 'append'); $replace = ($gid && $mode === 'replace');
+
+        // ── 변수 — 이미 등록된 이름만(v1 은 네이버를 부르지 않는다) ──
+        $varNames = [];
+        foreach (preg_split('/\s*,\s*/u', (string)($meta['vars'] ?? '')) as $v) {
+            $v = self::norm((string)$v);
+            if ($v !== '' && !in_array($v, $varNames, true)) $varNames[] = $v;
+        }
+        $needVars = (bool)$varNames;
+        foreach ($t['secs'] as $s) if ($s['dir']) $needVars = true;
+        $mvAll = []; $mvOk = true;
+        if ($needVars) {
+            try {
+                foreach ($this->pdo->query("SELECT id, name FROM mv_var")->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                    $mvAll[self::nameKey((string)$r['name'])] = ['id' => (int)$r['id'], 'name' => (string)$r['name']];
+                }
+            } catch (Throwable $e) {
+                $mvOk = false;
+                $E[] = '변수 표(mv_var)가 없습니다 — 관심그룹 「변수」에서 먼저 만드세요';
+            }
+        }
+        if (count($varNames) > Mv::GROUP_VAR_MAX) $E[] = 'vars 는 ' . Mv::GROUP_VAR_MAX . '개까지입니다(첫째가 주 변수)';
+        $vars = [];
+        foreach ($varNames as $v) {
+            $hit = $mvAll[self::nameKey($v)] ?? null;
+            if ($hit) $vars[] = $hit;
+            elseif ($mvOk) $E[] = "등록되지 않은 변수 「{$v}」 — 관심그룹 화면 「변수」에서 먼저 등록하세요";
+        }
+        $varKeys = array_map(static fn($x) => self::nameKey($x), $varNames);
+        $secs = $t['secs'];
+        foreach ($secs as $si => $s) {
+            $secs[$si]['var_id'] = 0;
+            if (!$s['dir'] || $s['var'] === '') continue;
+            if (!$varNames) { $E[] = "구분행 {$s['line']}행 — 방향 토큰이 있는데 머리말 vars 가 비었습니다"; continue; }
+            if (!in_array(self::nameKey($s['var']), $varKeys, true)) { $E[] = "구분행 {$s['line']}행 — 토큰의 변수 「{$s['var']}」가 vars 에 없습니다"; continue; }
+            foreach ($vars as $v) {
+                if (self::nameKey($v['name']) === self::nameKey($s['var'])) { $secs[$si]['var_id'] = $v['id']; $secs[$si]['var'] = $v['name']; }
+            }
+        }
+
+        // ── 종목 확인(한 번에) — 코드 필수 · 마스터(KRX) 이름과 대조 · ETF·마스터 밖은 뺀다 ──
+        $codeSet = [];
+        foreach ($secs as $s) foreach ($s['rows'] as $r) if ($r['code'] !== '' && !$r['errs']) $codeSet[$r['code']] = 1;
+        $codes = array_map('strval', array_keys($codeSet));        // ★숫자로만 된 키는 정수가 된다 — 다시 문자열로
+        $names = $codes ? StockName::many($this->pdo, $codes) : [];
+        $master = []; $krxd = []; $etf = []; $maxLast = '';
+        if ($codes) {
+            $ph  = implode(',', array_fill(0, count($codes), '?'));
+            $col = function (string $sql) use ($codes): array {
+                try { $st = $this->pdo->prepare($sql); $st->execute($codes); return $st->fetchAll(PDO::FETCH_NUM); }
+                catch (Throwable $e) { return []; }
+            };
+            foreach ($col("SELECT code, last_seen FROM stock_master WHERE code IN ($ph)") as $r) $master[(string)$r[0]] = (string)$r[1];
+            foreach ($col("SELECT DISTINCT stock_code FROM krx_daily WHERE stock_code IN ($ph)") as $r) $krxd[(string)$r[0]] = 1;
+            foreach ($col("SELECT etf_code FROM all_etf_info WHERE etf_code IN ($ph)") as $r) $etf[(string)$r[0]] = 1;
+            try { $maxLast = (string)$this->pdo->query("SELECT MAX(last_seen) FROM stock_master")->fetchColumn(); } catch (Throwable $e) { }
+        }
+        $held = [];
+        try { $held = array_flip(array_map('strval', (new Dt($this->pdo))->heldCodes())); } catch (Throwable $e) { }
+        $seen = [];
+        foreach ($secs as $si => $s) {
+            foreach ($s['rows'] as $ri => $r) {
+                $c = $r['code'];
+                if ($c !== '') {
+                    if (isset($seen[$c])) $r['errs'][] = "중복 — {$seen[$c]}행에 이미 있습니다(그룹 안에서 한 번만)";
+                    else $seen[$c] = $r['line'];
+                }
+                if (!$r['errs']) {
+                    if (isset($etf[$c])) $r['errs'][] = 'ETF 는 관심그룹에 담지 않습니다';
+                    elseif (!isset($master[$c]) && !isset($krxd[$c])) $r['errs'][] = '종목 마스터(KRX)에 없는 코드입니다';
+                    elseif (!isset($names[$c]) || self::nameKey($names[$c]) !== self::nameKey($r['name_md'])) {
+                        $r['errs'][] = '이름 불일치 md=「' . $r['name_md'] . '」 / 마스터=「' . ($names[$c] ?? '—') . '」';
+                    } elseif (isset($master[$c]) && $maxLast !== '' && $master[$c] < $maxLast) {
+                        $r['warns'][] = "최근 거래일 KRX 목록에 없습니다(마지막 {$master[$c]}) — 상장폐지·거래정지?";
+                    }
+                }
+                $r['name_master'] = (string)($names[$c] ?? '');
+                $secs[$si]['rows'][$ri] = $r;
+            }
+        }
+
+        // ── 기준가(올바른 행만) ──
+        $okCodes = [];
+        foreach ($secs as $s) foreach ($s['rows'] as $r) if (!$r['errs']) $okCodes[$r['code']] = 1;
+        $bmap = $this->themeBase(array_map('strval', array_keys($okCodes)), $base, $asof, $W);
+
+        // ── 그룹의 지금 모습 ──
+        $exist = $gid ? $this->items($gid) : [];
+        $exBy = []; $exSep = []; $exStock = 0;
+        foreach ($exist as $it) {
+            if ($it['item_type'] === 'stock') { $exBy[(string)$it['stock_code']] = $it; $exStock++; }
+            else { $lb = self::norm((string)$it['label']); if (!isset($exSep[$lb])) $exSep[$lb] = $it; }
+        }
+        $exVars = [];
+        if ($gid) {
+            try { foreach ((new Mv($this->pdo))->groupVars($gid) as $v) $exVars[] = ['id' => (int)$v['id'], 'name' => (string)$v['name']]; }
+            catch (Throwable $e) { }
+        }
+
+        // ── 행마다 상태 · 자리(그룹당 ITEM_MAX) ──
+        $room = self::ITEM_MAX - ($append ? $exStock : 0);
+        $cnt = ['stocks' => 0, 'add' => 0, 'keep' => 0, 'fill' => 0, 'over' => 0, 'excluded' => 0];
+        $over = []; $memoCh = []; $inherit = []; $inMd = [];
+        $opSecs = []; $outSecs = [];
+        foreach ($secs as $s) {
+            $sep = 'none'; $sepId = 0;
+            if ($s['label'] !== '') {
+                if ($append && isset($exSep[$s['label']])) {
+                    $sep = 'exists';
+                    $sepId = (int)$exSep[$s['label']]['id'];
+                    if ((int)($exSep[$s['label']]['dir'] ?? 0) !== (int)$s['dir']) {
+                        $W[] = "구분행 「{$s['label']}」의 방향이 그룹에 있는 것과 다릅니다 — 덧붙이기는 그 구분행을 바꾸지 않습니다";
+                    }
+                } else {
+                    $sep = 'new';
+                }
+            }
+            $oRows = []; $vRows = [];
+            foreach ($s['rows'] as $r) {
+                $cnt['stocks']++;
+                $c = $r['code']; $b = $bmap[$c] ?? null;
+                $state = 'bad'; $show = null; $warns = $r['warns'];
+                if ($r['errs']) {
+                    $cnt['excluded']++;
+                } else {
+                    $ex = $exBy[$c] ?? null;
+                    if ($ex && ($append || $replace)) {
+                        $state = ($append && $ex['base_price'] === null && $b && $b['price'] !== null) ? 'fill' : 'keep';
+                    } else {
+                        $state = 'new';
+                    }
+                    if ($state === 'new' || $replace) {                 // 자리를 먹는 행(갈아끼우기는 다시 만드는 행 전부)
+                        if ($room <= 0) $state = 'over'; else $room--;
+                    }
+                    if ($state === 'over') {
+                        $cnt['over']++;
+                        $over[] = ['code' => $c, 'name' => $r['name_md'], 'line' => $r['line']];
+                    } else {
+                        $inMd[$c] = 1;                              // 갈아끼우기에서 «남는» 종목(초과·제외된 것은 지워질 목록에 선다)
+                        $cnt[$state === 'new' ? 'add' : $state]++;
+                        $pb = $b['price'] ?? null; $pd = $pb !== null ? ($b['date'] ?? null) : null; $how = 'calc';
+                        $memo = $r['memo']; $memoAt = null; $vid = 0;
+                        if ($append && $ex) {
+                            // 덧붙이기 — 이미 있는 종목은 메모·기준가·자리를 건드리지 않는다. 기준가가 «비어 있을 때만» 채운다
+                            if ($state === 'keep') { $pb = $ex['base_price'] !== null ? (int)$ex['base_price'] : null; $pd = $ex['base_date']; $how = 'keep'; }
+                        }
+                        if ($replace && $ex) {
+                            if (!$rebase && $ex['base_price'] !== null) {
+                                $pb = (int)$ex['base_price']; $pd = $ex['base_date']; $how = 'inherit';
+                                $inherit[] = ['code' => $c, 'name' => $r['name_md'], 'price' => $pb, 'date' => $pd];
+                            }
+                            $vid = (int)($ex['var_id'] ?? 0);            // 종목별 «같이 볼 변수» — md 로 적을 수 없어 이어받는다
+                            $old = (string)($ex['memo'] ?? '');
+                            if ($old === $memo) $memoAt = $ex['memo_at'];
+                            else $memoCh[] = ['code' => $c, 'name' => $r['name_md'], 'old' => $old, 'new' => $memo];
+                        }
+                        if ($how === 'calc' && $b) $warns = array_merge($warns, $b['warns']);
+                        $show = ['price' => $pb, 'date' => $pd, 'src' => $how === 'calc' ? (string)($b['src'] ?? '') : '', 'how' => $how];
+                        $oRows[] = ['code' => $c, 'state' => $state, 'id' => $ex ? (int)$ex['id'] : 0, 'base' => $pb, 'base_date' => $pd,
+                                    'memo' => $memo, 'memo_at' => $memoAt, 'var_id' => $vid];
+                    }
+                }
+                $vRows[] = ['line' => $r['line'], 'code' => $c, 'name_md' => $r['name_md'], 'name_master' => $r['name_master'],
+                            'state' => $state, 'base' => $show, 'memo' => $r['memo'], 'memo_len' => mb_strlen($r['memo']),
+                            'held' => isset($held[$c]) ? 1 : 0, 'warns' => array_values(array_unique($warns)), 'errs' => $r['errs']];
+            }
+            $opSecs[]  = ['label' => $s['label'], 'dir' => (int)$s['dir'], 'var_id' => (int)$s['var_id'], 'sep_id' => $sepId, 'rows' => $oRows];
+            $outSecs[] = ['label' => $s['label'], 'dir' => (int)$s['dir'], 'var' => $s['dir'] ? $s['var'] : '', 'sep' => $sep,
+                          'line' => $s['line'], 'rows' => $vRows];
+        }
+
+        // 갈아끼우기에서 지워질 종목(md 에 없거나 md 에서 제외된 행)
+        $deletes = [];
+        if ($replace) {
+            $gone = array_values(array_filter(array_map('strval', array_keys($exBy)), static fn($c) => !isset($inMd[$c])));
+            $gn = $gone ? StockName::many($this->pdo, $gone) : [];
+            foreach ($gone as $c) $deletes[] = ['code' => $c, 'name' => (string)($gn[$c] ?? $c), 'held' => isset($held[$c]) ? 1 : 0];
+        }
+        // 변수 — 새 그룹·갈아끼우기 = md 의 것 · 덧붙이기 = 없는 것만 더한다(그룹당 상한)
+        $finalVars = array_column($vars, 'id'); $varsChange = true;
+        if ($append) {
+            $finalVars = array_column($exVars, 'id'); $varsChange = false;
+            foreach ($vars as $v) {
+                if (in_array($v['id'], $finalVars, true)) continue;
+                if (count($finalVars) >= Mv::GROUP_VAR_MAX) { $W[] = "변수 「{$v['name']}」 — 그룹의 변수가 " . Mv::GROUP_VAR_MAX . '개라 연결하지 않습니다'; continue; }
+                $finalVars[] = $v['id']; $varsChange = true;
+            }
+        }
+        $vName = [];
+        foreach (array_merge($exVars, $vars) as $v) $vName[$v['id']] = $v['name'];
+        if ($replace && array_column($exVars, 'id') !== $finalVars) {
+            $W[] = '그룹 변수가 바뀝니다: ' . (implode(', ', array_column($exVars, 'name')) ?: '없음') . ' → '
+                 . (implode(', ', array_map(static fn($id) => $vName[$id] ?? '', $finalVars)) ?: '없음');
+        }
+
+        $ops = ['mode' => $mode, 'gid' => $gid, 'name' => $name, 'vars' => $finalVars, 'vars_change' => $varsChange,
+                'secs' => $opSecs, 'deletes' => array_column($deletes, 'code'), 'asof' => $asof !== '' ? $asof : null,
+                'review' => $review !== '' ? $review : null, 'source' => $source !== '' ? $source : null, 'base' => $base];
+        /* sig — 계획 + 그룹의 지금 모습. base: now 는 현재가가 tick 마다 바뀌므로 기준가 값은 빼고 맞춘다(적용하는 순간의 값이 그 뜻이다) */
+        $sigOps = $ops;
+        if ($base === 'now') {
+            foreach ($sigOps['secs'] as &$so) foreach ($so['rows'] as &$sr) { $sr['base'] = null; $sr['base_date'] = null; }
+            unset($so, $sr);
+        }
+        $exSig = array_map(static fn($it) => [$it['id'], $it['item_type'], $it['stock_code'], $it['label'], $it['dir'], $it['var_id'],
+                                              $it['base_price'], $it['base_date'], $it['memo']], $exist);
+        $sig = sha1(json_encode([self::THEME_FMT, $sigOps, $exSig, array_column($exVars, 'id')], JSON_UNESCAPED_UNICODE));
+
+        $nSec = 0;
+        foreach ($outSecs as $s) if ($s['label'] !== '') $nSec++;
+        return [
+            'group'        => ['name' => $name, 'name_md' => self::norm((string)($meta['group'] ?? '')), 'exists' => $gid > 0, 'id' => $gid,
+                               'n' => $exStock, 'modes' => $modes, 'mode' => $mode],
+            'meta'         => ['asof' => $asof, 'base' => $base, 'review' => $review, 'source' => $source, 'rebase' => $rebase,
+                               'vars' => $varNames, 'title' => $t['title']],
+            'vars'         => ['before' => array_column($exVars, 'name'), 'after' => array_values(array_map(static fn($id) => $vName[$id] ?? '', $finalVars))],
+            'sections'     => $outSecs,
+            'deletes'      => $deletes,
+            'memo_changes' => $memoCh,
+            'inherits'     => $inherit,
+            'over'         => $over,
+            'errors'       => array_values(array_unique($E)),
+            'warns'        => array_values(array_unique($W)),
+            'counts'       => $cnt + ['sections' => $nSec, 'delete' => count($deletes), 'chars' => $len],
+            'sig'          => $sig,
+            'ops'          => $ops,
+        ];
+    }
+
+    /**
+     * 적용 — 계획을 다시 만들어 미리보기의 sig 와 같을 때만, 트랜잭션 하나로 쓴다.
+     *   new     = 그룹 생성(맨 아래) → 변수 연결 → 구분행·종목을 md 순서대로
+     *   append  = 새 종목만(같은 제목의 구분행이 있으면 그 섹션 끝 · 없으면 그룹 끝에 새 구분행) · 비어 있는 기준가만 채움 · 없는 변수만 더함
+     *   replace = 지금 행·변수를 백업(wg_import.backup_json) → 전부 지우고 md 대로 → 있던 종목은 기준가·같이 볼 변수를 이어받음(rebase: yes 면 기준가 새로)
+     * @return array ['group_id', 'import_id', 'mode', 'seps', 'added', 'kept', 'filled', 'deleted', 'counts']
+     */
+    public function themeApply(string $md, array $opt): array
+    {
+        $p = $this->themePlan($md, $opt);
+        if ($p === null) throw new InvalidArgumentException('테마 md(머리말 wg: ' . self::THEME_FMT . ')가 아닙니다.');
+        if ($p['errors']) throw new InvalidArgumentException('적용할 수 없습니다 — ' . $p['errors'][0]);
+        if ((string)($opt['sig'] ?? '') !== $p['sig']) {
+            throw new InvalidArgumentException('미리보기 뒤에 시세·그룹이 바뀌었습니다 — 미리보기를 다시 하세요.');
+        }
+        if (!$this->themeReady()) throw new InvalidArgumentException('가져오기 기록 표(wg_import)가 없습니다 — 표를 먼저 만드세요(module=wg&action=schema).');
+        $o   = $p['ops'];
+        $c   = $p['counts'];
+        // 바뀔 것이 없다(같은 파일을 덧붙이기로 또 넣었다) — 빈 기록을 쌓지 않는다. 화면도 이 때 적용 버튼을 잠근다
+        if ($o['mode'] === 'append' && !$c['add'] && !$c['fill'] && !$o['vars_change']) throw new InvalidArgumentException('바뀔 것이 없습니다 — 이미 다 들어 있습니다.');
+        if ($o['mode'] === 'new' && !$c['add']) throw new InvalidArgumentException('담을 종목이 없습니다 — 제외된 행의 이유를 보세요.');
+        $now = date('Y-m-d H:i:s');
+        $ins = $this->pdo->prepare("INSERT INTO wg_item (group_id, item_type, stock_code, label, dir, var_id, base_price, base_date, memo, memo_at, sort_no)
+                                    VALUES (?,?,?,?,?,?,?,?,?,?,?)");
+        $res = ['seps' => 0, 'added' => 0, 'kept' => 0, 'filled' => 0, 'deleted' => 0];
+        $this->pdo->beginTransaction();
+        try {
+            $gid = (int)$o['gid']; $backup = null;
+            if ($o['mode'] === 'new') $gid = $this->groupCreate($o['name']);
+            if ($o['mode'] === 'replace') {
+                $st = $this->pdo->prepare("SELECT * FROM wg_item WHERE group_id = ? ORDER BY sort_no, id");
+                $st->execute([$gid]);
+                $bv = [];
+                if ($this->tableExists('wg_group_var')) {
+                    $sv = $this->pdo->prepare("SELECT * FROM wg_group_var WHERE group_id = ? ORDER BY sort_no, var_id");
+                    $sv->execute([$gid]);
+                    $bv = $sv->fetchAll(PDO::FETCH_ASSOC);
+                }
+                $backup = ['items' => $st->fetchAll(PDO::FETCH_ASSOC), 'vars' => $bv];
+                $this->pdo->prepare("DELETE FROM wg_item WHERE group_id = ?")->execute([$gid]);
+                $res['deleted'] = count($o['deletes']);
+            }
+            // 변수 — 보낸 순서가 곧 순서(첫째 = 주 변수) · Mv::groupSet 은 이 트랜잭션에 합류한다
+            if ($o['mode'] === 'append' ? $o['vars_change'] : ($o['vars'] || $o['mode'] === 'replace')) {
+                (new Mv($this->pdo))->groupSet($gid, $o['vars']);
+            }
+            if ($o['mode'] === 'append') {
+                $this->themeAppendRows($gid, $o['secs'], $ins, $now, $res);
+            } else {
+                $no = 1;
+                foreach ($o['secs'] as $s) {
+                    if (!$s['rows']) continue;
+                    if ($s['label'] !== '') {
+                        $ins->execute([$gid, 'sep', null, $s['label'], $s['dir'] ?: null, $s['var_id'] ?: null, null, null, null, null, $no++]);
+                        $res['seps']++;
+                    }
+                    foreach ($s['rows'] as $r) {
+                        $m = $r['memo'] !== '' ? $r['memo'] : null;
+                        $ins->execute([$gid, 'stock', $r['code'], null, null, $r['var_id'] ?: null, $r['base'], $r['base'] !== null ? $r['base_date'] : null,
+                                       $m, $m !== null ? ($r['memo_at'] ?: $now) : null, $no++]);
+                        $res[$r['state'] === 'keep' ? 'kept' : 'added']++;
+                    }
+                }
+            }
+            $sum = $res + ['mode' => $o['mode'], 'counts' => $p['counts']];
+            $this->pdo->prepare("INSERT INTO wg_import (group_id, group_name, mode, asof, review_on, source_url, md, summary_json, backup_json)
+                                 VALUES (?,?,?,?,?,?,?,?,?)")
+                      ->execute([$gid, $o['name'], $o['mode'], $o['asof'], $o['review'], $o['source'], $md,
+                                 json_encode($sum, JSON_UNESCAPED_UNICODE),
+                                 $backup !== null ? json_encode($backup, JSON_UNESCAPED_UNICODE) : null]);
+            $iid = (int)$this->pdo->lastInsertId();
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+        return ['group_id' => $gid, 'import_id' => $iid] + $sum;
+    }
+
+    /** 덧붙이기의 쓰기 — 새 행을 넣고, 그룹 전체 순서를 한 번 다시 매긴다(renumber 는 이 트랜잭션에 합류) */
+    private function themeAppendRows(int $gid, array $secs, PDOStatement $ins, string $now, array &$res): void
+    {
+        $order = []; $type = [];
+        foreach ($this->items($gid) as $it) { $order[] = (int)$it['id']; $type[(int)$it['id']] = $it['item_type']; }
+        $fill  = $this->pdo->prepare("UPDATE wg_item SET base_price = ?, base_date = ? WHERE id = ? AND group_id = ? AND base_price IS NULL");
+        $tmp   = 100000;                                    // 임시 순번 — 끝에서 renumber 가 1..N 으로 다시 매긴다
+        $moved = false;
+        foreach ($secs as $s) {
+            foreach ($s['rows'] as $r) {
+                if ($r['state'] === 'fill') { $fill->execute([$r['base'], $r['base_date'], $r['id'], $gid]); $res['filled'] += $fill->rowCount(); }
+                elseif ($r['state'] === 'keep') $res['kept']++;
+            }
+            $new = array_values(array_filter($s['rows'], static fn($r) => $r['state'] === 'new'));
+            if (!$new) continue;                            // 새 종목이 없는 섹션은 구분행도 만들지 않는다(tableAdd 와 같다)
+            $ids = [];
+            if ($s['label'] !== '' && !$s['sep_id']) {
+                $ins->execute([$gid, 'sep', null, $s['label'], $s['dir'] ?: null, $s['var_id'] ?: null, null, null, null, null, $tmp++]);
+                $id = (int)$this->pdo->lastInsertId(); $ids[] = $id; $type[$id] = 'sep'; $res['seps']++;
+            }
+            foreach ($new as $r) {
+                $m = $r['memo'] !== '' ? $r['memo'] : null;
+                $ins->execute([$gid, 'stock', $r['code'], null, null, null, $r['base'], $r['base'] !== null ? $r['base_date'] : null,
+                               $m, $m !== null ? $now : null, $tmp++]);
+                $id = (int)$this->pdo->lastInsertId(); $ids[] = $id; $type[$id] = 'stock'; $res['added']++;
+            }
+            // 자리 — 그룹에 같은 제목의 구분행이 있으면 그 섹션 끝 · 새 구분행이면 그룹 끝 · 구분행 없는(맨 위) 종목이면 첫 구분행 앞
+            if ($s['sep_id']) {
+                $at  = array_search((int)$s['sep_id'], $order, true);
+                $pos = ($at === false) ? count($order) : $at + 1;
+                while ($pos < count($order) && ($type[$order[$pos]] ?? '') !== 'sep') $pos++;
+            } elseif ($s['label'] === '') {
+                $pos = 0;
+                while ($pos < count($order) && ($type[$order[$pos]] ?? '') !== 'sep') $pos++;
+            } else {
+                $pos = count($order);
+            }
+            array_splice($order, $pos, 0, $ids);
+            $moved = true;
+        }
+        if ($moved) $this->renumber($gid, $order);
+    }
+
+    /**
+     * 되돌리기 — 그 그룹의 «가장 최근» 가져오기가 갈아끼우기일 때만. 백업의 행을 «원래 번호 그대로» 되살린다(접어 둔 구분행 기억이 산다).
+     * $dry = true 면 쓰지 않고 「무엇이 사라지나」만 센다(갈아끼운 뒤 손으로 고친 행 수 · 이제 없는 변수).
+     */
+    public function themeUndo(int $importId, bool $dry = false): array
+    {
+        if (!$this->themeReady()) throw new InvalidArgumentException('가져오기 기록 표(wg_import)가 없습니다.');
+        $st = $this->pdo->prepare("SELECT * FROM wg_import WHERE id = ?");
+        $st->execute([$importId]);
+        $imp = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$imp || $imp['group_id'] === null) throw new InvalidArgumentException('되돌릴 기록을 찾지 못했습니다(그룹이 지워졌을 수 있습니다).');
+        $gid = (int)$imp['group_id'];
+        $st = $this->pdo->prepare("SELECT MAX(id) FROM wg_import WHERE group_id = ?");
+        $st->execute([$gid]);
+        if ($imp['mode'] !== 'replace' || (int)$st->fetchColumn() !== (int)$imp['id']) {
+            throw new InvalidArgumentException('가장 최근 가져오기가 «갈아끼우기»일 때만 되돌릴 수 있습니다.');
+        }
+        $b = json_decode((string)$imp['backup_json'], true);
+        if (!is_array($b) || !isset($b['items']) || !is_array($b['items'])) throw new InvalidArgumentException('백업이 없습니다.');
+        $st = $this->pdo->prepare("SELECT COUNT(*) FROM wg_item WHERE group_id = ? AND updated_at > ?");
+        $st->execute([$gid, $imp['created_at']]);
+        $changed = (int)$st->fetchColumn();
+        $vids = [];
+        try { $vids = array_flip(array_map('intval', $this->pdo->query("SELECT id FROM mv_var")->fetchAll(PDO::FETCH_COLUMN))); } catch (Throwable $e) { }
+        $vars = array_values(array_filter($b['vars'] ?? [], static fn($v) => isset($vids[(int)$v['var_id']])));
+        $info = ['import_id' => (int)$imp['id'], 'group_id' => $gid, 'items' => count($b['items']), 'vars' => count($vars),
+                 'lost_vars' => count($b['vars'] ?? []) - count($vars), 'changed' => $changed];
+        if ($dry) return $info + ['done' => false];
+
+        $cols = ['id', 'group_id', 'item_type', 'stock_code', 'label', 'dir', 'var_id', 'base_price', 'base_date', 'memo', 'memo_at',
+                 'sort_no', 'created_at', 'updated_at'];
+        $ins  = $this->pdo->prepare('INSERT INTO wg_item (' . implode(', ', $cols) . ') VALUES (' . implode(',', array_fill(0, count($cols), '?')) . ')');
+        $gv   = $this->tableExists('wg_group_var');
+        $this->pdo->beginTransaction();
+        try {
+            $this->pdo->prepare("DELETE FROM wg_item WHERE group_id = ?")->execute([$gid]);
+            if ($gv) $this->pdo->prepare("DELETE FROM wg_group_var WHERE group_id = ?")->execute([$gid]);
+            foreach ($b['items'] as $it) {
+                $row = [];
+                foreach ($cols as $c) $row[] = $it[$c] ?? null;
+                $row[1] = $gid;
+                if ($row[6] !== null && !isset($vids[(int)$row[6]])) $row[6] = null;     // 이제 없는 변수를 가리키면 비운다
+                $ins->execute($row);
+            }
+            if ($gv) {
+                $iv = $this->pdo->prepare("INSERT INTO wg_group_var (group_id, var_id, sort_no) VALUES (?,?,?)");
+                foreach ($vars as $v) $iv->execute([$gid, (int)$v['var_id'], (int)$v['sort_no']]);
+            }
+            $g = $this->pdo->prepare("SELECT name FROM wg_group WHERE id = ?");
+            $g->execute([$gid]);
+            $this->pdo->prepare("INSERT INTO wg_import (group_id, group_name, mode, asof, review_on, source_url, md, summary_json)
+                                 VALUES (?,?,?,NULL,NULL,NULL,'',?)")
+                      ->execute([$gid, (string)$g->fetchColumn(), 'undo', json_encode(['undid' => (int)$imp['id']] + $info, JSON_UNESCAPED_UNICODE)]);
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+        return $info + ['done' => true];
+    }
+
+    /**
+     * 테마 노트 — 그 그룹에 «살아 있는» 가장 최근 가져오기(되돌린 것은 건너뛴다). 표가 없거나 기록이 없으면 null.
+     * can_undo = 가장 최근 기록이 바로 이 갈아끼우기일 때.
+     */
+    public function themeNote(int $gid): ?array
+    {
+        if ($gid <= 0) return null;
+        try {
+            $st = $this->pdo->prepare("SELECT id, mode, asof, review_on, source_url, md, summary_json, created_at
+                                         FROM wg_import WHERE group_id = ? ORDER BY id DESC LIMIT 60");
+            $st->execute([$gid]);
+            $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Throwable $e) {
+            return null;                                    // 표가 아직 없다
+        }
+        if (!$rows) return null;
+        $undone = [];
+        foreach ($rows as $r) {
+            if ($r['mode'] !== 'undo') continue;
+            $s = json_decode((string)$r['summary_json'], true);
+            if (!empty($s['undid'])) $undone[(int)$s['undid']] = 1;
+        }
+        $eff = null;
+        foreach ($rows as $r) if ($r['mode'] !== 'undo' && !isset($undone[(int)$r['id']])) { $eff = $r; break; }
+        if (!$eff) return null;
+        $t = self::parseThemeMd((string)$eff['md']);
+        return ['id' => (int)$eff['id'], 'mode' => (string)$eff['mode'], 'asof' => $eff['asof'], 'review_on' => $eff['review_on'],
+                'source' => (string)($eff['source_url'] ?? ''), 'at' => (string)$eff['created_at'], 'title' => (string)($t['title'] ?? ''),
+                'sections' => self::themeSections((string)$eff['md']),
+                'can_undo' => ((int)$rows[0]['id'] === (int)$eff['id'] && $eff['mode'] === 'replace')];
+    }
+
+    /** 원문의 사람용 영역(## 노트 · ## 일정 · ## 출처) — [['h'=>제목, 'md'=>본문], …] · 등록 영역은 노트에 다시 보이지 않는다 */
+    public static function themeSections(string $md): array
+    {
+        $md = str_replace(["\r\n", "\r"], "\n", $md);
+        $all = []; $cur = null; $buf = [];
+        foreach (explode("\n", $md) as $line) {
+            $t = self::utrim($line);
+            if (preg_match('/^##\s+(.+)$/u', $t, $m)) {
+                if ($cur !== null) $all[$cur] = implode("\n", $buf);
+                $cur = self::norm($m[1]); $buf = [];
+                continue;
+            }
+            if ($cur !== null) $buf[] = $line;
+        }
+        if ($cur !== null) $all[$cur] = implode("\n", $buf);
+        $out = [];
+        foreach (self::THEME_NOTE_SECS as $h) {
+            if (isset($all[$h]) && self::utrim($all[$h]) !== '') $out[] = ['h' => $h, 'md' => $all[$h]];
         }
         return $out;
     }

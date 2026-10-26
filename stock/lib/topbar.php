@@ -54,6 +54,9 @@ function pf_menus(): array
         ['key' => 'dashboard', 'href' => '/stock/index.php',              'label' => '포트폴리오'],
         ['key' => 'sim',       'href' => '/stock/index.php?mode=sim',     'label' => '시뮬레이터'],
         ['key' => 'fund',      'href' => '/stock/index.php?mode=fund',    'label' => '재무분석'],
+        /* 리서치(2026-10-15) — claude.ai 에서 만든 종목 분석(Markdown)을 종목별 버전으로 쌓는 자리.
+         * 재무분석 옆인 이유: 리서치를 «쓰는» 곳이 재무분석 상세(카드·차트 깃발)다. */
+        ['key' => 'research',  'href' => '/stock/index.php?mode=research', 'label' => '리서치'],
         ['key' => 'quant',     'href' => '/stock/index.php?mode=quant',   'label' => '퀀트'],
         // 설정을 누르면 첫 하위탭인 '포트폴리오 관리'로 들어간다 (수수료 설정은 mode=setting).
         ['key' => 'setting',   'href' => '/stock/index.php?mode=portfolio', 'label' => '설정'],

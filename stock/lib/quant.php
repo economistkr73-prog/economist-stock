@@ -9,8 +9,9 @@
  *   그래서 판정을 여기로 옮기고 두 소비자가 나눠 쓴다.
  *
  * 소비자
- *   - 단타 「상위 종목」 목록 : stock_analysis_api.php  action=top30
- *   - 단타 「내 목록」        : stock/api.php           module=dt&action=pool_list
+ *   - 단타 Top-Pick·관심그룹 목록 : stock_analysis_api.php  action=watch
+ *   - 단타 보유종목·최근조회 목록 : stock/api.php           module=dt&action=pool_list
+ *   - 관심그룹 종목 리스트        : classes/Wg.class        decorate()
  *   그리는 쪽(HTML·CSS)의 단일본은 `style/quantbadge.js` 다 — 어휘·색을 화면에 다시 적지 않는다.
  *
  * ★판정은 여기서만 내린다. 화면은 「무엇을 보여 줄지」만 고른다.

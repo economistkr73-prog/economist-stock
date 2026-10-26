@@ -105,6 +105,16 @@ try {
             'done' => ($ev['is_done'] ?? 0) == 1 ? 1 : 0,
         ];
     }
+    // 리서치 일정(2026-10-26) — 캘린더 화면과 같은 Rs::calendarEvents(날짜가 «일»로 정해진 것만 · 복사 아님)
+    try {
+        foreach ((new Rs($pdo))->calendarEvents($start, $end) as $ev) {
+            $d = substr((string)$ev['start_dt'], 0, 10);
+            if (!isset($days[$d])) continue;
+            $days[$d]['evs'][] = ['t' => preg_replace('/^📑 /u', '', (string)$ev['title']), 'c' => (string)$ev['color'], 'i' => '📑',
+                                   'tm' => '', 'te' => '', 'p' => '', 'k' => 'research', 'done' => (int)$ev['is_done']];
+        }
+    } catch (Throwable $e) { /* 리서치 표가 없어도 일정은 보낸다 */ }
+
     // 하루 안의 순서: 기념일 → 할일 → 종일 → 시각순 (화면 주간뷰 상단행과 같은 순서)
     $rank = ['anniversary' => 0, 'todo' => 1];
     foreach ($days as &$day) {

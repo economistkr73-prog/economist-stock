@@ -52,6 +52,20 @@ function api_wg(string $action, PDO $pdo): void
         $out(false, null, '고정 그룹은 여기서 편집할 수 없습니다.');
     }
 
+    /* 테마 md 원문 — multipart 의 md(파일 조각)가 정본이고, 없으면 text 필드. 앞단(openresty)이 일반 POST 본문을 128KB 에서
+     * 자르므로 화면은 파일 조각으로 보낸다(리서치와 같다). ★자르지 않는다 — 글자 수 상한(Wg::THEME_MAX_CHARS)은 Wg 가 보고 거절한다 */
+    $mdIn = static function () use ($in): string {
+        $raw = '';
+        if (!empty($_FILES['md']['tmp_name']) && is_uploaded_file($_FILES['md']['tmp_name'])) {
+            if ((int)$_FILES['md']['size'] > 1048576) throw new InvalidArgumentException('원문이 너무 큽니다(1MB 까지).');
+            $raw = (string)file_get_contents($_FILES['md']['tmp_name']);
+        } elseif (isset($in['text']) && is_string($in['text'])) {
+            $raw = $in['text'];
+        }
+        if (!mb_check_encoding($raw, 'UTF-8')) throw new InvalidArgumentException('글자를 읽지 못했습니다 — UTF-8 로 보내 주세요.');
+        return $raw;
+    };
+
     /* 장중 시세 — 그 그룹의 종목만. 실패해도 조용히 넘어간다(목록은 DB 값으로 뜬다) */
     $live = static function (int $gid) use ($wg, $pdo): string {
         try {
@@ -112,7 +126,7 @@ function api_wg(string $action, PDO $pdo): void
                 $vars = []; $vall = [];
                 try { $m = new Mv($pdo); $vars = $m->groupVars($gid); $vall = $m->vars(); } catch (Throwable $e) { /* 변수 표가 없으면 없이 */ }
                 $out(true, ['items' => $wg->rows($gid), 'groups' => $wg->groupsAll(), 'vars' => $vars, 'vall' => $vall,
-                            'ts' => date('H:i:s'), 'src' => $src]);
+                            'theme' => wg_theme_view($wg, $gid), 'ts' => date('H:i:s'), 'src' => $src]);
             }
 
             /* 시세만 — 10초 폴링이 부른다. 그룹 id 를 받는다(코드 목록을 화면에서 받지 않는다 —
@@ -203,6 +217,25 @@ function api_wg(string $action, PDO $pdo): void
                 $out(true, $r + ['items' => $wg->rows($gid), 'groups' => $wg->groupsAll()]);
             }
 
+            /* ── 테마 md 가져오기(2026-10-26 · CLAUDE.md 관심그룹 규칙 17) — 미리보기 → 확인 → 적용 · 되돌리기 ──
+             * 셋 다 POST(미리보기도 — 원문이 크다) · 화면은 원문만 보내고 서버가 다시 읽는다(구조를 화면에서 받지 않는다).
+             * 대상 그룹은 md 의 group(또는 미리보기에서 바꾼 name)이 정한다 — 고정 그룹 이름은 Wg 가 막는다. */
+            case 'theme_parse': {
+                $p = $wg->themeParse($mdIn(), ['mode' => $str('mode'), 'name' => $str('name')]);
+                if ($p === null) $out(true, ['theme' => false]);   // 테마 md 가 아니다 — 화면이 옛 붙여넣기(item_parse)로 간다
+                $out(true, ['theme' => true] + $p);
+            }
+
+            case 'theme_apply': {
+                $r = $wg->themeApply($mdIn(), ['mode' => $str('mode'), 'name' => $str('name'), 'sig' => $str('sig')]);
+                $out(true, $r + ['groups' => $wg->groupsAll()]);
+            }
+
+            case 'theme_undo': {
+                $r = $wg->themeUndo($int('import_id'), !empty($in['dry']));
+                $out(true, $r + (!empty($r['done']) ? ['groups' => $wg->groupsAll()] : []));
+            }
+
             default:
                 $out(false, null, '알 수 없는 action 입니다.');
         }
@@ -211,5 +244,28 @@ function api_wg(string $action, PDO $pdo): void
     } catch (Throwable $e) {
         $out(false, null, '처리하지 못했습니다: ' . $e->getMessage());
     }
+}
+
+/**
+ * 테마 노트(화면용) — Wg::themeNote() 에 노트·일정·출처의 HTML 을 붙인다. 첫 화면(pf_page_wgroup)과 item_list 가 함께 쓴다.
+ * 렌더는 리서치의 rs_md_html()(stock/lib/research.php) 그대로 — 전부 이스케이프한 뒤 서식만 입힌다(링크는 http(s) 만).
+ * 재점검까지 남은 날(review_days · 지났으면 음수)은 서버가 센다. 판정·신호는 보이지 않는다(보는 자리).
+ */
+function wg_theme_view(Wg $wg, int $gid): ?array
+{
+    if ($gid <= 0) return null;
+    try { $n = $wg->themeNote($gid); } catch (Throwable $e) { return null; }
+    if (!$n) return null;
+    if (!function_exists('rs_md_html') && is_file(__DIR__ . '/research.php')) require_once __DIR__ . '/research.php';
+    $html = '';
+    foreach ($n['sections'] as $s) {
+        $html .= '<h3>' . htmlspecialchars($s['h'], ENT_QUOTES, 'UTF-8') . '</h3>'
+               . (function_exists('rs_md_html') ? rs_md_html($s['md'])
+                                                : '<pre>' . htmlspecialchars($s['md'], ENT_QUOTES, 'UTF-8') . '</pre>');
+    }
+    $days = null;
+    if (!empty($n['review_on'])) $days = (int)round((strtotime((string)$n['review_on']) - strtotime(date('Y-m-d'))) / 86400);
+    unset($n['sections']);
+    return $n + ['html' => $html, 'review_days' => $days];
 }
 ?>

@@ -663,7 +663,8 @@ function api_place(string $action, PDO $pdo, bool $isGuest = false): void
             if (!empty($kw['ok']) && !empty($kw['items'])) {
                 $top = $kw['items'][0];
                 $r = ['ok' => true, 'lat' => $top['lat'], 'lng' => $top['lng'],
-                      'address' => $top['name'], 'source' => 'kakao', 'msg' => ''];
+                      'address' => $top['name'], 'addr' => (string)($top['address'] ?? ''),   // address=장소 이름(옛 호출부 호환) · addr=실주소
+                      'source' => 'kakao', 'msg' => ''];
             } else {
                 $r = GeoCoder::geocode('naver', $address);       // ② 정식 주소
                 if (!empty($r['ok'])) {

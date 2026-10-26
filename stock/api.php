@@ -48,6 +48,8 @@ try {
         case 'flow':     require_once __DIR__ . '/lib/flow_api.php'; api_flow($action, $pdo); break;
         // 시장 변수(환율·유가·금리…) — 관심그룹의 테마 변수. 구현은 lib/mv_api.php (DB·수집은 classes/Mv.class)
         case 'mv':       require_once __DIR__ . '/lib/mv_api.php'; api_mv($action, $pdo); break;
+        // 리서치 — Claude 분석(Markdown) 올리기·AI 추출·버전. 구현은 lib/research_api.php (DB·AI 는 classes/Rs.class)
+        case 'rs':       require_once __DIR__ . '/lib/research_api.php'; api_rs($action, $pdo); break;
         default:         pf_api_fail('알 수 없는 module 입니다.');
     }
 } catch (Throwable $e) {
@@ -505,10 +507,23 @@ function api_position(string $action, PDO $pdo, Pf $pf): void
             ]);
 
             /* 퀀트 사다리 — 매수 방식이 box 면 <b>저장 전에</b> 가격 조합이 풀리는지 검증한다.
-             * 안 풀리는데 포지션부터 만들면 사다리 없는 반쪽 등록이 남는다. 룰셋 종목을 박스로
-             * 전환하는 흐름은 없다 — 방식은 편입 때 정해지고, 박스 포지션의 재조정만 이 길로 온다. */
+             * 안 풀리는데 포지션부터 만들면 사다리 없는 반쪽 등록이 남는다. 방식은 편입 때 정하고,
+             * 수정 저장에서는 체결이 없는 포지션만 방식을 바꿀 수 있다(아래 $modeSwitch · 2026-10-15). */
             $buyMode  = (($_POST['buy_mode'] ?? 'rule') === 'box') ? 'box' : 'rule';
             $boxBuilt = null;
+            /* 수정 저장의 방식 전환(2026-10-15) — <b>체결이 하나도 없을 때만</b>. 기록이 있으면 그 방식으로 이미 샀으니
+             * 지금 방식(레벨 행 유무)을 그대로 쓴다 — 화면은 그때 라디오 대신 고정 표시라 정상 경로로는 여기 안 걸린다. */
+            $modeSwitch = false;
+            if ($id) {
+                $wasBox = (bool)$pf->positionLevels($id);
+                if (($buyMode === 'box') !== $wasBox) {
+                    if ($pf->positionHasTrades($id)) {
+                        pf_api_done('/stock/index.php?mode=position&id=' . $id . '&edit=1', 'err',
+                            '매수 기록이 있는 종목은 매수 방식을 바꿀 수 없습니다.');
+                    }
+                    $modeSwitch = true;
+                }
+            }
             if ($buyMode === 'box') {
                 $bxPrices = array_map(fn($v) => (float)str_replace(',', '', (string)$v), (array)($_POST['box_prices'] ?? []));
                 $boxBuilt = pf_box_ladder_build($bxPrices);
@@ -561,6 +576,10 @@ function api_position(string $action, PDO $pdo, Pf $pf): void
                 'surge_event_d' => (string)($_POST['surge_event_d'] ?? ''),
             ]);
             if ($boxBuilt !== null) $pf->positionLevelsReplace($pid, $boxBuilt['levels']);
+            if ($modeSwitch) {
+                if ($buyMode === 'rule') $pf->positionLevelsReplace($pid, []);   // 퀀트 사다리 → 룰셋: 레벨을 걷으면 룰셋 차수로 돈다
+                $pf->positionLadderMethodSet($pid, $buyMode === 'box' ? 'quant_ladder' : 'ruleset_pct');
+            }
 
             /* ── M4 (v0.3 §2.5) — 신규 편입이면 「그때의 판정」을 한 번 찍는다.
              * ★신규만이다. 수정 저장에서 다시 찍으면 스냅샷이 아니라 최신값이 되어 존재 이유가 사라진다
@@ -576,7 +595,8 @@ function api_position(string $action, PDO $pdo, Pf $pf): void
                 } catch (Throwable $e) { /* 스냅샷 없이도 편입은 끝난다 */ }
             }
             pf_api_done('/stock/index.php?mode=position&id=' . $pid, 'ok',
-                '종목 설정을 저장했습니다.' . ($boxBuilt !== null ? ' (퀀트 사다리 ' . count($boxBuilt['levels']) . '차 확정)' : ''));
+                '종목 설정을 저장했습니다.' . ($boxBuilt !== null ? ' (퀀트 사다리 ' . count($boxBuilt['levels']) . '차 확정)' : '')
+                . (($modeSwitch && $buyMode === 'rule') ? ' (매수 방식을 룰셋 하락률로 바꿨습니다)' : ''));
 
         case 'delete':
             $id  = (int)($_POST['id'] ?? 0);
@@ -589,6 +609,68 @@ function api_position(string $action, PDO $pdo, Pf $pf): void
         case 'list':
             header('Content-Type: application/json; charset=utf-8');
             echo json_encode(pf_positions_payload($pf), JSON_UNESCAPED_UNICODE);
+            exit;
+
+        case 'simulate':
+            /* 매수 모달 「시뮬레이션」(2026-10-15 사용자) — 「이 차수를 이 값·이 주수로 샀다면 뒤 차수 사다리가 어떻게 바뀌나」.
+             * ★DB 에 아무것도 쓰지 않는다 — 지금 체결 + 가상 체결 한 건을 «같은 엔진»에 넣어 전/후 두 벌을 돌려준다.
+             * ★입력을 짜는 순서는 화면(pf_page_position)과 같다(사이클 → 차수별 체결 → 원장 → pf_position_calc → pf_delay_adjust).
+             *   한 곳만 고치면 시뮬레이션이 화면과 다른 말을 한다. 앞 차수의 이론가(룰셋 사다리)는 실매수가에 따라 바뀌므로 JS 로 흉내 내지 않는다. */
+            header('Content-Type: application/json; charset=utf-8');
+            $id    = (int)($_GET['id'] ?? 0);
+            $step  = (int)($_GET['step'] ?? 0);
+            $price = (float)str_replace(',', '', (string)($_GET['price'] ?? ''));
+            $qty   = (int)str_replace(',', '', (string)($_GET['qty'] ?? ''));
+            $date  = preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)($_GET['date'] ?? '')) ? (string)$_GET['date'] : date('Y-m-d');
+            $pos   = $id ? $pf->positionGet($id) : null;
+            if (!$pos || $step < 1 || $price <= 0 || $qty <= 0) {
+                echo json_encode(['ok' => false, 'message' => '체결가와 수량을 넣어 주세요.'], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+            $steps    = $pf->ruleSteps((int)$pos['rule_set_id']);
+            $tradeRow = $pf->trades($id);
+            $prm      = pf_cost_params($pos, $pf->brokerFees((int)$pos['broker_id']));
+            $last     = ($pos['last_price'] !== null) ? (float)$pos['last_price'] : null;
+            $posLv    = $pf->positionLevels($id);
+            $calcOf = function (array $rows) use ($steps, $pos, $prm, $last, $posLv): ?array {
+                $cy = pf_cycle_split($rows);
+                $c  = ($steps || $posLv) ? pf_position_calc($steps, pf_trades_by_step($cy['cur']), (float)$pos['limit_amt'], $last, $prm,
+                                                            pf_ledger($rows, $prm), $posLv, pf_cycle_sold($cy['cur'])) : null;
+                return $c ? pf_delay_adjust($c, $steps, pf_last_buy_at($cy['cur']), date('Y-m-d')) : null;
+            };
+            // 차수마다 — 이론가 · 체결(있으면) · 앞으로 차례대로 살 주수(≈) · 누적단가(실제 또는 이론 예고) · 자동매도가
+            $pack = function (?array $c) use ($prm): array {
+                if (!$c) return [];
+                $tq = null;
+                $ta = pf_theory_avg_run($c, $prm, $tq);
+                $out = []; $prevQ = (int)($c['filled_qty'] ?? 0);
+                foreach ($c['steps'] as $n => $s) {
+                    $fut = ($n > (int)$c['cur_step']);
+                    $avg = $fut ? ($ta[$n] ?? null) : ($s['avg_cost_upto'] ?? null);
+                    $sell = null;
+                    if ($n === (int)$c['cur_step'])                       $sell = $c['sell_price'] ?? null;
+                    elseif ($fut && $avg !== null && $s['target_rate'] !== null) $sell = pf_auto_sell_price((float)$avg, (float)$s['target_rate'], $prm, (int)($tq[$n] ?? 0));
+                    $pq = null;
+                    if ($fut && isset($tq[$n])) { $pq = max(0, (int)$tq[$n] - $prevQ); $prevQ = (int)$tq[$n]; }
+                    $out[] = ['n' => (int)$n, 'tp' => $s['theory_price'] === null ? null : (float)$s['theory_price'],
+                              'traded' => (bool)$s['traded'], 'price' => $s['price'] === null ? null : round((float)$s['price']),
+                              'qty' => $s['traded'] ? (int)$s['qty'] : null, 'pq' => $pq,
+                              'avg' => $avg === null ? null : round((float)$avg), 'sell' => $sell === null ? null : round((float)$sell)];
+                }
+                return $out;
+            };
+            $before = $calcOf($tradeRow);
+            $virt   = ['id' => PHP_INT_MAX, 'position_id' => $id, 'step_no' => $step, 'side' => 'buy', 'traded_at' => $date,
+                       'traded_time' => null, 'price' => $price, 'qty' => $qty, 'memo' => ''];
+            $rowsA  = $tradeRow; $rowsA[] = $virt;
+            usort($rowsA, fn($x, $y) => [(string)$x['traded_at'], (int)$x['id']] <=> [(string)$y['traded_at'], (int)$y['id']]);
+            $after  = $calcOf($rowsA);
+            echo json_encode([
+                'ok' => true, 'step' => $step, 'price' => $price, 'qty' => $qty,
+                'before' => $pack($before), 'after' => $pack($after),
+                'cur' => ['before' => (int)($before['cur_step'] ?? 0), 'after' => (int)($after['cur_step'] ?? 0)],
+                'avg' => ['before' => $before['avg_cost'] ?? null, 'after' => $after['avg_cost'] ?? null],
+            ], JSON_UNESCAPED_UNICODE);
             exit;
 
         default:

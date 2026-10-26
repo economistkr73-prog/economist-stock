@@ -3050,6 +3050,7 @@ function openNew(dt='', type='timed') {
 }
 function openEdit(ev) {
     if (ev.event_type==='holiday' || ev.is_holiday=='1') return; // 공휴일은 수정 불가
+    if (ev.event_type==='research') { if (ev.url) location.href=ev.url; return; } // 리서치 일정은 비춘 것 — 리서치 일정 탭에서 다룬다
     S.editId=ev.id; S.editEv=ev;
     const type=ev.event_type||'timed';
     document.getElementById('modal-title').textContent='일정 수정';
@@ -3415,6 +3416,7 @@ let VIEW_EV = null;
 
 function openView(ev) {
     if (ev.event_type === 'holiday' || ev.is_holiday=='1') return;
+    if (ev.event_type === 'research') { if (ev.url) location.href = ev.url; return; } // 리서치 일정(2026-10-26) — 리서치 일정 탭으로
     VIEW_EV = ev;
 
     const isDone = ev.is_done == '1';

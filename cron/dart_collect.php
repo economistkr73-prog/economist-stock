@@ -603,6 +603,17 @@ function job_daily(PDO $pdo, int $days, int $gap, float $start, int $secs, bool 
     say(sprintf('받음 %d종목 · %s행 저장 · 이미최신 %d%s',
         $got, number_format($rows), $skip, $fail ? " · 실패 {$fail}" : ''));
 
+    /* 지난 봉을 KRX 원장으로 맞춘다(2026-10-16) — 네이버는 2026-09 무렵부터 NXT 시간외가 섞인 종가·고저를 주고,
+     * 위의 증분이 「마지막 날 포함」으로 어제 봉을 그 값으로 덮는다. 최근 30일만 다시 맞춘다(예산 0콜 · UPDATE 한 번).
+     * 시가가 KRX 와 다른 행은 수정주가 구간이라 둔다(Pf::dailySyncKrx 주석). 실패는 삼킨다 — 일봉 저장이 본업이다. */
+    try {
+        $sy = $pf->dailySyncKrx(date('Y-m-d', strtotime('-30 days')));
+        say(sprintf('KRX 원장 맞춤 — %d행 고침%s', $sy['fixed'],
+            $sy['skipped'] ? sprintf(' · 수정주가 구간 %d행 그대로(%s)', $sy['skipped'], implode(',', array_keys($sy['skipCodes']))) : ''));
+    } catch (Throwable $e) {
+        say('⚠ KRX 원장 맞춤 실패 — ' . $e->getMessage());
+    }
+
     $st = $pf->dailyStatus();
     say(sprintf('현황 — %d종목 %s행 (%s ~ %s)',
         (int)$st['codes'], number_format((int)$st['rows_n']),
@@ -904,6 +915,18 @@ switch ($job) {
             say('알림 실패(무시하고 계속): ' . $e->getMessage());
             if (function_exists('pf_alert_fail')) pf_alert_fail('fresh', $e);   // §2.5 규칙 3 — 삼킨 예외는 직접 알림
         }
+        /* ★ 리서치 일정 알림 (2026-10-26) — 그날 시작하는 일정·방금 지난 일정(✓ 없음). 묶음마다 두 번까지(pf_alert_log 'rsev').
+         * 오후 fire(17:05)는 아침에 쏜 것을 장부가 막아 조용하다. 판정은 리서치 일정 탭과 같은 Rs::scheduleGroups. */
+        say('── 리서치 일정 알림');
+        try {
+            require_once $_SERVER['DOCUMENT_ROOT'] . '/stock/lib/alert.php';
+            require_once $_SERVER['DOCUMENT_ROOT'] . '/stock/lib/research.php';
+            $rl = rs_alert_events($pdo);
+            say($rl ? count($rl) . '줄 발송: ' . implode(' / ', array_slice($rl, 0, 3)) : '새 일정 없음 — 발송 안 함');
+        } catch (Throwable $e) {
+            say('리서치 일정 알림 실패(무시하고 계속): ' . $e->getMessage());
+            if (function_exists('pf_alert_fail')) pf_alert_fail('fresh', $e);
+        }
         break;
 
     /* ── 순이익 결측 보수 (일회성 배치 · 매일 몫은 fresh 안에 있다)
@@ -1097,6 +1120,19 @@ switch ($job) {
     case 'daily':
         job_daily($pdo, (int)($_GET['days'] ?? 1100), max(0, (int)($_GET['gap'] ?? 150)),
                   $start, $secs, !empty($_GET['full']));
+        break;
+
+    /* ── 지난 일봉을 KRX 원장으로 맞추기만 (2026-10-16 · 손으로 한 번 · 콜 0)
+     *   job=dailykrx&from=2026-08-01         미리보기(몇 행을 고칠지 · 수정주가 구간이라 둘 종목)
+     *   job=dailykrx&from=2026-08-01&go=1    실제로 고친다
+     * 매일은 job=daily(eod 안)가 최근 30일을 맞춘다 — 이건 그 전 구간을 메우는 문이다. */
+    case 'dailykrx':
+        $kFrom = preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)($_GET['from'] ?? '')) ? (string)$_GET['from'] : date('Y-m-d', strtotime('-30 days'));
+        $pfK = new Pf($pdo);
+        $kr  = $pfK->dailySyncKrx($kFrom, empty($_GET['go']));
+        say(sprintf('%s %s 부터 — %d행 %s · 수정주가 구간 %d행 그대로', $kr['dry'] ? '[미리보기 · 고치지 않음]' : '[고침]', $kFrom,
+            $kr['fixed'], $kr['dry'] ? '고칠 것' : '고침', $kr['skipped']));
+        foreach ($kr['skipCodes'] as $cd => $nn) say("  둠 {$cd} — {$nn}행");
         break;
 
     // ── 장 마감 뒤: NXT 가 못 훑는 종목의 시세를 메운다 (eod 가 이걸 포함한다)

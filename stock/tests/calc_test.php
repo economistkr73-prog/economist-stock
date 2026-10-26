@@ -1030,6 +1030,22 @@ t_eq('장중 반영 표시', true,  $iDay['intraday']);
 t_eq('종가 = 현재가',  200.0, $iDay['close'], 1e-9);
 t_eq('같은 값이면 장중 아님', false, pf_indicators($bars($rise(30)), 129.0)['intraday']);  // 마지막 종가와 동일
 
+/* ★★2026-10-16 — 장중엔 pf_daily 의 마지막 봉이 «어제»다. 갈아끼우면 어제가 사라져 chg 가 이틀치가 된다.
+ * Pf::dailyMap(live) 이 오늘 봉을 덧붙여(['live'=>true]) 넘기면 어제가 남고 chg = 오늘 하루치다. */
+t_head('지표 — 장중 오늘 봉 덧붙이기 (Pf::dailyMap live)');
+$lv = $bars(array_merge(array_fill(0, 28, 100.0), [100.0, 110.0]));          // … 그제 100 · 어제 110
+t_eq('덧붙이지 않고 갈아끼우면 이틀치(옛 버그의 모양)', 0.21, pf_indicators($lv, 121.0)['chg'], 1e-9);
+$lvLive   = $lv;
+$lvLive[] = ['d' => '2026-12-31', 'o' => 121, 'h' => 121, 'l' => 121, 'c' => 121, 'v' => 40, 'live' => true];
+$iLive    = pf_indicators($lvLive, 121.0);
+t_eq('덧붙이면 하루치 +10%',     0.10, $iLive['chg'], 1e-9);
+t_eq('덧붙인 봉이면 장중 표시', true, $iLive['intraday']);
+t_eq('종가 = 현재가',            121.0, $iLive['close'], 1e-9);
+t_eq('거래량 배수 = 누적 ÷ 평균(하한)', 0.4, $iLive['vol_mult'], 1e-9);  // 40 ÷ 100
+// 유동성은 덧붙인 봉을 뺀다 — 하루의 일부라 평균거래대금을 깎으면 안 된다
+t_eq('유동성 표본에서 오늘 봉 제외', pf_liquidity($lv)['n'], pf_liquidity($lvLive)['n']);
+t_eq('유동성 평균거래대금 그대로',  pf_liquidity($lv)['avg_val'], pf_liquidity($lvLive)['avg_val'], 1e-6);
+
 t_head('지표 — 추세 배열 / 이격도 / 연속일');
 $iUp = pf_indicators($bars($rise(70)));
 t_eq('정배열',            true, $iUp['trend'] === 'up');
@@ -1952,6 +1968,35 @@ t_eq('대비 = twr − 지수 = 10% − 5%', 0.05, $cr[2]['dK'], 1e-9);
 t_eq('KOSDAQ 없음 → null', null, $cr[2]['bQ']);
 t_eq('… 대비도 null', null, $cr[2]['dQ']);
 t_eq('원래 열은 그대로', 110.0, $cr[2]['asset'], 1e-9);
+
+t_head('이론 누적단가 — pf_theory_avg_run (실제 + 남은 차수를 이론가에 · catch-up 누적)');
+// 삼성전자 실화면(2026-10-15) 모양 — 1차 209,000×6 체결 · 퀀트 사다리 5차 · 수수료 0 으로 산수만 본다
+$tc = [
+    'cur_step' => 1, 'filled_qty' => 6, 'avg_cost' => 209000.0,
+    'steps' => [
+        1 => ['avg_cost_upto' => 209000.0, 'plan_cum' => 1380000,  'gap' => -126000,             'theory_price' => 212500],
+        2 => ['avg_cost_upto' => null,     'plan_cum' => 4582000,  'gap' => 1254000 - 4582000,   'theory_price' => 171900],
+        3 => ['avg_cost_upto' => null,     'plan_cum' => 6984000,  'gap' => 1254000 - 6984000,   'theory_price' => 150400],
+        4 => ['avg_cost_upto' => null,     'plan_cum' => 13700000, 'gap' => 1254000 - 13700000,  'theory_price' => 112400],
+        5 => ['avg_cost_upto' => null,     'plan_cum' => 20000000, 'gap' => 1254000 - 20000000,  'theory_price' => 90200],
+    ],
+];
+$ta = pf_theory_avg_run($tc, ['buy_cost_rate' => 0.0, 'fee_tiers' => []]);
+t_eq('도달 차수(1차)는 실제 값', 209000.0, $ta[1], 1e-9);
+t_eq('2차: 3,328,000÷171,900 → 19주 · (1,254,000+3,266,100)÷25', 4520100 / 25, $ta[2], 1e-6);
+t_eq('3차: 투입 4,520,100 기준 2,463,900÷150,400 → 16주', 6926500 / 41, $ta[3], 1e-6);
+t_eq('4차: 6,773,500÷112,400 → 60주', 13670500 / 101, $ta[4], 1e-6);
+t_eq('5차(최종): 6,329,500÷90,200 → 70주', 19984500 / 171, $ta[5], 1e-6);
+pf_theory_avg_run($tc, ['buy_cost_rate' => 0.0, 'fee_tiers' => []], $tq);
+t_eq('이론 보유수량 — 실제 구간은 null', null, $tq[1]);
+t_eq('이론 보유수량 — 2차 6+19', 25, $tq[2]);
+t_eq('이론 보유수량 — 5차 6+19+16+60+70', 171, $tq[5]);
+$taF = pf_theory_avg_run($tc, ['buy_cost_rate' => 0.01, 'fee_tiers' => []]);
+t_eq('매수비용 1% — 2차 예고분에 수수료가 붙는다', (209000 * 6 + 3266100 * 1.01) / 25, $taF[2], 1e-6);
+$t0 = $tc; $t0['cur_step'] = 0; $t0['filled_qty'] = 0; $t0['avg_cost'] = null;
+foreach ($t0['steps'] as $k => $_) { $t0['steps'][$k]['gap'] = -$t0['steps'][$k]['plan_cum']; }
+$ta0 = pf_theory_avg_run($t0, ['buy_cost_rate' => 0.0, 'fee_tiers' => []]);
+t_eq('미진입: 1차 1,380,000÷212,500 → 6주 = 212,500', 212500.0, $ta0[1], 1e-6);
 
 // ══ 결과 ════════════════════════════════════════════════════════════════
 $pass = $GLOBALS['pf_pass'];

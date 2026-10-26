@@ -1,0 +1,310 @@
+<?php
+/**
+ * classes/Reserve.class — 예약 › 캠핑장 빈자리 (DB 전담)
+ *
+ * ★캠핏(camfit.co.kr) 데이터는 «브라우저가 직접» 받는다 — 서버는 한 콜도 안 한다 (2026-10-23 실측):
+ *   - api.camfit.co.kr 는 Cloudflare 뒤에 있고, cafe24 서버 IP(데이터센터)는 헤더를 브라우저와
+ *     똑같이 줘도 전부 403 「Just a moment…」 챌린지로 막힌다(plain·browser·h2 12콜 전부).
+ *   - 대신 응답에 Access-Control-Allow-Origin: * 가 붙어 있어 사용자의 브라우저(가정·모바일 IP)는
+ *     우리 화면에서 바로 부를 수 있다. → 서버 프록시·크론을 만들지 않는다.
+ *   쓰는 주소 셋 (비공식 — 캠핏 앱 번들에서 찾았다 · 로그인 불필요):
+ *     GET /v1/camps/search/autocomplete?search=<이름>        → [{_id,name,city,major}]
+ *     GET /v1/camps/<campId>                                   → 주소·연락처·썸네일·bookableUntilTimestamp
+ *     GET /v1/vacancy-calendars/camps/<campId>/sites?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
+ *         → {camp, zones[], sites[{name,zoneId,availability[{date,status}]}]} — 한 콜에 전 공간·전 사이트
+ *         status = available(예약가능) · sold_out(마감 · 빈자리 알림 가능) · unavailable(예약불가)
+ *         ★과거 날짜는 400(「과거 날짜는 조회할 수 없습니다」) · ★한 번에 최대 34일
+ *
+ * 이름·주소 같은 값은 담을 때 화면이 캠핏에서 받아 넘긴 스냅샷이다(목록을 그릴 때 콜을 안 쓰려고).
+ *
+ * ★빈자리 기록(2026-10-23 사용자 — 「DB 에 저장하고 내 포맷으로 보고 PDF 로」):
+ *   화면이 캠핏에서 한 달을 받을 때마다 그 결과를 그대로 넘긴다(snapSave) — 서버는 캠핏을 못 부르니 «중계 저장»이다.
+ *   ★직전 기록과 «같으면» 새 행을 만들지 않고 checked_at 만 고친다 — 그래야 이력이 «변동»의 기록이 된다.
+ *     비교는 «겹치는 날짜»로 한다: 날이 지나면 시작일(오늘)이 밀려 문자열이 매일 달라지는데, 그건 변동이 아니다.
+ *   ★«새로 난 자리» = 직전 «다른» 기록에서 가능이 아니던 칸이 지금 가능 — 판정은 newlyOpen() 하나다(화면·달력이 같이 쓴다).
+ *   값은 사이트마다 날짜 순 한 글자 문자열(A=가능 · S=마감 · U=불가) — 한 달 한 캠핑장 ≈ 3KB.
+ *
+ *   배치도(map=1000px · mapFull=원본)도 그 JSON 에 함께 담는다 — 이미지는 브라우저가 캠핏 이미지 서버에서 바로 띄운다(주소만 저장).
+ *
+ * 표 (economist73 공유 스키마 — 접두어 rsv_ = 예약 메뉴):
+ *   rsv_camp  내 캠핑장 (src='camfit' · ext_id = 캠핏 campId 24자리 hex)
+ *   rsv_pick  내가 고른 사이트 (캠핑장별 한 줄 · 사이트 id 쉼표 목록 — PC·폰 어디서 열어도 같은 선택)
+ *   rsv_snap  빈자리 기록 (캠핑장·월 단위 · data = {zones, sites[{id,name,z,s}]} JSON · fetched_at = 처음 본 때 · checked_at = 마지막 확인)
+ */
+class Reserve
+{
+    public const SRC_CAMFIT = 'camfit';
+
+    private PDO $pdo;
+
+    public function __construct(PDO $pdo)
+    {
+        $this->pdo = $pdo;
+    }
+
+    /* ★매 요청 DDL 금지 — 부르는 곳은 api action=schema 뿐(화면은 표가 없으면 「표 만들기」 버튼). */
+    public function ensureTables(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS rsv_camp (
+              id         INT AUTO_INCREMENT PRIMARY KEY,
+              src        VARCHAR(16)  NOT NULL DEFAULT 'camfit',
+              ext_id     VARCHAR(40)  NOT NULL,
+              name       VARCHAR(200) NOT NULL DEFAULT '',
+              region     VARCHAR(100) NOT NULL DEFAULT '',
+              address    VARCHAR(300) NOT NULL DEFAULT '',
+              contact    VARCHAR(60)  NOT NULL DEFAULT '',
+              thumb      VARCHAR(500) NOT NULL DEFAULT '',
+              created_at DATETIME     NOT NULL,
+              UNIQUE KEY uk_src (src, ext_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS rsv_snap (
+              id         INT AUTO_INCREMENT PRIMARY KEY,
+              camp_ext   VARCHAR(40)  NOT NULL,
+              ym         CHAR(7)      NOT NULL,
+              start_d    DATE         NOT NULL,
+              end_d      DATE         NOT NULL,
+              camp_name  VARCHAR(200) NOT NULL DEFAULT '',
+              until_d    DATE         NULL,
+              n_sites    SMALLINT     NOT NULL DEFAULT 0,
+              n_avail    INT          NOT NULL DEFAULT 0,
+              data       MEDIUMTEXT   NOT NULL,
+              fetched_at DATETIME     NOT NULL,
+              checked_at DATETIME     NOT NULL,
+              KEY idx_camp_ym (camp_ext, ym, id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS rsv_pick (
+              camp_ext   VARCHAR(40) NOT NULL PRIMARY KEY,
+              sites      TEXT        NOT NULL,
+              updated_at DATETIME    NOT NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    }
+
+    /* ══════════════════════ 내가 고른 사이트 ══════════════════════
+     * 2026-10-23 사용자 — 「원하는 사이트를 체크하면 그 사이트 가능 날짜만 리스트로」. 캠핑장별 한 줄(덮어쓴다).
+     * 사이트가 나중에 없어져도 지우지 않는다 — 그리는 쪽이 지금 있는 사이트만 고른다. */
+    public const PICK_MAX = 100;
+
+    /** @return string[] 사이트 id */
+    public function pickGet(string $extId): array
+    {
+        $st = $this->pdo->prepare("SELECT sites FROM rsv_pick WHERE camp_ext = ?");
+        $st->execute([self::cleanExtId($extId)]);
+        $v = (string)($st->fetchColumn() ?: '');
+        return $v === '' ? [] : explode(',', $v);
+    }
+
+    /** @param string[] $ids @return string[] 저장된 것 */
+    public function pickSave(string $extId, array $ids): array
+    {
+        $ok = [];
+        foreach ($ids as $id) {
+            $id = strtolower(trim((string)$id));
+            if (preg_match('/^[0-9a-f]{24}$/', $id) && !in_array($id, $ok, true)) $ok[] = $id;
+            if (count($ok) >= self::PICK_MAX) break;
+        }
+        $st = $this->pdo->prepare("INSERT INTO rsv_pick (camp_ext, sites, updated_at) VALUES (?, ?, NOW())
+                                    ON DUPLICATE KEY UPDATE sites = VALUES(sites), updated_at = NOW()");
+        $st->execute([self::cleanExtId($extId), implode(',', $ok)]);
+        return $ok;
+    }
+
+    /* ══════════════════════ 빈자리 기록 ══════════════════════ */
+
+    public const ST_CODES = ['available' => 'A', 'sold_out' => 'S', 'unavailable' => 'U'];
+    private const MAX_SITES = 300;
+
+    /** 화면이 보낸 한 달 기록을 검증해 정규형으로. @return array{start:string,end:string,name:string,until:?string,zones:array,sites:array} */
+    public static function cleanSnap(string $ym, array $p): array
+    {
+        if (!preg_match('/^\d{4}-\d{2}$/', $ym)) throw new InvalidArgumentException('월 형식이 아닙니다.');
+        $start = (string)($p['start'] ?? '');
+        $end   = (string)($p['end'] ?? '');
+        $last  = $ym . '-' . date('t', strtotime($ym . '-01'));
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $start) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $end)
+            || $start > $end || substr($start, 0, 7) !== $ym || $end > $last) {
+            throw new InvalidArgumentException('기간이 그 달 안이 아닙니다.');
+        }
+        $nDays = (int)((strtotime($end) - strtotime($start)) / 86400) + 1;
+        $zones = [];
+        foreach ((array)($p['zones'] ?? []) as $z) {
+            $id = strtolower((string)($z['id'] ?? ''));
+            if (!preg_match('/^[0-9a-f]{24}$/', $id)) continue;
+            $zones[] = ['id' => $id, 'name' => self::cut((string)($z['name'] ?? ''), 60)];
+        }
+        $sites = [];
+        foreach ((array)($p['sites'] ?? []) as $s) {
+            $id = strtolower((string)($s['id'] ?? ''));
+            $st = (string)($s['s'] ?? '');
+            if (!preg_match('/^[0-9a-f]{24}$/', $id)) continue;
+            if (!preg_match('/^[ASU]*$/', $st) || strlen($st) !== $nDays) throw new InvalidArgumentException('상태 문자열이 기간과 맞지 않습니다.');
+            $z = strtolower((string)($s['z'] ?? ''));
+            $sites[] = ['id' => $id, 'name' => self::cut((string)($s['name'] ?? ''), 60), 'z' => preg_match('/^[0-9a-f]{24}$/', $z) ? $z : '', 's' => $st];
+            if (count($sites) > self::MAX_SITES) throw new InvalidArgumentException('사이트가 너무 많습니다.');
+        }
+        if (!$sites) throw new InvalidArgumentException('사이트가 없습니다.');
+        $until = (string)($p['until'] ?? '');
+        /* 배치도 이미지 주소 — 캠핏 이미지 서버(cloudfront)만 받는다(아무 주소나 화면에 박히지 않게) */
+        $img = fn($u) => preg_match('#^https://[a-z0-9]+\.cloudfront\.net/[^\s"<>]{1,300}$#i', (string)$u) ? (string)$u : '';
+        return [
+            'start' => $start, 'end' => $end,
+            'name'  => self::cut((string)($p['name'] ?? ''), 200),
+            'until' => preg_match('/^\d{4}-\d{2}-\d{2}$/', $until) ? $until : null,
+            'zones' => $zones, 'sites' => $sites,
+            'map'   => $img($p['map'] ?? ''), 'mapFull' => $img($p['mapFull'] ?? ''),
+        ];
+    }
+
+    /** 기록 하나 → [siteId => [date => 'A'|'S'|'U']] */
+    public static function statusMap(array $snap): array
+    {
+        $out = [];
+        $t0 = strtotime($snap['start']);
+        foreach ($snap['sites'] as $s) {
+            $m = [];
+            for ($i = 0, $n = strlen($s['s']); $i < $n; $i++) $m[date('Y-m-d', $t0 + $i * 86400 + 3600)] = $s['s'][$i];
+            $out[$s['id']] = $m;
+        }
+        return $out;
+    }
+
+    /** 두 기록이 «겹치는 날짜»에서 같은가 (사이트 구성이 다르면 다르다) */
+    private static function sameOnOverlap(array $a, array $b): bool
+    {
+        $ma = self::statusMap($a); $mb = self::statusMap($b);
+        if (array_keys($ma) != array_keys($mb)) return false;
+        $from = max($a['start'], $b['start']);
+        foreach ($ma as $sid => $days) {
+            foreach ($days as $d => $v) {
+                if ($d < $from) continue;
+                if (($mb[$sid][$d] ?? null) !== $v) return false;
+            }
+        }
+        return true;
+    }
+
+    /** 새로 난 자리 — $prev 에서 가능이 아니던 (사이트,날짜)가 $cur 에서 가능. @return string[] "siteId|date" */
+    public static function newlyOpen(array $cur, ?array $prev): array
+    {
+        if (!$prev) return [];
+        $mc = self::statusMap($cur); $mp = self::statusMap($prev);
+        $out = [];
+        foreach ($mc as $sid => $days) {
+            foreach ($days as $d => $v) {
+                if ($v !== 'A' || !isset($mp[$sid][$d])) continue;   // 직전에 없던 날·사이트는 «새로»라 말할 근거가 없다
+                if ($mp[$sid][$d] !== 'A') $out[] = $sid . '|' . $d;
+            }
+        }
+        return $out;
+    }
+
+    private function snapRow(array $r): array
+    {
+        $d = json_decode((string)$r['data'], true) ?: ['zones' => [], 'sites' => []];
+        return [
+            'id' => (int)$r['id'], 'ym' => $r['ym'], 'start' => $r['start_d'], 'end' => $r['end_d'],
+            'name' => $r['camp_name'], 'until' => $r['until_d'], 'zones' => $d['zones'] ?? [], 'sites' => $d['sites'] ?? [],
+            'map' => $d['map'] ?? '', 'mapFull' => $d['mapFull'] ?? '',
+            'fetched_at' => $r['fetched_at'], 'checked_at' => $r['checked_at'],
+        ];
+    }
+
+    /** 그 캠핑장·그 달의 최근 기록 $n 개 (최신 먼저) */
+    public function snapLatest(string $extId, string $ym, int $n = 2): array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM rsv_snap WHERE camp_ext = ? AND ym = ? ORDER BY id DESC LIMIT " . max(1, min(10, $n)));
+        $st->execute([self::cleanExtId($extId), $ym]);
+        return array_map([$this, 'snapRow'], $st->fetchAll(PDO::FETCH_ASSOC));
+    }
+
+    /**
+     * 한 달 기록 저장 — 직전과 같으면 checked_at 만, 다르면 새 행.
+     * @return array{changed:bool, newly:string[], fetched_at:string, checked_at:string}
+     */
+    public function snapSave(string $extId, string $ym, array $payload): array
+    {
+        $extId = self::cleanExtId($extId);
+        $cur   = self::cleanSnap($ym, $payload);
+        $last  = $this->snapLatest($extId, $ym, 2);
+        $nAvail = substr_count(implode('', array_column($cur['sites'], 's')), 'A');
+
+        $json = fn(array $x) => json_encode(['zones' => $x['zones'], 'sites' => $x['sites'], 'map' => $x['map'] ?? '', 'mapFull' => $x['mapFull'] ?? ''], JSON_UNESCAPED_UNICODE);
+        if ($last && self::sameOnOverlap($cur, $last[0])) {
+            $this->pdo->prepare("UPDATE rsv_snap SET checked_at = NOW() WHERE id = ?")->execute([$last[0]['id']]);
+            /* 빈자리는 같아도 배치도가 새로 왔으면(옛 기록엔 없다) 그 기록에 얹는다 — 변동이 아니라 새 행은 안 만든다 */
+            if ($cur['map'] !== '' && $cur['map'] !== ($last[0]['map'] ?? '')) {
+                $keep = $last[0]; $keep['map'] = $cur['map']; $keep['mapFull'] = $cur['mapFull'];
+                $this->pdo->prepare("UPDATE rsv_snap SET data = ? WHERE id = ?")->execute([$json($keep), $last[0]['id']]);
+            }
+            return ['changed' => false, 'newly' => self::newlyOpen($cur, $last[1] ?? null),
+                    'fetched_at' => $last[0]['fetched_at'], 'checked_at' => date('Y-m-d H:i:s')];
+        }
+        $st = $this->pdo->prepare("
+            INSERT INTO rsv_snap (camp_ext, ym, start_d, end_d, camp_name, until_d, n_sites, n_avail, data, fetched_at, checked_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())");
+        $st->execute([$extId, $ym, $cur['start'], $cur['end'], $cur['name'], $cur['until'], count($cur['sites']), $nAvail,
+                      $json($cur)]);
+        $now = date('Y-m-d H:i:s');
+        return ['changed' => true, 'newly' => self::newlyOpen($cur, $last[0] ?? null), 'fetched_at' => $now, 'checked_at' => $now];
+    }
+
+    /** 캠핏 campId 형식(몽고 ObjectId 24자리 hex) — 아무 글자나 담지 않게 */
+    public static function cleanExtId(string $id): string
+    {
+        $id = strtolower(trim($id));
+        if (!preg_match('/^[0-9a-f]{24}$/', $id)) throw new InvalidArgumentException('캠핑장 ID 형식이 아닙니다.');
+        return $id;
+    }
+
+    private static function cut(string $s, int $n): string
+    {
+        $s = trim(preg_replace('/\s+/u', ' ', $s));
+        return mb_substr($s, 0, $n, 'UTF-8');
+    }
+
+    public function campList(): array
+    {
+        return $this->pdo->query("SELECT * FROM rsv_camp ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /** 담기 — 이미 있으면 스냅샷만 새로 덮는다(id 유지). @return int id */
+    public function campAdd(string $extId, array $m): int
+    {
+        $extId = self::cleanExtId($extId);
+        $name  = self::cut((string)($m['name'] ?? ''), 200);
+        if ($name === '') throw new InvalidArgumentException('캠핑장 이름이 비었습니다.');
+        $thumb = (string)($m['thumb'] ?? '');
+        if ($thumb !== '' && !preg_match('#^https://[a-z0-9.-]+/#i', $thumb)) $thumb = '';
+        $st = $this->pdo->prepare("
+            INSERT INTO rsv_camp (src, ext_id, name, region, address, contact, thumb, created_at)
+            VALUES (:src, :ext, :name, :region, :addr, :contact, :thumb, NOW())
+            ON DUPLICATE KEY UPDATE name = VALUES(name), region = VALUES(region), address = VALUES(address),
+                                    contact = VALUES(contact), thumb = VALUES(thumb), id = LAST_INSERT_ID(id)");
+        $st->execute([
+            ':src'     => self::SRC_CAMFIT,
+            ':ext'     => $extId,
+            ':name'    => $name,
+            ':region'  => self::cut((string)($m['region'] ?? ''), 100),
+            ':addr'    => self::cut((string)($m['address'] ?? ''), 300),
+            ':contact' => self::cut((string)($m['contact'] ?? ''), 60),
+            ':thumb'   => mb_substr($thumb, 0, 500, 'UTF-8'),
+        ]);
+        return (int)$this->pdo->lastInsertId();
+    }
+
+    public function campGet(string $extId): ?array
+    {
+        $st = $this->pdo->prepare("SELECT * FROM rsv_camp WHERE src = ? AND ext_id = ?");
+        $st->execute([self::SRC_CAMFIT, self::cleanExtId($extId)]);
+        return $st->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    public function campDel(string $extId): void
+    {
+        $st = $this->pdo->prepare("DELETE FROM rsv_camp WHERE src = ? AND ext_id = ?");
+        $st->execute([self::SRC_CAMFIT, self::cleanExtId($extId)]);
+    }
+}
+?>

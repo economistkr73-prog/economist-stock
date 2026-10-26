@@ -1,7 +1,7 @@
 <?php
 // stock_analysis_api.php — 시세·차트 공용 데이터 API (module=stock)
-//   action=top30   상승률/시총 상위 30 → [{code,name,price,rate,tradeEok,q:퀀트배지|null}, ...]
-//   action=watch   관심종목(pf_watchlist) → top30 과 같은 행 모양 · 상승률 순 · 페이징 없음
+//   action=watch   Top-Pick(pf_watchlist) → [{code,name,price,rate,cap,tradeEok,kind,etfTop,etfCnt,q:퀀트배지|null}, ...]
+//                  상승률 순 · 페이징 없음
 //                  &g=<id> 를 주면 관심그룹(wg_item) 하나를 그룹 순서대로 (단타 탐색 패널 · 2026-10-07)
 //   action=news    종목 뉴스       → [{title,url,date}, ...]   (?code=005930)
 //   action=daily   일봉            → [{t:"YYYY-MM-DD",o,h,l,c,v}, ...]  (?code=&days=)
@@ -49,75 +49,12 @@ function api_stock(string $action, PDO $pdo): void
 {
     switch ($action) {
 
-        // ── 상승률 상위 30 (기존 실시간 시세 테이블 all_stock_info 재사용) ──
-        //   커서 페이징: before(상승률)·before_code(동률 보조키) 가 오면 그보다 '낮은' 30개.
-        //   정렬은 stock_rate DESC, stock_code ASC 고정(동률에도 안정적 페이징).
-        case 'top30': {
-            // 정렬 기준: rate=상승률상위(기본), cap=시총상위
-            $sort    = ($_GET['sort'] ?? 'rate') === 'cap' ? 'cap' : 'rate';
-            $sortCol = $sort === 'cap' ? 'cap' : 'rate';   // 통합 서브쿼리의 alias
-
-            // 주식 + ETF를 읽기 시점에만 UNION ALL로 통합 (테이블은 그대로 유지).
-            //   단위는 둘 다 '억' 기준: 주식 stock_cap/stock_vol_cap, ETF market_cap/trading_value(÷1e8 적재).
-            //   ETF 이름은 all_etf_price에 없어 all_etf_info JOIN. kind로 종류 구분(클릭/뱃지용).
-            //   etfTop = 이 종목을 '상위 편입'한 ETF 수(all_stock_holdings_info.top_rank_count) → ETF 뱃지용
-            $union = "SELECT s.stock_code AS code, s.stock_name AS name, s.stock_price AS price,
-                             s.stock_rate AS rate, s.stock_cap AS cap, s.stock_vol_cap AS tradeEok,
-                             'stock' AS kind,
-                             COALESCE(sh.top_rank_count, 0) AS etfTop,
-                             COALESCE(sh.etf_count, 0)      AS etfCnt
-                      FROM all_stock_info s
-                      LEFT JOIN all_stock_holdings_info sh ON sh.stock_code = s.stock_code
-                      UNION ALL
-                      SELECT ep.etf_code, ei.etf_name, ep.etf_price,
-                             ep.etf_rate, ep.market_cap, ep.trading_value,
-                             'etf' AS kind,
-                             0 AS etfTop, 0 AS etfCnt
-                      FROM all_etf_price ep
-                      JOIN all_etf_info ei ON ei.etf_code = ep.etf_code";
-            // 기준 컬럼이 양수인 행만 (시총/상승률 0 또는 미수집 제외)
-            $base = "SELECT * FROM ({$union}) u WHERE u.{$sortCol} > 0";
-
-            $before     = $_GET['before'] ?? '';
-            $beforeCode = preg_replace('/[^0-9A-Za-z]/', '', (string)($_GET['before_code'] ?? ''));
-
-            if ($before === '' || !is_numeric($before)) {           // 첫 페이지
-                $sql = "{$base} ORDER BY u.{$sortCol} DESC, u.code ASC LIMIT 30";
-                $rows = $pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC);
-            } else {                                                // 다음 페이지(커서 이후)
-                // ⚠️ 명명 플레이스홀더는 재사용 불가(에뮬레이션 OFF 환경) → :b1/:b2 분리
-                $sql = "{$base}
-                          AND (u.{$sortCol} < :b1 OR (u.{$sortCol} = :b2 AND u.code > :bc))
-                        ORDER BY u.{$sortCol} DESC, u.code ASC LIMIT 30";
-                $stmt = $pdo->prepare($sql);
-                $stmt->execute([':b1' => (float)$before, ':b2' => (float)$before, ':bc' => $beforeCode]);
-                $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-            }
-            $out = array_map(static function ($r) {
-                return [
-                    'code'     => (string) $r['code'],
-                    'name'     => (string) $r['name'],
-                    'price'    => (float)  $r['price'],
-                    'rate'     => (float)  $r['rate'],
-                    'cap'      => (float)  $r['cap'],
-                    'tradeEok' => (float)  $r['tradeEok'],
-                    'kind'     => (string) $r['kind'],
-                    'etfTop'   => (int)    $r['etfTop'],     // 상위 편입 ETF 수
-                    'etfCnt'   => (int)    $r['etfCnt'],     // 편입 ETF 총수
-                ];
-            }, $rows);
-            // 퀀트 배지(q) — krx_amt/krx_surge 원장 판정. 원장 미구축 환경이면 배지 없이 목록만.
-            try { quant_augment($pdo, $out); } catch (Throwable $e) { /* 배지는 부가정보 */ }
-            echo json_encode($out, JSON_UNESCAPED_UNICODE);
-            return;
-        }
-
-        // ── 관심종목 (pf_watchlist · 2026-08-20 단타 탐색 패널용) ──
-        //   행 모양을 top30 과 똑같이 맞춘다 — 소비자(단타 renderTop)가 두 목록을 한 렌더러로 그린다.
+        // ── Top-Pick (pf_watchlist · 2026-08-20 단타 탐색 패널용) ──
+        //   행 모양은 옛 상위 종목 목록(top30 · 2026-10-26 삭제)과 같다 — 소비자(단타 renderTop)가 한 렌더러로 그린다.
         //   시세는 all_stock_info · 이름은 StockName 단일본(Pf::watchList 와 같은 사슬 — SQL 사본을 두지 않는다).
         //   정렬은 상승률 순(같은 날 사용자 지시 — 담은 순에서 바꿈) · 동률은 최근 담은 것 위.
         //   시세가 아직 없는 종목(rate=0)은 그 값 그대로 줄을 선다 — 없는 값을 지어내지 않는다.
-        //   ★판정을 여기서 새로 내리지 않는다 — 배지는 top30 과 같은 quant_augment 단일본이다.
+        //   ★판정을 여기서 새로 내리지 않는다 — 배지는 quant_augment → quant_badge_many 단일본이다.
         //   ★보유 종목은 뺀다(2026-08-26 사용자 지시) — 오른쪽 「보유」 탭이 이미 그 종목들을 보여 주므로
         //     탐색 목록에 겹치면 자리만 먹는다. 보유 판정은 Dt::heldCodes() 단일본(수집 대상과 같은 기준).
         //   ⊕&g=<관심그룹 id> (2026-10-07) — 그 그룹(wg_item)의 종목을 «그룹에 저장된 순서»로 준다.
@@ -285,7 +222,9 @@ function api_stock(string $action, PDO $pdo): void
         /* ★종목 검색·최근조회·시세시각(search/recent/saverecent/meta)은 2026-08-05 에 지웠다 —
          *   상승종목분석 대시보드 전용이었고, 그 화면과 함께 소비자가 사라졌다.
          *   단타는 검색을 /stock/api.php?module=stock&action=search 로, 최근조회를
-         *   StockRepository 로 직접 읽는다(같은 표 etf_recent_view_stocks). */
+         *   StockRepository 로 직접 읽는다(같은 표 etf_recent_view_stocks).
+         * ★상승률/시총 상위 30(top30)은 2026-10-26 에 지웠다 — 단타 탐색 패널의 시총 목록이
+         *   2026-10-07 에 관심그룹 셀렉트로 바뀐 뒤 부르는 화면이 없었다(서버 전수 grep 0건). */
 
         default:
             http_response_code(400);
@@ -294,11 +233,11 @@ function api_stock(string $action, PDO $pdo): void
 }
 
 // ==========================================================
-// 퀀트 배지 — top30 목록에 "이 종목을 퀀트 잣대로 읽으면" 을 얹는다 (관찰 화면용, 2026-08-02)
+// 퀀트 배지 — watch 목록에 "이 종목을 퀀트 잣대로 읽으면" 을 얹는다 (관찰 화면용, 2026-08-02)
 //
 //   ★판정 본체는 2026-08-05 에 `stock/lib/quant.php` 의 quant_badge_many() 로 옮겼다.
 //     화면이 여럿이라 두 곳에 두면 임계를 고칠 때 한 화면만 조용히 옛말을 하게 되기
-//     때문이다. 여기 남은 것은 <b>top30 의 행 모양(kind/price/rate/tradeEok)을
+//     때문이다. 여기 남은 것은 <b>목록 행 모양(kind/price/rate/tradeEok)을
 //     그 함수의 입력으로 옮기는 어댑터</b>뿐이다.
 //     그리는 쪽(어휘·색)의 단일본은 `style/quantbadge.js`.
 // ==========================================================

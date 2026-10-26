@@ -261,6 +261,42 @@ function pf_ttm_series(array $qs): array
 }
 
 /**
+ * 「이 가격이면 PER·PBR 이 몇 배인가」의 재료 — 재무분석 상세 «현재 PER·PBR» 줄(pf_fund_detail_quarters)과 같은 세 값.
+ *   순이익 TTM(최신 분기 · pf_ttm_series[0]) · 자본총계(최신 분기말) · 지금 상장주식수(KRX).
+ * 포지션 상세 「차수 사다리」의 PER·PBR 열(2026-10-15)이 쓴다. 재료가 없으면 null — 화면은 열을 「–」로 둔다.
+ */
+function pf_val_basis(Dart $dart, string $code): ?array
+{
+    try {
+        $qs = Dart::quarterly($dart->reportSeries($code));   // 최근순
+        if (!$qs) return null;
+        $ttm = pf_ttm_series($qs);
+        return [
+            'ni'     => $ttm[0]['net_income'] ?? null,
+            'eq'     => $qs[0]['equity_total'] ?? null,
+            'shares' => $dart->listedShares($code),
+            'label'  => (string)$qs[0]['label'],
+        ];
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+/** 그 가격에서의 PER·PBR — 판정은 Dart::ratio() 그대로(적자·자본잠식·주식수 없음이면 null). */
+function pf_val_at(?array $b, ?float $price): array
+{
+    if (!$b || $price === null || $price <= 0) return ['per' => null, 'pbr' => null];
+    $m = Dart::ratio([
+        'net_income'   => $b['ni'] ?? 0,
+        'equity_total' => $b['eq'] ?? 0,
+        'list_shrs'    => $b['shares'] ?? 0,
+        'nav_price'    => $price,
+        'nav_age'      => 0,
+    ]);
+    return ['per' => $m['per'], 'pbr' => $m['pbr']];
+}
+
+/**
  * 마커에 «그때 PER·PBR» 를 붙인다 — 재무분석 상세 「분기 추이」 표의 PER·PBR 열과 같은 정의.
  *
  *   PER = 공시일 시총 ÷ 순이익 TTM(그 분기 포함 최근 4개 당분기 합)

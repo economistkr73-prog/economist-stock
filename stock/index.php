@@ -22,6 +22,7 @@ require_once __DIR__ . '/lib/slowlog.php'; // 느린 렌더 계측 — 임계 �
 require_once __DIR__ . '/lib/note.php';    // 종목 개요·태그 단일본 — 재무 상세 카드·스크리너 &tag=·목록 칩
 require_once __DIR__ . '/lib/value.php';   // 일일 결산 시계열 — 현황 카드 미니 그래프(총평가·수익률·KOSPI 대비)와 팝업
 require_once __DIR__ . '/lib/wgroup.php';  // 관심그룹 화면(mode=wgroup) — pf_page_wgroup
+require_once __DIR__ . '/lib/research.php'; // 리서치 화면(mode=research) — pf_page_research · 재무분석 상세 카드 pf_fund_research_card
 require_login();
 pf_slowlog_boot();
 
@@ -59,6 +60,7 @@ $routes = [
     'fund'      => 'pf_page_fund',        // 재무분석 (DART 스크리너)
     'earn'      => 'pf_page_earn',        // 재무분석 > 어닝 서프라이즈 (최근 공시 SUE 목록)
     'earncase'  => 'pf_page_earncase',    // 재무분석 > 서프라이즈 사례 — 성공·실패 실사례 차트
+    'research'  => 'pf_page_research',    // 리서치 — Claude 분석(Markdown)을 종목별 버전으로 (stock/lib/research.php · 2026-10-15)
 
     'watch'     => 'pf_page_watch',       // Top-Pick (재무분석에서 담아 둔 것)
     'quant'     => 'pf_page_quant',       // 퀀트 > 최고 거래대금 (krx_amt 전종목 원장)
@@ -169,7 +171,7 @@ function pf_subtabs(string $active, string $section = 'setting'): void
     echo '</div>';
 }
 
-/** @param string $width '' 기본(1440) | 'wide' 대시보드(2200) | 'narrow' 설정류(1100) */
+/** @param string $width '' 기본(1440) | 'wide' 보유종목·매매히스토리(2200) | 'dash' 현황(1900) | 'mid' 종목 상세(1800) | 'narrow' 설정류(1100) */
 function pf_head(string $title, string $active = 'dashboard', string $width = ''): void
 {
     echo '<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8">';
@@ -272,6 +274,8 @@ body{font-family:'Pretendard','Malgun Gothic',sans-serif;background:#f0f2f5;colo
 .pf-wrap.wide{max-width:2200px;padding:14px 16px 40px}
 /* 설정류 — 입력 위주라 좁게 */
 .pf-wrap.narrow{max-width:1100px}
+.pf-wrap.mid{max-width:1800px}
+.pf-wrap.dash{max-width:1900px;padding:14px 16px 40px}   /* 현황 대시보드(2026-10-16 사용자 「1800~1900 으로 · 한눈에 안 들어온다」 · 1800 이면 아래 두 단이 빠듯했다) */
 .pf-head{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap;margin-bottom:14px}
 .pf-head h1{font-size:21px;margin:0;letter-spacing:-.02em}
 .pf-head .sub{color:#7d8b99;font-size:13px;margin-top:4px}
@@ -372,9 +376,13 @@ table.pf tbody tr.folio-row.on td{font-weight:700}
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fd-body{padding:13px 15px;overflow-y:auto;flex:1 1 auto;min-height:0}
 .fd-empty{padding:80px 20px;text-align:center;color:#9aa7b4;font-size:14px}
-.fd-sum{grid-template-columns:repeat(auto-fit,minmax(104px,1fr));gap:8px;margin-bottom:12px}
-.fd-sum .sum-box{padding:8px 10px}
-.fd-sum .sum-box .v{font-size:15px}
+/* 오른쪽 상세의 카드 9장 = «한 줄»(2026-10-15 사용자 — KOSPI 대비만 둘째 줄로 떨어졌었다) · 칸이 좁아 글자·여백을 줄였다 */
+.split .sum-grid.fd-sum,.sum-grid.fd-sum{grid-template-columns:repeat(9,minmax(0,1fr));gap:6px;margin-bottom:12px}   /* ★.split .sum-grid(auto-fit) 보다 높아야 이긴다 */
+.fd-sum .sum-box{padding:7px 6px 7px 8px;min-width:0}
+.split .fd-sum .sum-box .v{font-size:13px;letter-spacing:-.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fd-sum .sum-box .k{font-size:11px;white-space:nowrap}
+.fd-sum .sum-box .s{font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:1100px){.split .sum-grid.fd-sum,.sum-grid.fd-sum{grid-template-columns:repeat(auto-fit,minmax(104px,1fr))}}
 
 /* 분할 화면에서는 표를 조금 더 촘촘하게 — 가로 스크롤을 최대한 피한다 */
 .split table.pf th,.split table.pf td{padding:6px 6px}
@@ -466,8 +474,11 @@ a.badge{text-decoration:none}
 .sum-box.wd .k .tm-tot small{color:#a3aeb9;font-weight:400}
 /* 포트폴리오 표의 「예수금 비중」 칸 — 숫자의 바탕색이 전체 평균과의 차이를 말한다(색은 $cashCell 이 인라인으로 준다) */
 table.pf td.cw{white-space:nowrap}
-table.pf td.cw b{display:inline-block;min-width:46px;padding:2px 6px;border-radius:5px;font-weight:700;color:#22303f;text-align:right}
-.sum-box.wd .k .tm-cash{font-weight:800;color:#3c4d5e;font-variant-numeric:tabular-nums}
+table.pf td.cw b{display:inline-block;min-width:42px;padding:0 5px;margin-top:2px;border-radius:5px;font-size:11.5px;font-weight:700;color:#22303f;text-align:right}   /* 아랫줄(예수금 비중) — 2026-10-16 예수금 칸 밑으로 접었다 */
+/* 한 칸 두 줄(2026-10-16 사용자 「너비가 너무 넓어」) — 평가손익 밑에 평가수익률 · 머리글 둘째 줄이 아랫줄의 이름이다 */
+table.pf td.pl2{white-space:nowrap}
+table.pf td.pl2 small{display:inline-block;margin-top:2px;font-size:11.5px}
+table.pf th small.th2{display:block;font-size:10px;font-weight:500;color:#9aa7b4;margin-top:1px}
 .tm{position:relative;margin-top:7px;border-radius:8px;overflow:hidden;background:#fff}
 .tm-g{position:absolute;box-sizing:border-box;border:2px solid #fff;overflow:hidden;border-radius:4px}
 .tm-gh{position:absolute;left:0;right:0;top:0;height:17px;line-height:17px;font-size:11px;padding:0 6px;
@@ -501,7 +512,7 @@ table.pf td.cw b{display:inline-block;min-width:46px;padding:2px 6px;border-radi
 .tm-c.xs b,.tm-c.xs span{display:none}
 .tm-c:hover{filter:brightness(1.07);z-index:2;outline:2px solid #22303f}
 /* 보는 축 토글 [포트폴리오별|종목별] (2026-09-08) — 숨긴 쪽은 hidden 이다(display 를 갖는 규칙이 없어 UA 기본이 먹지만 명시해 둔다) */
-.tm[hidden],.sum-box.wd .k .tm-note[hidden]{display:none}
+.tm[hidden]{display:none}
 .sum-box.wd .k .tm-tabs{display:inline-flex;margin-left:8px;border:1px solid #cfdae4;border-radius:6px;overflow:hidden}
 .sum-box.wd .k .tm-tab{font-size:11.5px;font-weight:700;color:#5b6b7b;background:#fff;padding:2px 9px;text-decoration:none;line-height:1.5}
 .sum-box.wd .k .tm-tab+.tm-tab{border-left:1px solid #cfdae4}
@@ -510,28 +521,7 @@ table.pf td.cw b{display:inline-block;min-width:46px;padding:2px 6px;border-radi
 /* 종목별 축에서 여러 포트폴리오에 담긴 종목 — 이름 옆 「3곳」 */
 .tm-c b i{font-style:normal;font-weight:700;font-size:10px;opacity:.72;margin-left:3px}
 .tm-empty{margin:0;padding:16px;color:#8b98a5;font-size:12px}
-/* ── 「오늘」 띠 (2026-10-02) — 트리맵 아래 한두 줄. 보유 종목의 오늘 등락률을 큰 순으로.
- * ★배경을 칠하지 않는다 — 바로 위 트리맵의 빨강·파랑은 «평가수익률(누적)»이라 여기도 타일로 칠하면 같은 색이 두 뜻이 된다.
- *   띠는 글자색만 쓴다(등락색 .up/.down).
- * ★많아야 두 줄이다 — JS 가 .fit 을 달면 두 줄에서 자르고, 넘치는 동안 «0 에 가까운 것부터» 접는다(양끝이 정보다).
- *   처음엔 한 줄이었는데 왼쪽 단(약 1,000px)에서 15종목 중 6개만 남았다 — 「흐름을 한눈에」가 안 됐다(미리보기 실측).
- *   JS 가 없으면 그냥 줄바꿈된다(잘려서 큰 하락이 안 보이는 것보다 낫다). */
-.td-strip{display:flex;align-items:flex-start;flex-wrap:wrap;gap:3px 12px;margin-top:8px;padding-top:7px;border-top:1px solid #eef2f6;
-  font-size:12px;line-height:1.5;font-variant-numeric:tabular-nums}
-.td-sum{flex:0 0 auto;color:#5b6b7b;white-space:nowrap;padding-right:12px;border-right:1px solid #e3eaf0}
-.td-sum>b{color:#22303f;font-weight:800;margin-right:6px}
-.td-sum em{font-style:normal;font-weight:800}
-.td-sum small{font-size:11px;color:#8b98a5;margin-left:5px}
-.td-list{display:flex;align-items:baseline;flex-wrap:wrap;gap:3px 12px;flex:1 1 320px;min-width:0}
-.td-strip.fit .td-list{max-height:39px;overflow:hidden}   /* 두 줄 = 18px × 2 + 줄 간격 3px */
-.td-i{flex:0 0 auto;color:#3c4d5e;text-decoration:none;white-space:nowrap}
-.td-i b{margin-left:4px;font-weight:800}
-.td-i b.flat{font-weight:700}
-.td-i:hover{text-decoration:underline}
-.td-more{flex:0 0 auto;color:#a3aeb9;font-size:11px;white-space:nowrap}
-.td-i[hidden],.td-more[hidden]{display:none}
-.td-at{flex:0 0 auto;margin-left:auto;color:#a3aeb9;font-size:11px;white-space:nowrap}
-/* ── 카드형 툴팁 (2026-10-02 사용자 「단순 텍스트 창이라 눈에 안 들어온다」) — 트리맵 타일·머리줄·「오늘」 칩에 뜬다.
+/* ── 카드형 툴팁 (2026-10-02 사용자 「단순 텍스트 창이라 눈에 안 들어온다」) — 트리맵 타일·머리줄에 뜬다(「오늘」 칩은 띠와 함께 2026-10-16 삭제).
  * 브라우저 title 은 글자 크기·색·정렬을 못 준다 → 제목 / 큰 수익률 / 항목 표로 «층»을 나눈 HTML 을 data-tip 에 싣고
  * JS 가 한 개의 떠 있는 상자(.pf-tip)에 갈아 끼운다. title 은 JS 없을 때의 예비로 남기고 JS 가 걷어낸다(둘이 겹쳐 뜨지 않게).
  * pointer-events 없음 — 상자가 마우스를 먹으면 타일 hover 가 끊겨 깜박인다. */
@@ -596,27 +586,31 @@ label.fld,div.fld{display:flex;flex-direction:column;gap:4px;font-size:12px;font
 .sig-strip{background:#fff;border:1px solid #e3eaf0;border-radius:11px;padding:12px 14px;
   margin-bottom:14px;box-shadow:0 1px 3px rgba(20,40,60,.05)}
 .sig-strip.quiet{background:#fafbfc}
-/* 맨 윗줄 — [보유 비중 트리맵] [오늘의 신호]. 칸 나눔과 간격은 아래 좌우분할(.split)과 «같은 값»이다 —
- * 트리맵의 폭이 그 아래 왼쪽 단(합계 카드·포트폴리오 표)과 맞고, 신호 표가 오른쪽 상세와 맞는다(2026-10-13 사용자).
- * 소스 순서는 신호가 먼저다(쌓일 때 신호가 위) — 나란히 설 때만 트리맵을 왼쪽으로 보낸다(order).
- * 신호가 없는 날(.quiet)과 .split 이 한 단으로 접히는 폭(1400px)에서는 위아래로 쌓인다. */
-.sig-row{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;align-items:stretch;margin-bottom:14px}
-.sig-row>.sig-strip,.sig-row>.sum-grid{margin-bottom:0;min-width:0}
-.sig-row>.sum-grid>.sum-box.wd{display:flex;flex-direction:column}
-.sig-row .sum-box.wd>.tm{height:300px!important}
-@media(min-width:1401px){
-  .sig-row:has(>.sig-strip:not(.quiet)){grid-template-columns:minmax(0,1fr) minmax(0,1.15fr)}
-  .sig-row:has(>.sig-strip:not(.quiet))>.sum-grid{order:-1}
-  /* 트리맵은 신호 표의 높이를 따라 늘어난다 — 박스가 줄의 높이를 다 쓰고 머리줄·「오늘」 띠를 뺀 나머지를 .tm 이 먹는다 */
-  .sig-row:has(>.sig-strip:not(.quiet)) .sum-box.wd>.tm{flex:1 1 0;height:auto!important;min-height:300px}
-}
+/* 맨 윗줄 — [오늘의 신호] 전폭 → 그 아래 [보유 비중 트리맵] 전폭(2026-10-16 사용자 「좌측 박스가 어중간 — 박스를 아래로 옮기고 오늘의 신호를 제대로」).
+ * 지나온 나눔: 10-13 트리맵 | 신호 나란히(.split 과 같은 1fr/1.15fr) → 10-15 신호 = 표의 내용 폭 · 트리맵 = 남는 폭(1800px 위) →
+ *   10-16 종목 사실 네 열이 붙어 표가 1,700px 가 되자 트리맵이 400px 로 끼고 신호 표엔 가로 스크롤이 생겼다(사용자 실화면).
+ * 이제 둘 다 전폭이고 신호가 위다. 표는 화면 폭을 다 쓰고 칸이 «고르게» 넓어진다(table-layout:fixed 의 비례 배분) —
+ *   한 칸(종목)에만 남는 폭을 몰면 「빈 띠」가 생긴다(10-15 사용자 「??」). 화면이 표의 최소 폭(--sgt-w)보다 좁으면 표 안에서 가로로 민다.
+ * 트리맵은 높이 300 의 낮은 띠다 — 넓이 = 비중이라 «한눈의 그림»이면 충분하다(사용자 「보유 비중은 시각적으로 필요할 뿐」). */
+/* ⊖같은 날 트리맵은 두 번 더 옮긴 뒤(왼쪽 단 → 맨 위 카드 옆) 현황에서 뺐다(사용자 「박스를 없애도 될 것 같아」). 이 줄엔 신호 표만 있다. */
+.sig-row{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;margin-bottom:14px}
+.sig-row>.sig-strip{margin-bottom:0;min-width:0}
 .sig-hd{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
 .sig-hd h2{font-size:15px;margin:0;letter-spacing:-.01em}
 .sig-strip.quiet .sig-hd{margin-bottom:0}
 .sig-pill{font-size:11.5px;font-weight:800;border-radius:999px;padding:3px 9px;line-height:1.35;white-space:nowrap}
 .sig-cash{margin-left:auto;font-size:12px;color:#7d8b99;font-variant-numeric:tabular-nums}
 .sig-cash b{color:#3c4d5e}
-.sig-cash b.short{color:#c62828}
+.sig-cash b.short{color:#1f5fa8}   /* 부족 = 파랑(2026-10-26 · 예수금 줄 칩과 같은 색) */
+.sig-cash small{margin-left:5px;font-size:11px;color:#8b98a5}   /* 필요의 나눔(매수·잔여 · 재진입) · 부족한 곳 수 */
+.sig-cash .enough{color:#0f8a5f;font-weight:700}
+/* 머리줄의 오늘 등락 요약(2026-10-16 · 트리맵 아래 「오늘」 띠에서 옮김) — 오른쪽으로 밀고 매수 소요와는 세로선으로 가른다 */
+.sig-day{margin-left:auto;font-size:12px;color:#7d8b99;font-variant-numeric:tabular-nums;white-space:nowrap}
+.sig-day>b{color:#22303f;font-weight:800;margin-right:6px}
+.sig-day>.up,.sig-day>.down,.sig-day>.flat{margin-right:4px}
+.sig-day em{font-style:normal;font-weight:800}
+.sig-day small{font-size:11px;color:#8b98a5;margin-left:5px}
+.sig-day+.sig-cash{margin-left:14px;padding-left:14px;border-left:1px solid #e3eaf0}
 /* 카드 본문 한 줄 — 종목명(큼) · 차수(작게) · 주수(색). 좁으면 주수가 다음 줄로 넘어간다 */
 /* ⊖ .sig-meta(현재가 ≤ 이론가 / ≥ 자동매도가 줄)는 카드를 주수만 남기면서 2026-08-03 삭제.
    ⊖ 예수금 게이트 배지(.sig-fund)는 출력처가 없어 2026-08-02 삭제 — 스트립 머리의
@@ -625,53 +619,241 @@ label.fld,div.fld{display:flex;flex-direction:column;gap:4px;font-size:12px;font
 /* 오늘의 신호 — 종목 × 포트폴리오 표(2026-10-13). 줄 = 종목 · 칸 = 포트폴리오 · 칸 안의 한 줄이 그 포지션으로 가는 링크 */
 /* ★폭은 내용만큼만 — 전폭(table.pf 의 100%)으로 두니 칸 사이가 벌어져 「신호 ··· 주수」가 한 눈에 안 들어왔다(사용자 실화면).
  * 포트폴리오 칸마다 세로선을 긋고 머리글을 진하게 해서 어느 칸이 어느 포트폴리오인지 갈린다. */
-table.pf.sig-mx{width:100%;table-layout:fixed;min-width:860px;border:1px solid #e3eaf0}
-/* 폭을 정하지 않은 칸(종목)이 남는 폭을 다 갖는다 — 포트폴리오 칸은 같은 폭으로 좁게, 그 덕에 비중 칸이 들어간다 */
-table.pf.sig-mx col.mx-cf{width:122px}
-table.pf.sig-mx col.mx-cw{width:66px}
-table.pf.sig-mx td.mx-w{font-weight:700;font-variant-numeric:tabular-nums}
-table.pf.sig-mx td.mx-w i{display:flex;height:6px;margin-top:2px;border-radius:2px;overflow:hidden}
-table.pf.sig-mx td.mx-w u{display:block;height:100%;min-width:0;background:#aab6c2;text-decoration:none}
-table.pf.sig-mx td.mx-w u.k-sell{background:#3fb489}
-table.pf.sig-mx td.mx-w u.k-fill{background:#f0a03c}
-table.pf.sig-mx td.mx-w u.k-buy{background:#e06666}
-table.pf.sig-mx col.mx-c9{width:84px}
-table.pf.sig-mx th+th,table.pf.sig-mx td+td{border-left:1px solid #e3eaf0}
-table.pf.sig-mx thead th{background:#eef3f7;color:#3c4d5e;font-weight:800;text-align:center;padding-left:12px;padding-right:12px}
-table.pf.sig-mx td{padding:3px 8px}
-table.pf.sig-mx tbody tr:hover td{background:#fafcfe}
-table.pf.sig-mx td.stk a,table.pf.sig-mx td.stk>b{display:inline}
-/* ★줄을 낮게 — 시장 배지를 종목명 «옆»에 한 줄로 세운다(같은 날 사용자: 보유 종목을 다 올리니 표가 너무 길어졌다).
- * 종목 칸이 두 줄이던 것이 줄 높이를 정하고 있었다. 코드는 숨긴다(종목명 툴팁에 있다) · 넘치는 배지는 잘린다. */
-table.pf.sig-mx td.stk{white-space:nowrap;overflow:hidden}
-table.pf.sig-mx td.stk .code{display:none}
-table.pf.sig-mx td.stk .mx-m{display:inline-flex;flex-wrap:nowrap;align-items:center;gap:3px;margin-left:8px;vertical-align:middle}
-table.pf.sig-mx td.stk .mx-m:empty{display:none}
-table.pf.sig-mx td.stk .mx-m .sig-conf{margin:0 3px 0 0}
-table.pf.sig-mx th{white-space:nowrap}
-table.pf.sig-mx th a{color:inherit;text-decoration:none}
-table.pf.sig-mx th a:hover{color:#1d5c93;text-decoration:underline}
-table.pf.sig-mx td{vertical-align:middle}
-table.pf.sig-mx td.mx-e{color:#d3dbe3;text-align:center}
-/* ★클래스 이름은 mx-b 다 — 처음에 bx 라 붙였더니 퀀트 배지(.bx · inline-block)와 겹쳐 상자가 내용 폭으로 쪼그라들었다 */
-.mx-c.mx-b{margin:0;padding:1px 4px;flex-direction:row;gap:7px}
-/* 열 칸 격자(5×2) — 한 칸 = 10% · 회색 = 보유 · 색 = 오늘 살(팔) 몫. 칸마다 같은 크기라 포트폴리오끼리 바로 견준다 */
-.mx-c>span.mx-wf{display:grid;grid-template-columns:repeat(5,8px);grid-auto-rows:8px;gap:2px;flex:0 0 auto;align-items:stretch}
-/* ★칸에 크기를 직접 준다 — 위 .mx-c>span 의 align-items:center 가 격자에도 먹어 빈 칸의 높이가 0 이 됐었다(화면에 아무것도 안 보였다) */
-.mx-wf i{display:block;width:8px;height:8px;border-radius:2px;background:#c3ccd5}
-.mx-c>span.mx-tx{flex-direction:column;align-items:flex-start;gap:1px;min-width:54px}
-table.pf.sig-mx th{overflow:hidden;text-overflow:ellipsis}
-.mx-c.mx-b small{color:#5f7183}
-.mx-c>span{display:flex;align-items:center;gap:6px}
-.mx-c small{font-size:10.5px;font-weight:400;color:#8b98a5;font-variant-numeric:tabular-nums;line-height:1.1}
-.mx-c{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;padding:3px 5px;margin:0 -5px;border-radius:6px;text-decoration:none;color:#22303f;white-space:nowrap}
-.mx-c+.mx-c{margin-top:2px}
-.mx-c:hover{background:#eef5fc}
-.mx-c .sig-pill{font-size:10.5px;padding:1px 7px}
-.mx-c i{font-style:normal;font-size:11.5px;font-weight:700;color:#7d8b99}
-.mx-c b{line-height:1.15;font-size:13.5px;font-weight:800;font-variant-numeric:tabular-nums}
-table.pf.sig-mx td.mx-t b{display:block;font-size:13.5px;line-height:1.15;font-weight:800}
-table.pf.sig-mx td.mx-t small{display:block;line-height:1.1;font-size:10.5px;color:#8b98a5;font-weight:400}
+/* ── 오늘의 신호 표 — 리디자인 시안(signal_table_redesign.html v2 · 2026-10-15 사용자)의 스타일을 그대로 옮긴 것.
+ * ★값은 시안 그대로, «범위»만 좁혔다: 변수는 :root 가 아니라 .sig-strip 에, 클래스는 table.sgt 안에 둔다.
+ *   이 파일의 :root 는 단타·마감변동 다크 화면이 --bg/--line/--ink 를 이미 쓰고(공용 CSS 가 모든 화면에 찍힌다),
+ *   .c·.w 는 다른 화면에 이미 있다(.sg-rule .c · .sg-h2 .w · .dt-t .c) — 맨 이름으로 두면 그 화면들이 바뀐다.
+ * ★표 클래스는 sgt(옛 sig-mx 와 table.pf 의 기본 줄·여백을 물려받지 않으려고 pf 를 뺐다).
+ * 시안에 없던 것 넷만 더했다(데이터 로직을 지키려고): 매도 칸(.sell · 세이지) · 예수금 칸의 막대(.m) ·
+ * 비중 막대의 세 토막(display:flex · .sell) · 칸이 링크(a.c)라 글자색·밑줄 없앰. */
+.sig-strip{--bg:#f6f5f2;--surface:#ffffff;--line:#e9e6e0;--line-2:#f1efea;--ink:#1c1d21;--ink-2:#5b5e66;--ink-3:#9a9ca3;
+  --seg:#e4e1da;--hold:#3b4252;--buy:#b07a3c;--buy-bg:#faf5ee;--up:#c0392b;--up-bg:#fcf3f2;--dn:#2d5f9e;--dn-bg:#f1f5fb;
+  --re:#6b6f7a;--re-bg:#f5f5f3;--warn:#a5534f;--ok:#4c7a62}
+/* 칸 폭은 col 이 정한다(fixed) — 포트폴리오 칸은 모두 180 · 종목 칸이 남는 폭(나란히 설 때 280 — PHP $sgtW 와 같은 값) */
+table.sgt{width:100%;min-width:var(--sgt-w,0);border-collapse:collapse;table-layout:fixed}   /* 최소 폭 = 열 폭의 합($sgtW) — 그보다 좁은 화면은 .tbl-scroll 안에서 민다 */
+table.sgt col.sgt-w{width:150px}   /* 2026-10-20 「수익률 · 비중」 칩 한 칸(옛 수익률 72 + 비중 72) — PHP $sgtW 와 같은 값 */
+table.sgt col.sgt-d{width:72px}   /* 「오늘」 열(2026-10-16) — PHP $sgtW 와 같은 값 · 「+29.99%」 가 한 줄에 */
+/* 종목 사실 네 열(2026-10-16 · pf_sig_fact_cells) — 실적 · PER·PBR · 고점·60일 · 리서치. 폭은 PHP $sgtW 와 같은 값 */
+table.sgt col.sgt-n{width:200px}
+table.sgt col.sgt-e{width:200px}   /* SUE 칩(≈80) + 「13분기↑ +45%」·「1분기↑ 흑자전환」(≈95) — 170 에선 잘렸다 */
+table.sgt col.sgt-v{width:90px}
+table.sgt col.sgt-h{width:90px}
+table.sgt col.sgt-r{width:170px}   /* 2026-10-16 「리서치는 너무 넓어」 120 → 100 · 2026-10-19 두 칸 칩 [의견 | 지금 자리]로 170(「1·2차 사이」까지 한 줄) */
+table.sgt th.fe,table.sgt th.fv,table.sgt th.fh,table.sgt th.fr{text-align:left;padding-left:8px}
+table.sgt th.fe small{margin-left:6px;font-size:10.5px;font-weight:600;color:var(--warn)}
+table.sgt td.fe,table.sgt td.fv,table.sgt td.fh,table.sgt td.fr{text-align:left;padding-left:8px;white-space:nowrap;overflow:hidden;font-size:12px;font-variant-numeric:tabular-nums}
+table.sgt td.fe .sue-b{margin:0 6px 0 0}
+table.sgt .sue-n{display:inline-block;font-size:10.5px;font-weight:700;color:var(--ink-3);border:1px solid var(--line);border-radius:5px;padding:0 5px;margin-right:6px;cursor:help}
+table.sgt .sue-n .sue-q{font-size:9.5px;margin-left:2px;opacity:.8}
+table.sgt .ttm{font-weight:700;color:var(--ink-2);cursor:help}
+table.sgt .ttm.u{color:var(--up)}
+table.sgt .ttm.d{color:var(--dn)}
+table.sgt td.fv b,table.sgt td.fh b{font-weight:700;color:var(--ink)}
+table.sgt td.fv small,table.sgt td.fh small{margin-left:7px;font-size:11px;color:var(--ink-3)}
+table.sgt td.fh small.up{color:var(--up)}
+table.sgt td.fh small.down{color:var(--dn)}
+/* 리서치 칩 [10/16 분할매수 | 1차 안](2026-10-19 · pf_sig_rs_chip) — 표의 다른 칩과 같은 두 칸 틀 · 오른쪽 = 리서치 구간에서 지금 자리.
+ * ★신호 칩(채운 빨강·주황·보라)과 겹치지 않게 오른쪽은 연한 바탕 + 글자색으로만 가른다(구간 안 = 진한 보라 글자 · 사이 = 보라 · 위 = 회보라 · 아래 = 회색) */
+table.sgt a.rsx{display:flex;width:100%;box-sizing:border-box;align-items:stretch;height:24px;   /* 칸 폭을 다 채운다 — 오른쪽 «자리» 칸이 줄마다 같은 자리에 선다 */
+border:1px solid #e2daf7;border-radius:7px;overflow:hidden;
+  background:#fff;text-decoration:none;white-space:nowrap;position:relative;vertical-align:middle;box-shadow:0 1px 0 rgba(60,40,120,.04)}
+table.sgt a.rsx:hover{border-color:#c4b5f4;box-shadow:0 1px 3px rgba(60,40,120,.12)}
+table.sgt a.rsx .o{display:flex;align-items:center;gap:5px;padding:0 8px;background:#fcfbff;flex:1 1 auto;min-width:0;overflow:hidden}
+table.sgt a.rsx .o small{font-size:10px;font-weight:600;color:#9a92b4;letter-spacing:-.01em}
+table.sgt a.rsx .o b{font-size:11px;font-weight:800;letter-spacing:-.02em}
+table.sgt a.rsx .z{display:flex;align-items:center;justify-content:center;flex:0 0 70px;padding:0 4px;border-left:1px solid #ece6fb;font-size:10.5px;font-weight:700;letter-spacing:-.01em;color:#7a7396;background:#f7f5fc}
+table.sgt a.rsx.k-in .z{background:#efe9ff;color:#4c1d95;font-weight:800;box-shadow:inset 0 -2px 0 #8b5cf6}
+table.sgt a.rsx.k-mid .z{background:#f5f1ff;color:#5b21b6}
+table.sgt a.rsx.k-below .z{background:#f2f3f6;color:#7b8492}
+table.sgt a.rsx.aft::after{content:"";position:absolute;top:3px;right:3px;width:5px;height:5px;border-radius:50%;background:#e8590c}   /* 이후 실적 */
+/* 리서치 칩의 카드형 툴팁(.pf-tip 틀 그대로) — 한 줄 결론 · 구간 사다리 */
+.pf-tip .tt-hl{max-width:380px;margin:0 0 8px;font-size:11.5px;line-height:1.55;color:#3c4d5e;white-space:normal}
+.pf-tip table.tt-z{margin-top:0}
+.pf-tip table.tt-z tr.z td{padding-top:4px}
+.pf-tip table.tt-z tr.on td{background:#f1ecff;color:#4c1d95}
+.pf-tip table.tt-z tr.now td{color:#4c1d95;font-weight:800;border-top:1px dashed #c4b5f4;border-bottom:1px dashed #c4b5f4;padding:3px 0 3px 10px}
+.pf-tip table.tt-z tr.now td:first-child{padding-left:0}
+.pf-tip table.tt-z tr.m td{font-size:10.5px;font-weight:400;color:#8b98a5;text-align:left;white-space:normal;padding:0 0 3px;max-width:380px}
+.pf-tip dd.warn{color:#c2410c}
+/* 세로 가격 막대(pf_sig_rs_gauge · 2026-10-19) — [왼쪽 이름 34px | 막대 10px | 오른쪽 「지금」 표] · 위 = 비싼 쪽 */
+.pf-tip:has(.tt-zw){max-width:540px}
+.pf-tip .tt-hl{max-width:500px}
+.pf-tip .tt-zw{display:flex;gap:12px;align-items:stretch}
+.pf-tip .tt-zt{flex:1 1 auto;min-width:0}
+.pf-tip .tt-zg{position:relative;flex:0 0 136px;min-height:176px;background:#fbfaff;border:1px solid #efeaff;border-radius:8px}
+.pf-tip .tt-zg .in{position:absolute;left:0;right:0;top:12px;bottom:12px}
+.pf-tip .tt-zg span,.pf-tip .tt-zg em{position:absolute;display:block;font-style:normal;white-space:nowrap;line-height:1}
+.pf-tip .tt-zg em{transform:translateY(-50%)}
+.pf-tip .tt-zg .ax{left:44px;width:10px;top:0;bottom:0;border-radius:5px;background:#eceff4}
+.pf-tip .tt-zg .zb{left:44px;width:10px;background:#c4b2fb;border-radius:2px;box-shadow:inset 0 0 0 1px #a78bfa}
+.pf-tip .tt-zg .zb.on{background:#7c3aed}
+.pf-tip .tt-zg .zl{left:0;width:38px;text-align:right;font-size:11px;font-weight:800;color:#7c6aa8}
+.pf-tip .tt-zg .zl.on{color:#5b21b6}
+.pf-tip .tt-zg .sc{left:40px;width:18px;height:0;border-top:1px dashed #aeb8c3}
+.pf-tip .tt-zg .sl{left:0;width:38px;text-align:right;font-size:9.5px;color:#9aa5b1}
+.pf-tip .tt-zg .bs{left:44px;width:10px;height:10px;box-sizing:border-box;border:2px solid #8b93a0;background:#fff;border-radius:50%;transform:translateY(-50%)}
+.pf-tip .tt-zg .bl{left:62px;font-size:9.5px;color:#8b98a5}
+.pf-tip .tt-zg .nw{left:38px;width:22px;height:0;border-top:2px solid #3b0f80}
+.pf-tip .tt-zg .nl{left:62px;font-size:10.5px;font-weight:800;color:#fff;background:#4c1d95;padding:3px 7px;border-radius:9px;box-shadow:0 1px 2px rgba(60,20,120,.25)}
+.pf-tip dl+.tt-f,.pf-tip table+.tt-f{margin-top:8px}
+/* 수익률 · 비중 칩(2026-10-20 · 옛 두 열을 합침) — [왼쪽 수익률 · 바탕 = 포트폴리오 칸과 같은 색] [오른쪽 비중 % + 아래 막대] · 포트폴리오 칩과 같은 테두리·둥글기 */
+table.sgt .w .wc{display:flex;align-items:stretch;height:28px;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#fff;cursor:default;box-sizing:border-box}
+table.sgt .w .wc:hover{border-color:#cfccc5}
+table.sgt td.w{padding-left:4px!important;padding-right:4px!important}   /* 칩이 칸 폭을 쓴다(옛 숫자 칸의 오른쪽 20px 여백을 되돌림) */
+table.sgt .w .wc .r{flex:0 0 70px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+table.sgt .w .wc.cash .r{background:#f3f4f6;color:var(--ink-3);font-size:11px;font-weight:600}
+table.sgt .w .wc .v{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;justify-content:center;padding:0 8px 0 6px}
+table.sgt .w .wc .v b{font-size:12.5px;line-height:1}
+table.sgt .w .wc .v i{margin-top:4px}
+.pf-tip .tt-u{color:#c62828}.pf-tip .tt-d{color:#1f5fa8}.pf-tip .tt-s{color:#0f8a5f}
+.pf-tip .tt-o{color:#b96600}.pf-tip .tt-r{color:#6d28d9}   /* 매수·잔여 · 재진입(예수금 카드 · 2026-10-26) — 칸 칩·막대와 같은 색 */
+.pf-tip .tt-bar{display:inline-block;vertical-align:middle;width:46px;height:6px;margin-right:6px;background:#eceff4;border-radius:3px;overflow:hidden}
+.pf-tip .tt-bar i{display:block;height:100%;background:#7c8ea3;border-radius:3px}
+table.sgt .fe-base{font-size:10px;color:var(--ink-3);margin-right:5px;cursor:help}
+table.sgt td.fe,table.sgt th.fe{border-left:1px solid var(--line);padding-left:14px}   /* 여기부터 «종목 사실» — 합계(내 포지션)와 가른다 · 2026-10-16 합계 오른쪽으로 옮김 */
+table.sgt .add small.st{font-size:10px;font-weight:600;opacity:.82;margin-left:3px}
+table.sgt th.d,table.sgt td.d,table.sgt th.pr,table.sgt td.pr{text-align:right!important;padding-right:14px!important}
+table.sgt th.d small{margin-left:4px;font-size:10px;color:var(--warn)}   /* 오늘 값이 아닐 때(휴장일·개장 전)의 날짜 */
+table.sgt td.d b,table.sgt td.pr b{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+table.sgt td.d b.up,table.sgt td.pr b.up{color:var(--up)}
+table.sgt td.d b.down,table.sgt td.pr b.down{color:var(--dn)}
+table.sgt td.d b.flat,table.sgt td.pr b.flat{color:var(--ink-3);font-weight:600}
+table.sgt col.sgt-f{width:140px}   /* 2026-10-16 130 → 140 — 칸에 「3차」를 붙였다 */
+table.sgt col.sgt-t{width:100px}
+table.sgt tbody td:first-child{white-space:nowrap;overflow:hidden}
+table.sgt td .tags{flex-wrap:nowrap}   /* 배지는 한 줄 — 넘치면 잘리고 전문은 각 배지 툴팁 */
+table.sgt th{font-size:11.5px;font-weight:500;color:var(--ink-3);letter-spacing:.02em;text-align:center;
+  padding:12px 8px;border-bottom:1px solid var(--line);background:#fcfbf9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+table.sgt th:first-child{text-align:left;padding-left:24px}
+table.sgt th a{color:inherit;text-decoration:none}
+table.sgt th a:hover{color:var(--ink)}
+table.sgt td{padding:6px 8px;border-bottom:1px solid var(--line-2);vertical-align:middle;text-align:center}
+table.sgt td:first-child{text-align:left;padding-left:24px}
+table.sgt tr:hover td{background:#fbfaf8}
+
+table.sgt .name{font-size:14px;font-weight:600;letter-spacing:-.02em;margin-right:8px;color:var(--ink);text-decoration:none}
+table.sgt a.name:hover{text-decoration:underline}
+table.sgt .tags{display:inline-flex;gap:4px;flex-wrap:wrap;vertical-align:middle}
+table.sgt .tag{font-size:10.5px;font-weight:500;color:var(--ink-2);padding:2px 7px;border-radius:4px;
+  border:1px solid var(--line);white-space:nowrap}
+table.sgt .tag.ok{color:var(--ok);border-color:#d9e6de}
+table.sgt .tag.warn{color:var(--warn);border-color:#efdcda}
+table.sgt .tag.solid{color:#fff;background:var(--dn);border-color:var(--dn)}
+table.sgt .tag.solid.u{background:var(--up);border-color:var(--up)}
+/* ★사이트 공용 .ok/.warn 은 «알림 상자»다(바탕·padding 9px·margin-bottom 12px) — 태그에 그대로 먹어 줄이 두 배로 늘었다. 여기서 되돌린다 */
+table.sgt .tag.ok,table.sgt .tag.warn{background:transparent;padding:2px 7px;margin:0;border-radius:4px;font-size:10.5px;font-weight:500}
+
+table.sgt .w{text-align:right!important;padding-right:20px!important}
+table.sgt .w b{display:block;font-size:13px;font-weight:600;font-variant-numeric:tabular-nums}
+table.sgt .w i{display:flex;height:2px;background:var(--line);margin-top:6px;border-radius:2px;overflow:hidden}
+table.sgt .w i span{display:block;height:100%;background:var(--ink-3)}
+table.sgt .w i span.over{background:var(--warn)}
+table.sgt .w i span.sell{background:var(--ok)}
+table.sgt .w i span.p{background:var(--buy)}
+
+/* 셀 */
+table.sgt .c{position:relative;display:flex;flex-direction:column;gap:6px;width:118px;margin:0 auto;padding:8px 10px 8px 12px;
+  border-radius:8px;text-align:left;border:1px solid var(--line-2);background:#fafaf8;overflow:hidden;
+  color:var(--ink);font-weight:400}   /* ★공용 .up{빨강·굵게} 가 .c.up 에 먹지 않게 */
+table.sgt a.c{color:inherit;text-decoration:none}
+/* ⊕칸 = 한 줄(같은 날 사용자 — 「높이가 너무 큼 · 보유 N −17.5% +20주 · 막대 삭제」): 세로 쌓기 → 가로 한 줄 · 폭은 내용만큼(최소 118) */
+table.sgt .c{flex-direction:row;align-items:baseline;justify-content:space-between;gap:5px;width:auto;
+  padding:5px 7px 5px 9px;white-space:nowrap}
+table.sgt tbody td{padding-left:4px;padding-right:4px}   /* 칸 좌우 여백을 칩에 준다(종목·비중·합계 칸은 자기 규칙이 이긴다) */
+/* ⊕칸 = [왼쪽: 보유 N 수익률 (붙여서)] [오른쪽: 비어 있음 · 살 주수가 있으면 빨강으로 채운 「+N주」 · 팔 주수면 초록] — 바탕은 흰색
+ *   (같은 날 사용자). 손익은 왼쪽 2px 줄과 수익률 글자색이 말한다. 재진입(.re)·예수금 칸은 따로 그대로. */
+table.sgt tr:not(.cash) a.c{padding:0;gap:0;align-items:stretch;justify-content:flex-start;background:#fff;border-color:var(--line);border-style:solid;box-shadow:none}
+table.sgt .c .l{display:flex;align-items:baseline;gap:5px;padding:5px 6px 5px 9px;flex:0 0 64px;box-sizing:border-box}   /* 폭 고정 — 칸마다 색 칠한 넓이가 같아야 한다(사용자) · 64 = 수익률만(「보유 N」은 칸에서 뺐다 — 툴팁·합계 칸에 있다) */
+/* 바탕을 수익률 색으로 칠하므로 글자는 그 바탕이 정한 색(인라인 color)을 따른다 · 왼쪽 2px 줄은 바탕과 겹쳐 뺀다 */
+table.sgt tr:not(.cash) a.c .l .lbl,table.sgt tr:not(.cash) a.c .l .qty,table.sgt tr:not(.cash) a.c .l .pl{color:inherit}
+table.sgt tr:not(.cash) a.c .l .lbl{opacity:.75}
+table.sgt tr:not(.cash) a.c::before{display:none}
+/* ★칸의 색 = 머리줄 칩(.sig-pill.k-*)의 글자색과 «같은 값»(2026-10-16 사용자 「매수와 잔여매수 구분이 안 가고 · 재진입 칩과 아래 색이 안 맞는다」).
+ *   매수 #c62828 빨강 · 잔여매수 #b96600 주황 · 재진입 #6d28d9 보라 · 매도 #0f8a5f 초록 — 머리줄을 고치면 여기도 함께 고친다(.k-buy·.k-fill·.k-re·.k-sell 규칙).
+ *   전엔 매수·잔여매수가 같은 빨강(--up)이었고, 재진입 왼쪽이 빨강이라 머리줄의 파란 「재진입」 칩과 따로 놀았다. */
+/* 재진입 — 같은 경계선 · 왼쪽 「재진입」 = 보라 바탕 흰 굵은 글씨 | 오른쪽 = 회색 바탕 보라 「청산가 대비 −N%」(2026-10-16 파랑 → 보라 — 파랑은 손실 바탕과 겹쳤다) */
+table.sgt tr:not(.cash) a.c.re .l{background:#6d28d9;color:#fff;font-weight:700}
+table.sgt tr:not(.cash) a.c.re .l .lbl{opacity:1;font-weight:700;font-size:11.5px}
+table.sgt tr:not(.cash) a.c.re .add{background:var(--re-bg);color:#6d28d9;font-size:12.5px;font-weight:700}
+table.sgt tr:not(.cash) a.c .add{flex:1 1 auto;min-width:0;justify-content:center;display:flex;align-items:center;padding:0 6px;background:#c62828;color:#fff;font-size:12px}
+table.sgt tr:not(.cash) a.c.fill:not(.re) .add{background:#b96600;color:#fff}   /* 잔여매수 = 주황(머리줄 「잔여매수」 칩) */
+table.sgt tr:not(.cash) a.c.sell:not(.re) .add{background:#0f8a5f;color:#fff}
+table.sgt tr:not(.cash) a.c:hover{border-color:#cfccc5;background:#fcfbf9}
+table.sgt .c .pl{font-size:11.5px}
+table.sgt .c .add{font-size:12.5px}
+table.sgt .tot .hl{display:block;font-size:11px;color:var(--ink-3);white-space:nowrap}
+table.sgt .tot .hl .pl{display:inline;margin-left:5px}
+table.sgt .cash .c{justify-content:flex-start}
+table.sgt a.c:hover{border-color:#cfccc5}
+table.sgt .c+.c{margin-top:4px}
+/* 손익 표시: 왼쪽 2px 스트라이프 + 수익률 텍스트 */
+table.sgt .c.up::before,table.sgt .c.dn::before{content:"";position:absolute;left:0;top:0;bottom:0;width:2px}
+table.sgt .c.up::before{background:var(--up)}
+table.sgt .c.dn::before{background:var(--dn)}
+table.sgt .c.up{background:var(--up-bg);border-color:#f3e1de}
+table.sgt .c.dn{background:var(--dn-bg);border-color:#dfe7f2}
+/* 매수 신호는 손익색 위에 브론즈 테두리로 구분 · 매도는 세이지(시안에 없던 것) */
+table.sgt .c.buy,table.sgt .c.fill{box-shadow:inset 0 0 0 1px #e2c9a6}
+table.sgt .c.sell{box-shadow:inset 0 0 0 1px #c9dccf}
+table.sgt .c.re{background:var(--re-bg);border-style:dashed;border-color:#dcdad4}
+
+table.sgt .row{display:flex;align-items:baseline;justify-content:space-between;gap:6px;white-space:nowrap}
+table.sgt .lbl{font-size:10.5px;color:var(--ink-3);letter-spacing:.02em}
+table.sgt .qty{font-size:11.5px;font-weight:600;color:var(--ink-2);font-variant-numeric:tabular-nums}
+table.sgt .add{font-size:13px;font-weight:700;color:var(--buy);font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+table.sgt .c.sell .add{color:var(--ok)}
+table.sgt .pl{font-size:12px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+table.sgt .up .pl{color:var(--up)}
+table.sgt .dn .pl{color:var(--dn)}
+table.sgt .pct{font-size:13px;font-weight:700;color:var(--re);font-variant-numeric:tabular-nums}
+
+table.sgt .seg{display:grid;grid-template-columns:repeat(10,1fr);gap:2px}
+table.sgt .seg i{height:3px;border-radius:1px;background:var(--seg)}
+table.sgt .seg i.h{background:var(--hold)}
+table.sgt .seg i.p{background:var(--buy)}
+table.sgt .seg i.s{background:var(--ok)}
+table.sgt .seg i.m{background:#8fa3bb}
+
+table.sgt .empty{color:#d6d3cc;font-size:12px}
+/* 빈 칸의 ➕(종목 추가로) — 평소엔 흐리게(빈 칸이 시끄럽지 않게) · 줄에 마우스가 오면 조금 · 그 칸이면 또렷하게 */
+/* ★이모지(➕)는 CSS 로 색을 못 바꿔 «+» 글자로 바꿨다 — 마우스를 올리면 빨강(사용자) */
+table.sgt a.addq{font-size:12px;font-weight:700;line-height:18px;width:18px;height:18px;text-align:center;text-decoration:none;color:#dcd8d0;display:inline-block;border-radius:50%;transition:background .12s,color .12s}
+table.sgt tr:hover a.addq{color:#bdb8ae}
+table.sgt a.addq:hover{color:#fff;background:var(--up)}   /* 마우스 = 빨간 원(사용자 — 글자색만 바뀌니 티가 안 났다) */
+table.sgt .tot{text-align:right!important;padding-right:14px!important}
+table.sgt .tot b{display:block;font-size:13px;font-weight:700;color:var(--buy);font-variant-numeric:tabular-nums}
+table.sgt .tot b.sell{color:var(--ok)}
+table.sgt .tot span{font-size:11px;color:var(--ink-3);font-variant-numeric:tabular-nums}
+table.sgt .tot .pl{display:block;font-size:11px}
+table.sgt .tot .pl.u{color:var(--up)}
+table.sgt .tot .pl.d{color:var(--dn)}
+
+table.sgt .cash td{background:#fcfbf9;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}   /* 보유 종목과 재진입 대기 사이에 끼어(2026-10-16) 위아래로 가른다 */
+table.sgt .cash .c{background:transparent;border-color:transparent}
+/* 예수금 줄의 자금 칩(2026-10-26 · 옛 「45.4% 853만」 글자 칸) — [왼쪽 예수금 | 오른쪽 부족·남음] + 아래 4px 막대 · 높이는 다른 칩과 같은 28.
+ * 오른쪽: .fz-lack = 매수·잔여부터 모자람(파랑 바탕 — 같은 날 사용자 「부족은 파란색 배경으로」) · .fz-re = 재진입만 모자람(보라 — 재진입을 미루면 된다) · .fz-ok = 남음(회색) · .fz-none = 오늘 쓸 돈 없음.
+ * 막대: 주황 = 매수·잔여 · 보라 = 재진입 · em = 예수금이 닿는 곳부터 오른쪽(흐리게) + 그 자리의 세로선(::before) */
+table.sgt a.fc{position:relative;display:flex;align-items:stretch;height:28px;box-sizing:border-box;border:1px solid var(--line);border-radius:8px;overflow:hidden;
+  background:#fff;color:var(--ink);text-decoration:none;white-space:nowrap}
+table.sgt a.fc:hover{border-color:#cfccc5}
+table.sgt a.fc .k{flex:0 0 58px;display:flex;align-items:center;justify-content:center;padding-bottom:4px;box-sizing:border-box;
+  font-size:12px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+table.sgt a.fc .s{flex:1 1 auto;min-width:0;display:flex;align-items:center;justify-content:center;padding:0 4px 4px;overflow:hidden;
+  border-left:1px solid var(--line-2);background:#f6f6f4;color:var(--ink-2);font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+table.sgt a.fc.fz-lack .s{background:hsl(215,62%,52%);color:#fff}   /* 2026-10-26 사용자 「부족은 파란색 배경으로」 — 표의 손실 칩과 같은 파랑(pf_tm_rate_color 의 중간 단) · 빨강은 이 표에서 «매수»다 */
+table.sgt a.fc.fz-re .s{background:#f3eefe;color:#6d28d9}
+table.sgt a.fc.fz-none .s{background:#fff;color:#d6d3cc;font-weight:400}
+table.sgt a.fc .fb{position:absolute;left:0;right:0;bottom:0;height:4px;display:flex;background:#e9ecef}
+table.sgt a.fc .fb span{display:block;height:100%}
+table.sgt a.fc .fb .b{background:#b96600}
+table.sgt a.fc .fb .r{background:#8b5cf6}
+table.sgt a.fc .fb em{position:absolute;top:0;bottom:0;right:0;background:rgba(255,255,255,.62)}
+table.sgt a.fc .fb em::before{content:"";position:absolute;left:-1px;bottom:0;width:2px;height:9px;border-radius:1px;background:#1c1d21}
+table.sgt .tot span.lk{color:#1f5fa8;font-weight:700}   /* 부족 = 파랑(칸 칩과 같은 뜻) */
+.sig-strip .foot{padding:14px 24px;font-size:12px;color:var(--ink-3);display:flex;gap:18px;flex-wrap:wrap}
+.sig-strip .foot b{color:var(--ink-2);font-weight:600}
+.sig-strip .lg{display:inline-flex;align-items:center;gap:6px}
+.sig-strip .lg i{width:10px;height:10px;border-radius:2px;display:inline-block}
 /* 종류별 색 — 배지·카드 왼쪽 띠가 같은 값을 쓴다 */
 .k-sell.sig-pill,.k-sell.sig-dot{background:#e6f5ee;color:#0f8a5f}
 .k-buy.sig-pill,.k-buy.sig-dot{background:#fdeaea;color:#c62828}
@@ -697,7 +879,7 @@ table.pf.sig-mx td.mx-t small{display:block;line-height:1.1;font-size:10.5px;col
   box-shadow:0 1px 2px rgba(30,138,95,.30),inset 0 1px 0 rgba(255,255,255,.28)}
 .wl-pill.on:hover{filter:none;box-shadow:0 1px 2px rgba(30,138,95,.30),inset 0 1px 0 rgba(255,255,255,.28)}
 /* 재진입 — 같은 알약, 빨강(2026-08-04 사용자). 이 카드에서 이웃은 「선택」(파랑)이라 빨강이 갈린다.
-   ★현황 스트립의 k-re 는 <b>파랑 그대로</b> 둔다 — 거기서는 이웃이 「매수」(빨강)라 같은 색이면 안 된다.
+   ★현황 스트립의 k-re 는 빨강이 아니다(보라 · 2026-10-16 전엔 파랑) — 거기서는 이웃이 「매수」(빨강)라 같은 색이면 안 된다.
      색은 개념의 이름표가 아니라 <b>그 자리에서 무엇과 구별되는가</b>로 정한다. */
 a.wl-pill{text-decoration:none;line-height:1.6}
 .wl-pill.re{background:linear-gradient(135deg,#e0605a 0%,#c62828 100%);
@@ -717,15 +899,17 @@ tr.wl-on td{background:#eef7ff}
 tr.wl-off td{color:#98a5b2}
 tr.wl-off .stk a{color:#8b98a5}
 /* 가라앉은 행 중 「청산」만 ↓ 하나 — 보유·청산이 섞여 가라앉으면 화면만으로 못 가른다(2026-08-20 사용자).
-   글자 없이 화살표만, 색은 재진입(k-re)과 같은 파랑. 누르면 아래 「재진입 후보」 카드로 간다 */
-a.wl-re{display:inline-block;min-width:21px;height:21px;line-height:19px;border:1px solid #c9d6e4;border-radius:50%;
-  background:#fff;color:#1f5fa8;font-size:12px;font-weight:700;text-decoration:none;text-align:center}
-a.wl-re:hover{border-color:#1f5fa8;background:#eaf1fb}
+   글자 없이 화살표만, 색은 재진입(k-re)과 같은 보라(2026-10-16 파랑 → 보라). 누르면 아래 「재진입 후보」 카드로 간다 */
+a.wl-re{display:inline-block;min-width:21px;height:21px;line-height:19px;border:1px solid #d8ccf5;border-radius:50%;
+  background:#fff;color:#6d28d9;font-size:12px;font-weight:700;text-decoration:none;text-align:center}
+a.wl-re:hover{border-color:#6d28d9;background:#f3eefe}
 
 /* 재진입 — 매수(빨강)와 <b>다른 색</b>이어야 한다. 아직 사이클이 시작되지 않은 「검토」라
    계획 매수 신호와 같은 무게로 읽히면 안 된다. */
-.k-re.sig-pill,.k-re.sig-dot{background:#eaf1fb;color:#1f5fa8}
-b.k-re{color:#1f5fa8}
+.k-re.sig-pill,.k-re.sig-dot{background:#f3eefe;color:#6d28d9}
+b.k-re{color:#6d28d9}
+/* ⊕2026-10-16 파랑 → 보라(사용자 「재진입 색이 수익률(파랑)과 겹친다」) — 현황 신호 표의 칸 바탕(평가수익률)이 빨강·파랑이라 파랑 칩이 «손실»로 읽혔다.
+   초록은 매도 색이라 피했다. 보라 = 빨강(매수)·주황(잔여)·초록(매도)·빨강/파랑(수익률) 어느 것과도 안 겹친다. 재진입을 쓰는 곳은 전부 이 색이다 */
 b.k-sell{color:#0f8a5f}
 b.k-buy{color:#c62828}
 b.k-fill{color:#b96600}
@@ -743,6 +927,9 @@ b.k-fill{color:#b96600}
 /* 포트폴리오 목록 행의 신호 배지 */
 .sig-dot{display:inline-block;font-size:10.5px;font-weight:800;border-radius:999px;
   padding:1px 6px;margin-left:3px;vertical-align:1px}
+/* 포트폴리오 표 이름 칸의 아랫줄(2026-10-16 — 칩을 이름 옆에서 아래로) · 첫 칩은 왼쪽 여백 없이 이름과 줄을 맞춘다 */
+.fsig{display:inline-block;margin-top:3px}
+.fsig .sig-dot:first-child{margin-left:0}
 
 /* 전체 종목 표 — 거리 칸. 가까운 쪽만 굵게 해 눈이 그리로 간다 */
 table.pf td.gap{font-variant-numeric:tabular-nums;color:#8b98a5}
@@ -2211,11 +2398,15 @@ JS;
  * @param array $folios    포트폴리오 목록
  * @param array $stats     pf_folio_stats() — 포트폴리오별 cash · rate
  * @param float|null $totRate 전체 수익률(추정자산÷원금−1) — 머리줄 오른쪽에 적는다(옛 「수익률」 카드 자리)
- * @param array $quotes    pf_today_quotes() — 종목코드 => 오늘 등락률. 트리맵 아래 「오늘」 띠의 재료(비면 띠 없음)
+ * @param array $quotes    pf_today_quotes() — 종목코드 => 오늘 등락률. 타일 툴팁의 «오늘» 줄 재료(비면 그 줄 없음)
+ * @param float $H · $W    배치 계산용 가상 캔버스(px) — 실제 상자와 가로세로 비가 비슷해야 타일이 정사각형에 가깝게 보인다(위치는 % 라 크기는 몰라도 된다).
+ *                         2026-10-16 전폭 띠(약 2,100 × 300)가 되며 $W 를 인자로 뺐다(옛 고정값 830 은 왼쪽 단 시절의 폭).
+ * ⊖★2026-10-16 부터 <b>부르는 곳이 없다</b> — 사용자 지시로 현황에서 뺐다(pf_page_dashboard 의 「오늘의 신호」 주석에 되살리는 한 줄).
+ *   다시 쓸 일이 없다고 정해지면 이 함수·pf_tm_*·.tm-* CSS 를 함께 지운다(pf_tip_html·.pf-tip 은 다른 곳이 쓰는지 grep 먼저).
  */
-function pf_render_weight_treemap(array $positions, array $calc, array $folios, array $stats, ?float $totRate = null, array $quotes = [], float $H = 220.0): void
+function pf_render_weight_treemap(array $positions, array $calc, array $folios, array $stats, ?float $totRate = null, array $quotes = [], float $H = 220.0, float $W = 830.0): void
 {
-    $W = 830.0; $HDR = 17.0;   // 배치 계산용 가상 캔버스(px) · 머리줄 높이(.tm-gh 와 같은 값)
+    $HDR = 17.0;   // 배치 계산용 가상 캔버스(px — 폭 $W · 높이 $H) · 머리줄 높이(.tm-gh 와 같은 값)
 
     $groups = [];   // fid => name · cash · cells · val · n
     foreach ($folios as $f) {
@@ -2404,30 +2595,29 @@ function pf_render_weight_treemap(array $positions, array $calc, array $folios, 
     $view = (string)($_GET['wd'] ?? ($_COOKIE['pf_wd'] ?? 'folio'));
     if ($view !== 'stk') $view = 'folio';
     $q = $_GET; unset($q['frag'], $q['wd']);        // frag=1 은 조각 요청 표시라 링크에 실어 나르면 안 된다
+    $cashPct = number_format($totCash / $total * 100, 1) . '%';
+    /* 머리줄 설명 — ⊖2026-10-16 사용자 지시로 «글자»를 걷었다(「추정자산 대비 · 종목 N개(N건) N% · 회색 = 예수금 N%」 · 포트폴리오별 쪽도 같은 자리라 함께).
+     * 신호 표에 「오늘」 열이 붙어 트리맵이 좁아지자 전체 수익률이 둘째 줄로 밀렸다. 축 이름은 탭이, 예수금 비중은 예수금 타일이 이미 말한다.
+     * 분모·합계는 탭의 툴팁에 남긴다. ★분모는 두 축 모두 추정자산이다(2026-10-13 사용자 결정) — 종목 칸의 % 합 + 예수금 칸 = 100% · 넓이도 같은 비례다. */
+    $notes = [
+        'folio' => '종목 ' . $totN . '건 · 넓이 = 금액 · 회색 = 예수금 ' . $cashPct . "\n"
+                 . '비중의 분모 = 전 포트폴리오 추정자산 ' . pf_n(round($total)) . '원(예수금 포함) — 합계 카드의 추정자산과 같은 값이다',
+        'stk'   => '종목 ' . $stkN . '개(' . $totN . '건) ' . number_format($totEval / $total * 100, 1) . '% · 회색 = 예수금 ' . $cashPct . "\n"
+                 . '비중의 분모 = 전 포트폴리오 추정자산 ' . pf_n(round($total)) . '원(예수금 포함) — 종목 비중의 합 + 예수금 = 100% · 넓이 = 금액'
+                 . "\n" . '주식(총평가) ' . pf_n(round($totEval)) . '원 · 같은 종목은 포트폴리오를 넘어 합쳤고 수익률은 가중이다'
+                 . "\n" . '예수금 ' . pf_n(round($totCash)) . '원 = 추정자산 ' . pf_n(round($total)) . '원의 ' . $cashPct . ' (주식 ' . number_format($totEval / $total * 100, 1) . '%)',
+    ];
     $tabs = '';
     foreach (['folio' => '포트폴리오별', 'stk' => '종목별'] as $v => $lab) {
         $tabs .= '<a class="tm-tab' . ($view === $v ? ' on' : '') . '" data-v="' . $v . '" href="/stock/index.php?'
-               . pf_h(http_build_query($q + ['wd' => $v])) . '">' . $lab . '</a>';
+               . pf_h(http_build_query($q + ['wd' => $v])) . '" title="' . pf_h($notes[$v]) . '">' . $lab . '</a>';
     }
-    $cashPct = number_format($totCash / $total * 100, 1) . '%';
-    /* 머리줄 설명 — 한 줄에 「탭 · 설명 · 색 눈금 · 전체 수익률」이 다 서야 해서 짧게 적고, 분모의 «값»은 툴팁에 둔다
-     * (실측: 분모까지 적었더니 1,180px 에서 전체 수익률이 다음 줄로 내려갔다). 축 이름은 탭이 이미 말한다. */
-    $notes = [
-        'folio' => ['넓이 = 금액 · 회색 = 예수금 ' . $cashPct . ' · 종목 ' . $totN . '건',
-                     '비중의 분모 = 전 포트폴리오 추정자산 ' . pf_n(round($total)) . '원(예수금 포함) — 합계 카드의 추정자산과 같은 값이다'],
-        /* ★분모는 두 축 모두 추정자산이다(2026-10-13 사용자 결정) — 종목 칸의 % 합 + 예수금 칸 = 100% · 넓이도 같은 비례다. */
-        'stk'   => ['추정자산 대비 · 종목 ' . $stkN . '개(' . $totN . '건) ' . number_format($totEval / $total * 100, 1) . '% · <b class="tm-cash">회색 = 예수금 ' . $cashPct . '</b>',
-                     '비중의 분모 = 전 포트폴리오 추정자산 ' . pf_n(round($total)) . '원(예수금 포함) — 종목 비중의 합 + 예수금 = 100% · 넓이 = 금액'
-                     . "\n" . '주식(총평가) ' . pf_n(round($totEval)) . '원 · 같은 종목은 포트폴리오를 넘어 합쳤고 수익률은 가중이다'
-                     . "\n" . '예수금 ' . pf_n(round($totCash)) . '원 = 추정자산 ' . pf_n(round($total)) . '원의 ' . $cashPct . ' (주식 ' . number_format($totEval / $total * 100, 1) . '%)'],
-    ];
 
     /* 색 눈금 — pf_tm_rate_color() 의 구간 경계를 그대로 찍는다(손으로 색을 다시 적지 않는다). */
     $scale = '';
     foreach ([-0.25, -0.15, -0.05, -0.01, 0.01, 0.05, 0.15, 0.25] as $r) $scale .= '<i style="background:' . pf_tm_rate_color($r)[0] . '"></i>';
     echo '<div class="sum-box wd" id="pfWd" data-v="' . $view . '"><div class="k">보유 비중'
        . '<span class="tm-tabs">' . $tabs . '</span>';
-    foreach ($notes as $v => $n) echo '<span class="tm-note" data-v="' . $v . '" title="' . pf_h($n[1]) . '"' . ($view === $v ? '' : ' hidden') . '>' . $n[0] . '</span>';   // $n[0] 은 위에서 지은 HTML 이다(숫자·고정 글자뿐)
     echo '<span class="tm-sc" title="타일 색 = 그 종목의 평가수익률(평가손익 ÷ 매입) · 종목별 축에서는 여러 포트폴리오를 합친 «가중» 수익률 · 머리줄 막대 = 그 포트폴리오 수익률(원금 대비)">'
        . '색 = 수익률 <b>−20%</b>' . $scale . '<b>+20%</b></span>'
        . ($totRate !== null ? '<span class="tm-tot">전체 수익률 <em class="' . pf_updown($totRate) . '">' . pf_h(pf_pct($totRate)) . '</em> <small>원금 대비</small></span>' : '')
@@ -2436,8 +2626,9 @@ function pf_render_weight_treemap(array $positions, array $calc, array $folios, 
     /* ★마지막 </div> 는 .sum-box.wd 를 닫는 것이다 — 트리맵을 둘로 늘리며 이걸 빠뜨려서 뒤에 오는
      * 「포트폴리오」 카드가 sum-grid 의 «격자 칸»이 되어 200px 로 눌렸다(사용자 화면으로 잡았다).
      * 서버 CLI 렌더도 php -l 도 이것을 못 잡는다 — 오류가 아니라 «중첩»이라서다. 아래 균형 검사를 테스트에 뒀다. */
-    echo '<div class="tm" data-v="stk"'   . ($view === 'stk'   ? '' : ' hidden') . ' style="height:' . (int)$H . 'px">' . $sHtml . '</div>'
-       . pf_today_strip($stk, $quotes) . '</div>';
+    /* ⊖「오늘」 띠(트리맵 아래 · 2026-10-02)는 2026-10-16 사용자 지시로 걷었다 — 종목별 등락률은 오늘의 신호 표의 「오늘」 열이,
+     *   요약(▲N ▼M · 보유분 ±%)은 그 표의 머리줄이 말한다. $quotes 는 타일 툴팁의 「오늘」 줄에만 남는다. */
+    echo '<div class="tm" data-v="stk"'   . ($view === 'stk'   ? '' : ' hidden') . ' style="height:' . (int)$H . 'px">' . $sHtml . '</div></div>';
     /* 글자 접기는 브라우저가 «실제 픽셀»로 다시 잰다(2026-09-04 사용자 「비중·금액이 왜 안 보이나」).
      * 서버는 가상 캔버스(830px) 폭으로 판정하는데 실제 화면은 더 넓어서 66px(가상)짜리 타일이 이름만 남았다 —
      * 높이 109px 로 넉넉한데도. 서버 판정은 JS 가 없을 때의 예비값이다. 판정은 문턱이 아니라 «넘치나»다:
@@ -2455,7 +2646,7 @@ function pf_render_weight_treemap(array $positions, array $calc, array $folios, 
        . 'w.querySelectorAll(".tm-tab").forEach(function(a){a.addEventListener("click",function(e){e.preventDefault();'
        . 'var v=a.getAttribute("data-v");if(v===w.getAttribute("data-v"))return;w.setAttribute("data-v",v);'
        . 'w.querySelectorAll(".tm-tab").forEach(function(b){b.classList.toggle("on",b.getAttribute("data-v")===v)});'
-       . 'w.querySelectorAll(".tm,.tm-note").forEach(function(el){el.hidden=el.getAttribute("data-v")!==v});'
+       . 'w.querySelectorAll(".tm").forEach(function(el){el.hidden=el.getAttribute("data-v")!==v});'
        . 'try{document.cookie="pf_wd="+v+";path=/;max-age=31536000"}catch(x){}fit();})});'
        /* 카드형 툴팁 — 상자 하나를 body 에 두고 [data-tip] 위에서 갈아 끼운다. 마우스 오른쪽 아래에 띄우되 화면을 넘으면 반대편으로 뒤집는다. */
        . 'var T=document.createElement("div"),cur=null;T.className="pf-tip";T.hidden=true;document.body.appendChild(T);'
@@ -2486,7 +2677,7 @@ function pf_render_weight_treemap(array $positions, array $calc, array $folios, 
 }
 
 /**
- * 카드형 툴팁의 HTML — 트리맵 타일·머리줄·「오늘」 칩이 <b>같은 틀</b>을 쓴다(data-tip 에 싣고 JS 가 .pf-tip 상자에 넣는다).
+ * 카드형 툴팁의 HTML — 트리맵 타일·머리줄이 <b>같은 틀</b>을 쓴다(data-tip 에 싣고 JS 가 .pf-tip 상자에 넣는다).
  * 층은 셋: ①머리(이름 · 작은 배지 · 오른쪽 큰 수익률) ②항목(라벨 왼쪽 회색 · 값 오른쪽 굵게) ③여러 곳일 때의 포트폴리오 표.
  *
  * @param array $kv  [[라벨, 값, 색 클래스(up|down|flat|''), 덧말], …] — 값은 평문(여기서 이스케이프한다)
@@ -2551,96 +2742,295 @@ function pf_today_quotes(PDO $pdo, array $codes): array
         }
         return $out;
     } catch (Throwable $e) {
-        return [];   // 띠는 곁들이는 것이다 — 못 읽으면 조용히 생략(현황 화면을 죽이지 않는다)
+        return [];   // 등락률은 곁들이는 것이다 — 못 읽으면 조용히 생략(현황 화면을 죽이지 않는다)
     }
 }
 
 /**
- * 「오늘」 띠 — 트리맵 아래 한두 줄(2026-10-02 사용자 「이 화면을 열었을 때 보유종목들의 등락률(흐름)을 빠르게 파악하고 싶다 ·
- * 여기서 보고 단타 화면으로 가서 자세히」). 종목 단위(여러 포트폴리오를 합침)로 오늘 등락률 큰 순 · 칩 클릭 = 단타(mode=short&code=).
+ * 오늘의 신호 표 «종목 사실» 열의 재료(2026-10-16 사용자 「오늘의 신호를 더 의미 있게 — 리서치·SUE 같은 데이터를」).
  *
- * - 판정이 아니다 — 오늘 등락률은 시장 사실이다(포트폴리오 규칙 1 의 「공통층」). 임계도 색 구간도 없다.
- * - 왼쪽 요약의 「보유분」 = 지금 평가금액이 어제 종가 대비 얼마나 움직였나(금액 가중).
- *   어제 평가 = 지금 평가 ÷ (1 + 등락률). ★오늘 산 수량도 하루치로 센다(근사) — 툴팁에 밝힌다.
- * - 시세가 없는 종목(all_stock_info 밖)은 칩도 합계도 뺀다 — 0% 로 그리면 「안 움직였다」는 거짓이 된다.
- * - 시세가 오늘 것이 아니면(휴장일·개장 전) 머리 글자가 「오늘」 대신 그 날짜가 된다.
- * - 두 줄로 접는 일은 브라우저가 한다 — 넘치는 동안 |등락률| 이 작은 것부터 감추고 「… 외 N」 을 부호가 바뀌는 자리에 둔다.
+ * 신호는 룰셋이 기계적으로 낸다. 사람이 이 표에서 하는 판단은 «따를까, 멈출까»(거부권)이고, 그 판단에 쓰는 것은 넷이다:
+ *   ①실적 — 왜 떨어졌나(이익이 꺾이는 종목에 물을 타는 것이 분할매수의 가장 비싼 실수다 · 실측: 현대차 영업익 5분기 연속↓ −30% 인데 매수 신호 둘)
+ *   ②밸류 — 지금 싼가 ③하락 깊이 — 얼마나 내려왔나 ④내 리서치 — 내가 뭐라고 판단했었나.
+ * ★판정을 새로 만들지 않는다 — 전부 그 종목의 사실이거나 내가 남긴 기록이다. 리서치는 두 칸 칩(pf_sig_rs_chip — 의견 | 지금 자리) · 「그 뒤 새 실적」 사실 ·
+ *   ⊕리서치가 적은 매수 구간에서 «지금 자리»(rs_zone_state 의 short — 2026-10-19 사용자 결정으로 리서치 규칙 10 을 좁혔다).
+ *   자리는 «리서치 기준 위치»이지 매수 신호가 아니다 — 보라 글자로만 그리고(신호 칩과 모양이 다르다) 사다리·게이트는 읽지 않는다.
+ * 계산은 다른 화면과 같은 단일본: SUE = pf_sue_stock · 접수일 = pf_sue_receipts · 영업이익 TTM·연속 = pf_ttm_series ·
+ * PER·PBR = pf_val_basis/pf_val_at(차수 사다리·재무분석 «현재 PER»과 같은 정의) · 고점 = pf_indicators 의 hi52(52주 종가 고점).
+ * 전부 DB 읽기다(외부 콜 0 · 실측 16종목 45ms). 못 읽은 칸은 비운다 — 0 으로 채우면 「없다」가 「나쁘다」로 읽힌다.
  *
- * @param array $stk    pf_render_weight_treemap() 이 종목 코드로 합친 것(code · name · amt · n)
- * @param array $quotes pf_today_quotes()
+ * @param array $quotes pf_today_quotes() — PER 과 고점의 «지금 가격»
+ * @param array $daily  Pf::dailyMap(…, live) — 없는 종목(재진입 후보 등)은 여기서 마저 읽는다
  */
-function pf_today_strip(array $stk, array $quotes): string
+function pf_sig_facts(PDO $pdo, Pf $pf, array $codes, array $quotes, array $daily): array
 {
-    $rows = [];
-    $last = '';
-    foreach ($stk as $s) {
-        $q = $quotes[$s['code'] ?? ''] ?? null;
-        if ($q === null || $s['amt'] <= 0 || $q['rate'] <= -1) continue;
-        $prev   = $s['amt'] / (1 + $q['rate']);
-        $rows[] = ['code' => $s['code'], 'name' => $s['name'], 'n' => (int)$s['n'], 'amt' => (float)$s['amt'],
-                   'rate' => $q['rate'], 'price' => $q['price'], 'chg' => $s['amt'] - $prev, 'prev' => $prev];
-        if ($q['at'] > $last) $last = $q['at'];
+    $codes = array_values(array_unique(array_filter(array_map('strval', $codes), fn($c) => $c !== '')));
+    if (!$codes) return [];
+    $miss = array_values(array_filter($codes, fn($c) => !isset($daily[$c])));
+    if ($miss) { try { $daily += $pf->dailyMap($miss, 400, true); } catch (Throwable $e) {} }
+    $rsAll = [];
+    try { $rsAll = (new Rs($pdo))->latestMany($codes); } catch (Throwable $e) { $rsAll = []; }   // 표가 없으면(첫 리서치 전) 빈 칸
+    $dart = new Dart($pdo);
+    $qLab = fn(int $qk): string => (intdiv($qk - 1, 4) % 100) . '.' . ($qk - intdiv($qk - 1, 4) * 4) . 'Q';
+
+    $out = [];
+    foreach ($codes as $c) {
+        $f  = ['sue' => null, 'sueQ' => '', 'sueAt' => '', 'op' => null, 'opPrev' => null, 'opSt' => null,
+               'per' => null, 'pbr' => null, 'loss' => false, 'valQ' => '', 'hi' => null, 'm60' => null, 'rs' => null, 'rsAfter' => [], 'rsNow' => null, 'rsBase' => null, 'rsThen' => null, 'rsZones' => [], 'rsScen' => [], 'rsPx' => null, 'rsName' => '', 'base' => ''];
+        $px = isset($quotes[$c]) ? (float)$quotes[$c]['price'] : null;
+        /* 우선주(끝자리 5·7·9)는 재무가 따로 없다 — 실적은 «회사»의 사실이라 보통주(끝자리 0)의 것을 빌린다(현대차우 → 현대차).
+         * PER·PBR 은 빌리지 않는다 — 우선주 자기 가격·주식수가 들어가야 하는 값이다. */
+        $ec = $c;
+        if (preg_match('/^\d{5}[579]$/', $c)) {
+            try {
+                $hasOwn = (bool)$pdo->query("SELECT 1 FROM stock_financial WHERE stock_code = " . $pdo->quote($c) . " LIMIT 1")->fetchColumn();
+                if (!$hasOwn) { $ec = substr($c, 0, 5) . '0'; $f['base'] = $ec; }
+            } catch (Throwable $e) {}
+        }
+        try {
+            $rc  = pf_sue_receipts($pdo, $ec);
+            $sue = pf_sue_stock($pdo, $ec);
+            if ($sue) {
+                $qk = array_key_last($sue);
+                $f['sue'] = (float)$sue[$qk]; $f['sueQ'] = $qLab((int)$qk); $f['sueAt'] = (string)($rc[$qk] ?? '');
+            }
+            $qs = Dart::quarterly($dart->reportSeries($ec));   // 최근순
+            if ($qs) {
+                $tt = pf_ttm_series($qs);
+                $f['op']     = $tt[0]['op_income'] ?? null;
+                $f['opPrev'] = $tt[4]['op_income'] ?? null;   // 넉 분기 전 TTM — 전년 대비
+                $f['opSt']   = $tt[0]['streak']['op_income'] ?? null;
+            }
+            $vb = $ec === $c ? pf_val_basis($dart, $c) : null;   // 우선주는 PER·PBR 을 빌리지 않는다(위 주석)
+            if ($vb) {
+                $v = pf_val_at($vb, $px);
+                $f['per'] = $v['per']; $f['pbr'] = $v['pbr']; $f['valQ'] = (string)$vb['label'];
+                $f['loss'] = $vb['ni'] !== null && (float)$vb['ni'] <= 0;
+            }
+            if (isset($rsAll[$c])) {
+                $f['rs'] = $rsAll[$c];
+                // 리서치가 적은 가격대에서 «지금»과 «쓸 때»의 자리(2026-10-19 사용자) — 판정 단일본 rs_zone_state 를 부르기만 한다 · 신호가 아니다
+                $f['rsNow']  = rs_zone_state($rsAll[$c], $px);
+                $f['rsBase'] = rs_base_price($pdo, $rsAll[$c]);
+                $f['rsThen'] = rs_zone_state($rsAll[$c], $f['rsBase']);
+                $f['rsZones'] = rs_zones($rsAll[$c]);
+                $f['rsScen']  = rs_scen($rsAll[$c]);
+                $f['rsPx']    = $px;
+                $f['rsName']  = StockName::one($pdo, $c, $c);
+                foreach ($rc as $qk => $dt) if ($dt > (string)$rsAll[$c]['d']) $f['rsAfter'][] = $qLab((int)$qk) . ' ' . substr($dt, 5);
+            }
+        } catch (Throwable $e) { /* 재무가 없는 종목(우선주·ETF) — 그 칸만 빈다 */ }
+        $bars = $daily[$c] ?? [];
+        if ($bars) {
+            $ind = pf_indicators($bars, $px);
+            if (!empty($ind['hi52']) && $ind['close']) $f['hi'] = $ind['close'] / $ind['hi52'] - 1;
+            $cl = array_column(array_values(array_filter($bars, 'pf_bar_valid')), 'c');
+            $n  = count($cl);
+            if ($px && $n) $cl[$n - 1] = $px;
+            if ($n > 60 && $cl[$n - 61] > 0) $f['m60'] = $cl[$n - 1] / $cl[$n - 61] - 1;
+        }
+        $out[$c] = $f;
     }
-    if (!$rows) return '';
-    usort($rows, fn($a, $b) => $b['rate'] <=> $a['rate']);
+    return $out;
+}
 
-    $up = $dn = $fl = 0;
-    $chg = $prev = 0.0;
-    foreach ($rows as $r) {
-        if (abs($r['rate']) < 0.00005) $fl++; elseif ($r['rate'] > 0) $up++; else $dn++;
-        $chg  += $r['chg'];
-        $prev += $r['prev'];
+/**
+ * 다음 정기공시의 법정 기한 — 분기·반기 보고서는 분기 끝 뒤 45일, 사업보고서는 90일.
+ * 회사별 잠정실적 발표일은 수집하지 않는다(그보다 이를 수 있다) — 그래서 «마감»이라 부른다.
+ * @return array ['label' => '3분기', 'date' => 'Y-m-d', 'days' => 남은 날]
+ */
+function pf_next_filing_deadline(?string $today = null): array
+{
+    $today = $today ?: date('Y-m-d');
+    $y = (int)substr($today, 0, 4);
+    $best = null;
+    foreach ([$y - 1, $y] as $yy) {
+        foreach (['03-31' => ['1분기', 45], '06-30' => ['반기', 45], '09-30' => ['3분기', 45], '12-31' => ['사업', 90]] as $md => [$lb, $dd]) {
+            $qe = $yy . '-' . $md;                                        // 아직 안 끝난 분기도 센다(11/15~12/31 엔 다음 마감이 사업보고서다)
+            $dl = date('Y-m-d', strtotime($qe . ' +' . $dd . ' days'));
+            if ($dl < $today) continue;                                   // 이미 지난 마감
+            if ($best === null || $dl < $best['date']) $best = ['label' => $lb, 'date' => $dl];
+        }
     }
-    $tot = $prev > 0 ? $chg / $prev : null;
-    $sgn = fn(float $v): string => ($v > 0 ? '+' : '') . pf_n(round($v));
+    if ($best === null) return ['label' => '', 'date' => '', 'days' => null];
+    $best['days'] = (int)round((strtotime($best['date']) - strtotime($today)) / 86400);
+    return $best;
+}
 
-    $ts    = strtotime($last) ?: time();
-    $today = date('Y-m-d', $ts) === date('Y-m-d');
-    $label = $today ? '오늘' : date('n/j', $ts);
-    $miss  = count($stk) - count($rows);
-    $sum   = '<span class="td-sum" title="' . pf_h(
-                 '보유 종목 ' . count($rows) . '개의 ' . ($today ? '오늘' : date('n월 j일', $ts)) . " 등락\n"
-               . '보유분 = 지금 평가금액이 전일 종가 대비 움직인 폭(금액 가중)' . "\n"
-               . '오늘 산 수량도 하루치로 센다(근사)'
-               . ($miss > 0 ? "\n시세가 없어 뺀 종목 " . $miss . '개' : '')) . '">'
-           . '<b>' . $label . '</b>'
-           . '<span class="up">▲' . $up . '</span> <span class="down">▼' . $dn . '</span>' . ($fl ? ' <span class="flat">─' . $fl . '</span>' : '')
-           . ($tot === null ? '' : ' <em class="' . pf_updown($tot) . '">' . pf_h(pf_pct($tot)) . '</em><small>' . $sgn($chg) . '원</small>')
-           . '</span>';
+/**
+ * 종목 사실 네 칸(실적 · PER·PBR · 고점·60일 · 리서치)의 <td> 넷 — pf_sig_facts() 의 한 종목.
+ * 색은 사실의 방향만 말한다(빨강 = 늘었다/올랐다 · 파랑 = 줄었다/내렸다) — 「사라·팔아라」가 아니다.
+ * SUE 칩은 다른 화면의 SUE 배지(.sue-b · pf_sue_badge_map)와 같은 모양·같은 문턱(Thr::SUE_HIT/SHOCK)이다 — ±1 안은 회색 테두리로 값만.
+ */
+function pf_sig_fact_cells(?array $f): string
+{
+    $no = '<span class="empty">·</span>';
+    if ($f === null) return '<td class="fe">' . $no . '</td><td class="fv">' . $no . '</td><td class="fh">' . $no . '</td><td class="fr">' . $no . '</td>';
+    $sp  = fn(float $v, int $d = 0): string => ($v > 0 ? '+' : ($v < 0 ? '−' : '')) . number_format(abs($v) * 100, $d) . '%';
+    $eok = fn(float $v): string => ($v < 0 ? '−' : '') . number_format(abs($v) / 100000000) . '억';
 
-    $list = '';
-    $more = '<span class="td-more" hidden></span>';
-    $put  = false;
-    foreach ($rows as $r) {
-        $flat = abs($r['rate']) < 0.00005;
-        if (!$put && $r['rate'] <= 0) { $list .= $more; $put = true; }   // 부호가 바뀌는 자리 — 접힌 것들이 있던 곳
-        $tip = $r['name'] . ($r['n'] > 1 ? ' (' . $r['n'] . '곳)' : '') . "\n"
-             . '현재가 ' . pf_n($r['price']) . '원 · ' . pf_pct($r['rate']) . "\n"
-             . '보유 ' . pf_n(round($r['amt'])) . '원 · ' . ($today ? '오늘 ' : '') . $sgn($r['chg']) . "원\n"
-             . '(누르면 단타 화면)';
-        $tipH = pf_tip_html($r['name'], $r['n'] > 1 ? $r['n'] . '곳' : '', $r['rate'], $today ? '오늘' : $label . ' 등락', [
-            ['현재가',   pf_n($r['price']) . '원'],
-            ['보유 평가', pf_n(round($r['amt'])) . '원'],
-            [$today ? '오늘 손익' : '그 날 손익', $sgn($r['chg']) . '원', pf_updown($r['chg'])],
-        ], [], '누르면 단타 화면');
-        $list .= '<a class="td-i" data-r="' . round($r['rate'] * 100, 2) . '" href="/stock/index.php?mode=short&amp;code=' . pf_h($r['code']) . '"'
-               . ' title="' . pf_h($tip) . '" data-tip="' . pf_h($tipH) . '">' . pf_h($r['name'])
-               . '<b class="' . ($flat ? 'flat' : pf_updown($r['rate'])) . '">' . pf_h($flat ? '0.00%' : pf_pct($r['rate'])) . '</b></a>';
+    // ① 실적 — SUE 칩 + 영업이익 TTM 의 연속 증감·넉 분기 전 대비
+    $e = '';
+    if ($f['sue'] !== null) {
+        $v   = (float)$f['sue'];
+        $cls = $v >= Thr::SUE_HIT ? 'sue-b up' : ($v <= Thr::SUE_SHOCK ? 'sue-b dn' : 'sue-n');
+        $t   = '최신 분기(' . $f['sueQ'] . ') 이익 서프라이즈 SUE ' . sprintf('%+.2f', $v) . ($f['sueAt'] !== '' ? ' · 공시 ' . $f['sueAt'] : '')
+             . ($v >= Thr::SUE_HIT ? "\n+1 이상 = 서프라이즈 무리" : ($v <= Thr::SUE_SHOCK ? "\n−1 이하 = 어닝쇼크 무리 — 실적 전제가 깨졌는지 다시 볼 자리" : "\n±1 안 = 평범한 분기"));
+        $e  .= '<span class="' . $cls . '" title="' . pf_h($t) . '">SUE ' . sprintf('%+.1f', $v) . '<span class="sue-q">' . pf_h($f['sueQ']) . '</span></span>';
     }
-    if (!$put) $list .= $more;
+    if ($f['op'] !== null) {
+        $op = (float)$f['op']; $pv = $f['opPrev'] === null ? null : (float)$f['opPrev']; $st = $f['opSt'];
+        if ($op <= 0)                      $yo = ($pv !== null && $pv > 0) ? '적자전환' : '적자';
+        elseif ($pv !== null && $pv <= 0)  $yo = '흑자전환';
+        elseif ($pv !== null)              $yo = $op / $pv >= 3 ? '×' . number_format($op / $pv, 1) : $sp($op / $pv - 1);
+        else                               $yo = '';
+        $stT  = ($st === null || $st === 0) ? '' : abs((int)$st) . '분기' . ($st > 0 ? '↑' : '↓');
+        $tone = $op <= 0 ? ' d' : (($st ?? 0) > 0 ? ' u' : (($st ?? 0) < 0 ? ' d' : ''));
+        $tip  = '영업이익 4분기 합(TTM) ' . $eok($op) . ($pv !== null ? ' · 넉 분기 전 ' . $eok($pv) : '')
+              . ($stT !== '' ? "\n" . abs((int)$st) . '분기 연속 ' . ($st > 0 ? '늘었다' : '줄었다') . '(직전 분기의 TTM 과 견줌)' : '');
+        // 적자면 연속 증감을 칸에서 뺀다 — 「1분기↑ 적자전환」이 모순처럼 읽혔다(적자 폭이 줄어든 것) · 툴팁엔 남는다
+        $e   .= '<span class="ttm' . $tone . '" title="' . pf_h($tip) . '">' . pf_h($op <= 0 ? $yo : trim($stT . ' ' . $yo)) . '</span>';
+    }
+    if ($e !== '' && $f['base'] !== '') $e = '<span class="fe-base" title="' . pf_h('우선주 — 실적은 보통주(' . $f['base'] . ')의 것이다(같은 회사)') . '">보</span>' . $e;   // 한 글자 — 「보통주」로 쓰니 영업익 글자가 잘렸다
+    $h = '<td class="fe">' . ($e !== '' ? $e : $no) . '</td>';
 
-    $at = '<span class="td-at" title="시세 = all_stock_info 스냅샷 · 화면을 연 순간의 값(자동 갱신 없음 — 지켜보는 자리는 단타)">'
-        . date($today ? 'H:i' : 'n/j H:i', $ts) . ' 기준</span>';
+    // ② PER · PBR — 지금 가격
+    if ($f['valQ'] !== '' && ($f['per'] !== null || $f['pbr'] !== null || $f['loss'])) {
+        $h .= '<td class="fv" title="' . pf_h('지금 가격 기준 · 재료 ' . $f['valQ'] . '(순이익 4분기 합 · 자본총계 · 상장주식수)') . '">'
+            . '<b>' . ($f['per'] !== null ? number_format((float)$f['per'], 1) : ($f['loss'] ? '적자' : '–')) . '</b>'
+            . '<small>' . ($f['pbr'] !== null ? number_format((float)$f['pbr'], 2) : '–') . '</small></td>';
+    } else {
+        $h .= '<td class="fv" title="재무 없음(우선주·ETF 등)">' . $no . '</td>';
+    }
 
-    /* 두 줄 맞추기 — .fit 을 달아 두 줄에서 자르고, 넘치는 동안 0 에 가까운 것부터 감춘다(양끝은 끝까지 남긴다 · 최소 2개). */
-    $js = '<script>(function(){var s=document.getElementById("pfTd");if(!s)return;'
-        . 'var l=s.querySelector(".td-list"),m=s.querySelector(".td-more"),it=[].slice.call(l.querySelectorAll(".td-i"));'
-        . 'var o=it.slice().sort(function(a,b){return Math.abs(+a.getAttribute("data-r"))-Math.abs(+b.getAttribute("data-r"))});'
-        . 'function fit(){s.classList.add("fit");it.forEach(function(a){a.hidden=false});m.hidden=true;var n=0;'
-        . 'while(l.scrollHeight>l.clientHeight+1&&n<o.length-2){o[n].hidden=true;n++;m.hidden=false;m.textContent="… 외 "+n+" …"}}'
-        . 'fit();var t;window.addEventListener("resize",function(){clearTimeout(t);t=setTimeout(fit,80)});})();</script>';
+    // ③ 고점 · 60일
+    if ($f['hi'] !== null || $f['m60'] !== null) {
+        $h .= '<td class="fh" title="' . pf_h(($f['hi'] !== null ? '52주 종가 고점 대비 ' . $sp((float)$f['hi'], 1) : '52주 이력 부족')
+                                         . ($f['m60'] !== null ? ' · 60거래일 ' . $sp((float)$f['m60'], 1) : '')) . '">'
+            . '<b>' . ($f['hi'] !== null ? $sp((float)$f['hi']) : '–') . '</b>'
+            . ($f['m60'] !== null ? '<small class="' . pf_updown($f['m60']) . '">' . $sp((float)$f['m60']) . '</small>' : '') . '</td>';
+    } else {
+        $h .= '<td class="fh">' . $no . '</td>';
+    }
 
-    return '<div class="td-strip" id="pfTd">' . $sum . '<div class="td-list">' . $list . $at . '</div></div>' . $js;
+    // ④ 리서치 — 기록(링크 칩)과 «그 뒤 새 실적» 사실만
+    if ($f['rs']) {
+        $h .= '<td class="fr">' . pf_sig_rs_chip($f) . '</td>';
+    } else {
+        $h .= '<td class="fr" title="이 종목의 리서치가 없습니다 — 리서치 화면(mode=research)에서 올린다">' . $no . '</td>';
+    }
+    return $h;
+}
+
+/**
+ * 오늘의 신호 표 리서치 칸의 칩 하나(2026-10-19 사용자 「고급스럽게 · 칩 형태로 · 마우스를 올리면 종합적으로」).
+ * [10/16 분할매수 | 1차 안] — 표의 다른 칩(왼쪽·오른쪽 두 칸)과 같은 틀. 왼쪽 = 문서의 의견(올릴 때 고정) · 오른쪽 = 리서치가 적은 매수 구간에서
+ * 지금 자리(rs_zone_state 의 short — 리서치 상세의 하이라이트와 같은 갈래). ★신호가 아니다 — 채운 빨강·주황(매수)·보라(재진입) 칩과 겹치지 않게
+ * 오른쪽은 연한 바탕 + 글자색으로만 자리를 가른다. 「이후 실적」(리서치 뒤 새 정기공시)은 오른쪽 위 주황 점.
+ * 카드형 툴팁(data-tip → .pf-tip) = 머리(종목 · 의견) · 한 줄 결론 · 구간 사다리(가격 순 — 「지금」 줄이 제자리에 낀다) · 시나리오 · 쓸 때 자리 · 이후 실적.
+ */
+/**
+ * 리서치 툴팁의 세로 가격 막대(2026-10-19 사용자 「눈에 잘 안 들어온다 — 세로 막대로 지금 가격이 어느 위치인지」).
+ * 위 = 비싼 쪽. 매수 구간 = 보라 띠(지금 그 안이면 진하게) · 지금 = 진보라 가로선 + 오른쪽 「지금 25,150」 · 쓸 때 기준가 = 빈 동그라미 ·
+ * 시나리오 = 회색 점선 눈금(구간 근처에 있는 것만 — 낙관 같은 먼 값을 넣으면 구간이 납작해진다).
+ * 눈금 범위 = 구간·지금·쓸 때 ±7% — 막대는 «자리»를 보여 주고 숫자는 옆 표가 말한다. 그림은 HTML 층(.pf-tip 이 pointer-events 없음).
+ */
+function pf_sig_rs_gauge(array $f): string
+{
+    $zs = $f['rsZones']; $px = $f['rsPx'] ? (float)$f['rsPx'] : null; $bp = $f['rsBase'] ? (float)$f['rsBase'] : null;
+    if (!$zs || !$px) return '';
+    $core = [$px];
+    foreach ($zs as $z) { $core[] = $z['lo']; $core[] = $z['hi']; }
+    if ($bp) $core[] = $bp;
+    $lo = min($core); $hi = max($core);
+    $sc = [];
+    foreach ($f['rsScen'] as $l => $v) if ($v >= $lo * 0.8 && $v <= $hi * 1.25) { $sc[$l] = $v; $lo = min($lo, $v); $hi = max($hi, $v); }
+    $pad = max(($hi - $lo) * 0.07, $hi * 0.01);
+    $lo -= $pad; $hi += $pad;
+    $y   = fn(float $v): float => round(($hi - $v) / ($hi - $lo) * 100, 2);   // 위 = 비싼 쪽
+    $won = fn($v): string => number_format((float)$v);
+
+    $h = '<div class="tt-zg"><div class="in"><span class="ax"></span>';
+    $zc = [];
+    foreach ($zs as $z) {
+        $in = ($px >= $z['lo'] && $px <= $z['hi'] && $z['lo'] !== $z['hi']) || ($z['lo'] === $z['hi'] && abs($px / $z['lo'] - 1) <= Rs::NEAR_PCT);
+        $t = $y((float)$z['hi']); $b = $y((float)$z['lo']);
+        $h .= '<span class="zb' . ($in ? ' on' : '') . '" style="top:' . $t . '%;height:' . max($b - $t, 1.2) . '%"></span>'
+            . '<em class="zl' . ($in ? ' on' : '') . '" style="top:' . (($t + $b) / 2) . '%">' . pf_h($z['label']) . '</em>';
+        $zc[] = ($t + $b) / 2;
+    }
+    foreach ($sc as $l => $v) {
+        $yy = $y((float)$v);
+        $h .= '<span class="sc" style="top:' . $yy . '%"></span>';
+        $clash = false; foreach ($zc as $c) if (abs($c - $yy) < 10) $clash = true;   // 구간 이름과 겹치면 눈금만
+        if (!$clash) $h .= '<em class="sl" style="top:' . $yy . '%">' . pf_h($l) . '</em>';
+    }
+    $ny = $y($px);
+    if ($bp) {
+        $by = $y($bp);
+        $h .= '<span class="bs" style="top:' . $by . '%"></span>';
+        if (abs($by - $ny) >= 12) $h .= '<em class="bl" style="top:' . $by . '%">쓸 때</em>';   // 지금 표와 겹치면 동그라미만
+    }
+    $h .= '<span class="nw" style="top:' . $ny . '%"></span><em class="nl" style="top:' . $ny . '%">지금 ' . $won($px) . '</em>';
+    return $h . '</div></div>';
+}
+
+function pf_sig_rs_chip(array $f): string
+{
+    $n   = $f['rs'];
+    $url = '/stock/index.php?mode=research&code=' . rawurlencode((string)$n['code']) . '&id=' . (int)$n['id'];
+    $op  = (string)$n['opinion'];
+    $opL = Rs::opinionLabel($op) ?: '의견 없음';
+    $opC = Rs::opinionColor($op);
+    $md  = substr((string)$n['d'], 5, 2) . '/' . substr((string)$n['d'], 8, 2);
+    $zn  = $f['rsNow'] ?: ['short' => '', 'text' => '', 'cls' => ''];
+    $px  = $f['rsPx'];
+    $won = fn($v): string => number_format((float)$v);
+    $rng = fn($z): string => $z['lo'] === $z['hi'] ? $won($z['lo']) : $won($z['lo']) . '~' . $won($z['hi']);
+
+    // ── 툴팁 카드
+    $t = '<div class="tt-h"><b>' . pf_h($f['rsName'] !== '' ? $f['rsName'] : (string)$n['code']) . '</b><i>리서치 ' . pf_h($md) . '</i>'
+       . '<em style="color:' . $opC . '">' . pf_h($opL) . '<small>문서의 의견 · 올릴 때 고정</small></em></div>';
+    if ((string)$n['headline'] !== '') $t .= '<p class="tt-hl">' . pf_h((string)$n['headline']) . '</p>';
+    if ($f['rsZones']) {
+        $zt = '<table class="tt-z"><tr><th>매수 구간</th><th>가격</th><th>지금에서</th></tr>';
+        $nowRow = $px ? '<tr class="now"><td>▸ 지금</td><td>' . $won($px) . '</td><td>' . pf_h($zn['short']) . '</td></tr>' : '';
+        $placed = !$px;
+        foreach ($f['rsZones'] as $z) {
+            $in = $px && (($px >= $z['lo'] && $px <= $z['hi'] && $z['lo'] !== $z['hi']) || ($z['lo'] === $z['hi'] && abs($px / $z['lo'] - 1) <= Rs::NEAR_PCT));
+            if (!$placed && !$in && $px > $z['hi']) { $zt .= $nowRow; $placed = true; }   // 지금 가격이 이 구간보다 위 — 「지금」 줄이 먼저 선다
+            // 지금에서 = 가까운 끝까지(내려가야 하면 −, 이미 지나 올라가야 하면 +) · 구간 안이면 그 말
+            $gap = !$px ? '' : ($in ? '지금 ' . $won($px) : rs_pct(($px > $z['hi'] ? $z['hi'] : $z['lo']) / $px - 1));
+            $zt .= '<tr class="z' . ($in ? ' on' : '') . '"><td>' . pf_h($z['label']) . '</td><td>' . $rng($z) . '</td><td>' . pf_h($gap) . '</td></tr>';
+            if ($z['memo'] !== '') $zt .= '<tr class="m"><td colspan="3">' . pf_h($z['memo']) . '</td></tr>';
+            if ($in) $placed = true;
+        }
+        if (!$placed) $zt .= $nowRow;   // 마지막 구간보다 아래
+        $zt .= '</table>';
+        $gg  = pf_sig_rs_gauge($f);   // 세로 가격 막대(2026-10-19 사용자 「지금 가격이 어느 위치인지 직관적으로」) — 표 왼쪽에 나란히
+        $t  .= $gg !== '' ? '<div class="tt-zw">' . $gg . '<div class="tt-zt">' . $zt . '</div></div>' : $zt;
+    }
+    $kv = '';
+    if ($f['rsScen']) {
+        $kv .= '<dt>시나리오</dt><dd>' . pf_h(implode(' · ', array_map(fn($l, $v) => $l . ' ' . $won($v), array_keys($f['rsScen']), $f['rsScen']))) . '</dd>';
+    }
+    if ($f['rsThen'] && $f['rsThen']['short'] !== '') {
+        $bd = (string)($n['price_ref_d'] ?? '');
+        $same = preg_replace('/ \d+%$/u', '', $f['rsThen']['short']) === preg_replace('/ \d+%$/u', '', $zn['short']);   // 「위 8% → 위 20%」는 같은 자리
+        $kv .= '<dt>쓸 때</dt><dd>' . $won($f['rsBase']) . ' · ' . pf_h($f['rsThen']['short'])
+             . '<small>' . pf_h(($bd !== '' ? substr($bd, 5) . ' 기준가' : '') . ($same ? '' : ' → 지금 자리가 바뀌었다')) . '</small></dd>';
+    }
+    if ($f['rsAfter']) $kv .= '<dt>이후 실적</dt><dd class="warn">' . pf_h(implode(', ', $f['rsAfter'])) . '<small>리서치 뒤 정기공시 — 다시 볼 때</small></dd>';
+    if ($kv !== '') $t .= '<dl>' . $kv . '</dl>';
+    $t .= '<p class="tt-f">리서치가 적은 가격대에서의 위치 — 매수 신호가 아닙니다(신호는 포트폴리오 칸) · 누르면 리서치 상세</p>';
+
+    // ── 칩
+    $plain = $md . ' ' . $opL . ($zn['text'] !== '' ? ' · ' . $zn['text'] : '');   // JS 가 없을 때의 예비 title
+    return '<a class="rsx' . ($zn['cls'] !== '' ? ' k-' . pf_h($zn['cls']) : '') . ($f['rsAfter'] ? ' aft' : '') . '" href="' . pf_h($url) . '"'
+         . ' title="' . pf_h($plain) . '" data-tip="' . pf_h($t) . '">'
+         . '<span class="o"><small>' . pf_h($md) . '</small><b style="color:' . $opC . '">' . pf_h($opL) . '</b></span>'
+         . ($zn['short'] !== '' ? '<span class="z">' . pf_h($zn['short']) . '</span>' : '')
+         . '</a>';
 }
 
 /**
@@ -2690,6 +3080,7 @@ function pf_tm_rate_color(?float $rate): array
     $h = $rate > 0 ? 0 : 215;                                             // 빨강 / 파랑
     return ['hsl(' . $h . ',62%,' . $l . '%)', $l >= 68 ? '#22303f' : '#fff'];
 }
+
 
 /** 트리맵 좌표 → 부모 기준 % (left/top/width/height). */
 function pf_tm_pos(float $x, float $y, float $w, float $h, float $W, float $H): string
@@ -2767,31 +3158,91 @@ function pf_tm_squarify(array $vals, float $x, float $y, float $w, float $h): ar
  *
  * @param array $re   pf_reentry_list() 결과 (예수금 게이트를 <b>이미 통과시킨</b> 상태)
  * @param int   $wait 재진입 대기일 — 후보 문구에 근거로 적는다
+ * @param array $quotes pf_today_quotes() — 「오늘」 열과 머리줄의 오늘 등락(비면 그 열이 「·」)
+ * @param array $facts  pf_sig_facts() — 종목 사실 네 열(실적·밸류·고점·리서치 · 2026-10-16). 비면 그 칸이 「·」
  */
-function pf_render_signal_strip(array $sigs, array $stats, array $re = [], int $wait = 0, array $weights = []): void
+function pf_render_signal_strip(array $sigs, array $stats, array $re = [], int $wait = 0, array $weights = [], array $quotes = [], array $facts = []): void
 {
     // $weights = 종목코드 => 전 포트폴리오 평가금액 합 — 표의 줄 순서(보유 비중 큰 순)에만 쓴다
     $act  = array_values(array_filter($sigs, fn($g) => $g['s']['kind'] !== null));
     $waitRows = array_values(array_filter($sigs, fn($g) => $g['s']['kind'] === null));
     $reReady  = array_values(array_filter($re, fn($x) => $x['chk']['state'] === 'ready'));
 
-    $cnt = ['sell' => 0, 'buy' => 0, 'fill' => 0];
-    $need = 0.0;
-    $short = 0;
+    $man = fn(float $v): string => (abs($v) > 0 && abs($v) < 10000 ? number_format($v / 10000, 1) : number_format(round($v / 10000))) . '만';
+
+    /* 필요 자금 — 포트폴리오마다 «매수·잔여»와 «재진입 1차»를 갈라 모은다(2026-10-26 사용자 「필요한 자금이 얼마인지 · 예수금에서 얼마가 부족한지」).
+     * 재진입 1차도 <b>같은 예수금</b>을 쓴다 — 따로 세면 필요한 돈이 실제보다 작게 나온다.
+     * ★부족은 «포트폴리오마다» 센 것의 합이다 — 예수금은 포트폴리오의 것이라 한 곳에 남는 돈이 다른 곳의 부족을 못 메운다
+     *   (전체 필요 − 전체 예수금으로 내면 실제보다 덜 모자라 보인다).
+     * ★순서는 예수금 게이트(pf_fund_take)와 같다 — 매수·잔여가 먼저 쓰고 재진입은 남은 돈으로. 그래서 lackB(매수·잔여만 해도 모자람)를 따로 둔다.
+     * 매도 대금은 넣지 않는다(게이트와 같다 — 체결 뒤에야 들어오는 돈이다). */
+    $cnt  = ['sell' => 0, 'buy' => 0, 'fill' => 0];
+    $fund = [];   // fid => b(매수·잔여) · re(재진입 1차) · items[[종목, 신호, 금액, 게이트 통과]] · lack · lackB
     foreach ($act as $g) {
         $cnt[$g['s']['kind']]++;
         if ($g['s']['kind'] === 'sell') continue;
-        $need += (float)$g['s']['amount'];
-        if ($g['fund_ok'] === false) $short++;
+        $fid = (int)$g['p']['portfolio_id'];
+        $a   = (float)$g['s']['amount'];
+        $stN = $g['s']['kind'] === 'buy' ? (int)$g['c']['reach_step'] : (int)$g['c']['cur_step'];
+        $fund[$fid]['b'] = ($fund[$fid]['b'] ?? 0.0) + $a;
+        $fund[$fid]['items'][] = [(string)$g['p']['stock_name'], pf_sig_label($g['s']['kind']) . ($stN > 0 ? ' ' . $stN . '차' : ''), $a, $g['fund_ok'] !== false];
     }
-    /* 재진입 1차도 <b>같은 예수금</b>을 쓴다 — 소요·부족 집계에 함께 넣는다.
-     * 따로 세면 머리의 「매수 소요」가 실제로 필요한 돈보다 작게 나온다. */
     foreach ($reReady as $x) {
-        if ($x['need'] !== null) $need += (float)$x['need'];
-        if ($x['fund_ok'] === false) $short++;
+        if ($x['need'] === null) continue;
+        $fid = (int)$x['portfolio_id'];
+        $fund[$fid]['re'] = ($fund[$fid]['re'] ?? 0.0) + (float)$x['need'];
+        $fund[$fid]['items'][] = [(string)$x['stock_name'], '재진입 1차', (float)$x['need'], $x['fund_ok'] !== false];
     }
+    $nB = $nR = $lack = 0.0;
+    $nBc = $nRc = $lackN = 0;
+    foreach ($fund as $fid => &$fd) {
+        $fd += ['b' => 0.0, 're' => 0.0, 'items' => []];
+        $cv = max(0.0, (float)($stats[$fid]['cash'] ?? 0));
+        $fd['lack']  = max(0.0, $fd['b'] + $fd['re'] - $cv);   // 다 하려면 모자라는 돈
+        $fd['lackB'] = max(0.0, $fd['b'] - $cv);                // 매수·잔여만 해도 모자라는 돈
+        $nB += $fd['b'];
+        $nR += $fd['re'];
+        foreach ($fd['items'] as $it) { if ($it[1] === '재진입 1차') $nRc++; else $nBc++; }
+        if ($fd['lack'] > 0.5) { $lack += $fd['lack']; $lackN++; }
+    }
+    unset($fd);
+    $need = $nB + $nR;
 
     $any = ($act || $reReady);
+
+    /* 오늘 등락 요약(2026-10-16 사용자 「신호 칸에 당일 등락률 · 트리맵 아래 띠는 삭제」) — 띠가 하던 요약을 머리줄로 옮겼다.
+     * 머리줄이라 신호가 없는 날(표가 접힌 날)에도 남는다. 종목 단위(여러 포트폴리오를 합친 $weights) · 시세는 all_stock_info(띠와 같은 값).
+     * 보유분 = 지금 평가금액이 전일 종가 대비 움직인 폭(금액 가중) · 어제 평가 = 지금 ÷ (1 + 등락률) · ★오늘 산 수량도 하루치로 센다(근사).
+     * 시세가 없는 종목(all_stock_info 밖)은 빼고 센다 — 0% 로 넣으면 「안 움직였다」는 거짓이 된다. */
+    $dUp = $dDn = $dFl = $dMiss = 0;
+    $dChg = $dPrev = 0.0;
+    $dAt = '';
+    foreach ($weights as $cd => $amt) {
+        if ((float)$amt <= 0) continue;
+        $q = $quotes[(string)$cd] ?? null;
+        if ($q === null || $q['rate'] <= -1) { $dMiss++; continue; }
+        if (abs($q['rate']) < 0.00005) $dFl++; elseif ($q['rate'] > 0) $dUp++; else $dDn++;
+        $pv     = (float)$amt / (1 + $q['rate']);
+        $dChg  += (float)$amt - $pv;
+        $dPrev += $pv;
+        if ($q['at'] > $dAt) $dAt = $q['at'];
+    }
+    $dTs    = strtotime($dAt) ?: time();
+    $dToday = date('Y-m-d', $dTs) === date('Y-m-d');
+    $dLab   = $dToday ? '오늘' : date('n/j', $dTs);   // 휴장일·개장 전이면 그 날짜(오늘 값이 아니다)
+    $dayHtml = '';
+    if ($dPrev > 0) {
+        $dTot = $dChg / $dPrev;
+        $dayHtml = '<span class="sig-day" title="' . pf_h(
+                       '보유 종목 ' . ($dUp + $dDn + $dFl) . '개의 ' . ($dToday ? '오늘' : date('n월 j일', $dTs)) . ' 등락 (' . date('H:i', $dTs) . ' 기준 · 화면을 연 순간의 값)' . "\n"
+                     . '보유분 = 지금 평가금액이 전일 종가 대비 움직인 폭(금액 가중) — 오늘 산 수량도 하루치로 센다(근사)'
+                     . ($dMiss > 0 ? "\n시세가 없어 뺀 종목 " . $dMiss . '개' : '')) . '">'
+                 . '<b>' . $dLab . '</b><span class="up">▲' . $dUp . '</span><span class="down">▼' . $dDn . '</span>'
+                 . ($dFl ? '<span class="flat">─' . $dFl . '</span>' : '')
+                 . ' · 보유분 <em class="' . pf_updown($dTot) . '">' . pf_h(pf_pct($dTot)) . '</em>'
+                 . '<small>' . ($dChg > 0 ? '+' : '') . pf_n(round($dChg)) . '원</small></span>';
+    }
+
     echo '<section class="sig-strip' . ($any ? '' : ' quiet') . '">';
     echo '<div class="sig-hd"><h2>오늘의 신호</h2>';
     if ($any) {
@@ -2803,13 +3254,20 @@ function pf_render_signal_strip(array $sigs, array $stats, array $re = [], int $
             echo '<span class="sig-pill k-re" title="청산한 종목을 되살 때가 됐는지 — 대기 ' . $wait
                . '일 경과 + 청산가보다 충분히 낮음">재진입 ' . count($reReady) . '건</span>';
         }
+        echo $dayHtml;
+        /* 필요 자금 요약 한 줄(2026-10-26 — 옛 「매수 소요 N원 · 예수금 부족 N건」). 포트폴리오별은 예수금 줄의 칩이 말한다 */
         if ($need > 0) {
-            echo '<span class="sig-cash">매수 소요 <b>' . pf_n(round($need)) . '</b>';
-            if ($short > 0) echo ' · <b class="short">예수금 부족 ' . $short . '건</b>';
-            echo '</span>';
+            echo '<span class="sig-cash" title="' . pf_h(
+                     '필요 = 오늘 매수·잔여매수 ' . $nBc . '건 ' . pf_n(round($nB)) . '원' . ($nRc ? ' + 재진입 1차 ' . $nRc . '건 ' . pf_n(round($nR)) . '원' : '') . "\n"
+                   . ($lack > 0.5 ? '부족 = 포트폴리오마다 (필요 − 예수금)의 합 ' . pf_n(round($lack)) . '원 — 한 곳에 남는 예수금으로 다른 곳을 못 메운다' . "\n" : '')
+                   . '오늘 매도 대금은 넣지 않았다 · 포트폴리오별은 예수금 줄 칩에 마우스') . '">'
+               . '필요 <b>' . $man($need) . '</b><small>매수·잔여 ' . $man($nB) . ($nR > 0 ? ' · 재진입 ' . $man($nR) : '') . '</small>'
+               . ($lack > 0.5 ? ' · <b class="short">부족 ' . $man($lack) . '</b><small>' . $lackN . '곳</small>'
+                              : ' · <span class="enough">예수금 안에서 됨</span>')
+               . '</span>';
         }
     } else {
-        echo '<span class="sig-none">지금 실행할 매수·매도 신호가 없습니다.</span>';
+        echo '<span class="sig-none">지금 실행할 매수·매도 신호가 없습니다.</span>' . $dayHtml;
     }
     echo '</div>';
 
@@ -2865,8 +3323,13 @@ function pf_render_signal_strip(array $sigs, array $stats, array $re = [], int $
             if (!$rows[$key]['mkt'] && !empty($g['mkt'])) $rows[$key]['mkt'] = $g['mkt'];
             $fid = (int)$g['p']['portfolio_id'];
             $cols[$fid] = (string)$g['fname'];
-            $rows[$key]['held'][$fid] = ['qty' => $q, 'pid' => (int)$g['pid']];
+            $rows[$key]['held'][$fid] = ['qty' => $q, 'pid' => (int)$g['pid'],
+                                         'eval' => (float)($g['c']['eval_amount'] ?? 0),   // 비중 카드의 포트폴리오별 나눔(2026-10-20)
+                                         'rate' => pf_eval_rate($g['c']['eval_pl'] ?? null, (float)($g['c']['cost_amount'] ?? 0))];
             $rows[$key]['heldTot']    = ($rows[$key]['heldTot'] ?? 0) + $q;
+            // 합계 칸의 수익률(전 포트폴리오 평가손익 ÷ 원가 합 — 칸마다의 수익률과 같은 정의 pf_eval_rate)
+            $rows[$key]['plSum']   = ($rows[$key]['plSum'] ?? 0.0) + (float)($g['c']['eval_pl'] ?? 0);
+            $rows[$key]['costSum'] = ($rows[$key]['costSum'] ?? 0.0) + (float)($g['c']['cost_amount'] ?? 0);
         }
 
         /* 줄의 순서 = 보유 비중 큰 순(같은 날 사용자) — 옆의 「종목별」 트리맵과 같은 순서로 읽힌다.
@@ -2882,59 +3345,264 @@ function pf_render_signal_strip(array $sigs, array $stats, array $re = [], int $
         foreach (array_keys($stats) as $fid) if (isset($cols[(int)$fid])) $ord[(int)$fid] = $cols[(int)$fid];
         $cols = $ord + $cols;
 
-        /* 포트폴리오 칸은 «같은 폭»이다(같은 날 사용자) — 칸이 100% 상자라 폭이 다르면 채운 넓이를 칸끼리 견줄 수 없다.
-         * table-layout:fixed 라 폭은 colgroup 이 정한다 — 포트폴리오·비중·합계 칸은 고정 폭, 종목 칸이 남는 폭을 다 갖는다. */
-        echo '<div class="tbl-scroll"><table class="pf sig-mx"><colgroup><col><col class="mx-cw">' . str_repeat('<col class="mx-cf">', count($cols))
-           . '<col class="mx-c9"></colgroup><thead><tr><th>종목</th>'
-           . '<th class="num" title="보유 비중 — 그 종목의 평가금액(전 포트폴리오 합) ÷ 추정자산 · 왼쪽 「종목별」 트리맵과 같은 값 · 막대: 회색 = 남는 보유 · 초록 = 오늘 팔 몫 · 주황/빨강 = 오늘 살 몫 (전체 = 지금 보유 + 오늘 살 금액)">비중</th>';
+        /* 예수금 줄(2026-10-14 사용자 — 「여기에 예수금도 · 주식 수량 대신 예수금 비중」). 종목 줄과 같은 표에 한 줄로 선다:
+         * 칸 = 그 포트폴리오의 예수금 ÷ 추정자산(아래 포트폴리오 표의 「예수금 비중」과 같은 값) · 비중 칸 = 전체 예수금 ÷ 추정자산(트리맵의 예수금 칸).
+         * 오늘 매수 소요(신호 + 재진입 1차)는 그 예수금에서 나가므로 주황으로 갈라 보인다. ★읽기만 한다 — 판정·예수금 게이트는 pf_signal_list() 의 것이다.
+         * 예수금만 있고 종목이 없는 포트폴리오도 칸으로 선다(빼면 줄의 합이 전체 예수금과 안 맞는다). */
+        $needBy = array_map(fn(array $f) => $f['b'] + $f['re'], $fund);   // fid => 오늘 필요(매수·잔여 + 재진입 1차) — 위 머리줄에서 묶은 $fund
+        foreach ($stats as $fid => $st) {
+            if (!isset($cols[(int)$fid]) && (float)($st['cash'] ?? 0) > 0) $cols[(int)$fid] = (string)($st['name'] ?? '');
+        }
+
+        /* ── 표 그리기 — 리디자인 시안(signal_table_redesign.html v2 · 2026-10-15 사용자)의 마크업.
+         *    ★데이터는 위에서 묶은 그대로다($rows·$cols·$needBy·$weights) — 바뀐 것은 모양뿐이다.
+         *    칸 = .c 한 장: 보유만 .c(+up/dn) · 매수/잔여매수 .c.buy · 매도 .c.sell · 재진입 .c.re(회색 점선) · 빈 칸 .empty.
+         *    up/dn = 그 포지션의 평가수익률(평균단가 대비 · pf_eval_rate — 트리맵·포지션 상세와 같은 값)의 부호 · .pl 에 숫자.
+         *    ⊕같은 날 사용자(「높이가 너무 큼」) — 칸은 «한 줄»이다: 「보유 N · 수익률 · ＋N주」. 시안의 .seg 막대는 걷었다(사고 난 뒤 주수는 툴팁에 남는다). */
+        $pl  = fn(?float $v): string => $v === null ? '' : (($v > 0 ? '+' : ($v < 0 ? '−' : '')) . number_format(abs($v) * 100, 1) . '%');
+        $ud  = fn(?float $v): string => ($v === null || abs($v) < 0.0005) ? '' : ($v > 0 ? ' up' : ' dn');
+        /* 종목 칸의 배지 → 시안의 .tag (기존 판정 그대로 · 모양만): 근거 강함/매수 쪽 = ok · 주의·위험·매도 쪽 = warn · 당일 급등락 = solid */
+        $tagTone = ['buyish' => ' ok', 'sellish' => ' warn', 'risk' => ' warn', 'warn' => ' warn', 'info' => '', 'down' => ' solid', 'up' => ' solid u'];
+        $tags = function (array $r) use ($tagTone, $wait): string {
+            $h = '';
+            if (($r['conf']['label'] ?? '') !== '') {
+                $h .= '<span class="tag' . ($r['conf']['level'] === 'strong' ? ' ok' : ' warn') . '" title="' . pf_h($r['conf']['why']) . '">'
+                    . pf_h($r['conf']['label']) . '</span>';
+            }
+            foreach ($r['mkt'] ?: [] as $m) {
+                /* 추세 배지(역배열·정배열)는 이 표에서 뺀다(2026-10-16) — 거의 모든 줄에 붙어 정보가 없었고(하락장의 보유 종목은 다 역배열이다),
+                 * 「고점」 열이 하락의 깊이를 숫자로 말한다. 이례만 남는다(급등락·거래량·RSI·52주 끝·이격·연속). 다른 화면의 배지는 그대로다. */
+                if (in_array($m['key'] ?? '', ['downtrend', 'uptrend'], true)) continue;
+                $h .= '<span class="tag' . ($tagTone[$m['tone']] ?? '') . '" title="' . pf_h($m['why']) . '">' . pf_h($m['label']) . '</span>';
+            }
+            if (!$r['kinds'] && $r['re']) $h .= '<span class="tag ok">대기 ' . $wait . '일 경과 · 값도 내려왔음</span>';
+            return $h !== '' ? '<span class="tags">' . $h . '</span>' : '';
+        };
+
+        /* 표 폭 = 종목 280 + 비중 80 + 포트폴리오 180 × N + 합계 120 (CSS 의 col 폭과 같은 값) — 트리맵 옆에 설 때 신호 칸이 딱 이만큼 차지한다.
+         * 포트폴리오 180 = 가장 긴 칸 「보유 1,326 −32.6% +130주」가 한 줄에 들어가는 폭(160 에서 잘렸다) */
+        /* 열 = 종목 200 · 등락률 72 · 수익률 72 · 비중 72 · 포트폴리오 140 × N · 합계 100 │(세로선) 종목 사실: 실적 200 · PER·PBR 90 · 고점 90 · 리서치 100
+         * (2026-10-16 현황 페이지를 2200 → 1900 으로 줄이며 다시 나눴다 — 5곳이면 1,696 · 1900 페이지의 표 자리 ≈ 1,840 에 여유 있게 든다)
+         * (CSS 의 col 폭과 같은 값 · 표의 최소 폭 — 넓은 화면에선 칸이 비례로 넓어진다). 2026-10-16 «종목 사실» 넷을 더하며 종목 280 → 220(추세 배지를 뺐다) ·
+         * 포트폴리오 130 → 140(칸에 «몇 차» 를 붙였다). 사실 넷은 처음엔 종목 바로 옆이었다가 같은 날 사용자 지시로 합계 오른쪽 끝으로 갔다. */
+        $sgtW = 200 + 72 + 150 + 140 * count($cols) + 100 + 200 + 90 + 90 + 170;   // 리서치 170(2026-10-19 두 칸 칩)   // 2026-10-16 페이지 1800 에 맞춰 다시 나눔(사용자 「한눈에 안 들어온다」) — 5곳이면 1,696
+        /* 「오늘」 열(2026-10-16 사용자) — 그 종목의 당일 등락률(전일 종가 대비 · all_stock_info · 왼쪽에 있던 「오늘」 띠와 같은 값).
+         * ★글자색만 쓴다 — 칸의 칩 바탕(빨강·파랑)은 «평가수익률»이라 여기까지 칠하면 같은 색이 두 뜻이 된다(띠의 규칙 그대로). */
+        $fd = pf_next_filing_deadline();
+        /* 종목 사실 네 열은 합계 «오른쪽 끝»에 둔다(2026-10-16 사용자 「빨간 부분을 합계 우측으로」) — 표의 앞쪽은 오늘 할 일(칸·주수)이 차지하고,
+         * 사실은 그 신호를 따를지 멈출지 볼 때 눈을 옮겨 읽는 곁 정보다. 사실 열 앞에 세로선을 그어 «내 포지션»과 가른다. */
+        $factTh = '<th class="fe" title="' . pf_h('실적 — 최신 분기 SUE(이익 서프라이즈 · ±1 밖이면 색 칩) · 영업이익 4분기 합(TTM)의 연속 증감(N분기↑↓)과 넉 분기 전 대비'
+                 . "\n" . '이익이 꺾이는 중인 종목에 물을 타고 있는지 보는 칸이다(판정이 아니라 사실)'
+                 . ($fd['date'] !== '' ? "\n" . '다음 정기공시 법정 기한: ' . $fd['label'] . '보고서 ' . date('n/j', strtotime($fd['date'])) . '(분기·반기 45일 · 사업 90일) — 회사별 잠정실적은 그보다 이를 수 있다(발표일은 수집하지 않는다)' : '')) . '">실적'
+                 . ($fd['date'] !== '' ? '<small>' . pf_h($fd['label']) . ' 마감 D-' . (int)$fd['days'] . '</small>' : '') . '</th>'
+           . '<th class="fv" title="PER · PBR — 지금 가격 기준(순이익 4분기 합 · 최신 분기 자본총계 · 상장주식수) · 종목 상세 차수 사다리·재무분석 «현재 PER»과 같은 정의 · 적자면 「적자」">PER · PBR</th>'
+           . '<th class="fh" title="52주 종가 고점 대비 · 60거래일 등락 — 얼마나 내려와 있나">고점 · 60일</th>'
+           . '<th class="fr" title="내 리서치 — 최신 버전의 의견·날짜(누르면 리서치 화면) · 둘째 줄 = 리서치가 적은 매수 구간에서 지금 자리(1차 안·1차 위·1·2차 사이·2차 아래 — 신호가 아니다 · 숫자는 툴팁) · 그 뒤에 새 정기공시가 나왔으면 「이후 실적」">리서치</th>';
+        echo '<div class="tbl-scroll" style="--sgt-w:' . $sgtW . 'px"><table class="sgt"><colgroup><col class="sgt-n"><col class="sgt-d"><col class="sgt-w">'
+           . str_repeat('<col class="sgt-f">', count($cols))
+           . '<col class="sgt-t"><col class="sgt-e"><col class="sgt-v"><col class="sgt-h"><col class="sgt-r"></colgroup><thead><tr><th>종목</th>'
+           . '<th class="d" title="' . pf_h(($dToday ? '오늘' : date('n월 j일', $dTs)) . ' 등락률 — 전일 종가 대비 · all_stock_info 스냅샷 ' . date('H:i', $dTs) . ' 기준(화면을 연 순간의 값 · 자동 갱신 없음 — 지켜보는 자리는 단타)') . '">'
+           . '등락률' . ($dToday ? '' : '<small>' . date('n/j', $dTs) . '</small>') . '</th>'   // 머리글 「오늘」 → 「등락률」(2026-10-16 사용자) · 오늘 값이 아니면 날짜를 붙인다
+           . '<th class="pw" title="보유 수익률 | 비중 — 왼쪽 = 전 포트폴리오 평가손익 합 ÷ 원가 합(평균단가 대비 · 바탕색 = 포트폴리오 칸과 같은 규칙) · 오른쪽 = 평가금액 합 ÷ 추정자산 · 아래 막대: 회색 = 남는 보유 · 초록 = 오늘 팔 몫 · 주황 = 오늘 살 몫 · 마우스를 올리면 포트폴리오별로">수익률 · 비중</th>';
         foreach ($cols as $fid => $nm) echo '<th><a href="/stock/index.php?id=' . (int)$fid . '">' . pf_h($nm) . '</a></th>';
-        echo '<th class="num" title="전 포트폴리오 합 — 윗줄 = 살 주수(＋) · 팔 주수(−) · 아랫줄 = 지금 보유 주수 · 매수 소요 금액은 칸에 마우스를 올리면">합계</th></tr></thead><tbody>';
+        echo '<th style="text-align:right;padding-right:14px" title="전 포트폴리오 합 — 살 주수(＋) · 팔 주수(−) · 지금 보유 주수 · 매수 소요 금액은 칸에 마우스를 올리면 (보유 수익률은 「수익률 · 비중」 칩)">합계</th>' . $factTh . '</tr></thead><tbody>';
+
+        /* ── 예수금 줄 — 보유 종목과 재진입 대기 사이(2026-10-16 · 전엔 맨 위). 칸 = 그 포트폴리오의 예수금 ÷ 추정자산 · 막대(10칸 = 추정자산): 파랑 = 오늘 사고도 남는 예수금 · 브론즈 = 오늘 매수에 쓸 몫 · 빈 칸 = 주식 */
+        /* ⊕자리 = 보유 종목과 재진입 대기 종목 «사이»(2026-10-16 사용자 「예수금 위치를 보유종목과 대기종목 사이로」) — 그래서 바로 찍지 않고
+         * 문자열로 받아 두었다가(ob) 아래 줄 그리기에서 «보유가 없는 첫 줄» 앞에 끼운다. 보유가 없는 줄이 없으면 맨 끝. */
+        /* 「비중」 칸의 카드형 툴팁(2026-10-20 사용자 「텍스트 창 말고 칩으로」 — 리서치 칩과 같은 .pf-tip 틀 · 아래 스크립트가 띄운다).
+         * 머리 = 종목 · 비중 % · 몸 = 보유 평가 · 오늘 살·팔 금액과 매매 뒤 비중 · 포트폴리오별 나눔(그 종목 평가 중 몫 · 수익률) · 꼬리 = 분모 */
+        $wCard = function (array $r, float $wv, float $bA, float $sA, ?float $trH = null) use ($cols, $wDen): string {
+            $pc = fn(float $v) => number_format($v / $wDen * 100, 1) . '%';
+            $h  = '<div class="tt-h"><b>' . pf_h($r['name']) . '</b><i>보유 비중</i><em>' . $pc($wv) . '<small>추정자산 대비</small></em></div>'
+                . '<dl><dt>보유 평가</dt><dd>' . pf_n(round($wv)) . '원</dd>';
+            if ($trH !== null) $h .= '<dt>평가손익</dt><dd class="' . ($trH >= 0 ? 'tt-u' : 'tt-d') . '">' . ((float)$r['plSum'] >= 0 ? '+' : '−') . pf_n(abs(round((float)$r['plSum']))) . '원'
+                                  . '<small>' . pf_h(pf_pct($trH)) . '</small></dd>'
+                                  . '<dt>보유</dt><dd>' . pf_n($r['heldTot']) . '주<small>원가 ' . pf_n(round((float)$r['costSum'])) . '원</small></dd>';
+            if ($bA > 0) $h .= '<dt>오늘 매수</dt><dd class="tt-u">+' . pf_n(round($bA)) . '원</dd>';
+            if ($sA > 0) $h .= '<dt>오늘 매도</dt><dd class="tt-s">−' . pf_n(round($sA)) . '원</dd>';
+            if ($bA > 0 || $sA > 0) $h .= '<dt>매매 뒤</dt><dd>' . pf_n(round($wv - $sA + $bA)) . '원<small>' . $pc($wv - $sA + $bA) . '</small></dd>';
+            $h .= '</dl>';
+            $hs = array_filter($r['held'] ?? [], fn($x) => ($x['eval'] ?? 0) > 0);
+            if ($hs) {
+                uasort($hs, fn($a, $b) => $b['eval'] <=> $a['eval']);
+                $h .= '<table><tr><th>포트폴리오</th><th>평가</th><th>몫</th><th>수익률</th></tr>';
+                foreach ($hs as $fid => $x) {
+                    $sh = $x['eval'] / $wv;
+                    $rt = $x['rate'];
+                    $h .= '<tr><td>' . pf_h($cols[$fid] ?? '') . '</td><td>' . pf_n(round($x['eval'])) . '</td>'
+                        . '<td><span class="tt-bar"><i style="width:' . round($sh * 100, 1) . '%"></i></span>' . round($sh * 100) . '%</td>'
+                        . '<td' . ($rt === null ? '>·' : ' class="' . ($rt >= 0 ? 'tt-u' : 'tt-d') . '">' . pf_h(pf_pct($rt))) . '</td></tr>';
+                }
+                $h .= '</table>';
+            }
+            return $h . '<p class="tt-f">분모 = 추정자산 ' . pf_n(round($wDen)) . '원 (전 포트폴리오 예수금 + 평가)</p>';
+        };
+
+        $cashRow = '';
+        if ($wDen > 0) {
+            ob_start();
+            $cTot = 0.0; $nTot = 0.0;
+            foreach ($stats as $fid => $st) {
+                $cv = max(0.0, (float)($st['cash'] ?? 0));
+                $cTot += $cv;
+                $nTot += min($cv, (float)($needBy[(int)$fid] ?? 0));
+            }
+            $nAll = array_sum($needBy);
+            echo '<tr class="cash"><td><span class="name">예수금</span><span class="lbl">칸 = 예수금 | 부족·남음</span></td><td class="d"></td>';
+            $cw = $cTot / $wDen * 100;
+            // 카드형 툴팁(종목 줄의 비중 카드와 같은 틀) — 전체 예수금 · 필요(매수·잔여 / 재진입) · 부족 · 포트폴리오별. 「수익률 · 비중」 칩과 합계 칸이 함께 쓴다
+            $tip = '<div class="tt-h"><b>예수금</b><i>비중</i><em>' . number_format($cw, 1) . '%<small>추정자산 대비</small></em></div>'
+                 . '<dl><dt>예수금</dt><dd>' . pf_n(round($cTot)) . '원</dd>'
+                 . ($nB > 0 ? '<dt>매수·잔여 ' . $nBc . '건</dt><dd class="tt-o">' . pf_n(round($nB)) . '원</dd>' : '')
+                 . ($nR > 0 ? '<dt>재진입 ' . $nRc . '건</dt><dd class="tt-r">' . pf_n(round($nR)) . '원</dd>' : '')
+                 . ($nAll > 0 ? '<dt>필요</dt><dd>' . pf_n(round($nAll)) . '원</dd>'
+                              . ($lack > 0.5 ? '<dt>부족</dt><dd class="tt-d">' . pf_n(round($lack)) . '원<small>' . $lackN . '곳 합</small></dd>' : '')
+                              . '<dt>사고 나면</dt><dd>' . pf_n(round($cTot - $nTot)) . '원<small>' . number_format(($cTot - $nTot) / $wDen * 100, 1) . '%</small></dd>' : '')
+                 . '</dl><table><tr><th>포트폴리오</th><th>예수금</th><th>필요</th><th>부족·남음</th></tr>';
+            foreach ($cols as $fid => $nm) {
+                if (!isset($stats[$fid])) continue;
+                $cv = (float)($stats[$fid]['cash'] ?? 0);
+                $nd = (float)($needBy[$fid] ?? 0);
+                $lk = (float)($fund[$fid]['lack'] ?? 0);
+                $tip .= '<tr><td>' . pf_h($nm) . '</td><td' . ($cv < 0 ? ' class="tt-d"' : '') . '>' . pf_n(round($cv)) . '</td>'
+                      . '<td>' . ($nd > 0 ? pf_n(round($nd)) : '·') . '</td>'
+                      . ($nd <= 0 ? '<td>·</td>' : ($lk > 0.5 ? '<td class="tt-d">−' . pf_n(round($lk)) . '</td>' : '<td>+' . pf_n(round(max(0.0, $cv) - $nd)) . '</td>')) . '</tr>';
+            }
+            $tip .= '</table><p class="tt-f">분모 = 추정자산 ' . pf_n(round($wDen)) . '원 · 부족은 포트폴리오마다 센 것의 합(한 곳의 남는 예수금으로 다른 곳을 못 메운다) · 오늘 매도 대금은 넣지 않았다</p>';
+            /* 포트폴리오 칸의 카드 — 그 포트폴리오의 예수금 · 매수·잔여 · 재진입 · 필요 · 부족(또는 남음) · 갈림(재진입을 미루면 되나) · 건별 금액 */
+            $fundCard = function (string $nm, float $cash, float $as, array $fd): string {
+                $cv  = max(0.0, $cash);
+                $all = $fd['b'] + $fd['re'];
+                $h = '<div class="tt-h"><b>' . pf_h($nm) . '</b><i>예수금</i><em>' . pf_n(round($cash)) . '원'
+                   . '<small>추정자산의 ' . number_format($cash / $as * 100, 1) . '%</small></em></div>';
+                if ($all <= 0) return $h . '<p class="tt-f">오늘 이 포트폴리오에서 살 것이 없다</p>';
+                $h .= '<dl>'
+                    . ($fd['b']  > 0 ? '<dt>매수·잔여</dt><dd class="tt-o">' . pf_n(round($fd['b'])) . '원</dd>' : '')
+                    . ($fd['re'] > 0 ? '<dt>재진입 1차</dt><dd class="tt-r">' . pf_n(round($fd['re'])) . '원</dd>' : '')
+                    . '<dt>필요</dt><dd>' . pf_n(round($all)) . '원</dd>'
+                    . ($fd['lack'] > 0.5 ? '<dt>부족</dt><dd class="tt-d">' . pf_n(round($fd['lack'])) . '원</dd>'
+                                         : '<dt>사고 나면</dt><dd>' . pf_n(round($cv - $all)) . '원 남음</dd>');
+                // 갈림 — 재진입을 미루면 되나 · 매수·잔여만으로도 모자라나(재진입이 있을 때만 뜻이 있다)
+                if ($fd['lack'] > 0.5 && $fd['re'] > 0) {
+                    $h .= $fd['lackB'] > 0.5 ? '<dt>재진입 빼도</dt><dd class="tt-d">' . pf_n(round($fd['lackB'])) . '원 부족</dd>'
+                                             : '<dt>재진입 빼면</dt><dd>' . pf_n(round($cv - $fd['b'])) . '원 남음</dd>';
+                }
+                $h .= '</dl><table><tr><th>종목</th><th>신호</th><th>금액</th></tr>';
+                foreach ($fd['items'] as [$n, $k, $a, $ok]) {
+                    $h .= '<tr><td>' . pf_h($n) . '</td><td>' . pf_h($k) . '</td><td' . ($ok ? '>' : ' class="tt-d">✕ ') . pf_n(round($a)) . '</td></tr>';
+                }
+                return $h . '</table><p class="tt-f">순서 = 예수금 게이트(매수·잔여가 먼저 · 재진입은 남은 돈) · ✕ = 예수금이 모자라는 건 · 오늘 매도 대금은 넣지 않았다</p>';
+            };
+            // 수익률·비중 칩의 예수금판 — 왼쪽은 수익률이 없으니 「예수금」 이름표(회색) · 막대 = 사고도 남는 몫(회청) + 오늘 쓸 몫
+            echo '<td class="w"><span class="wc cash" data-tip="' . pf_h($tip) . '"><span class="r">예수금</span><span class="v"><b>' . number_format($cw, 1) . '%</b><i>'
+               . '<span style="width:' . round(max(0.0, ($cTot - $nTot) / max(1.0, $cTot) * 100), 2) . '%;background:#8fa3bb"></span>'
+               . ($nTot > 0 ? '<span class="p" style="width:' . round($nTot / max(1.0, $cTot) * 100, 2) . '%"></span>' : '') . '</i></span></span></td>';
+            foreach ($cols as $fid => $nm) {
+                $st = $stats[$fid] ?? null;
+                $as = (float)($st['asset'] ?? 0);
+                if (!$st || $as <= 0) { echo '<td><span class="empty">·</span></td>'; continue; }
+                /* 자금 칩(2026-10-26 사용자 — 「필요한 자금이 얼마인지 · 예수금에서 얼마가 부족한지 · 간단하게」 · 줄을 늘리지 않는 안을 골랐다).
+                 * [왼쪽 예수금 | 오른쪽 결론] + 아래 막대. 오른쪽: 매수·잔여부터 모자람 = 파랑 바탕 「부족」 · 재진입만 모자람 = 보라 「부족」(재진입을 미루면 된다) ·
+                 * 다 되면 회색 「남음」 · 오늘 쓸 돈이 없으면 「·」. 막대: 길이 = max(예수금, 필요) · 주황 = 매수·잔여 · 보라 = 재진입 ·
+                 * 세로선 = 예수금이 닿는 곳(그 오른쪽은 흐리게 — 돈이 없는 몫) · 숫자는 마우스 카드($fundCard). 예수금 비중(%)은 카드와 아래 포트폴리오 표에 있다. */
+                $cash = (float)$st['cash'];
+                $cv   = max(0.0, $cash);
+                $fd   = $fund[$fid] ?? ['b' => 0.0, 're' => 0.0, 'items' => [], 'lack' => 0.0, 'lackB' => 0.0];
+                $all  = $fd['b'] + $fd['re'];
+                // ★상태 클래스는 fz- 접두어 — 맨 이름 .ok 는 이 파일의 «알림 상자»(바탕·padding 9px·margin-bottom 12px)라 칩이 깨졌다(2026-10-26 헤드리스)
+                if ($all <= 0)              { $fc = ' fz-none'; $sTx = '·'; }
+                elseif ($fd['lack'] <= 0.5) { $fc = ' fz-ok';   $sTx = '남음 ' . $man($cv - $all); }
+                elseif ($fd['lackB'] > 0.5) { $fc = ' fz-lack'; $sTx = '부족 ' . $man($fd['lack']); }
+                else                        { $fc = ' fz-re';   $sTx = '부족 ' . $man($fd['lack']); }
+                $bar = '';
+                if ($all > 0) {
+                    $base = max($cv, $all);
+                    $bar  = '<i class="fb">'
+                          . ($fd['b']  > 0 ? '<span class="b" style="width:' . round($fd['b'] / $base * 100, 2) . '%"></span>' : '')
+                          . ($fd['re'] > 0 ? '<span class="r" style="width:' . round($fd['re'] / $base * 100, 2) . '%"></span>' : '')
+                          . ($all > $cv + 0.5 ? '<em style="left:' . round($cv / $base * 100, 2) . '%"></em>' : '')
+                          . '</i>';
+                }
+                echo '<td><a class="fc' . $fc . '" href="/stock/index.php?id=' . (int)$fid . '" data-tip="' . pf_h($fundCard($nm, $cash, $as, $fd)) . '">'
+                   . '<span class="k"' . ($cash < 0 ? ' style="color:var(--dn)"' : '') . '>' . $man($cash) . '</span>'
+                   . '<span class="s">' . pf_h($sTx) . '</span>' . $bar . '</a></td>';
+            }
+            // 합계 = 전체 예수금 / 부족(포트폴리오마다 센 것의 합) 또는 남음 · 마우스 = 「수익률 · 비중」 예수금 칩과 같은 카드
+            echo '<td class="tot" data-tip="' . pf_h($tip) . '">'
+               . '<b style="color:var(--ink)">' . $man($cTot) . '</b>'
+               . ($nAll > 0 ? ($lack > 0.5 ? '<span class="lk">부족 ' . $man($lack) . '</span>' : '<span>남음 ' . $man($cTot - $nTot) . '</span>') : '') . '</td>'
+               . '<td class="fe"></td><td class="fv"></td><td class="fh"></td><td class="fr"></td></tr>';   // 종목 사실 네 칸(예수금 줄은 비운다)
+            $cashRow = (string)ob_get_clean();
+        }
 
         foreach ($rows as $r) {
-            echo '<tr><td class="stk">'
-               . ($r['code'] !== '' ? '<a href="/stock/index.php?mode=short&code=' . pf_h($r['code']) . '" title="' . pf_h($r['code']) . ' · 단타 화면에서 차트 보기">' . pf_h($r['name']) . '</a>'
-                                     . '<span class="code">' . pf_h($r['code']) . '</span>'
-                                    : '<b>' . pf_h($r['name']) . '</b>');
+            // 예수금 줄 — 보유가 없는 첫 줄(재진입 후보 등 · 비중 0 이라 정렬상 맨 뒤) 앞에 한 번
+            if ($cashRow !== '' && (float)($weights[$r['code']] ?? 0) <= 0) { echo $cashRow; $cashRow = ''; }
+            echo '<tr><td>'
+               . ($r['code'] !== '' ? '<a class="name" href="/stock/index.php?mode=short&code=' . pf_h($r['code']) . '" title="' . pf_h($r['code']) . ' · 단타 화면에서 차트 보기">' . pf_h($r['name']) . '</a>'
+                                    : '<span class="name">' . pf_h($r['name']) . '</span>')
+               . $tags($r) . '</td>';
 
-            /* 시장 — 종목 «밑»에 적는다(같은 날 사용자 — 따로 열로 두니 표가 옆으로 너무 넓어 눈에 안 들어왔다).
-             * 신뢰도(근거 강함 / 주의) 먼저, 그 옆에 근거가 된 배지. 재진입뿐인 종목은 그 근거를 적는다. */
-            echo '<div class="mx-m">';
-            if (($r['conf']['label'] ?? '') !== '') {
-                echo '<span class="sig-conf lv-' . pf_h($r['conf']['level']) . '" title="' . pf_h($r['conf']['why']) . '">'
-                   . ($r['conf']['level'] === 'strong' ? '◎ ' : '△ ') . pf_h($r['conf']['label']) . '</span>';
+            // 오늘 등락률 — 시세가 없으면(all_stock_info 밖 · ETF 등) 「·」(0% 로 그리면 「안 움직였다」는 거짓이 된다)
+            $tq = $r['code'] !== '' ? ($quotes[$r['code']] ?? null) : null;
+            if ($tq !== null) {
+                $tFl = abs($tq['rate']) < 0.00005;
+                $tTs = strtotime($tq['at']) ?: time();
+                echo '<td class="d" title="' . pf_h('현재가 ' . pf_n($tq['price']) . '원 · 전일 종가 대비 ' . pf_pct($tq['rate']) . ' · ' . date('n/j H:i', $tTs) . ' 기준') . '">'
+                   . '<b class="' . ($tFl ? 'flat' : pf_updown($tq['rate'])) . '">' . pf_h($tFl ? '0.00%' : pf_pct($tq['rate'])) . '</b></td>';
+            } else {
+                echo '<td class="d"><span class="empty">·</span></td>';
             }
-            if ($r['mkt']) echo pf_mkt_badges($r['mkt']);
-            if (!$r['kinds'] && $r['re']) echo '<span class="sig-conf lv-strong">◎ 대기 ' . $wait . '일 경과 · 값도 내려왔음</span>';
-            echo '</div></td>';
-            /* 보유 비중 — 숫자는 트리맵(종목별)과 같은 분모(추정자산). 보유가 없는 줄(재진입 후보)은 빈 칸.
-             * 막대는 세 토막이다(같은 날 사용자): 회색 = 팔고도 남는 보유 · 초록 = 오늘 팔 몫 · 주황/빨강 = 오늘 살 몫.
-             * 전체 = 지금 보유 + 오늘 살 금액. 살 것만 있으면 「보유 + 매수 = 100%」, 팔 것만 있으면 「지금 보유 = 100%」가 된다
-             * (포트폴리오 칸의 열 칸과 같은 뜻). 아무 신호도 없으면 전부 회색. */
-            $wv = (float)($weights[$r['code']] ?? 0);
+            /* 수익률 · 비중 칩(2026-10-20 사용자 「수익률과 비중을 합쳐서 칩으로」 — 10-16 의 두 열 「수익률」·「비중」을 한 칸으로).
+             * [왼쪽 = 보유 수익률 · 바탕 = 포트폴리오 칸과 같은 함수 pf_tm_rate_color] [오른쪽 = 비중 % + 아래 막대] · 마우스 = 비중 카드($wCard).
+             *   수익률 = 전 포트폴리오 평가손익 합 ÷ 원가 합(pf_eval_rate · 평균단가 대비 — 칸의 수익률과 같은 정의).
+             *   비중 = 평가금액 합 ÷ 추정자산(트리맵과 같은 분모) · 막대 세 토막: 회색 = 팔고도 남는 보유 · 초록 = 오늘 팔 몫 · 주황 = 오늘 살 몫(전체 = 지금 보유 + 오늘 살 금액).
+             *   보유가 없는 줄(재진입 후보)은 「·」. */
+            $trH = ($r['heldTot'] ?? 0) > 0 ? pf_eval_rate($r['plSum'] ?? null, (float)($r['costSum'] ?? 0)) : null;
+            $wv  = (float)($weights[$r['code']] ?? 0);
             if ($wv > 0 && $wDen > 0) {
                 $bA  = (float)$r['amt'];
                 $sA  = min($wv, (float)($r['sellAmt'] ?? 0));
-                $tip = '보유 ' . pf_n(round($wv)) . '원'
-                     . ($sA > 0 ? ' − 오늘 매도 ' . pf_n(round($sA)) . '원' : '')
-                     . ($bA > 0 ? ' + 오늘 매수 ' . pf_n(round($bA)) . '원' : '')
-                     . ($sA > 0 || $bA > 0 ? ' → ' . pf_n(round($wv - $sA + $bA)) . '원 (지금의 ' . number_format(($wv - $sA + $bA) / $wv, 2) . '배)' : '');
-                $seg = '<u style="flex:' . round($wv - $sA) . '"></u>'
-                     . ($sA > 0 ? '<u class="k-sell" style="flex:' . round($sA) . '"></u>' : '')
-                     . ($bA > 0 ? '<u class="k-' . (isset($r['kinds']['buy']) ? 'buy' : 'fill') . '" style="flex:' . round($bA) . '"></u>' : '');
-                echo '<td class="num mx-w" title="' . pf_h($tip) . '">' . number_format($wv / $wDen * 100, 1) . '%<i>' . $seg . '</i></td>';
+                $all = $wv + $bA;
+                $bar = '<span style="width:' . round(($wv - $sA) / $all * 100, 2) . '%"></span>'
+                     . ($sA > 0 ? '<span class="sell" style="width:' . round($sA / $all * 100, 2) . '%"></span>' : '')
+                     . ($bA > 0 ? '<span class="over" style="width:' . round($bA / $all * 100, 2) . '%"></span>' : '');
+                [$rBg, $rFg] = pf_tm_rate_color($trH);
+                $rTx = $trH === null ? '·' : (abs($trH) < 0.00005 ? '0.00%' : pf_pct($trH));
+                echo '<td class="w"><span class="wc" data-tip="' . pf_h($wCard($r, $wv, $bA, $sA, $trH)) . '">'
+                   . '<span class="r" style="background:' . $rBg . ';color:' . $rFg . '">' . pf_h($rTx) . '</span>'
+                   . '<span class="v"><b>' . number_format($wv / $wDen * 100, 1) . '%</b><i>' . $bar . '</i></span></span></td>';
             } else {
-                echo '<td class="mx-e">·</td>';
+                echo '<td class="w"><span class="empty">·</span></td>';
             }
 
             foreach ($cols as $fid => $nm) {
                 $cs = $r['cells'][$fid] ?? [];
                 $hd = $r['held'][$fid] ?? null;
-                /* 칸의 두 줄 — 위: 오늘 살(팔) 주수(색 · 굵게) · 아래: 지금 보유(회색 · 작게). 신호 없이 보유만이면 회색 한 줄. */
-                $hl = $hd ? '<small>보유 ' . pf_n($hd['qty']) . '</small>' : '';
+                $hr = $hd['rate'] ?? null;                                       // 그 포지션의 평가수익률(평균단가 대비)
+                $hq = (int)($hd['qty'] ?? 0);
+                $hl = $hd ? '<span class="lbl">보유 <span class="qty">' . pf_n($hq) . '</span></span>' : '';
+                $plS = $hd && $hr !== null ? '<span class="pl" title="평균단가 대비 평가수익률">' . $pl($hr) . '</span>' : '';
+                /* 왼쪽 「보유 · 수익률」 바탕 = 수익률 색(같은 날 사용자) — 왼쪽 트리맵 타일과 «같은 함수»(pf_tm_rate_color: 3·10·20% 구간 · 진한 단은 흰 글자) */
+                $lSt = '';
+                if ($hd) { [$lBg, $lFg] = pf_tm_rate_color($hr); $lSt = ' style="background:' . $lBg . ';color:' . $lFg . '"'; }
                 if (!$cs) {
-                    if (!$hd) { echo '<td class="mx-e">·</td>'; continue; }
-                    echo '<td><a class="mx-c mx-b" href="/stock/index.php?mode=position&id=' . $hd['pid'] . '" title="'
-                       . pf_h($nm . ' · 보유 ' . pf_n($hd['qty']) . '주 · 오늘 신호 없음') . '"><span class="mx-wf">' . str_repeat('<i></i>', 10) . '</span><span class="mx-tx">' . $hl . '</span></a></td>';
+                    if (!$hd) {
+                        /* 빈 칸 = 그 포트폴리오에 없는 종목 — ➕ 를 누르면 종목 추가 화면이 «그 포트폴리오 · 그 종목»을 고른 채 열린다
+                         * (2026-10-15 사용자). 폼이 &pid=&code=&name= 을 받는다 · 그 포트폴리오에서 청산한 종목이면 저장 때 중복 가드가 그 포지션으로 보낸다. */
+                        if ($r['code'] !== '') {
+                            echo '<td><a class="addq" href="/stock/index.php?mode=position&id=new&pid=' . (int)$fid . '&code=' . rawurlencode($r['code'])
+                               . '&name=' . rawurlencode($r['name']) . '" title="' . pf_h($nm . '에 ' . $r['name'] . ' 담기 — 종목 추가 화면으로') . '">+</a></td>';
+                        } else {
+                            echo '<td><span class="empty">·</span></td>';
+                        }
+                        continue;
+                    }
+                    // 보유만 — 오늘 신호 없음 · 한 줄 「보유 N · 수익률」
+                    echo '<td><a class="c' . $ud($hr) . '" href="/stock/index.php?mode=position&id=' . $hd['pid'] . '" title="'
+                       . pf_h($nm . ' · 보유 ' . pf_n($hq) . '주 · 평가수익률 ' . ($hr === null ? '-' : pf_pct($hr)) . ' · 오늘 신호 없음') . '">'
+                       . '<span class="l"' . $lSt . '>' . $plS . '</span></a></td>';
                     continue;
                 }
                 echo '<td>';
@@ -2946,56 +3614,73 @@ function pf_render_signal_strip(array $sigs, array $stats, array $re = [], int $
                              . ' → 현재가 ' . pf_n($x['last']) . ' · ' . (int)$x['days'] . '일 전 청산 · 하락요건 −' . number_format($x['req'] * 100, 1) . '% 충족'
                              . ($x['need'] !== null ? "\n" . '1차 소요 ' . pf_n(round($x['need'])) . '원' : '')
                              . ($x['fund_ok'] === false ? ' · 예수금 부족' : '');
-                        echo '<a class="mx-c" href="/stock/index.php?mode=position&id=' . (int)$x['id'] . '" title="' . pf_h($tip) . '">'
-                           . '<span><span class="sig-pill k-re">재진입</span>'
-                           . '<b class="k-re">' . pf_h(pf_pct($x['chk']['gap'], 1)) . '</b></span></a>';
+                        echo '<a class="c re" href="/stock/index.php?mode=position&id=' . (int)$x['id'] . '" title="' . pf_h($tip) . '">'
+                           . '<span class="l"><span class="lbl">재진입</span></span><span class="add">' . pf_h(pf_pct($x['chk']['gap'], 1)) . '</span></a>';
                         continue;
                     }
                     $g = $cell['g']; $s = $g['s']; $c = $g['c']; $kind = $s['kind'];
-                    // 차수 표기 — 매수만 "올라가는" 것이라 화살표를 쓴다
+                    // 차수 표기 — 매수만 "올라가는" 것이라 화살표를 쓴다 (툴팁)
                     $step = ($kind === 'buy' && (int)$c['reach_step'] > (int)$c['cur_step'])
                         ? ((int)$c['cur_step'] > 0 ? $c['cur_step'] . '차 → ' : '') . $c['reach_step'] . '차'
                         : ((int)$c['cur_step'] > 0 ? $c['cur_step'] . '차' : '진입');
-                    /* 금액·예수금 부족은 칸에 적지 않는다(카드 때와 같은 규칙 — 「몇 주」만 보고 지나가는 자리) · 툴팁에 둔다 */
                     $tip = $nm . ' · ' . pf_sig_label($kind) . ' ' . $step
-                         . ($hd ? ' · 보유 ' . pf_n($hd['qty']) . '주' : '')
+                         . ($hd ? ' · 보유 ' . pf_n($hq) . '주 · 평가수익률 ' . ($hr === null ? '-' : pf_pct($hr)) : '')
                          . ((float)($s['amount'] ?? 0) > 0 ? "\n" . '금액 ' . pf_n(round((float)$s['amount'])) . '원' : '')
                          . ($kind !== 'sell' && $g['fund_ok'] === false ? ' · 예수금 부족' : '');
-                    /* 칸 = 100% 짜리 «열 칸 격자»(같은 날 사용자 — 칸 배경 채우기 → 원(26px 라 안 보였다) → 열 칸).
-                     * 매수: 열 칸 = 사고 난 뒤의 주수(보유 + 살 것) · 회색 = 지금 보유한 몫 · 색 = 오늘 살 몫 → 「지금의 몇 배를 더 사나」가 넓이로 보인다.
-                     * 매도: 열 칸 = 지금 보유 · 초록 = 팔 몫. 회색(보유)이 먼저 깔리고 색이 뒤에 온다 · 색은 글자색과 같은 계열이다. */
-                    $hq  = (int)($hd['qty'] ?? 0); $sq = (int)$s['qty'];
+                    // 사고 난 뒤 주수 — 칸에서 막대를 걷어 툴팁에만 남는다
+                    $sq  = (int)$s['qty'];
                     $tot = $kind === 'sell' ? max($hq, $sq) : $hq + $sq;
-                    $hp  = $tot > 0 ? ($kind === 'sell' ? ($tot - $sq) : $hq) / $tot * 100 : 0;
-                    $tint = ['buy' => '#e06666', 'fill' => '#f0a03c', 'sell' => '#3fb489'][$kind] ?? '#b4bfca';
-                    /* 열 칸(한 칸 = 10%) — 반올림하되, 있는 것은 최소 한 칸을 준다(보유가 있는데 회색이 0칸이면 「첫 매수」로 읽힌다) */
-                    $nH = (int)round($hp / 10);
-                    if ($hq > 0 && $tot > $sq) $nH = max(1, $nH);
-                    if ($sq > 0) $nH = min(9, $nH);
-                    $bg  = str_repeat('<i></i>', $nH) . str_repeat('<i style="background:' . $tint . '"></i>', 10 - $nH);
                     $tip .= $tot > 0 && $kind !== 'sell' ? "\n" . '사고 나면 ' . pf_n($tot) . '주 (지금의 ' . ($hq > 0 ? number_format($tot / $hq, 1) . '배' : '첫 매수') . ')' : '';
-                    echo '<a class="mx-c mx-b" href="/stock/index.php?mode=position&id=' . (int)$g['pid'] . '" title="' . pf_h($tip) . '"><span class="mx-wf">' . $bg . '</span><span class="mx-tx">'
-                       /* 칸에는 «주수»만 적는다(같은 날 사용자 — 「잔여매수 1차 같은 문구는 없어도」). 신호의 종류는 색이 말하고
-                        * (매수 빨강 · 잔여매수 주황 · 매도 초록) 차수·금액은 툴팁에 있다. 재진입만 이름표를 남긴다 — 주수가 아니라 %라서. */
-                       . '<b class="k-' . $kind . '">' . ($kind === 'sell' ? '−' : '＋') . pf_n($s['qty']) . '주</b>' . $hl . '</span></a>';
+                    $isSell = ($kind === 'sell');
+                    /* 몇 차 매수인가(2026-10-16) — 매수는 닿은 차수, 잔여매수는 지금 차수. 매도는 포지션 전체라 차수를 안 붙인다 */
+                    $stN = $isSell ? 0 : ($kind === 'buy' ? (int)$c['reach_step'] : (int)$c['cur_step']);
+                    // 종류 클래스 — 매수 buy · 잔여매수 fill · 매도 sell (색은 머리줄 칩과 같다 · CSS 주석)
+                    echo '<a class="c' . $ud($hd ? $hr : null) . ($isSell ? ' sell' : ($kind === 'fill' ? ' fill' : ' buy')) . '" href="/stock/index.php?mode=position&id=' . (int)$g['pid'] . '" title="' . pf_h($tip) . '">'
+                       . '<span class="l"' . $lSt . '>' . $plS . '</span><span class="add">' . ($isSell ? '−' : '+') . pf_n($sq) . '주'
+                       . ($stN > 0 ? '<small class="st">' . $stN . '차</small>' : '') . '</span></a>';
                 }
                 echo '</td>';
             }
 
-            // 합계 — 살 것과 팔 것을 섞어 빼지 않는다(같은 종목을 한 곳에서 팔고 다른 곳에서 사는 날이 있다)
-            /* 아랫줄은 보유 합(칸과 같은 두 줄) — 매수 소요 금액은 툴팁으로 내렸다(세 줄이 되면 줄이 높아진다 · 총액은 머리줄에 있다). */
+            // 합계 — 살 것과 팔 것을 섞어 빼지 않는다(같은 종목을 한 곳에서 팔고 다른 곳에서 사는 날이 있다) · 수익률은 원가 합 대비
             $tt = array_filter([
                 $r['amt'] > 0    ? '매수 소요 ' . pf_n(round($r['amt'])) . '원' : '',
                 $r['reNeed'] > 0 ? '재진입 1차 소요 ' . pf_n(round($r['reNeed'])) . '원' : '',
             ]);
-            echo '<td class="num mx-t"' . ($tt ? ' title="' . pf_h(implode(' · ', $tt)) . '"' : '') . '>';
-            if ($r['buy'] > 0)  echo '<b class="k-' . (isset($r['kinds']['buy']) ? 'buy' : 'fill') . '">＋' . pf_n($r['buy']) . '주</b>';
-            if ($r['sell'] > 0) echo '<b class="k-sell">−' . pf_n($r['sell']) . '주</b>';
-            if (($r['heldTot'] ?? 0) > 0) echo '<small>보유 ' . pf_n($r['heldTot']) . '</small>';
-            elseif ($r['reNeed'] > 0)     echo '<small>1차 ' . pf_n(round($r['reNeed'])) . '</small>';
-            echo '</td></tr>';
+            echo '<td class="tot"' . ($tt ? ' title="' . pf_h(implode(' · ', $tt)) . '"' : '') . '>';
+            if ($r['buy'] > 0)  echo '<b>+' . pf_n($r['buy']) . '주</b>';
+            if ($r['sell'] > 0) echo '<b class="sell">−' . pf_n($r['sell']) . '주</b>';
+            if (($r['heldTot'] ?? 0) > 0) {
+                // 「보유 N」 — 윗줄은 살·팔 주수가 있을 때만 · 수익률은 2026-10-16 「수익률」 열로 옮겼다(사용자)
+                echo '<span class="hl">보유 ' . pf_n($r['heldTot']) . '</span>';
+            } elseif ($r['reNeed'] > 0) {
+                echo '<span>1차 ' . pf_n(round($r['reNeed'])) . '</span>';
+            }
+            echo '</td>' . pf_sig_fact_cells($facts[$r['code']] ?? null) . '</tr>';   // 종목 사실 네 칸 — 합계 오른쪽 끝(2026-10-16)
         }
+        echo $cashRow;   // 보유가 없는 줄이 하나도 없었으면 맨 끝(위에서 이미 찍었으면 빈 문자열)
         echo '</tbody></table></div>';
+        /* 카드형 툴팁(리서치 칩 · 2026-10-19) — 트리맵 JS 와 같은 방식: 상자 하나를 body 에 두고 [data-tip] 위에서 갈아 끼운다.
+         * 트리맵을 현황에서 뺀 뒤로 이 화면엔 그 JS 가 없다 — 그래서 표에 따로 단다(트리맵이 돌아오면 상자가 둘이 되지 않게 class 로 찾는다). */
+        echo '<script>(function(){var w=document.querySelector("table.sgt");if(!w||!w.querySelector("[data-tip]"))return;'
+           . 'var T=document.querySelector("body>.pf-tip.sgt-tip");if(!T){T=document.createElement("div");T.className="pf-tip sgt-tip";T.hidden=true;document.body.appendChild(T)}'
+           . 'var cur=null;w.querySelectorAll("[data-tip]").forEach(function(e){e.removeAttribute("title")});'
+           . 'function mv(e){var r=T.getBoundingClientRect(),x=e.clientX+16,y=e.clientY+18;'
+           . 'if(x+r.width>innerWidth-8)x=e.clientX-r.width-12;if(x<8)x=8;'
+           . 'if(y+r.height>innerHeight-8)y=e.clientY-r.height-12;if(y<8)y=8;T.style.left=x+"px";T.style.top=y+"px"}'
+           . 'w.addEventListener("mouseover",function(e){var el=e.target.closest("[data-tip]");if(el===cur)return;cur=el;'
+           . 'if(!el){T.hidden=true;return}T.innerHTML=el.getAttribute("data-tip");T.hidden=false;mv(e)});'
+           . 'w.addEventListener("mousemove",function(e){if(cur)mv(e)});'
+           . 'w.addEventListener("mouseleave",function(){cur=null;T.hidden=true});})();</script>';
+        // 범례 — 칸 색이 무엇을 뜻하나(지금 칩 모양 기준). 왼쪽 바탕 색은 트리맵과 같은 함수에서 뽑는다. 대기 종목 줄은 아래 <details> 가 맡는다
+        [$lgU] = pf_tm_rate_color(0.15); [$lgD] = pf_tm_rate_color(-0.15);
+        echo '<div class="foot"><span class="lg"><i style="background:' . $lgU . '"></i><i style="background:' . $lgD . ';margin-left:-4px"></i>보유 바탕 = 수익률 (빨강 수익 · 파랑 손실 · 진할수록 크다)</span>'
+           . '<span class="lg"><i style="background:#c62828"></i>오른쪽 빨강 = 매수 주수</span>'
+           . '<span class="lg"><i style="background:#b96600"></i>주황 = 잔여매수 주수</span>'
+           . '<span class="lg"><i style="background:#0f8a5f"></i>초록 = 매도 주수</span>'
+           . '<span class="lg"><i style="background:#6d28d9"></i><i style="background:var(--re-bg);margin-left:-4px;border:1px solid var(--line)"></i>재진입 = 왼쪽 보라 · 오른쪽 청산가 대비</span>'
+           . '<span class="lg"><i style="background:#efe9ff;border:1px solid #c4b5f4"></i>리서치 = 문서의 의견 | 리서치가 적은 구간에서 지금 자리 (신호 아님)</span>'
+           . '<span class="lg"><i style="background:#b96600"></i><i style="background:#8b5cf6;margin-left:-4px"></i>예수금 줄 = 예수금 | 부족(파랑 · 재진입만 모자라면 보라)·남음 · 막대 주황 매수·잔여 · 보라 재진입 · 세로선 = 예수금이 닿는 곳</span></div>';
     }
 
     // ── 대기 종목 — 접어 둔다. <details> 라 JS 가 필요 없다
@@ -3064,7 +3749,7 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
     $byFolio = [];
     foreach ($positions as $p) $byFolio[(int)$p['portfolio_id']][] = $p;
 
-    pf_head('포트폴리오', 'dashboard', 'wide');
+    pf_head('포트폴리오', 'dashboard', 'dash');   // 2200 → 1900(2026-10-16 사용자 「너비를 1800~1900 으로 · 한눈에 안 들어온다」 · 1800 은 아래 두 단이 잘렸다)
 
     $tPrincipal = 0.0;
     $tIncome    = 0.0;
@@ -3084,7 +3769,7 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
     $stats = pf_folio_stats($folios, $byFolio, $calc);
     /* 시장 지표용 일봉을 한 쿼리로 당겨 온다 (종목당 쿼리를 내면 N+1 이다).
      * 크론(job=daily)이 채워 두는 pf_daily 를 읽을 뿐이라 네이버를 부르지 않는다. */
-    $daily = $pf->dailyMap(array_column($active, 'stock_code'), 400);
+    $daily = $pf->dailyMap(array_column($active, 'stock_code'), 400, true);   // live — 장중엔 오늘 봉을 덧붙인다(Pf::dailyMap 주석)
     /* $used = 포트폴리오별로 이미 배정된 예수금. 계획 신호가 먼저 가져가고,
      * 그 나머지로 재진입 후보를 판정한다 — 같은 돈을 두 곳이 각각 쓸 수 있다고 말하면 안 된다. */
     $used  = [];
@@ -3124,40 +3809,18 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
     echo '<a class="btn btn-outline" href="' . $closedHref . '">' . ($showClosed ? '종료 숨기기' : '종료 보기') . '</a>';
     echo '</div></div>';
 
-    /* ── 맨 윗줄 = [오늘의 신호] [보유 비중 트리맵] (2026-10-13 사용자 — 신호 표를 내용 폭으로 좁히니 오른쪽이 비었다.
-     *    합계 카드를 올리는 안도 나왔는데 사용자가 트리맵을 골랐다: 빈자리가 한 덩어리라 한 덩어리짜리가 맞는다).
-     *    신호가 없는 날(.quiet)·좁은 화면에서는 위아래로 쌓인다(CSS .sig-row). 트리맵은 전에 왼쪽 단의 합계 카드 아래에 있었다.
-     *    합계와 같은 $positions·$calc·$stats 를 읽는다. .sum-box.wd 가 격자 전폭을 쓴다. */
-    echo '<div class="sig-row">';
-    $sigW = [];   // 종목코드 => 전 포트폴리오 평가금액 합 (신호 표의 줄 순서)
-    foreach ($positions as $p) {
-        if (($p['status'] ?? '') === 'closed') continue;
-        $cd = (string)($p['stock_code'] ?? '');
-        $sigW[$cd] = ($sigW[$cd] ?? 0) + (float)($calc[(int)$p['id']]['eval_amount'] ?? 0);
-    }
-    if ($folios) pf_render_signal_strip($sigs, $stats, $re, $reWait, $sigW);
-    /* 트리맵 높이 — 화면에서는 신호 표의 높이를 그대로 따라간다(CSS: .sig-row 가 두 칸을 같은 높이로 늘리고 .tm 이 남는 높이를 먹는다).
-     * 여기서 넘기는 값은 «배치 계산용» 어림이다: 신호 표의 줄 수(종목 수)로 어림해 사각형의 가로세로 비가 실제와 비슷하게 나오게 한다. */
-    $sigN = [];
-    foreach ($sigs as $g) if ($g['s']['kind'] !== null || (int)($g['c']['filled_qty'] ?? 0) > 0) $sigN[(string)($g['p']['stock_code'] ?? $g['pid'])] = 1;
-    foreach ($re as $x)   if ($x['chk']['state'] === 'ready') $sigN[(string)($x['stock_code'] ?? $x['id'])] = 1;
-    $tmH = max(300.0, min(640.0, 33.0 * count($sigN) - 20));
-    echo '<div class="sum-grid">';
-    pf_render_weight_treemap($positions, $calc, $folios, $stats, $tRate,
-                             pf_today_quotes($pdo, array_column($active, 'stock_code')), $tmH);
-    echo '</div></div>';   // .sum-grid · .sig-row
-
-    // ── 좌우 컬럼. 오른쪽 상세는 맨 위부터 시작하는 독립 영역이다.
-    echo '<div class="split">';
-    echo '<div class="split-left">';
-
-    // 전체 합계
+    /* 전체 합계 카드 — 2026-10-15 사용자 지시로 왼쪽 단(포트폴리오 표 위)에서 «제목 줄 바로 아래 · 전폭 한 줄»로 올렸다.
+     * 값·미니 그래프·팝업은 그대로(같은 pf_sum_card) — 자리만 옮겼다. */
     /* 일일 결산 미니 그래프(2026-09-07) — 최근 60거래일 · pf_value_daily 를 읽기만 한다(판정·수집 없음 · 표가 비면 그래프 없이 카드만).
      * 총평가·수익률·KOSPI 대비 세 칸이 클릭되면 전체기간 팝업(pf_render_value_modal). 「수익률」 카드는 09-04 에 트리맵 머리줄로
      * 옮겼었는데 추이(선)를 달 자리라 다시 둔다 — 값은 머리줄과 같은 $tRate 다. */
     $mini  = pf_value_minis($pdo, null);
     $dK    = pf_mini_last($mini, 'dK');
-    echo '<div class="sum-grid">';
+    /* 오늘 시세 — 신호 표의 「오늘」 열·머리줄 요약 · 종목 사실이 같은 한 벌을 읽는다(한 번만 읽는다).
+     * 재진입 후보(청산한 종목)도 신호 표의 줄이라 함께 읽는다. */
+    $sigCodes = array_merge(array_column($active, 'stock_code'), array_column($re, 'stock_code'));
+    $tq = pf_today_quotes($pdo, $sigCodes);
+    echo '<div class="sum-grid sum-top">';
     foreach ([
         ['원금',     pf_n($tPrincipal),         '',                       ''],
         ['예수금',   pf_n(round($tCash)),       $tCash < 0 ? 'down' : '',
@@ -3177,6 +3840,29 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
     }
     echo '</div>';
 
+    /* ── 오늘의 신호(전폭).
+     * ⊖보유 비중 트리맵은 2026-10-16 사용자 지시로 현황에서 뺐다(「박스를 없애도 될 것 같아」) — 그날 자리를 네 번 옮긴 끝이다
+     *   (신호 옆 → 신호 아래 전폭 띠 → 왼쪽 단 포트폴리오 표 밑 → 맨 위 카드 옆). 신호 옆이 안 된 이유: 종목 사실 열이 붙은 표가 1,700px 라
+     *   트리맵이 400px 로 끼었다. 함수 pf_render_weight_treemap() 는 남겨 뒀다(부르는 곳 없음) — 되살리려면 여기에 한 줄:
+     *   pf_render_weight_treemap($positions, $calc, $folios, $stats, $tRate, $tq, 300.0, 2000.0) 를 .sum-grid 로 감싼다. */
+    echo '<div class="sig-row">';
+    $sigW = [];   // 종목코드 => 전 포트폴리오 평가금액 합 (신호 표의 줄 순서)
+    foreach ($positions as $p) {
+        if (($p['status'] ?? '') === 'closed') continue;
+        $cd = (string)($p['stock_code'] ?? '');
+        $sigW[$cd] = ($sigW[$cd] ?? 0) + (float)($calc[(int)$p['id']]['eval_amount'] ?? 0);
+    }
+    /* 종목 사실(실적·PER·PBR·고점·리서치 · 2026-10-16) — 같은 일봉($daily · live)을 다시 쓴다 · 전부 DB 읽기 · 실패하면 사실 칸만 빈다 */
+    $facts = [];
+    if ($folios) { try { $facts = pf_sig_facts($pdo, $pf, $sigCodes, $tq, $daily); } catch (Throwable $e) { $facts = []; } }
+    if ($folios) pf_render_signal_strip($sigs, $stats, $re, $reWait, $sigW, $tq, $facts);
+    echo '</div>';   // .sig-row
+
+    // ── 좌우 컬럼. 오른쪽 상세는 맨 위부터 시작하는 독립 영역이다.
+    echo '<div class="split">';
+    echo '<div class="split-left">';
+
+
     if (!$folios) {
         echo '<div class="card"><p class="muted">포트폴리오가 없습니다. '
            . '<a href="/stock/index.php?mode=portfolio">포트폴리오를 먼저 만들어</a> 주세요.</p></div>';
@@ -3188,16 +3874,19 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
     // 포트폴리오 리스트
     echo '<div class="card"><h2>포트폴리오</h2>';
     echo '<div class="tbl-scroll"><table class="pf"><thead><tr>';
+    /* ⊕2026-10-16 사용자 「너비가 너무 넓어 — 예수금 아래로 비중, 평가손익 밑에 평가수익률」 → 두 쌍을 한 칸 두 줄로 접어 열 둘을 줄였다.
+     * 넷째 값 = 머리글 둘째 줄(작게) — 그 칸의 아랫줄이 무엇인지 말한다. */
     foreach ([
-        ['포트폴리오', ''], ['원금', 'num'], ['예수금', 'num'],
-        ['예수금 비중', 'num', '예수금 ÷ 추정자산 — 그 포트폴리오 돈 중 아직 안 쓴 몫 · 합계 줄 = 전체 평균 · 바탕색 = 평균과의 차이: 붉을수록 평균보다 많고 푸를수록 적다(±3%p 안은 무색 · 10%p · 20%p 에서 진해진다) · 칸에 마우스를 올리면 차이(%p)'],
+        ['포트폴리오', ''], ['원금', 'num'],
+        ['예수금', 'num', '윗줄 = 예수금 · 아랫줄 = 예수금 비중(예수금 ÷ 추정자산 — 그 포트폴리오 돈 중 아직 안 쓴 몫) · 합계 줄 = 전체 평균 · 바탕색 = 평균과의 차이: 붉을수록 평균보다 많고 푸를수록 적다(±3%p 안은 무색 · 10%p · 20%p 에서 진해진다) · 칸에 마우스를 올리면 차이(%p)', '비중'],
         ['총매입', 'num'],
-        ['종목', 'num'], ['총평가', 'num'], ['평가손익', 'num', '보유분 현재가치 − 매입원가'],
-        ['평가수익률', 'num', '평가손익 ÷ 총매입 — 지금 들고 있는 종목만의 성적'],
+        ['종목', 'num'], ['총평가', 'num'],
+        ['평가손익', 'num', '윗줄 = 평가손익(보유분 현재가치 − 매입원가) · 아랫줄 = 평가수익률(평가손익 ÷ 총매입 — 지금 들고 있는 종목만의 성적)', '수익률'],
         ['추정자산', 'num'], ['수익률', 'num', '추정자산 ÷ 원금 − 1 — 실현손익·예수금까지 든 계좌 전체의 성적'],
     ] as $hc) {
         [$label, $cls] = $hc;
-        echo '<th class="' . $cls . '"' . (isset($hc[2]) ? ' title="' . pf_h($hc[2]) . '"' : '') . '>' . pf_h($label) . '</th>';
+        echo '<th class="' . $cls . '"' . (isset($hc[2]) ? ' title="' . pf_h($hc[2]) . '"' : '') . '>' . pf_h($label)
+           . (isset($hc[3]) ? '<small class="th2">' . pf_h($hc[3]) . '</small>' : '') . '</th>';
     }
     echo '</tr></thead><tbody>';
 
@@ -3217,8 +3906,9 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
     };
     $avgCash  = (float)$tAsset > 0 ? max(0.0, min(1.0, (float)$tCash / (float)$tAsset)) : null;
     $cashCell = function ($cash, $asset, bool $isTot = false) use ($avgCash): string {
-        $amt = '<td class="num' . ((float)$cash < 0 ? ' down' : '') . '">' . pf_n(round((float)$cash)) . '</td>';
-        if ((float)$asset <= 0) return $amt . '<td class="num"><span class="flat">-</span></td>';
+        /* ⊕2026-10-16 한 칸 두 줄 — 윗줄 예수금 · 아랫줄 예수금 비중(옛 「예수금 비중」 열 · 사용자 「너비가 너무 넓어」) */
+        $amt = '<span' . ((float)$cash < 0 ? ' class="down"' : '') . '>' . pf_n(round((float)$cash)) . '</span>';
+        if ((float)$asset <= 0) return '<td class="num cw">' . $amt . '<br><span class="flat">-</span></td>';
         $r  = (float)$cash / (float)$asset;
         $rc = max(0.0, min(1.0, $r));
         $p  = fn(float $x): string => number_format($x * 100, 1);
@@ -3236,7 +3926,7 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
                 $sty = ' style="background:hsl(' . ($d > 0 ? 0 : 215) . ',85%,' . $L . '%)"';
             }
         }
-        return $amt . '<td class="num cw"' . ($dif !== '' ? ' title="' . pf_h($dif) . '"' : '') . '><b' . $sty . '>' . $p($r) . '%</b></td>';
+        return '<td class="num cw"' . ($dif !== '' ? ' title="' . pf_h($dif) . '"' : '') . '>' . $amt . '<br><b' . $sty . '>' . $p($r) . '%</b></td>';
     };
 
     foreach ($folios as $f) {
@@ -3251,15 +3941,15 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
         $cls = 'folio-row' . ($fid === $selId ? ' on' : '') . ((int)$f['is_active'] ? '' : ' watch');
         echo '<tr class="' . $cls . '" data-id="' . $fid . '">';
 
-        echo '<td><a href="/stock/index.php?id=' . $fid . ($showClosed ? '&closed=1' : '') . '">'
-           . '<b>' . pf_h($f['name']) . '</b></a>';
-        /* 신호 배지 — 새 열을 만들지 않고 이름 옆에 붙인다.
-         * 이 표는 좌우분할의 왼쪽에 들어가 폭이 빠듯해서, 열을 하나 늘리면 가로 스크롤이 생긴다. */
-        if (!empty($sigCnt[$fid])) echo ' ' . pf_sig_dots($sigCnt[$fid]);
-        if (!(int)$f['is_active']) echo ' <span class="badge st-closed">미사용</span>';
+        /* 이름 칸 = 윗줄 이름 · 아랫줄 신호 칩(2026-10-16 사용자 「매수·잔여매수 칩을 아래로 · 계좌정보는 삭제」).
+         * 아랫줄의 증권사·계좌번호·메모 글자는 걷었다 — 증권사·계좌·메모는 이름의 툴팁에만 남긴다(메모는 계좌정보가 아니라 지우지 않았다).
+         * 신호 배지는 새 열을 만들지 않는다 — 이 표는 좌우분할의 왼쪽이라 폭이 빠듯해서 열을 늘리면 가로 스크롤이 생긴다. */
         $ident = implode(' ', array_filter([$f['broker'], $f['acct_no']]));
-        $ident = implode(' · ', array_filter([$ident, trim((string)$f['memo'])], fn($x) => $x !== ''));   // 메모는 열 대신 여기에
-        if ($ident !== '') echo '<br><span class="muted" style="font-size:11px">' . pf_h($ident) . '</span>';
+        $ident = implode(' · ', array_filter([$ident, trim((string)$f['memo'])], fn($x) => $x !== ''));
+        echo '<td><a href="/stock/index.php?id=' . $fid . ($showClosed ? '&closed=1' : '') . '"' . ($ident !== '' ? ' title="' . pf_h($ident) . '"' : '') . '>'
+           . '<b>' . pf_h($f['name']) . '</b></a>';
+        if (!(int)$f['is_active']) echo ' <span class="badge st-closed">미사용</span>';
+        if (!empty($sigCnt[$fid])) echo '<br><span class="fsig">' . pf_sig_dots($sigCnt[$fid]) . '</span>';
         echo '</td>';
 
         echo $prinCell($prin);
@@ -3267,8 +3957,7 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
         echo '<td class="num">' . pf_n(round($sub['cost'])) . '</td>';
         echo '<td class="num">' . $st['n'] . '</td>';   // 종료 제외 — 목록에 보이는 수와 같게
         echo '<td class="num">' . pf_n(round($sub['eval'])) . '</td>';
-        echo '<td class="num">' . pf_signed($sub['pl']) . '</td>';
-        echo '<td class="num">' . pf_signed_pct(pf_eval_rate($sub['pl'], $sub['cost'])) . '</td>';
+        echo '<td class="num pl2">' . pf_signed($sub['pl']) . '<br><small>' . pf_signed_pct(pf_eval_rate($sub['pl'], $sub['cost'])) . '</small></td>';   // 윗줄 평가손익 · 아랫줄 평가수익률(2026-10-16)
         echo '<td class="num"><b>' . pf_n(round($sAsset)) . '</b></td>';
         echo '<td class="num">' . ($sRate === null ? '<span class="flat">-</span>' : pf_signed_pct($sRate)) . '</td>';
         echo '</tr>';
@@ -3281,8 +3970,7 @@ function pf_page_dashboard(PDO $pdo, Pf $pf): void
     echo '<td class="num">' . pf_n(round($t['cost'])) . '</td>';
     echo '<td class="num">' . count($active) . '</td>';
     echo '<td class="num">' . pf_n(round($t['eval'])) . '</td>';
-    echo '<td class="num">' . pf_signed($t['pl']) . '</td>';
-    echo '<td class="num">' . pf_signed_pct(pf_eval_rate($t['pl'], $t['cost'])) . '</td>';
+    echo '<td class="num pl2">' . pf_signed($t['pl']) . '<br><small>' . pf_signed_pct(pf_eval_rate($t['pl'], $t['cost'])) . '</small></td>';
     echo '<td class="num">' . pf_n(round($tAsset)) . '</td>';
     echo '<td class="num">' . ($tRate === null ? '' : pf_signed_pct($tRate)) . '</td>';
     echo '</tr></tfoot></table></div>';
@@ -3585,7 +4273,7 @@ function pf_page_all(PDO $pdo, Pf $pf): void
 
     $stats = pf_folio_stats($folios, $byFolio, $calc);
     $listed = pf_visible($positions, $showClosed);
-    $daily  = $pf->dailyMap(array_column($listed, 'stock_code'), 400);
+    $daily  = $pf->dailyMap(array_column($listed, 'stock_code'), 400, true);   // live — 장중 오늘 봉
     $rows   = pf_signal_list($listed, $calc, $stats, $daily);   // 기본이 신호순
     $total = count($rows);
     $nSig  = count(array_filter($rows, fn($g) => $g['s']['kind'] !== null));
@@ -4864,7 +5552,7 @@ function pf_page_position(PDO $pdo, Pf $pf): void
     $high = ($pos['high_price'] !== null) ? (float)$pos['high_price'] : null;
     $draw = ($high && $last) ? ($last / $high - 1) : null;
 
-    pf_head($pos['stock_name'] . ' 상세', 'dashboard');
+    pf_head($pos['stock_name'] . ' 상세', 'dashboard', 'mid');   // 2026-10-15 — 차수 사다리에 PER·PBR 열을 들일 자리(2200 은 너무 넓다 · 사용자)
     pf_flash();
 
     echo '<div class="pf-head"><div>';
@@ -4946,13 +5634,13 @@ function pf_page_position(PDO $pdo, Pf $pf): void
         $fRow  = $pf->portfolioGet($fid);
         $fStat = $fRow ? pf_folio_stats([$fRow], $byF, $fCalc) : [];
         // 체결 시점 지표까지 계산하므로 이 종목은 넉넉히(3년) 받아 온다
-        $dmap  = $pf->dailyMap(array_column($fPos, 'stock_code'), 1200);
+        $dmap  = $pf->dailyMap(array_column($fPos, 'stock_code'), 1200, true);   // live — 장중 오늘 봉
         foreach (pf_signal_list($fPos, $fCalc, $fStat, $dmap) as $g) {
             if ($g['pid'] === (int)$pos['id']) { $me = $g; break; }
         }
     }
     if ($dmap === [] || !isset($dmap[(string)$pos['stock_code']])) {
-        $dmap = $pf->dailyMap([$pos['stock_code']], 1200);
+        $dmap = $pf->dailyMap([$pos['stock_code']], 1200, true);
     }
     $myBars = $dmap[(string)$pos['stock_code']] ?? [];
     if ($me === null && $myBars) {
@@ -5102,14 +5790,51 @@ function pf_page_position(PDO $pdo, Pf $pf): void
        . (($cy['no'] > 1 || $cy['closed'])
             ? ' <span class="muted" style="font-size:12px;font-weight:600;margin-left:6px" title="전량매도가 사이클의 경계입니다 — 사다리는 현재 사이클의 체결로만 짭니다">사이클 '
               . (int)$cy['no'] . ($cy['closed'] ? ' · 종료' : '') . '</span>' : '') . '</h2>';
+    /* 「얼마나 빠지면 사나」(2026-10-15 사용자) — 아직 안 산 차수의 이론가 ÷ 기준가 − 1.
+     * 기준 = 지금 누적단가(보유가 없으면 현재가). 표의 「가격(이론)」 괄호와 오른쪽 그래프 아래 축이 같은 배열을 읽는다.
+     * 종료된 사이클은 기록이라 옛 괄호(직전 기준가 대비)를 그대로 둔다. */
+    $dropOpen = ($pos['status'] !== 'closed');
+    $dropBase = ((int)$c['filled_qty'] > 0 && $c['avg_cost'] !== null) ? (float)$c['avg_cost']
+              : (($last !== null && (float)$last > 0) ? (float)$last : null);
+    $dropFrom = ((int)$c['filled_qty'] > 0 && $c['avg_cost'] !== null) ? '지금 누적단가' : '현재가';
+    $dropMap  = [];
+    foreach ($c['steps'] as $n => $s) {
+        $dropMap[$n] = ($dropOpen && $dropBase && !$s['traded'] && $n > $c['cur_step'] && (float)$s['theory_price'] > 0)
+            ? (float)$s['theory_price'] / $dropBase - 1 : null;
+    }
+
+    /* PER·PBR 열(2026-10-15 사용자 — 「앞으로 마지막까지 매수하게 될 가격의 PER·PBR 수준」).
+     * 각 줄 = 그 차수 이론가에 샀을 때 · 합계 줄 = 끝까지 이론대로 샀을 때의 최종 누적단가(예고가 없으면 지금 누적단가).
+     * 재료·판정은 재무분석 상세 «현재 PER·PBR» 줄과 같다(pf_val_basis · Dart::ratio) — 지금 실적을 고정한 값이다. */
+    $valB   = pf_val_basis(new Dart($pdo), (string)$pos['stock_code']);
+    $valTip = $valB
+        ? '그 가격 × 상장주식수 ' . pf_n($valB['shares']) . '주 ÷ 순이익 TTM ' . pf_eok($valB['ni']) . '억 / 자본총계 '
+          . pf_eok($valB['eq']) . '억 (' . $valB['label'] . ' 기준 · 재무분석 「현재 PER」과 같은 정의). '
+          . '지금 실적을 고정한 값이라 그 가격에 닿을 때의 실적이 다르면 달라집니다. 적자·자본잠식이면 –'
+        : '재무 원장이 없어 계산할 수 없습니다';
+    $valCell = function (?float $v, int $dec, string $tip = '', bool $plan = false): string {
+        if ($v === null) return '<td class="num muted">–</td>';
+        $t = number_format($v, $dec);
+        return '<td class="num"' . ($tip !== '' ? ' title="' . pf_h($tip) . '"' : '') . '>'
+             . ($plan ? '<span class="plan-qty">≈' . $t . '</span>' : $t) . '</td>';
+    };
+
     echo '<div class="tbl-scroll"><table class="pf"><thead><tr>';
-    foreach ([['차수',''],['일자',''],['매수가(실)','num'],['가격(이론)','num'],[$qtyLabel,'num'],
+    foreach ([['차수',''],['일자',''],['매수가(실)','num'],['가격(이론)','num'],['PER','num'],['PBR','num'],[$qtyLabel,'num'],
               [$amtLabel,'num'],['누적목표','num'],['과부족','num'],['누적단가','num']] as [$l, $cl]) {
-        echo '<th class="' . $cl . '">' . pf_h($l) . '</th>';
+        $thTip = ($l === '가격(이론)' && $dropOpen && $dropBase)
+            ? ' title="' . pf_h('괄호 = 아직 안 산 차수가 ' . $dropFrom . ' ' . pf_n(round($dropBase)) . '원에서 몇 % 내려가면 사는지') . '"' : '';
+        if ($l === 'PER' || $l === 'PBR') $thTip = ' title="' . pf_h($valTip) . '"';
+        echo '<th class="' . $cl . '"' . $thTip . '>' . pf_h($l) . '</th>';
     }
     echo '</tr></thead><tbody>';
 
     $hit = (bool)$c['buy_signal'];
+
+    /* 누적단가 칸 = 실제 체결 + 남은 차수를 이론가에 샀다면(2026-10-15 사용자 — 「이론대로 했을 때 최종 매수단가」).
+     * 도달 차수까지는 실제 값, 그 뒤는 회색 ≈ 예고. 종료된 사이클은 기록이라 예고하지 않는다. */
+    $tAvg = ($pos['status'] === 'closed') ? [] : pf_theory_avg_run($c, $prm, $tQty);   // $tQty = 이론 보유수량(차트의 이론 자동매도가가 쓴다)
+    $tAvgLast = $tAvg ? end($tAvg) : null;
 
     foreach ($c['steps'] as $n => $s) {
         $isCur = ($n === $c['cur_step']);
@@ -5144,21 +5869,29 @@ function pf_page_position(PDO $pdo, Pf $pf): void
         echo '<td>' . pf_h($s['traded_at'] ?? '') . '</td>';
         echo '<td class="num">' . pf_n($s['price'] === null ? null : round($s['price'])) . '</td>';
 
-        // 이론가 옆에 직전 기준가 대비 실제 변동률 (10원 절사 때문에 룰셋 하락률과 미세하게 다를 수 있다)
+        // 직전 기준가 대비 실제 변동률 (10원 절사 때문에 룰셋 하락률과 미세하게 다를 수 있다) — 지금은 툴팁 몫
         $chg = ($n > 1 && $s['theory_price'] !== null && $s['base_price'] > 0)
             ? ($s['theory_price'] / $s['base_price'] - 1) : null;
+        $drop = $dropMap[$n] ?? null;
 
-        echo '<td class="num"';
-        if ($chg !== null) {
-            echo ' title="기준가 ' . pf_n($s['base_price']) . ' → ' . pf_n($s['theory_price'])
-               . ' · 룰셋 ' . pf_h(pf_pct($s['drop_rate'], 2)) . '"';
-        }
-        echo '>' . pf_n($s['theory_price']);
-        if ($chg !== null) {
+        $tip = [];
+        if ($drop !== null) $tip[] = $dropFrom . ' ' . pf_n(round($dropBase)) . ' → ' . pf_n($s['theory_price'])
+                                   . ' (' . number_format($drop * 100, 1) . '%) 에서 매수';
+        if ($chg !== null)  $tip[] = '직전 기준가 ' . pf_n($s['base_price']) . ' 대비 ' . number_format($chg * 100, 1) . '%'
+                                   . ($posLv ? '' : ' · 룰셋 ' . pf_pct($s['drop_rate'], 2));
+        echo '<td class="num"' . ($tip ? ' title="' . pf_h(implode("\n", $tip)) . '"' : '') . '>' . pf_n($s['theory_price']);
+        if ($drop !== null) {
+            echo ' <span class="chg ' . pf_updown($drop) . '">(' . pf_arrow($drop)
+               . number_format(abs($drop) * 100, 1) . '%)</span>';
+        } elseif (!$dropOpen && $chg !== null) {
             echo ' <span class="chg ' . pf_updown($chg) . '">(' . pf_arrow($chg)
                . number_format(abs($chg) * 100, 1) . '%)</span>';
         }
         echo '</td>';
+
+        // 그 차수 이론가에 샀을 때의 PER·PBR (머리글 툴팁에 재료)
+        $vAt = pf_val_at($valB, $s['theory_price'] === null ? null : (float)$s['theory_price']);
+        echo $valCell($vAt['per'], 1) . $valCell($vAt['pbr'], 2);
 
         // 안분된 보유수량 — 원래 매수수량은 hover 로 확인
         if ($hasSold && $s['traded']) {
@@ -5200,9 +5933,31 @@ function pf_page_position(PDO $pdo, Pf $pf): void
         echo '<td class="num" title="' . pf_h($tip) . '">';
         echo '<span class="' . ($skipped ? 'flat' : pf_updown($gap)) . '">'
            . ($gap > 0 ? '+' : '') . pf_n(round($gap)) . '</span></td>';
-        echo '<td class="num">' . pf_n($s['avg_cost_upto'] === null ? null : round($s['avg_cost_upto'])) . '</td>';
+        if ($n > $c['cur_step'] && isset($tAvg[$n]) && $tAvg[$n] !== null) {
+            echo '<td class="num"><span class="plan-qty" title="'
+               . pf_h('지금까지 실제 매수 + ' . $n . '차까지 이론가에 계획대로 샀을 때의 누적단가(매수비용 포함 · 예고)') . '">≈'
+               . pf_n(round($tAvg[$n])) . '</span></td>';
+        } else {
+            echo '<td class="num">' . pf_n($s['avg_cost_upto'] === null ? null : round($s['avg_cost_upto'])) . '</td>';
+        }
         echo '</tr>';
     }
+
+    /* 합계 줄의 누적단가 — 끝 차수까지 이론대로 샀을 때(예고가 있으면) · 지금 실제 값은 툴팁과 위 카드 */
+    $avgFoot = function () use ($c, $tAvgLast): string {
+        $act = $c['avg_cost'] === null ? null : round($c['avg_cost']);
+        if ($tAvgLast === null || $c['cur_step'] >= (int)array_key_last($c['steps'])) return '<td class="num">' . pf_n($act) . '</td>';
+        return '<td class="num" title="' . pf_h('끝 차수까지 이론가에 계획대로 샀을 때의 최종 누적단가 · 지금 실제 누적단가 ' . pf_n($act)) . '">'
+             . '≈' . pf_n(round($tAvgLast)) . ' <span class="muted" style="font-size:11px;font-weight:600">최종</span></td>';
+    };
+
+    // 합계 줄의 PER·PBR — 누적단가 칸과 같은 값(최종 이론 누적단가 · 예고가 없으면 지금 실제 누적단가)
+    $valFinal = ($tAvgLast !== null && $c['cur_step'] < (int)array_key_last($c['steps']));
+    $valPx    = $valFinal ? (float)$tAvgLast : ($c['avg_cost'] === null ? null : (float)$c['avg_cost']);
+    $vF       = pf_val_at($valB, $valPx);
+    $vFTip    = $valPx === null ? '' : (($valFinal ? '끝 차수까지 이론대로 샀을 때의 최종 누적단가 ' : '지금 누적단가 ')
+              . pf_n(round($valPx)) . '원 기준');
+    $valFoot  = $valCell($vF['per'], 1, $vFTip, $valFinal) . $valCell($vF['pbr'], 2, $vFTip, $valFinal);
 
     $execUpto = $c['exec_rate_upto'];
     $execCls  = ($execUpto === null) ? 'flat' : (($execUpto > 1.02) ? 'up' : (($execUpto < 0.98) ? 'down' : 'flat'));
@@ -5211,23 +5966,23 @@ function pf_page_position(PDO $pdo, Pf $pf): void
 
     echo '</tbody><tfoot>';
     if (!$hasSold) {
-        echo '<tr><td colspan="4">매수 합계</td>';
+        echo '<tr><td colspan="4">매수 합계</td>' . $valFoot;
         echo '<td class="num">' . pf_n($c['bought_qty']) . '</td>';
         echo '<td class="num">' . pf_n(round($c['filled_amount'])) . '</td>';
         echo '<td class="num">' . pf_n(round($c['plan_upto'])) . '</td>';
         echo '<td class="num"><span class="' . pf_updown($gapUpto) . '">'
            . ($gapUpto > 0 ? '+' : '') . pf_n(round($gapUpto)) . '</span></td>';
-        echo '<td class="num">' . pf_n($c['avg_cost'] === null ? null : round($c['avg_cost'])) . '</td></tr>';
+        echo $avgFoot() . '</tr>';
     } else {
-        echo '<tr><td colspan="4">보유 합계</td>';
+        echo '<tr><td colspan="4">보유 합계</td>' . $valFoot;
         echo '<td class="num">' . pf_n($c['filled_qty']) . '</td>';
         echo '<td class="num">' . pf_n(round($c['held_cost'])) . '</td>';
         echo '<td class="num">' . pf_n(round($c['plan_upto'])) . '</td>';
         echo '<td class="num"><span class="' . pf_updown($gapUpto) . '">'
            . ($gapUpto > 0 ? '+' : '') . pf_n(round($gapUpto)) . '</span></td>';
-        echo '<td class="num">' . pf_n($c['avg_cost'] === null ? null : round($c['avg_cost'])) . '</td></tr>';
+        echo $avgFoot() . '</tr>';
 
-        echo '<tr><td colspan="9" class="muted" style="font-weight:600;text-align:right">';
+        echo '<tr><td colspan="11" class="muted" style="font-weight:600;text-align:right">';
         /* 수량은 «이 사이클» 것이다(사다리가 그렇다) — 매도 0 이면 「−0주」를 적지 않는다.
          * 실현손익은 포지션 전체라 사이클이 여럿이면 그렇게 밝힌다(2026-09-08). */
         echo '총 매수 ' . pf_n($c['bought_qty']) . '주';
@@ -5306,7 +6061,9 @@ function pf_page_position(PDO $pdo, Pf $pf): void
         $labels[] = $n . '차';
         $theory[] = $s['theory_price'];
         $actual[] = $s['traded'] ? round((float)$s['price']) : null;   // 미체결 차수는 null
-        $avgRun[] = ($s['avg_cost_upto'] === null) ? null : round((float)$s['avg_cost_upto']);
+        // 누적단가 — 도달 차수 뒤는 표와 같은 이론 예고($tAvg · pf_theory_avg_run) · 차트에서는 점선으로 가른다
+        $avgV     = ($n > $curStep && isset($tAvg[$n]) && $tAvg[$n] !== null) ? $tAvg[$n] : $s['avg_cost_upto'];
+        $avgRun[] = ($avgV === null) ? null : round((float)$avgV);
 
         /* 자동매도가 = 그 차수까지의 누적단가 × (1 + 그 차수 목표수익률) ÷ (1 − 매도비용률).
          *
@@ -5320,14 +6077,20 @@ function pf_page_position(PDO $pdo, Pf $pf): void
         if ($n < $curStep) {
             $sp = pf_auto_sell_price($s['avg_cost_upto'], $s['target_rate'], $prm, $cumQty);
             $sellRun[] = ($sp === null) ? null : round($sp);
+        } elseif ($n > $curStep && isset($tAvg[$n]) && $tAvg[$n] !== null) {
+            /* ⊕2026-10-15 사용자 — 앞으로의 차수도 «이론대로 샀을 때» 값으로: 이론 누적단가 × (1 + 그 차수 목표) ÷ (1 − 매도비용률).
+             *   위 ★(눕힌다)의 이유였던 «누적단가는 그대로인데 목표만 오른다»가 이제 성립하지 않는다 — 누적단가도 함께 내려간다.
+             *   차수 지연(목표 하향)은 그 차수에 닿은 «뒤»의 일이라 여기엔 넣지 않는다(룰셋 목표 그대로). */
+            $sp = pf_auto_sell_price((float)$tAvg[$n], $s['target_rate'], $prm, (int)($tQty[$n] ?? 0));
+            $sellRun[] = ($sp === null) ? null : round($sp);
         } else {
             $sellRun[] = ($c['sell_price'] === null) ? null : round((float)$c['sell_price']);
         }
     }
     echo '<div class="card"><h2>차수별 이론가</h2>';
     echo '<div class="sub muted" style="font-size:12px;margin:-6px 0 8px">'
-       . '자동매도가는 <b>체결한 차수까지 실선</b>, 그 뒤 점선은 <b>지금 값을 눕힌 것</b>입니다 — '
-       . '그 차수에 닿으면 매수가 일어나 누적단가와 함께 내려갑니다.</div>';
+       . '누적단가는 <b>체결한 차수까지 실선</b>, 그 뒤 점선은 <b>이론가에 계획대로 샀을 때</b>(표의 ≈ 값)입니다. '
+       . '자동매도가 점선도 같은 가정(이론 누적단가 × 그 차수 목표수익률)입니다.</div>';
     echo '<div class="chart-box"><canvas id="pfChart"></canvas></div></div>';
     echo '</div>';
 
@@ -5426,7 +6189,7 @@ function pf_page_position(PDO $pdo, Pf $pf): void
     }
 
     // 차트는 공용 모듈(style/dailychart.js)이 그린다 — 라이브러리 로드도 모듈이 맡는다
-    echo '<script src="/style/dailychart.js?v=62"></script>';
+    echo '<script src="/style/dailychart.js?v=63"></script>';
     echo ChartFeat::boot('position', $pdo);   // DC_SCREEN·DC_FEATS·DC_VIEW (기능 구성 + 저장한 높이)
     echo '<script>';
     echo 'const PF_CODE=' . json_encode($pos['stock_code']) . ';';
@@ -5546,8 +6309,12 @@ JS;
        . 'title="HTS 체결시각. 지금 시각이 기본값입니다 — 다르면 고치고, 모르면 비우세요(분봉에 찍을 때만 씁니다)."></label>';
     echo '<label class="fld">체결가<input type="text" class="num-comma" inputmode="numeric" id="pfmBuyPrice" name="price" style="width:120px" required></label>';
     echo '<label class="fld">수량<input type="text" class="num-comma" inputmode="numeric" id="pfmBuyQty" name="qty" style="width:80px" required></label>';
+    // 시뮬레이션(2026-10-15 사용자) — 이 값·이 주수로 샀다면 뒤 차수 사다리가 어떻게 바뀌나 · DB 에 안 쓴다(api position simulate)
+    echo '<div class="fld"><span>&nbsp;</span><button type="button" class="btn btn-outline btn-sm" style="height:34px" onclick="pfSimulate()" '
+       . 'title="이 체결가·수량으로 샀다고 치고 뒤 차수(이론가·살 수량·누적단가·자동매도가)를 다시 계산해 보여 줍니다 — 기록은 안 됩니다">시뮬레이션</button></div>';
     echo '<label class="fld" style="flex:1;min-width:150px">메모<input type="text" name="memo"></label>';
     echo '</div>';
+    echo '<div id="pfmSim"></div>';
     echo '<div class="pfm-preview" id="pfmBuyPreview"></div>';
     echo '<div class="pfm-foot"><span class="muted" id="pfmBuyNote"></span>';
     echo '<button class="btn btn-primary" type="submit">매수 등록</button></div>';
@@ -5621,6 +6388,15 @@ JS;
     echo 'const PF_THEORY=' . json_encode($theory) . ';';
     echo 'const PF_ACTUAL=' . json_encode($actual) . ';';
     echo 'const PF_AVG='    . json_encode($avgRun) . ';';
+    /* 아래 축 둘째 줄 — 표 괄호와 같은 값($dropMap). 지금 차수는 «기준»(보유가 있을 때만 · 없으면 현재가가 기준이라 칸이 없다) */
+    $dropLbl = [];
+    foreach ($c['steps'] as $n => $s) {
+        $d = $dropMap[$n] ?? null;
+        $dropLbl[] = ($d !== null) ? ('▼' . number_format(abs($d) * 100, 1) . '%')
+                    : (($dropOpen && $n === (int)$c['cur_step'] && $dropFrom === '지금 누적단가') ? '기준' : '');
+    }
+    echo 'const PF_DROP=' . json_encode($dropLbl, JSON_UNESCAPED_UNICODE) . ';';
+    echo 'const PF_AVG_TH=' . ($tAvg ? 'true' : 'false') . ';';   // 이론 예고가 실렸나(종료 사이클은 아님)
     echo 'const PF_SELL='   . json_encode($sellRun) . ';';
     /* ★ 이름을 PF_CUR 로 두면 안 된다 — 아래 모달 스크립트의 `var PF_CUR`(현재 열린 차수)와
      *   같은 전역 이름이 되어 "Identifier 'PF_CUR' has already been declared" 로 그 블록이 통째로 죽는다.
@@ -5649,11 +6425,17 @@ JS;
   }
 
   // 차수가 쌓일수록 누적단가가 어떻게 내려오는지 (물타기 효과)
+  // 도달 차수 뒤는 이론 예고(표의 ≈) — 점선·속 빈 점으로 실제와 가른다
   if (PF_AVG.some(function(v){ return v !== null; })) {
+    var avgFut = function(i){ return PF_AVG_TH && i > PF_CHART_CUR - 1; };
     ds.push({
       label: '누적단가', data: PF_AVG, borderColor: '#1e9e74',
       backgroundColor: '#1e9e74', fill: false, tension: .2, spanGaps: true,
-      borderWidth: 2, pointRadius: 3, pointBackgroundColor: '#1e9e74', order: 2
+      borderWidth: 2, pointRadius: 3, order: 2,
+      pointBackgroundColor: function(ctx){ return avgFut(ctx.dataIndex) ? '#fff' : '#1e9e74'; },
+      pointBorderColor: '#1e9e74',
+      segment: { borderDash: function(ctx){ return avgFut(ctx.p1DataIndex) ? [6, 4] : undefined; } },
+      pfTheory: true
     });
   }
 
@@ -5665,8 +6447,10 @@ JS;
       label: '자동매도가', data: PF_SELL,
       borderColor: '#d32f2f', backgroundColor: '#d32f2f', fill: false, tension: 0,
       spanGaps: true, borderWidth: 2,
-      pointRadius: function(ctx){ return ctx.dataIndex <= PF_CHART_CUR - 1 ? 3 : 0; },
-      pointBackgroundColor: '#d32f2f',
+      // 이론 예고가 실렸으면 앞 차수도 속 빈 점(누적단가 선과 같은 말) · 종료 사이클은 옛 모양(눕힌 선 · 점 없음)
+      pointRadius: function(ctx){ return (ctx.dataIndex <= PF_CHART_CUR - 1 || PF_AVG_TH) ? 3 : 0; },
+      pointBackgroundColor: function(ctx){ return ctx.dataIndex > PF_CHART_CUR - 1 ? '#fff' : '#d32f2f'; },
+      pointBorderColor: '#d32f2f', pfTheory: true,
       segment: {
         // p0 이 현재차수(0-based: PF_CHART_CUR-1) 이후면 그 구간은 "눕힌" 부분이다
         borderDash: function(ctx){ return (ctx.p0DataIndex >= PF_CHART_CUR - 1) ? [6, 4] : undefined; }
@@ -5696,7 +6480,8 @@ JS;
           callbacks: {
             label: function(ctx){
               if (ctx.parsed.y === null) return null;
-              return ctx.dataset.label + ' ' + Math.round(ctx.parsed.y).toLocaleString() + '원';
+              var lb = ctx.dataset.label + ((ctx.dataset.pfTheory && PF_AVG_TH && ctx.dataIndex > PF_CHART_CUR - 1) ? '(이론)' : '');
+              return lb + ' ' + Math.round(ctx.parsed.y).toLocaleString() + '원';
             },
             afterBody: function(items){
               // 이론가 대비 실제 체결가가 얼마나 유리/불리했는지
@@ -5714,7 +6499,10 @@ JS;
         }
       },
       scales: { y: { ticks: { callback: function(v){ return v.toLocaleString(); }, font: { size: 11 } } },
-                x: { ticks: { font: { size: 11 } } } }
+                /* 둘째 줄 = 지금 누적단가에서 몇 % 내려가면 사나(표의 괄호와 같은 값) — 점 위가 아니라 축에 둔다(차트 안 글자 금지) */
+                x: { ticks: { font: { size: 11 }, callback: function(v){
+                       var l = this.getLabelForValue(v), d = PF_DROP[v];
+                       return d ? [l, d] : l; } } } }
     }
   });
 })();
@@ -5856,6 +6644,7 @@ function pfOpenStep(n){
   var q = (basePrice > 0) ? Math.floor(s.need / basePrice) : 0;
 
   document.getElementById('pfmBuyStep').value  = n;
+  document.getElementById('pfmSim').innerHTML  = '';   // 지난 시뮬레이션 결과는 다른 차수의 것이다
   document.getElementById('pfmBuyPrice').value = (basePrice !== null) ? Number(basePrice).toLocaleString() : '';
   document.getElementById('pfmBuyQty').value   = (q > 0) ? q.toLocaleString() : '';
   PF_QTY_DIRTY = false;   // 열 때마다 초기화 — 아직 사용자가 손대지 않은 상태다
@@ -5887,6 +6676,50 @@ function pfOpenStep(n){
   pfTab('buy');
   document.getElementById('pfModal').classList.add('on');
   document.body.style.overflow = 'hidden';
+}
+
+/**
+ * 시뮬레이션(2026-10-15) — 「이 차수를 이 값·이 주수로 샀다면」 뒤 차수 사다리를 서버 엔진으로 다시 계산해 전/후를 보여 준다.
+ * ★계산은 서버(api position simulate)가 한다 — 룰셋 사다리의 뒤 이론가는 실매수가에 따라 바뀌어 여기서 흉내 내면 화면과 다른 말을 한다.
+ */
+function pfSimulate(){
+  var box  = document.getElementById('pfmSim');
+  var num  = function(id){ return String(document.getElementById(id).value || '').replace(/,/g, ''); };
+  var step = document.getElementById('pfmBuyStep').value;
+  var price = num('pfmBuyPrice'), qty = num('pfmBuyQty');
+  var pid  = document.querySelector('#pfmBuy input[name="position_id"]').value;
+  if (!(+price > 0) || !(+qty > 0)) { box.innerHTML = '<div class="pfm-sim-msg">체결가와 수량을 넣어 주세요.</div>'; return; }
+  box.innerHTML = '<div class="pfm-sim-msg">계산 중…</div>';
+  var q = 'module=position&action=simulate&id=' + pid + '&step=' + step + '&price=' + price + '&qty=' + qty
+        + '&date=' + encodeURIComponent(document.getElementById('pfmBuyDate').value || '');
+  fetch('/stock/api.php?' + q, {credentials: 'same-origin'}).then(function(r){ return r.json(); }).then(function(j){
+    if (!j.ok) { box.innerHTML = '<div class="pfm-sim-msg">' + (j.message || '계산 실패') + '</div>'; return; }
+    var B = {}; (j.before || []).forEach(function(r){ B[r.n] = r; });
+    var cell = function(a, b, plan){                       // 후 값 + 바뀌었으면 옆에 «지금» 값
+      if (a === null || a === undefined) return '<td class="num muted">-</td>';
+      var t = (plan ? '≈' : '') + pfN(a);
+      var ch = (b !== null && b !== undefined && Math.round(b) !== Math.round(a));
+      return '<td class="num"><b' + (plan ? ' class="muted"' : '') + '>' + t + '</b>'
+           + (ch ? ' <span class="pfm-sim-was">' + pfN(b) + '</span>' : '') + '</td>';
+    };
+    var h = '<div class="pfm-sim-hd"><b>' + j.step + '차를 ' + pfN(j.price) + '원 × ' + pfN(j.qty) + '주에 샀다면</b>'
+          + ' <span class="muted">— 굵은 값 = 산 뒤 · 회색 취소선 = 지금 · ≈ = 계획대로 차례로 샀을 때(예고)</span>'
+          + '<button type="button" class="pfm-sim-x" onclick="document.getElementById(\'pfmSim\').innerHTML=\'\'" aria-label="닫기">✕</button></div>';
+    h += '<table class="pf pfm-sim"><thead><tr><th>차수</th><th class="num">매수가</th><th class="num">이론가</th><th class="num">살 수량</th><th class="num">누적단가</th><th class="num">자동매도가</th></tr></thead><tbody>';
+    (j.after || []).forEach(function(r){
+      var b = B[r.n] || {};
+      var mine = (r.n === j.step), done = (r.n <= j.cur.after);
+      var qtyTxt = r.traded ? pfN(r.qty) + '주' : (r.pq !== null ? '≈' + pfN(r.pq) + '주' : '-');
+      h += '<tr' + (mine ? ' class="pfm-sim-me"' : (done ? ' class="pfm-sim-done"' : '')) + '>'
+         + '<td>' + r.n + '차' + (mine ? ' <span class="sig-pill k-buy">이번</span>' : '') + '</td>'
+         + '<td class="num">' + (r.price !== null ? '<b>' + pfN(r.price) + '</b>' : '<span class="muted">-</span>') + '</td>'   // 실제(또는 이번 가상) 체결가
+         + cell(r.tp, b.tp, false)
+         + '<td class="num">' + qtyTxt + '</td>'
+         + cell(r.avg, b.avg, !done)
+         + cell(r.sell, b.sell, !done) + '</tr>';
+    });
+    box.innerHTML = h + '</tbody></table>';
+  }).catch(function(){ box.innerHTML = '<div class="pfm-sim-msg">계산 실패 — 잠시 뒤 다시 눌러 주세요.</div>'; });
 }
 
 /**
@@ -6365,6 +7198,16 @@ table.pf tbody tr.next-target{box-shadow:inset 4px 0 0 #c9d4de}
 .pfm-tabs button.on{background:#eaf3fc;color:#12406b;box-shadow:inset 0 -2px 0 #1d5c93}
 .pfm-body{padding:14px 16px 0}
 .pfm-preview{margin-top:12px}
+/* 매수 모달 시뮬레이션 결과(2026-10-15) — 굵은 값 = 산 뒤 · 회색 취소선 = 지금 */
+#pfmSim .pfm-sim-hd{display:flex;align-items:baseline;gap:8px;margin:12px 0 6px;font-size:12.5px}
+#pfmSim .pfm-sim-hd .muted{font-size:11px}
+#pfmSim .pfm-sim-x{margin-left:auto;border:0;background:none;color:#9aa7b4;cursor:pointer;font-size:13px}
+#pfmSim .pfm-sim-msg{margin:10px 0;font-size:12.5px;color:#7d8b99}
+#pfmSim table.pfm-sim{font-size:12.5px}
+#pfmSim table.pfm-sim td,#pfmSim table.pfm-sim th{padding:5px 8px}
+#pfmSim .pfm-sim-was{font-size:11px;color:#a3aeb9;text-decoration:line-through;margin-left:4px}
+#pfmSim tr.pfm-sim-me td{background:#fff5f3}
+#pfmSim tr.pfm-sim-done td{color:#8b98a5}
 .pfm-preview:empty{display:none}
 
 /* 현재 → 매수 후 → 변화 비교표 */
@@ -6403,8 +7246,8 @@ function pf_render_position_form(Pf $pf, ?array $pos): void
     $rules   = $pf->ruleSets();
     $markets = $pf->markets();
     $isNew   = ($pos === null);
-    /* 퀀트 사다리 — 매수 방식은 편입 때 정한다(룰셋 종목을 퀀트 사다리로 전환하는 흐름이 아니다).
-     * 수정 화면에서는 이미 박스인 포지션만 같은 섹션으로 재조정할 수 있다. */
+    /* 퀀트 사다리 — 매수 방식은 편입 때 정한다. 수정 화면에서 바꿀 수 있는 것은 <b>체결이 하나도 없는</b> 포지션뿐이고
+     * (2026-10-15), 체결이 있으면 박스 포지션의 재조정만 같은 섹션으로 한다. */
     $posLvF  = $isNew ? [] : $pf->positionLevels((int)$pos['id']);
     $buyMode = $posLvF ? 'box' : 'rule';
 
@@ -6535,11 +7378,23 @@ function pf_render_position_form(Pf $pf, ?array $pos): void
         }
         echo '</select></label>';
 
-        // 매수 방식은 편입 때 정한 값 고정 — 전환은 없다 (박스 포지션만 아래 섹션으로 재조정)
-        echo '<input type="hidden" name="buy_mode" value="' . $buyMode . '">';
-        echo '<div class="fld"><span>매수 방식</span><div class="fld-fixed">'
-           . ($buyMode === 'box' ? '📦 퀀트 사다리 <span class="muted">(' . count($posLvF) . '차)</span>' : '룰셋 하락률')
-           . '</div></div>';
+        /* 매수 방식 — 아직 한 주도 안 샀으면 바꿀 수 있다(2026-10-15 사용자 결정 · 서버도 같은 조건으로 다시 막는다).
+         * 체결이 있으면 그 방식으로 이미 샀으니 고정 표시(박스 포지션만 아래 섹션으로 재조정). */
+        if (!$pf->positionHasTrades((int)$pos['id'])) {
+            $ruleChk = $buyMode === 'box' ? '' : ' checked';
+            $boxChk  = $buyMode === 'box' ? ' checked' : '';
+            echo '<div class="fld"><span>매수 방식</span><div style="padding:7px 0;font-size:13px;white-space:nowrap" '
+               . 'title="매수 기록이 없어 바꿀 수 있습니다 — 첫 매수를 기록하면 고정됩니다">'
+               . '<label style="margin-right:12px"><input type="radio" name="buy_mode" value="rule"' . $ruleChk . ' onchange="pfBoxToggle()"> 룰셋 하락률</label>'
+               . '<label title="이 종목의 실제 박스 지지선(3~5개)을 골라 차수 가격표를 확정합니다 — 1차부터 지지에 닿아야 사는 매복형"><input type="radio" name="buy_mode" value="box"' . $boxChk . ' onchange="pfBoxToggle()"> 퀀트 사다리'
+               . ($posLvF ? ' <span class="muted">(' . count($posLvF) . '차)</span>' : '') . '</label>'
+               . '</div></div>';
+        } else {
+            echo '<input type="hidden" name="buy_mode" value="' . $buyMode . '">';
+            echo '<div class="fld"><span>매수 방식</span><div class="fld-fixed" title="매수 기록이 있어 바꿀 수 없습니다">'
+               . ($buyMode === 'box' ? '📦 퀀트 사다리 <span class="muted">(' . count($posLvF) . '차)</span>' : '룰셋 하락률')
+               . '</div></div>';
+        }
     }
 
     // ── 종목 — 코드/이름을 하나로 합치고 자동완성으로 고른다 (시뮬레이터와 공용 위젯)
@@ -7158,7 +8013,7 @@ document.querySelector('form[action*="action=save"]').addEventListener('submit',
 });
 pfBoxToggle();
 </script>
-<script src="/style/dailychart.js?v=62"></script>
+<script src="/style/dailychart.js?v=63"></script>
 <style>
 .fld-fixed{padding:7px 10px;background:#f2f6fa;border:1px solid #e0e8f0;border-radius:6px;
   font-size:13px;font-weight:700;color:#22303f;min-width:120px}
@@ -8922,7 +9777,7 @@ tr.rs-row:hover{background:#f2f8fd}
 CSS;
 
     // 차트는 공용 모듈(style/dailychart.js)이 그린다 — 라이브러리 로드도 모듈이 맡는다
-    echo '<script src="/style/dailychart.js?v=62"></script>';
+    echo '<script src="/style/dailychart.js?v=63"></script>';
     echo ChartFeat::boot('sim');   // DC_SCREEN·DC_FEATS·DC_VIEW 를 한 줄에
     echo <<<'JS'
 <script>
@@ -9777,7 +10632,7 @@ function pf_page_earncase(PDO $pdo, Pf $pf): void
        . '· 오늘 시장의 신호는 같은 탭이 매 분기 자동으로 보여 준다 — 이 페이지는 그 배지를 <b>믿어도 되는 이유</b>다.</div></div>';
 
     /* ── 차트 — dailychart.js 재사용. 마커는 날짜 스냅뿐이라 수정주가 정합 문제가 없다 ── */
-    echo '<script src="/style/dailychart.js?v=62"></script>';
+    echo '<script src="/style/dailychart.js?v=63"></script>';
     echo '<script>const EC_CASES=' . json_encode($CASES, JSON_UNESCAPED_UNICODE) . ';</script>';
     echo <<<'JS'
 <script>
@@ -10595,7 +11450,7 @@ function pf_page_watch(PDO $pdo, Pf $pf): void
          *   pf_liquidity 는 「★ 거래량 N배」 강조 재료로만 넘긴다 — 그래야 현황과 같은 배지가 나온다.
          * ★ 일봉이 없거나 표본이 모자란 종목은 <b>조용히 비운다</b>. 「특이 없음」이 아니라 「아직 모름」이다. */
         try {
-            $wDaily = $pf->dailyMap(array_column($rows, 'stock_code'), 400);
+            $wDaily = $pf->dailyMap(array_column($rows, 'stock_code'), 400, true);   // live — 장중 오늘 봉
             foreach ($rows as $w) {
                 $bars = $wDaily[(string)$w['stock_code']] ?? [];
                 if (!$bars) continue;
@@ -11269,6 +12124,7 @@ function pf_page_fund_detail(PDO $pdo, Dart $dart, string $code, ?Pf $pf = null)
 
     // 종목 개요·태그 — 재무가 없어도 뜬다(개요는 종목의 성질이지 재무의 부속이 아니다)
     pf_fund_note_card($pdo, $code);
+    pf_fund_research_card($pdo, $code);   // 리서치 — 최신 버전의 요지·위치·재점검 (stock/lib/research.php)
 
     if (!$series) {
         echo '<div class="warn">이 종목의 재무제표가 아직 없습니다.</div>';
@@ -11480,6 +12336,8 @@ function pf_fund_detail_chart(PDO $pdo, string $code): void
        . ($sue ? '<br>▲<b>어닝서프라이즈</b>(SUE ≥ ' . Thr::SUE_HIT . ' 서프라이즈)·▼<b>어닝쇼크</b>'
                . '(SUE ≤ ' . Thr::SUE_SHOCK . ') 마커는 정기공시 <b>다음 거래일</b> — '
                . '백테스트의 매수 시점 그대로입니다. 공시가 있으면 기간 바에 「SUE 공시 N」 버튼이 뜹니다.' : '')
+       . ($FEAT['overlay.research'] ? '<br>📑 깃발은 <b>리서치</b> 기준일 — <b style="color:#16a34a">초록</b>은 최신 리서치의 매수 구간, '
+               . '<b style="color:#7c3aed">보라 점선</b>은 시나리오입니다(기간 바 「리서치 N」 으로 끄고 켭니다).' : '')
        . '</div>';
     echo '</div><div class="act">';
     // 기간 바 [일봉|주봉 ┃ 160일 240일 480일 전체] + 사용자 지표 바 — DailyChart 공용 컴포넌트
@@ -11491,7 +12349,7 @@ function pf_fund_detail_chart(PDO $pdo, string $code): void
     echo '</div>';
 
     // 차트는 공용 모듈(style/dailychart.js)이 그린다 — 라이브러리 로드도 모듈이 맡는다
-    echo '<script src="/style/dailychart.js?v=62"></script>';
+    echo '<script src="/style/dailychart.js?v=63"></script>';
     echo ChartFeat::boot('fund', $pdo);       // DC_SCREEN·DC_FEATS·DC_VIEW (기능 구성 + 저장한 높이)
     echo '<script>const FD_CODE=' . json_encode($code) . ';</script>';
     echo <<<'JS'
@@ -14662,7 +15520,7 @@ table.bx-doc td:first-child,table.bx-doc th:first-child{text-align:left}
        . $pg . ' / ' . $pages . ' 페이지</div>';
     }   // ← 목록·페이지 번호는 결과가 있을 때만. 아래 스크립트는 «항상» — 사례 카드가 쓴다.
 
-    echo '<script src="/style/dailychart.js?v=62"></script>';
+    echo '<script src="/style/dailychart.js?v=63"></script>';
     echo '<script>const FL_CARDS=' . json_encode($cards, JSON_UNESCAPED_UNICODE) . ';</script>';
     echo '<script>const FL_IND=' . json_encode(
         $flInd ? [['def' => $flInd, 'vars' => ['변수_봉수' => $INDBARS]]] : [], JSON_UNESCAPED_UNICODE)
@@ -15961,7 +16819,7 @@ a.dt-bdg:hover{border-color:var(--accent);color:var(--accent)}
 
 /* ── 맨 왼쪽: 탐색 패널 — ☆ 관심종목 또는 관심그룹 하나 (2026-10-07 시총 목록 삭제·관심그룹 추가) ──
    소스는 stock_analysis_api.php action=watch — ☆ 는 pf_watchlist · 그룹은 &g=<id>(wg_item).
-   새 조회 경로를 만들지 않는다(watch 도 top30 과 같은 행 모양·같은 배지 단일본).
+   새 조회 경로를 만들지 않는다(옛 상위 종목 목록과 같은 행 모양·같은 배지 단일본 · top30 은 2026-10-26 삭제).
    여기서 «담고» 오른쪽 내 목록에서 «본다» — 왼쪽에서 오른쪽으로 탐색 → 편입 → 관찰. */
 #dt-top{flex:0 0 302px;display:flex;flex-direction:column;min-height:0;
   background:var(--panel);border-right:1px solid var(--line)}
@@ -16190,7 +17048,7 @@ CSS;
     }
     echo '</main></div><div id="dtToast"></div>';
 
-    echo '<script src="/style/dailychart.js?v=62"></script>';
+    echo '<script src="/style/dailychart.js?v=63"></script>';
     // 목록 배지(ETF 편입 수·퀀트) — 그리기·색의 단일본(사이트 공통 모듈)
     echo '<script src="/style/quantbadge.js?v=6"></script>';   // v6 = SUE 라벨 축약·종목명 옆 배치 (2026-08-12)
     echo '<script src="/style/stockrow.js?v=1"></script>';     // 목록의 한 행(3줄) — 관심그룹 화면과 나눠 쓰는 공용 모듈
@@ -17332,7 +18190,7 @@ CSS;
     }
     echo '</div>';
 
-    echo '<script src="/style/dailychart.js?v=62"></script>';
+    echo '<script src="/style/dailychart.js?v=63"></script>';
     echo ChartFeat::boot('move', $pdo);   // DC_SCREEN·DC_FEATS·DC_VIEW — 기간 기억은 'move' 행
     echo '<script>var MV_ITEMS=' . json_encode($items, JSON_UNESCAPED_UNICODE) . ';</script>';
 

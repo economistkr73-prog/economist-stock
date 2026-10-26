@@ -104,6 +104,14 @@ body { font-family: 'Pretendard','Malgun Gothic',sans-serif; background: #f0f2f5
 .pl-ac-addr { font-size: 11.5px; color: #8a97a3; margin-top: 1px; }
 .pl-ac-empty { padding: 12px; font-size: 12.5px; color: #aaa; text-align: center; }
 .pl-ac-grp { padding: 6px 12px 4px; font-size: 11px; font-weight: 700; color: #95a5a6; background: #f7f9fb; border-bottom: 1px solid #eef1f4; position: sticky; top: 0; }
+/* 🕘 최근 검색(같은 드롭다운) — 오른쪽 위 「전체 지우기」, 줄마다 시각·× */
+.pl-rc-hd { display: flex; align-items: center; justify-content: space-between; }
+.pl-rc-clr { font-weight: 600; color: #8a97a3; cursor: pointer; padding: 2px 4px; }
+.pl-rc-clr:hover { color: #c0392b; }
+.pl-rc-item { position: relative; padding-right: 38px; }
+.pl-rc-t { white-space: nowrap; font-size: 10.5px; font-weight: 500; color: #aab3bc; margin-left: 6px; }
+.pl-rc-x { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 28px; height: 28px; border: none; background: none; color: #b6c0c9; font-size: 18px; line-height: 1; cursor: pointer; border-radius: 50%; }
+.pl-rc-x:hover { background: #f1f3f5; color: #c0392b; }
 
 /* 상단 태그 칩 바 (가로 스크롤) */
 #pl-tagbar { display: flex; align-items: center; gap: 6px; padding: 7px 12px; background: #fff; border-top: 1px solid #f0f2f5; box-shadow: 0 1px 3px rgba(0,0,0,.05); flex-shrink: 0; }
@@ -788,9 +796,103 @@ a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
 .pem-lbl-row { display: flex; align-items: center; gap: 6px; }
 .pem-tagmgr { margin-left: auto; background: #f3f1fb; border: 1px solid #d9d2f0; color: #6c5ce7; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
 .pem-tagmgr:hover { background: #e9e4f8; }
+
+/* ══ 📱 모바일 화면(body.pm) — 폰에서 «근처 맛집·숙소·여행지 찾기» 하나에 맞춘 얼굴 ══
+   켜는 법 = 서버 $mobile(UA · 상단 메뉴와 같은 판정). 툴바 「PC」(localStorage pl_pcview)로 PC 화면을 볼 수 있다.
+   ★규칙은 전부 body.pm 아래 — PC 화면은 이 블록의 영향을 받지 않는다.
+   남기는 것: 검색 · 분류 칩 · 북마크만 · 내 위치 · 목록(아래 시트) · 상세(아래 시트) · 저장한 경로 «보기».
+   빼는 것(PC 에서): 지역·반경·태그·달 바 · 🔭주변 · AI 추천 · 공유 · 경로 만들기(편집) · 목록 편집·문서 · 범례. */
+.pm-only, #pmHere, #pmTripX, #pmBackBtn { display: none; }
+body.pm { height: 100vh; height: 100dvh; }   /* dvh = 주소창을 뺀 실제 높이(아래 시트가 주소창 밑에 숨지 않게) */
+body.pm button, body.pm a { touch-action: manipulation; }
+body.pm .pl-toolbar { flex-wrap: nowrap; gap: 6px; padding: 7px 8px; }
+body.pm .pl-toolbar h2, body.pm .pl-toolbar .btn-reco, body.pm .pl-toolbar .btn-route, body.pm .pl-toolbar .pl-share-wrap { display: none; }
+body.pm .pl-search-box { flex: 1; min-width: 0; }
+body.pm .pl-toolbar input#addr { width: 100%; font-size: 16px; padding: 9px 11px; }   /* 16px 미만이면 입력할 때 화면이 확대된다 */
+body.pm .pl-toolbar .btn { padding: 9px 11px; font-size: 14px; }
+body.pm .pm-only { display: inline-block; }
+body.pm .pl-ac { width: calc(100vw - 16px); max-width: none; max-height: 55vh; }
+body.pm .pl-ac-item { padding: 11px 12px; }
+body.pm #pl-regionbar, body.pm #pl-ancbar, body.pm #pl-tagbar, body.pm #pl-monthbar,
+body.pm #pl-foodbar, body.pm #pl-staybar, body.pm #pl-campbar,
+body.pm #ovToggle, body.pm .cb-chip.cat-etc, body.pm #pl-catbar .cb-lbl, body.pm .pl-legend { display: none !important; }
+body.pm #pl-catbar { padding: 6px 8px; }
+body.pm .cb-chip, body.pm .cb-bm { font-size: 14px; padding: 8px 14px; }
+/* 지도 위 버튼 */
+body.pm #pmHere { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 12; background: #fff; color: #2471a3; border: 1px solid #cfe0ef; border-radius: 20px; padding: 9px 16px; font-size: 14px; font-weight: 700; box-shadow: 0 2px 10px rgba(0,0,0,.22); white-space: nowrap; cursor: pointer; }
+body.pm #pmHere.on { display: block; }
+body.pm .pl-hint { top: 58px; max-width: 90%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+body.pm .pl-myloc, body.pm #pl-list.open ~ .pl-myloc { left: 10px; top: 10px; width: 44px; height: 44px; }
+body.pm.rt-on #pmTripX { display: block; position: absolute; right: 10px; top: 10px; z-index: 12; background: #5a4cd0; color: #fff; border: none; border-radius: 20px; padding: 9px 14px; font-size: 13.5px; font-weight: 700; box-shadow: 0 2px 10px rgba(0,0,0,.25); cursor: pointer; }
+/* 결과 목록 = 아래에서 올라오는 시트 — 접으면 머리줄만(지도가 화면을 갖는다) · 머리줄을 누르면 펴고 접는다 */
+body.pm #pl-list { left: 0; right: 0; top: auto; bottom: 0; width: 100%; max-width: 100%; height: 46px; border-radius: 14px 14px 0 0; box-shadow: 0 -3px 14px rgba(0,0,0,.18); transition: height .22s; }
+body.pm #pl-list.pm-exp { height: 55%; }
+body.pm .pl-list-head { position: relative; height: 46px; padding: 6px 16px 0; font-size: 14.5px; cursor: pointer; user-select: none; }
+body.pm .pl-list-head::before { content: ''; position: absolute; top: 5px; left: 50%; width: 38px; height: 4px; margin-left: -19px; border-radius: 2px; background: #d5dbe1; }
+body.pm .pl-list-head::after { content: '▲ 목록'; flex-shrink: 0; margin-left: 8px; font-size: 12.5px; font-weight: 700; color: #2980b9; }
+body.pm #pl-list.pm-exp .pl-list-head::after { content: '▼ 지도'; }
+body.pm #plListTitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+body.pm .lh-acts, body.pm .pl-lx { display: none !important; }
+body.pm .pl-list-body { display: block; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+body.pm #pl-list:not(.pm-exp) .pl-list-body { display: none; }   /* 접힌 동안은 행이 없다 — scrollIntoView 가 지도 칸을 밀지 않게 */
+body.pm .pl-sec { overflow: visible; min-height: 0; }
+body.pm .pl-li { padding: 12px 14px; }
+body.pm .li-name { font-size: 15px; }
+/* 상세 = 아래 시트(지도 위쪽은 보인다 · 고른 곳은 그 위쪽 가운데로 옮긴다 — pmReveal) */
+body.pm #pl-panel { top: auto; left: 0; right: 0; bottom: 0; width: 100%; max-width: 100%; height: auto; max-height: 58%; border-radius: 16px 16px 0 0; box-shadow: 0 -4px 18px rgba(0,0,0,.22); transform: translateY(105%); }
+body.pm #pl-panel.open { transform: translateY(0); }
+/* 시트는 내용만큼만 — 이름은 분류 배지와 한 줄 · 버튼은 한 줄(길안내·카카오맵·북마크) · 출처는 접어 둔다 */
+body.pm .panel-head { padding: 12px 16px 10px; border-bottom: none; }
+body.pm .panel-close { width: 34px; height: 34px; font-size: 24px; }
+body.pm .panel-head h3 { display: inline; font-size: 17px; margin: 0 0 0 6px; vertical-align: middle; }
+body.pm .panel-head .panel-guides { display: inline-flex; margin: 0 0 0 6px; vertical-align: middle; }
+body.pm .panel-head .meta { margin-top: 6px; font-size: 12.5px; line-height: 1.6; }
+body.pm .panel-head .pl-nv { margin-top: 8px; padding: 6px 10px; font-size: 12px; }
+body.pm .panel-head .pl-nv .nv-trend, body.pm .ai-gen-btn, body.pm .ref-empty { display: none; }
+body.pm .panel-head .tags { margin-top: 6px; }
+body.pm .panel-refs { padding: 0 16px 12px; }
+.pm-refs summary { font-size: 12.5px; font-weight: 700; color: #7f8c8d; cursor: pointer; padding: 4px 0 8px; }
+.pm-nav { display: flex; gap: 6px; margin-top: 10px; }
+.pm-nav-b { flex: 0 0 auto; display: block; text-align: center; text-decoration: none; white-space: nowrap; font-family: inherit; font-size: 13.5px; font-weight: 700; padding: 9px 12px; border: none; border-radius: 8px; color: #fff; cursor: pointer; }
+.pm-nav-b.nv { background: #03c75a; }
+.pm-facts { margin-top: 5px; font-size: 12.5px; line-height: 1.6; color: #5b6b7b; }
+.pm-facts .pf { white-space: nowrap; }
+.pm-facts .pf.ad { white-space: normal; }
+.pm-facts .pf.tg { color: #2980b9; font-weight: 600; }
+.pm-facts i { font-style: normal; color: #c5ccd3; margin: 0 5px; }
+.pm-facts a { color: #03a04a; font-weight: 700; text-decoration: none; cursor: pointer; }
+.pm-micro { margin-top: 2px; font-size: 12.5px; font-style: italic; color: #586c66; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pm-guides { margin-left: 4px; vertical-align: middle; }
+.pm-guides .li-guide { margin-left: 3px; }
+body.pm .panel-head .ai-sum-chip { margin-left: 6px; padding: 2px 7px; }
+.pm-nav-b.kk { background: #fee500; color: #3c1e1e; }
+.pm-nav-b.bm { background: #fff; border: 1.5px solid #f5a800; color: #b97a00; padding: 7.5px 11px; }
+.pm-nav-b.bm.on { background: #f5a800; color: #fff; }
+.pm-bm-memo { display: flex; gap: 6px; margin-top: 6px; padding: 5px 9px; background: #fff8e1; border-radius: 6px; font-size: 12.5px; color: #6b5200; }
+.pm-bm-memo span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pm-bm-memo a { flex-shrink: 0; color: #b97a00; font-weight: 700; text-decoration: underline; cursor: pointer; }
+/* 🤖 Claude 요약 = 화면 전체 · 큰 글씨(사용자 「눈이 안 좋아서 — 가득 채우고 글씨를 키워 줘 · 스크롤 생겨도 좋다」) */
+body.pm #pl-aisum { align-items: stretch; justify-content: stretch; }
+body.pm #pl-aisum .pem-box { width: 100% !important; max-width: 100% !important; height: 100vh; height: 100dvh; max-height: none; border-radius: 0; }
+body.pm #pl-aisum .pem-head { font-size: 19px; padding: 10px 12px 10px 20px; }
+body.pm #pl-aisum .pem-x { width: 48px; height: 48px; font-size: 34px; color: #7f8c8d; }
+body.pm #pl-aisum .pem-body { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 18px 16px 60px; }
+/* 글씨 = 처음 크기(이름 24 · 본문 20)의 170% — 사용자 「지금보다 170% 크게」 */
+body.pm #pl-aisum .aisum-name { font-size: 41px; margin-bottom: 16px; line-height: 1.3; word-break: keep-all; overflow-wrap: anywhere; }   /* 띄어쓰기 없는 긴 이름은 넘칠 때만 끊는다 */
+body.pm #pl-aisum .aisum-text { font-size: 34px; line-height: 1.7; color: #2c2540; word-break: keep-all; overflow-wrap: anywhere; }   /* 낱말 중간에서 끊지 않는다 */
+body.pm #pl-aisum .aisum-sub { font-size: 18px; margin-top: 24px; }
+/* 여행 경로 = 보기 전용 — 편집 패널 대신 아래 지점 카드(공유 링크 화면과 같은 바) */
+body.pm #rt-dock, body.pm .rt-banner { display: none !important; }
+.rti-name { font-weight: 700; color: #5a4cd0; }
+/* 저장함 = 열기·공유만(저장·삭제는 PC 에서) */
+body.pm .rt-trip-save, body.pm #rtTripCur, body.pm .rt-trip-del { display: none !important; }
+body.pm .rt-trip-it { padding: 11px 6px; }
+body.pm .rt-trip-open { padding: 9px 14px; font-size: 13.5px; }
 </style>
 </head>
 <body<?= $tripShareName !== '' ? ' class="trip-view"' : '' ?>>
+<script>/* 📱 모바일 화면 — 폰(UA)이면 켠다. 「PC」를 눌러 두었으면(pl_pcview) 끈다. 그리기 전에 정해야 화면이 튀지 않는다 */
+(function () { var m = <?= nav_is_mobile() ? 'true' : 'false' ?>; try { if (localStorage.getItem('pl_pcview') === '1') m = false; } catch (e) {} if (m) document.body.classList.add('pm'); })();</script>
 <?php if (!$isGuest) render_nav('places'); ?>
 <?php if ($tripShareName !== ''): ?>
 <div class="pl-guest-banner">📍 <b><?= htmlspecialchars($tripShareName, ENT_QUOTES, 'UTF-8') ?></b> · 공유된 여행지도 (보기 전용)</div>
@@ -802,7 +904,7 @@ a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
     <h2>🗺️ 웅이가 간다! (전국의 숨겨진 명소,맛집 지도)</h2>
     <div class="pl-search-box">
         <input type="text" id="addr" placeholder="장소·주소 입력 (예: 경포대, 강릉시)" autocomplete="off"
-               oninput="plSuggest(this.value)" onkeydown="plAddrKey(event)" onblur="setTimeout(plAcClose,150)">
+               oninput="plAddrAuto=false;plSuggest(this.value)" onfocus="plRecentFocus(this)" onkeydown="plAddrKey(event)" onblur="setTimeout(plAcClose,150)">
         <div id="pl-ac" class="pl-ac"></div>
     </div>
     <button class="btn btn-primary" onclick="plGeocode()">검색</button>
@@ -837,6 +939,9 @@ a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
             <div class="ts-hint">이 링크를 가진 사람은 로그인 없이 지도를 볼 수 있습니다(읽기전용). 만료되면 자동 차단됩니다.</div>
         </div>
     </div>
+    <button class="btn btn-outline pm-only" onclick="rtTripOpen()" title="저장한 여행 경로를 지도에서 봅니다">📂 경로</button>
+    <button class="btn btn-ghost pm-only" onclick="pmSetPc(true)" title="PC 화면(전체 기능)으로 봅니다">PC</button>
+    <button class="btn btn-ghost" id="pmBackBtn" onclick="pmSetPc(false)" title="폰에 맞춘 화면으로 돌아갑니다">📱 모바일 화면</button>
 <?php endif; ?>
 </div>
 
@@ -946,6 +1051,9 @@ a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
         <div class="pl-list-body" id="plListBody"></div>
     </div>
     <div class="pl-hint" id="hint">주소를 검색하거나 지도를 옮긴 뒤 '이 지역 검색'을 누르세요</div>
+    <button type="button" id="pmHere" onclick="plSearchHere()">🔄 이 지역에서 찾기</button>
+<?php if (!$isGuest): ?>    <button type="button" id="pmTripX" onclick="pmTripClose()">✕ 경로 닫기</button>
+<?php endif; ?>
     <div class="pl-legend">
         <span><i class="dot travel"></i>여행지</span>
         <span><i class="dot stay"></i>숙소</span>
@@ -1122,7 +1230,7 @@ a.pem-ref-t:hover { text-decoration: underline; color: #2980b9; }
             <div class="bm-place" id="bmPlace"></div>
             <div id="bmNewWrap">
                 <label class="pem-lbl">이름</label>
-                <input type="text" id="bmName" class="pem-inp">
+                <input type="text" id="bmName" class="pem-inp" placeholder="예: 양촌리 계곡 펜션">
                 <label class="pem-lbl">분류 <span class="pem-sub">마커 모양·색</span></label>
                 <select id="bmCat" class="pem-inp">
                     <option value="travel">여행지</option>
@@ -1206,6 +1314,8 @@ var PL_TRIP         = <?= json_encode($tripToken ?? '') ?>; // 트립 공유 토
 var PL_GUEST        = !!(PL_SHARE || PL_TRIP);   // 게스트(공유)면 보기 전용 — 찜·경로추가·길찾기 버튼 숨김
 var PL_GUIDES       = <?= json_encode(FoodGuide::clientDefs(), JSON_UNESCAPED_UNICODE) ?>; // 맛집 가이드 정의(색·prio·등급라벨)
 var PL_FOCUS        = <?= (int)($_GET['place'] ?? 0) ?>;   // ?place=<id> 로 들어오면 그 장소를 지도에 바로 띄운다(아덴트 수집기록 등 외부 링크용)
+var PL_MUA          = <?= nav_is_mobile() ? 'true' : 'false' ?>;   // 폰·태블릿(UA) — 상단 메뉴와 같은 판정
+var PL_M            = document.body.classList.contains('pm');   // 📱 모바일 화면(PL_MUA 이고 「PC」로 돌리지 않았을 때) — 맨 아래 「모바일 화면」 절
 
 // ── 맛집 가이드 헬퍼 (마커색·배지) ──
 // 대표 가이드 = 한 장소의 여러 guide 중 prio 최댓값(미쉐린 > 블루리본 > 기타)
@@ -1291,19 +1401,33 @@ var plLastSearchZoom = null;                  // 마지막 검색 시 줌(줌 �
 var plMergeSel = [];                  // 편집모드 병합 선택 장소 id 목록
 var plSearchMarker = null; // 검색으로 이동한 위치 마커(여행지 마커와 별개로 유지)
 
-// 검색 위치 마커 표시(기존 것 교체) — 보라 별 핀
-function plSetSearchMarker(lat, lng, label) {
+// 검색 위치 마커 표시(기존 것 교체) — 빨강 별 핀
+//  spot = 그 자리의 정보 {name, address, category} — 마커를 누르면 그 자리를 상세로 연다(거기서 「🔖 북마크로 저장」).
+//  없으면 label 을 주소로 본다(이름은 저장할 때 적는다).
+function plSetSearchMarker(lat, lng, label, spot) {
     if (plSearchMarker) plSearchMarker.setMap(null);
     plSearchMarker = new naver.maps.Marker({
         position: new naver.maps.LatLng(lat, lng),
         map: plMap,
-        title: label || '검색 위치',
+        title: (label || '검색 위치') + (PL_GUEST ? '' : ' — 누르면 북마크로 저장'),
         zIndex: 300, // 여행지 번호 마커 위에
         icon: {
             content: '<div class="mk-search"><b>★</b></div>',
             anchor: new naver.maps.Point(17, 34)
         }
     });
+    var sp = spot || { name: '', address: label || '' };
+    naver.maps.Event.addListener(plSearchMarker, 'click', function () {
+        plOpenNewSpot(lat, lng, sp.name, sp.address, sp.category);
+    });
+}
+
+// 지도에 없는 자리(검색한 주소·카카오 장소)를 상세로 연다 — 거기서 「🔖 북마크로 저장」.
+//  이름이 없으면(주소만 검색) 주소를 제목으로 보이고, 저장 모달에서 이름을 적게 한다(_addrOnly).
+function plOpenNewSpot(lat, lng, name, address, category) {
+    if (PL_GUEST || (typeof rtMode !== 'undefined' && rtMode)) return;
+    plOpenPanel({ name: name || address || '선택한 위치', address: address || '', lat: lat, lng: lng,
+                  category: category || 'travel', _new: true, _addrOnly: !name });
 }
 // ── 줌 기반 주변 오버레이 ─────────────────────────────────────
 //  베이스(필터 결과, 예: 호수)는 그대로 두고, 줌인하면 화면 안의 '선택 안 한 다른 분류'를
@@ -1599,11 +1723,14 @@ function plInit() {
 
         // 공유 링크(?trip=토큰)면 그 여행지도만 표시(일반 검색 생략)
         if (PL_TRIP) { rtViewShared(PL_TRIP); }
+        // 📱 모바일은 내 위치에서 연다(근처 찾기가 이 화면의 일) — 위치를 못 받으면 기본 화면에서 찾는다
+        else if (PL_M && !PL_FOCUS && !/[?&]bm=1(&|$)/.test(location.search)) plMyLocation(function () { if (plReady && !plChipActive()) plSearchHere(); });
         // 지도 열면 현재 화면의 마커를 바로 표시(뷰포트 + 최소리뷰 기준) — 바운드 준비 후 1회
         else setTimeout(function () { if (plReady && !plChipActive()) plSearchHere(); }, 600);
 
         // 🎯 반경 필터의 「지도에서 찍기」 — 찍기 모드일 때만 지도 클릭을 기준점으로 받는다
         naver.maps.Event.addListener(plMap, 'click', function (e) {
+            if (PL_M) pmMapTap();   // 📱 지도를 누르면 상세 시트를 닫는다(없으면 목록을 접는다)
             if (!plAncPicking || !e || !e.coord) return;
             plAncPickToggle(false);
             plAncSet(e.coord.lat(), e.coord.lng(), '찍은 지점', null, true);
@@ -1614,6 +1741,7 @@ function plInit() {
         naver.maps.Event.addListener(plMap, 'idle', function () {
             clearTimeout(plIdleTimer);
             plIdleTimer = setTimeout(function () {
+                if (PL_M) pmMovedCheck();                          // 📱 검색한 자리에서 멀어졌으면 「이 지역에서 찾기」
                 if (typeof rtMode !== 'undefined' && rtMode) { if (rtFinalized) { /* 찜·경로만: 주변 갱신 안 함(찜 마커 유지) */ } else if (rtRoute.length >= 2) rtFetchNearby(); else plUpdateLabels(); return; }   // 경로 모드: 이동/줌 시 현재 화면 ∩ 회랑 재조회(뷰포트 증분)
                 if (plBmOnly) { plUpdateLabels(); return; }        // 🔖 북마크만: 주변 오버레이·자동 재검색 없음(북마크만 남긴다)
                 plUpdateOverlay();                                 // 줌인=주변(전 분류) 오버레이 표시 / 줌아웃=제거(베이스 유지)
@@ -1665,6 +1793,7 @@ function plCatBarRender() {
 }
 // 분류 변경 = 칩바 갱신 + 빠진 도메인의 고아 태그만 정리(나머지 태그는 보존) + 통합 재검색
 function plCatApply() {
+    if (PL_M) { try { localStorage.setItem('pl_m_cats', JSON.stringify(plCatSel)); } catch (e) {} }   // 📱 다음에 열 때 이 분류로
     plCatPrune();
     plCatBarRender(); plTagBarRender(); plMonthBarRender(); plFoodBarRender(); plSubRender('stay'); plSubRender('camp');
     plReload();
@@ -1681,6 +1810,13 @@ function plCatChipClick(c) {
     if (i >= 0) plCatSel.splice(i, 1);   // 켜진 칩 재클릭 = 해제
     else plCatSel.push(c);               // 추가(멀티)
     plCatApply();
+}
+// 📱 모바일은 마지막으로 고른 분류로 연다(처음엔 맛집). PC 는 그대로 — 늘 빈 상태로 연다
+if (PL_M && !PL_TRIP) {
+    try {
+        var _pmCats = JSON.parse(localStorage.getItem('pl_m_cats') || 'null');
+        plCatSel = Array.isArray(_pmCats) ? _pmCats.filter(function (c) { return PL_CATS_ALL.indexOf(c) >= 0; }) : ['restaurant'];
+    } catch (e) { plCatSel = ['restaurant']; }
 }
 plCatBarRender();
 
@@ -2293,6 +2429,7 @@ function plSearch(lat, lng, expandFrom, viewport) {
     var keepId = (plActive >= 0 && plFeatures[plActive]) ? plFeatures[plActive].properties.id : null;  // 재검색 후 포커스 유지용
     var anc = plAnchor;    // 🎯 반경 필터 — 켜져 있으면 중심·반경은 기준점의 것(누가 불렀든)
     if (anc) { lat = anc.lat; lng = anc.lng; }
+    if (PL_M) pmMovedHide([lat, lng]);   // 📱 「이 지역에서 찾기」는 이 자리에서 멀어질 때 다시 뜬다
     var mode = anc ? 'viewport' : (plRegionLock ? 'region' : (plChipActive() ? 'nation' : 'viewport'));
     var rad = anc ? anc.km : ((expandFrom != null) ? expandFrom : parseFloat(document.getElementById('radius').value));
     var sp = { module: 'place', action: 'search', lat: lat, lng: lng, radius: rad, limit: PL_MAP_LIMIT,
@@ -2671,7 +2808,7 @@ function plMergeApply() {
 //  (경로 만들기 모드에서는 상세패널 대신 그 장소를 경로에 추가)
 function plFocus(idx) {
     var f = plFeatures[idx]; if (!f) return;
-    if (typeof rtMode !== 'undefined' && rtMode) { rtAddFromFeature(f); return; }
+    if (typeof rtMode !== 'undefined' && rtMode && !PL_M) { rtAddFromFeature(f); return; }   // 📱 모바일 경로는 보기 전용 — 누르면 상세만
     var co = f.geometry.coordinates;
 
     // 이전 active 마커 원복
@@ -2908,12 +3045,12 @@ function plBmEdit() {
     document.getElementById('bmHead').textContent = isNew ? '🔖 북마크로 저장' : '🔖 메모·링크';
     document.getElementById('bmPlace').textContent = (isNew ? '' : pr.name + ' · ') + (pr.address || '');
     document.getElementById('bmNewWrap').style.display = isNew ? '' : 'none';
-    document.getElementById('bmName').value = pr.name || '';
+    document.getElementById('bmName').value = pr._addrOnly ? '' : (pr.name || '');   // 주소만 검색한 자리는 이름을 적게 한다
     document.getElementById('bmCat').value = pr.category || 'travel';
     document.getElementById('bmUrl').value = '';
     document.getElementById('bmMemo').value = (b && b.bm_memo) || '';
     document.getElementById('pl-bm').classList.add('open');
-    setTimeout(function () { document.getElementById(isNew ? 'bmUrl' : 'bmMemo').focus(); }, 50);
+    setTimeout(function () { document.getElementById(isNew ? (pr._addrOnly ? 'bmName' : 'bmUrl') : 'bmMemo').focus(); }, 50);
 }
 function plBmEditClose() { document.getElementById('pl-bm').classList.remove('open'); }
 function plBmEditSave() {
@@ -2979,16 +3116,20 @@ function plOpenPanel(pr) {
     //  - 경로 모드가 아니면 '여기로 길찾기'(현위치→이 장소로 경로 시작) — 빠른 길찾기 흐름
     var addBtn = '', navBtns = '';
     if (!PL_GUEST && pr.lat != null && pr.lng != null) {   // 게스트(공유)는 보기 전용 — 추가/찜/길찾기 버튼 없음
-        if (typeof rtMode !== 'undefined' && rtMode) {
+        if (PL_M) {
+            addBtn = pmNavHtml(pr, true);   // 📱 모바일 = 한 줄(길안내 · 카카오맵 · 북마크) — 경로 편집·찜은 PC 에서
+        } else if (typeof rtMode !== 'undefined' && rtMode) {
             addBtn = '<button class="rt-addcur" onclick="rtAddCurrent()">➕ 경로에 추가</button>';
             var pk = (pr.id != null && rtIsPicked(pr.id));   // ⭐ 찜 토글(수집 — 경로 지점과 별개)
             addBtn += '<button class="rt-addcur rt-pickbtn' + (pk ? ' on' : '') + '" onclick="rtTogglePickHere()">' + (pk ? '★ 찜됨' : '☆ 찜') + '</button>';
         } else {
             addBtn = '<button class="rt-addcur nav-open-b" onclick="rtNavHere()">🧭 여기로 길찾기</button>';
         }
-        addBtn += plBmPanelHtml(pr);   // 🔖 북마크(가고 싶은 곳) — 찜(이 여행)과 별개
+        addBtn += PL_M ? pmBmMemoHtml(pr) : plBmPanelHtml(pr);   // 🔖 북마크(가고 싶은 곳) — 찜(이 여행)과 별개
+    } else if (PL_M && pr.lat != null && pr.lng != null) {
+        addBtn = pmNavHtml(pr);       // 📱 공유 링크로 보는 사람도 길안내는 쓴다
     }
-    head.innerHTML =
+    head.innerHTML = PL_M ? pmPanelHead(pr, tags) + addBtn :   // 📱 모바일 = 빈 칸 없이 줄로 흘린 머리(같은 재료 · 모양만 다르다)
         '<button class="panel-close" onclick="plClosePanel()">×</button>' +
         '<span class="cat-badge ' + (pr.category || 'etc') + '">' + (CAT_KO[pr.category] || '기타') + '</span>' +
         (plGuideBadges(pr) ? '<div class="panel-guides">' + plGuideBadges(pr) + '</div>' : '') +
@@ -3007,6 +3148,7 @@ function plOpenPanel(pr) {
 
     document.getElementById('panelRefs').innerHTML = '<div class="ref-empty">불러오는 중…</div>';
     document.getElementById('pl-panel').classList.add('open');
+    if (PL_M) { pmListToggle(false); pmReveal(pr.lat, pr.lng); }   // 📱 목록은 접고, 고른 곳은 시트 위쪽 가운데로
 
     // 네이버 맛집이면 전월 대비 추이 비동기 로드
     var _nv = pr.attributes && pr.attributes.naver;
@@ -3027,7 +3169,7 @@ function plRenderRefs(refs) {
     var box = document.getElementById('panelRefs');
     if (!refs.length) { box.innerHTML = '<div class="ref-empty">연결된 출처가 없습니다</div>'; return; }
     var RT = { article: '기사', youtube: '유튜브', blog: '블로그', official: '공식', manual: '메모' };
-    box.innerHTML = '<h4>출처 ' + refs.length + '건</h4>' + refs.map(function (r) {
+    var items = refs.map(function (r) {
         var href = r.url ? plEsc(r.url) : '#';
         var onclk = r.url ? ' onclick="plOpenArticle(this.href); return false;"' : '';
         return '<a class="ref-item" href="' + href + '" target="_blank" rel="noopener"' + onclk + '>' +
@@ -3036,6 +3178,9 @@ function plRenderRefs(refs) {
             '<div class="rtitle">' + plEsc(r.title || '(제목 없음)') + '</div>' +
             '</a>';
     }).join('');
+    box.innerHTML = PL_M   // 📱 출처는 접어 둔다(시트를 짧게 — 누르면 펴진다)
+        ? '<details class="pm-refs"><summary>📰 출처 ' + refs.length + '건</summary>' + items + '</details>'
+        : '<h4>출처 ' + refs.length + '건</h4>' + items;
 }
 
 function plClosePanel() { document.getElementById('pl-panel').classList.remove('open'); }
@@ -3265,6 +3410,7 @@ function plOpenNaverMap() {
     var q = ((pr.name || '') + ' ' + (pr.address || '')).trim();
     if (!q) return;
     var url = 'https://search.naver.com/search.naver?query=' + encodeURIComponent(q);
+    if (PL_M) { var w = window.open(url, '_blank'); if (!w) location.href = url; return; }   // 📱 폰은 창 크기 옵션을 못 다룬다(plOpenArticle 과 같은 이유)
     window.open(url, 'plNaverSearch', 'width=980,height=900,scrollbars=yes,resizable=yes,menubar=no,toolbar=no');
 }
 
@@ -3859,12 +4005,20 @@ function plGeocode() {
         .then(function (r) { return r.json(); })
         .then(function (d) {
             if (!d.ok) { plHint(d.msg || '주소를 찾을 수 없습니다'); return; }
+            plRecentAdd(d.source === 'kakao' ? { k: 'place', name: d.address, address: d.addr || '', lat: d.lat, lng: d.lng }
+                                             : { k: 'addr', name: d.address || addr, address: '', lat: d.lat, lng: d.lng });
+            plAddrAuto = true;
             if (plAnchor) { plAncSet(d.lat, d.lng, d.address || addr); return; }   // 🎯 반경 필터 중 = 기준점을 옮긴다(태그 유지)
             plClearOverlay();   // 새 장소로 이동 → 주변 오버레이 해제
             plMap.setCenter(new naver.maps.LatLng(d.lat, d.lng));
             plMap.setZoom(plZoomForRadius(document.getElementById('radius').value));
-            plSetSearchMarker(d.lat, d.lng, d.address || addr);
+            // 카카오 키워드로 찾았으면 d.address 는 장소 «이름»이고 실주소는 d.addr 다. 주소로 찾았으면 이름이 없다.
+            var spot = d.source === 'kakao' ? { name: d.address, address: d.addr || '' }
+                                            : { name: '', address: d.address || addr };
+            plSetSearchMarker(d.lat, d.lng, d.address || addr, spot);
             plSearch(d.lat, d.lng, parseFloat(document.getElementById('radius').value)); // 선택 반경부터 자동 확장
+            // 지도에 없는 자리도 상세를 열어 준다 — 거기서 「🔖 북마크로 저장」(우리 DB 장소면 검색 결과에 이미 있다)
+            if (d.source !== 'db') plOpenNewSpot(d.lat, d.lng, spot.name, spot.address);
         })
         .catch(function () { plHint('지오코딩 실패'); });
 }
@@ -3872,9 +4026,9 @@ function plGeocode() {
 // ── 현재 위치 (브라우저 Geolocation → 그 좌표로 이동 + 주변 검색) ──
 //  네이버 역지오코딩으로 실제 주소를 검색창·검색마커 라벨에 표시(가능할 때).
 //  주의: Geolocation 은 HTTPS(보안 컨텍스트)에서만 동작한다.
-function plMyLocation() {
+function plMyLocation(onFail) {   // onFail = 위치를 못 받았을 때(📱 첫 화면이 비지 않게)
     if (!plReady) return;
-    if (!navigator.geolocation) { plHint('이 브라우저는 현재위치를 지원하지 않습니다'); return; }
+    if (!navigator.geolocation) { plHint('이 브라우저는 현재위치를 지원하지 않습니다'); if (onFail) onFail(); return; }
     plAncClear(true); plRegionClear(); plClearTagSel();   // 현재위치로 이동 → 반경 필터·시도 고정·칩 필터 해제(브라우즈)
     var btn = document.getElementById('myLocBtn');
     if (btn) btn.classList.add('loading');
@@ -3888,8 +4042,9 @@ function plMyLocation() {
         plMap.setZoom(plZoomForRadius(rad));
         // 역지오코딩(주소)은 가능하면 표시하되, 실패해도 검색은 그대로 진행
         plReverseGeocode(lat, lng, function (addr) {
-            plSetSearchMarker(lat, lng, addr || '현재 위치');
-            document.getElementById('addr').value = addr || '';
+            plSetSearchMarker(lat, lng, addr || '현재 위치', { name: '', address: addr || '' });
+            document.getElementById('addr').value = addr || ''; plAddrAuto = true;
+            plRecentAdd({ k: 'here', name: '현재 위치', address: addr || '', lat: lat, lng: lng });   // 🕘 「그때 있던 곳」으로 돌아갈 수 있게
             plSearch(lat, lng, rad);   // 선택 반경부터 자동 확장
             plHint(addr ? ('📍 현재 위치: ' + addr) : '📍 현재 위치로 이동');
         });
@@ -3898,6 +4053,7 @@ function plMyLocation() {
         plHint(err && err.code === 1 ? '위치 권한이 거부되었습니다'
              : err && err.code === 3 ? '위치 확인 시간이 초과되었습니다'
              : '현재 위치를 가져올 수 없습니다');
+        if (onFail) onFail();
     }, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
 }
 
@@ -3924,7 +4080,7 @@ var plAcItems = [], plAcIndex = -1, plAcTimer = null;
 function plSuggest(q) {
     q = (q || '').trim();
     clearTimeout(plAcTimer);
-    if (q.length < 2) { plAcClose(); return; }
+    if (q.length < 2) { plRecentShow(); return; }   // 지운 칸 = 🕘 최근 검색
     plAcTimer = setTimeout(function () {       // 디바운스 220ms — 타이핑마다 호출 방지
         // 우리 DB(등록 장소) + 카카오 장소를 동시(병렬) 검색해 한 드롭다운에 병합
         var dbP = fetch(plApiUrl({ module: 'place', action: 'place_name_search', q: q }))
@@ -3993,11 +4149,17 @@ function plAcHighlight() {
 //  · 카카오 장소(src=kakao) → 그 위치로 이동(빨강 검색마커) + 주변 우리 마커 검색
 function plAcPick(i) {
     var it = plAcItems[i]; if (!it || !plReady) return;
-    document.getElementById('addr').value = it.name;
+    // 🕘 최근 검색에서 고른 것도 같은 길을 탄다 — 내 지도 장소(id)는 처음 고를 때처럼, 나머지는 그 자리로 옮기기만
+    var rc = (it.src === 'recent') ? it : null;
+    if (rc && rc.id) it = { src: 'db', id: rc.id, name: rc.name, address: rc.address, lat: +rc.lat, lng: +rc.lng };
+    plRecentAdd(rc || { k: it.src === 'db' ? 'db' : 'place', name: it.name, address: it.address || '',
+                        lat: it.lat, lng: it.lng, id: it.src === 'db' ? it.id : null, cat: it.category || '' });
+    var label = (rc && rc.k === 'here' && rc.address) ? rc.address : it.name;   // 현재 위치는 그때의 주소로
+    document.getElementById('addr').value = label; plAddrAuto = true;
     plAcClose();
     if (plAnchor) {                      // 🎯 반경 필터 중 = 기준점을 옮긴다(태그 유지)
         if (it.src === 'db') plPendingFocusId = it.id;
-        plAncSet(it.lat, it.lng, it.name);
+        plAncSet(it.lat, it.lng, label);
         return;
     }
     plRegionClear(); plClearTagSel();   // 검색창 선택 = 새 위치로 이동 → 시도 고정·칩 필터 해제(브라우즈)
@@ -4008,15 +4170,77 @@ function plAcPick(i) {
         plPendingFocusId = it.id;                 // 검색 결과 렌더 후 이 장소 마커 강조
         plSearch(it.lat, it.lng, rad);
     } else {
-        plSetSearchMarker(it.lat, it.lng, it.name);
+        var cat = plBmGuessCat(rc ? rc.cat : it.category);
+        var nm = (rc && rc.k !== 'place') ? '' : it.name;   // 주소·현재 위치엔 이름이 없다(북마크로 저장할 때 적는다)
+        plSetSearchMarker(it.lat, it.lng, label, { name: nm, address: it.address, category: cat });
         plSearch(it.lat, it.lng, rad);
         // 지도에 없는 곳도 상세를 열어 준다 — 거기서 「🔖 북마크로 저장」(SNS 에서 본 곳을 담는 길)
-        if (!PL_GUEST && !(typeof rtMode !== 'undefined' && rtMode)) {
-            plOpenPanel({ name: it.name, address: it.address, lat: it.lat, lng: it.lng,
-                          category: plBmGuessCat(it.category), _new: true });
-        }
+        //  최근 검색은 옮기기만 한다(돌아가 주변을 보려는 것 · 상세는 ★ 마커를 누르면 열린다)
+        if (!rc) plOpenNewSpot(it.lat, it.lng, it.name, it.address, cat);
     }
 }
+
+// ══ 🕘 최근 검색 — 고른 장소·찾은 주소·현재 위치를 이 기기에 10개까지 ══════════════
+//  ★이 기기(localStorage 'pl_recent')에만 둔다 — 폰과 PC 는 따로 쌓인다.
+//  ★같은 곳을 다시 찾으면 맨 위로 올린다(내 지도 장소=같은 id · 그 밖=같은 이름 300m 안 · 현재 위치=1km 안은 하나).
+//  보이는 때: 검색칸을 누를 때(비었거나 프로그램이 채운 글자일 때) · 칸을 지웠을 때. 고르기·키보드는 자동완성과 같은 길(plAcItems).
+var PL_RECENT_MAX = 10;
+var plAddrAuto = false;   // 검색칸 글자를 사람이 아니라 코드가 채웠나(고른 이름·현재 위치 주소) — 그러면 누를 때 최근 검색을 보인다
+function plRecentGet() {
+    try { var a = JSON.parse(localStorage.getItem('pl_recent') || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; }
+}
+function plRecentSet(a) { try { localStorage.setItem('pl_recent', JSON.stringify(a)); } catch (e) {} }
+function plRecentAdd(e) {
+    if (!e || e.lat == null || e.lng == null || isNaN(+e.lat) || isNaN(+e.lng)) return;
+    var n = { k: e.k || 'place', name: String(e.name || e.address || '').slice(0, 80), address: String(e.address || '').slice(0, 120),
+              lat: +e.lat, lng: +e.lng, id: e.id || null, cat: e.cat || '', t: Date.now() };
+    var a = plRecentGet().filter(function (x) {
+        if (n.id && x.id == n.id) return false;
+        var d = rtHaversine(+x.lat, +x.lng, n.lat, n.lng);
+        if (n.k === 'here' && x.k === 'here' && d < 1) return false;
+        if (x.name === n.name && d < 0.3) return false;
+        return true;
+    });
+    a.unshift(n);
+    plRecentSet(a.slice(0, PL_RECENT_MAX));
+}
+function plRecentAgo(t) {
+    var m = Math.floor((Date.now() - (t || 0)) / 60000);
+    if (m < 1) return '방금';
+    if (m < 60) return m + '분 전';
+    if (m < 1440) return Math.floor(m / 60) + '시간 전';
+    return Math.floor(m / 1440) + '일 전';
+}
+function plRecentFocus(el) {
+    if (el.value.trim() && !plAddrAuto) return;   // 사람이 적던 글자 = 자동완성이 맡는다
+    if (plAddrAuto) { try { el.select(); } catch (e) {} }   // 코드가 채운 글자는 통째로 골라 둔다(바로 새로 적게)
+    plRecentShow();
+}
+function plRecentShow() {
+    var box = document.getElementById('pl-ac'); if (!box) return;
+    var a = plRecentGet();
+    if (!a.length) { plAcClose(); return; }
+    plAcItems = a.map(function (x) { var o = {}; for (var k in x) o[k] = x[k]; o.src = 'recent'; return o; });
+    plAcIndex = -1;
+    var IC = { here: '📍', db: '🗺️', place: '🔍', addr: '🏠' };
+    var html = '<div class="pl-ac-grp pl-rc-hd">🕘 최근 검색<span class="pl-rc-clr" onmousedown="event.preventDefault();plRecentClear()">전체 지우기</span></div>';
+    plAcItems.forEach(function (it, i) {
+        var sub = it.address;
+        html +='<div class="pl-ac-item pl-rc-item" data-i="' + i + '" onmousedown="plAcPick(' + i + ')">' +
+            '<div class="pl-ac-name">' + (IC[it.k] || '🔍') + ' ' + plEsc(it.name) +
+                '<span class="pl-rc-t">' + plRecentAgo(it.t) + '</span></div>' +
+            (sub ? '<div class="pl-ac-addr">' + plEsc(sub) + '</div>' : '') +
+            '<button type="button" class="pl-rc-x" title="이 기록 지우기" onmousedown="event.preventDefault();event.stopPropagation();plRecentDel(' + i + ')">×</button>' +
+        '</div>';
+    });
+    box.innerHTML = html;
+    box.classList.add('open');
+}
+function plRecentDel(i) {
+    var a = plRecentGet(); a.splice(i, 1); plRecentSet(a);
+    plRecentShow();
+}
+function plRecentClear() { plRecentSet([]); plAcClose(); }
 
 // 검색창 키보드: ↑↓ 후보이동, Enter 선택/검색, Esc 닫기
 function plAddrKey(e) {
@@ -4129,7 +4353,7 @@ var RT_CAT_META = {
 
 function rtToggleMode() {
     // 종료(끄기) 시 데이터가 있으면 확인 — 종료 = 초기화(경로·찜 모두 비움). 저장한 여행지도는 보존.
-    if (rtMode && (rtRoute.length || rtPicks.length)) {
+    if (rtMode && !PL_M && (rtRoute.length || rtPicks.length)) {   // 📱 모바일은 저장한 경로를 «보기»만 해서 비울 것이 없다 — 묻지 않는다
         if (!confirm('경로 만들기를 종료하고 경로·찜을 모두 비울까요?\n(저장한 여행지도는 그대로 남아 있습니다)')) return;
     }
     rtMode = !rtMode;
@@ -4316,7 +4540,7 @@ function rtDraw() {
 
 // 경로 마커 클릭 — 소유자(편집)는 경로 지점 행 강조, 공유(트립) 게스트는 슬라이드 바와 연동
 function rtRouteMarkerClick(idx, pos) {
-    if (PL_TRIP) { rtShareFocus(idx); return; }
+    if (PL_TRIP || PL_M) { rtShareFocus(idx); return; }   // 📱 모바일 경로 보기도 공유 화면과 같은 지점 카드
     plMap.panTo(pos);
     var wp = rtRoute[idx];
     if (wp) { rtSelId = wp.placeId || null; rtShareOpenDetail(wp); }   // 경로 번호핀 클릭 = 그 지점 상세패널(placeId면 풀 상세, 없으면 이름·주소) — 찜/주변 마커와 일관
@@ -4328,7 +4552,7 @@ function rtRouteMarkerClick(idx, pos) {
 function rtRenderShareBar() {
     var wrap = document.getElementById('rt-sharewrap'), bar = document.getElementById('rt-sharebar');
     if (!wrap || !bar) return;
-    if (!(PL_TRIP && rtMode && rtRoute.length)) { wrap.classList.remove('on'); bar.innerHTML = ''; return; }
+    if (!((PL_TRIP || PL_M) && rtMode && rtRoute.length)) { wrap.classList.remove('on'); bar.innerHTML = ''; return; }
     bar.innerHTML = rtRoute.map(function (wp, i) {
         return '<div class="rt-sb-card' + (i === rtShareSel ? ' active' : '') + '" id="rt-sb-' + i + '" onclick="rtShareFocus(' + i + ')">' +
                 '<span class="rt-sb-num" style="background:' + rtColor(i) + '">' + (i + 1) + '</span>' +
@@ -4345,13 +4569,14 @@ function rtRenderShareBar() {
 // 공유(트립) 게스트 — 경로 요약(지점 수 · 🚗 소요시간 · 거리 · 통행료) 줄
 function rtRenderShareInfo() {
     var el = document.getElementById('rt-shareinfo'); if (!el) return;
-    if (!(PL_TRIP && rtMode && rtRoute.length)) { el.classList.remove('on'); el.innerHTML = ''; return; }
+    if (!((PL_TRIP || PL_M) && rtMode && rtRoute.length)) { el.classList.remove('on'); el.innerHTML = ''; return; }
     var stops = '📍 ' + rtRoute.length + '개 지점';
     var body;
     if (rtRoute.length < 2)   body = '<span class="rti-muted">' + stops + '</span>';
     else if (rtRouting)       body = stops + ' · <span class="rti-muted">🚗 경로 계산 중…</span>';
     else if (rtRouteInfo)     body = stops + ' · ' + rtFmtRoute(rtRouteInfo);
     else                      body = stops + ' · <span class="rti-muted">직선 거리 기준</span>';
+    if (PL_M && !PL_TRIP && rtLoadedName) body = '<span class="rti-name">📁 ' + plEsc(rtLoadedName) + '</span> · ' + body;
     el.innerHTML = body;
     el.classList.add('on');
 }
@@ -5024,6 +5249,7 @@ function rtTripLoad(id) {
             setTimeout(function () { plBumpResize(); try { plMap.fitBounds(b, { top: 60, right: 60, bottom: 90, left: 60 }); } catch (e) {} }, 260);
         }
         plHint('📂 불러옴: ' + (d.trip.name || ''));
+        if (PL_M) { rtShareSel = -1; plClosePanel(); rtRenderShareBar(); }   // 📱 편집 패널 대신 아래 지점 카드
     }).catch(function () { alert('불러오기 오류'); });
 }
 // 공유 링크(?trip=토큰) 게스트 뷰 — 그 여행지도(경로+찜)만 읽기전용 표시(주변 회랑 없이)
@@ -5052,6 +5278,118 @@ function rtLoad() {
     try { var raw = localStorage.getItem('placesRoute'); if (raw) { var a = JSON.parse(raw); if (Array.isArray(a)) rtRoute = a; } } catch (e) {}
 }
 rtLoad(); rtPicksLoad();
+
+// ══ 📱 모바일 화면(body.pm · PL_M) ══════════════════════════════════════
+//  폰에서는 «근처 맛집·숙소·여행지 찾기»만 한다 — 지도가 화면을 갖고, 목록·상세는 아래 시트다.
+//  ★같은 함수를 탄다(검색 plSearch · 상세 plOpenPanel · 경로 rt*) — 모바일용 검색·상세를 따로 만들지 않는다.
+//  ★편집(경로 만들기·찜·장소 수정·태그)은 PC 에서 — 모바일 경로는 저장한 것을 «보기»만(공유 링크 화면과 같은 지점 카드).
+//  ★PC 화면은 PL_M 이 false 라 이 절의 어느 것도 돌지 않는다.
+var pmLastCenter = null;   // 마지막으로 찾은 자리 [lat, lng]
+
+// 목록 시트 펴기/접기(force 없으면 뒤집기)
+function pmListToggle(force) {
+    var l = document.getElementById('pl-list'); if (!l) return;
+    l.classList.toggle('pm-exp', (force != null) ? !!force : !l.classList.contains('pm-exp'));
+}
+// 지도를 누르면 — 상세 시트가 열려 있으면 닫고, 아니면 목록을 접는다(지도를 크게)
+function pmMapTap() {
+    var p = document.getElementById('pl-panel');
+    if (p && p.classList.contains('open')) { plClosePanel(); return; }
+    pmListToggle(false);
+}
+// 상세 시트가 아래를 덮으므로, 고른 곳을 «시트 위쪽 지도»의 가운데로 옮긴다
+function pmReveal(lat, lng) {
+    if (!plMap || lat == null || lng == null || !(window.naver && naver.maps)) return;
+    var p = document.getElementById('pl-panel'), cover = p ? p.offsetHeight : 0;
+    var ll = new naver.maps.LatLng(+lat, +lng);
+    try {
+        var pj = plMap.getProjection(), o = pj.fromCoordToOffset(ll);
+        plMap.panTo(pj.fromOffsetToCoord(new naver.maps.Point(o.x, o.y + cover / 2)));
+    } catch (e) { plMap.panTo(ll); }
+}
+// 길안내 — 네이버 지도 앱(출발지 생략 = 현재 위치) · 카카오맵(앱이 없으면 웹) · withBm = 같은 줄 끝에 북마크
+function pmNavHtml(pr, withBm) {
+    var nm = String(pr.name || pr.address || '목적지'), la = +pr.lat, lo = +pr.lng;
+    var q = 'dlat=' + la + '&dlng=' + lo + '&dname=' + encodeURIComponent(nm) + '&appname=economist.kr';
+    var nv = /Android/i.test(navigator.userAgent || '')
+        ? 'intent://route/car?' + q + '#Intent;scheme=nmap;action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;package=com.nhn.android.nmap;end'
+        : 'nmap://route/car?' + q;
+    var kk = 'https://map.kakao.com/link/to/' + encodeURIComponent(nm.replace(/,/g, ' ')) + ',' + la + ',' + lo;
+    var bm = '';
+    if (withBm) {   // 북마크 동작은 PC 와 같은 함수(plBmEdit·plBmToggle) — 모양만 한 줄 안의 작은 단추
+        if (pr.id == null) bm = '<button type="button" class="pm-nav-b bm" onclick="plBmEdit()">🔖 저장</button>';
+        else bm = plIsBm(pr.id) ? '<button type="button" class="pm-nav-b bm on" onclick="plBmToggle()" title="누르면 북마크를 풉니다">🔖 북마크</button>'
+                                : '<button type="button" class="pm-nav-b bm" onclick="plBmToggle()">☆ 북마크</button>';
+    }
+    return '<div class="pm-nav"><a class="pm-nav-b nv" href="' + plEsc(nv) + '">🧭 네이버 길안내</a>' +
+        '<a class="pm-nav-b kk" href="' + plEsc(kk) + '" target="_blank" rel="noopener">카카오맵</a>' + bm + '</div>';
+}
+// 상세 시트의 머리 — 상자·빈 칸 없이 줄로 흘린다(사용자 「불필요한 공간 — 압축」)
+//  1줄 = 분류 · 이름 · 가이드 · 🤖  /  2줄 = 📍주소 · ⭐평점 · 📝리뷰 · 📞전화 · #태그 · 네이버 · 플레이스↗ (넘치면 접혀 내려간다)
+//  3줄 = 네이버 한줄평(한 줄 · 넘치면 …). 방문·블로그 리뷰 내역·전월 추이·AI 요약 생성은 PC 에서.
+function pmPanelHead(pr, tags) {
+    var nv = (pr.attributes && pr.attributes.naver) || null;
+    var f = [];
+    var pf = function (h, cls) { f.push('<span class="pf' + (cls ? ' ' + cls : '') + '">' + h + '</span>'); };
+    if (pr.address && pr.address !== pr.name) pf('📍 ' + plEsc(pr.address), 'ad');   // 주소로 찾은 곳은 제목이 곧 주소다
+    if (nv && nv.score) pf('⭐ ' + plEsc(String(nv.score)));
+    if (nv && nv.review) pf('📝 ' + Number(nv.review || 0).toLocaleString());
+    if (pr.phone) pf('<a href="tel:' + plEsc(String(pr.phone).replace(/[^0-9+]/g, '')) + '">📞 ' + plEsc(pr.phone) + '</a>');
+    if (pr.period_start) pf('🗓️ ' + plEsc(pr.period_start + (pr.period_end ? '~' + pr.period_end : '')));
+    (tags || []).slice(0, 3).forEach(function (t) { pf('#' + plEsc(t), 'tg'); });
+    if (pr.address || (pr.lat != null && pr.lng != null)) pf('<a onclick="plOpenNaverMap()">🔍 네이버</a>');
+    if (nv && nv.url) pf('<a href="' + plEsc(nv.url) + '" onclick="plOpenArticle(this.href); return false;">플레이스 ↗</a>');
+    var gb = plGuideBadges(pr);
+    return '<button class="panel-close" onclick="plClosePanel()">×</button>' +
+        '<span class="cat-badge ' + (pr.category || 'etc') + '">' + (CAT_KO[pr.category] || '기타') + '</span>' +
+        '<h3>' + plEsc(pr.name) + '</h3>' +
+        (gb ? '<span class="pm-guides">' + gb + '</span>' : '') +
+        ((pr.attributes && pr.attributes.summary)
+            ? ' <button type="button" class="ai-sum-chip" onclick="plShowAiSummary()" title="Claude 요약 보기">🤖</button>' : '') +
+        (f.length ? '<div class="pm-facts">' + f.join('<i>·</i>') + '</div>' : '') +
+        ((nv && nv.micro) ? '<div class="pm-micro">“' + plEsc(nv.micro) + '”</div>' : '');
+}
+// 북마크된 곳의 메모 한 줄(없으면 「＋ 메모·링크」) — 북마크 안 된 곳은 아무것도 안 그린다
+function pmBmMemoHtml(pr) {
+    var b = (pr.id != null) ? plBmMap[pr.id] : null;
+    if (!b) return '';
+    return '<div class="pm-bm-memo"><span>' + (b.bm_memo ? '📝 ' + plEsc(b.bm_memo) : '') + '</span>' +
+        '<a onclick="plBmEdit()">' + (b.bm_memo ? '수정' : '＋ 메모·링크') + '</a></div>';
+}
+// 「이 지역에서 찾기」 — 마지막으로 찾은 자리에서 화면 반경의 1/3 넘게 옮겼을 때만 뜬다
+function pmMovedHide(center) {
+    if (center) pmLastCenter = center;
+    var b = document.getElementById('pmHere'); if (b) b.classList.remove('on');
+}
+function pmMovedCheck() {
+    var b = document.getElementById('pmHere'); if (!b || !plMap) return;
+    var show = false;
+    if (pmLastCenter && plCatSel.length && !plBmOnly && !plAnchor && !plRegionLock && !(rtMode && !rtFinalized)) {
+        var c = plMap.getCenter();
+        show = rtHaversine(c.lat(), c.lng(), pmLastCenter[0], pmLastCenter[1]) > plViewportRadiusKm() / 3;
+    }
+    b.classList.toggle('on', show);
+}
+// 경로 보기 닫기 — 저장한 여행지도는 그대로(이 기기의 임시 경로만 비운다)
+function pmTripClose() {
+    if (rtMode) rtToggleMode();
+    rtRenderShareBar(); plClosePanel();
+    plToggleList(plFeatures.length > 0);
+}
+// PC 화면 ↔ 모바일 화면(이 기기에 기억)
+function pmSetPc(on) {
+    try { if (on) localStorage.setItem('pl_pcview', '1'); else localStorage.removeItem('pl_pcview'); } catch (e) {}
+    location.reload();
+}
+(function () {
+    if (!PL_M) {   // 폰인데 PC 화면을 고른 경우 — 돌아가는 단추만 보인다
+        var bb = document.getElementById('pmBackBtn'); if (bb && PL_MUA) bb.style.display = 'inline-block';
+        return;
+    }
+    var ad = document.getElementById('addr'); if (ad) ad.placeholder = '장소·주소 검색';   // 좁은 칸에서 잘리지 않게
+    var hd = document.querySelector('#pl-list .pl-list-head');   // 목록 머리줄 = 시트 손잡이
+    if (hd) hd.addEventListener('click', function (e) { if (!e.target.closest('button')) pmListToggle(); });
+})();
 </script>
 </body>
 </html>

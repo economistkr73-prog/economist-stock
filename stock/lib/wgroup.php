@@ -26,7 +26,11 @@
  * ★테마 그룹(2026-10-12) — 그룹에 «시장 변수»(환율·유가·금리… · classes/Mv.class · module=mv)를 연결하면
  *   ①격자 맨 앞 칸에 변수의 추이 ②종목 차트마다 변수 선 겹치기 ③구분행의 방향(↑ 오를 때 유리 · ↓ 내릴 때 유리)이 켜진다.
  *   변수가 없는 그룹은 예전 그대로다. 판정을 세우지 않는다 — 방향은 내가 적은 것이고 「유리」는 주 변수가 오른 날인지 내린 날인지만 본다.
+ * ★테마 md 가져오기(2026-10-26 · 규칙 17) — 「그룹 관리 · 일괄등록」 붙여넣기 칸이 머리말 `wg: theme/1` 을 알아보면
+ *   미리보기 표(모드 · 행 상태 · 기준가 · 제외 이유)를 보이고, 적용한 그룹은 리스트 위에 접이식 「테마 노트」(원문의 노트·일정·출처)가 선다.
  */
+require_once __DIR__ . '/wgroup_api.php';      // wg_theme_view() — 테마 노트(첫 화면과 item_list 가 같은 함수)
+
 function pf_page_wgroup(PDO $pdo, Pf $pf): void
 {
     $wg     = new Wg($pdo);
@@ -61,6 +65,8 @@ function pf_page_wgroup(PDO $pdo, Pf $pf): void
     // 등록된 변수 전부 — 종목별 «같이 볼 변수»의 이름·자릿수와 고르는 메뉴가 이것을 본다
     $vall = [];
     if ($mvReady) { try { $vall = $mv->vars(); } catch (Throwable $e) { $vall = []; } }
+    // 테마 노트 — 이 그룹을 테마 md 로 가져왔으면(wg_import) 그 원문의 노트·일정·출처 · 표가 없거나 기록이 없으면 null
+    $theme = ($ready && $gid > 0) ? wg_theme_view($wg, $gid) : null;
 
     echo '<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8">';
     echo '<title>관심그룹 · 주식 포트폴리오</title>';
@@ -157,8 +163,34 @@ button{font-family:inherit}
 .wg-th,.wg-r{display:grid;grid-template-columns:20px minmax(0,1fr) 46px 92px 68px 22px;gap:0 6px;align-items:center;padding:0 8px}
 /* 종목 칸 — 공용 모듈의 여섯 칸이 놓이는 2열 격자(단타 .dt-it 와 같은 나눔) */
 .wg-r .info{display:grid;grid-template-columns:1fr auto;gap:2px 8px;min-width:0;padding:7px 0}
-/* 메모가 있으면 종목명 뒤에 빨간 삼각형 — 마우스를 올리면 메모와 작성일 */
-.wg-r .wg-memo{flex:0 0 auto;margin-left:5px;color:var(--up);font-size:9px;cursor:help;line-height:1}
+/* 메모가 있으면 종목명 뒤에 빨간 삼각형 — 마우스를 올리면 카드(#wgTip · 꼬리표·트리거·무효는 칩) · 작은 글자라 손이 닿는 자리를 넓힌다 */
+.wg-r .wg-memo{flex:0 0 auto;margin-left:1px;padding:3px 4px;color:var(--up);font-size:9px;cursor:help;line-height:1}
+/* ── 카드형 툴팁(메모) — 포트폴리오 현황 .pf-tip 과 같은 방식(data-tip 의 HTML 을 떠 있는 상자 하나에) · 다크 ── */
+.wg-tip{position:fixed;z-index:99;pointer-events:none;min-width:220px;max-width:420px;background:#1b2335;color:var(--ink);
+  border:1px solid #3a4766;border-radius:10px;box-shadow:0 10px 28px rgba(0,0,0,.55);padding:9px 12px 10px;font-size:12px;line-height:1.55}
+.wg-tip[hidden]{display:none}
+.wg-tip .tt-h{display:flex;align-items:center;gap:6px;padding-bottom:6px;margin-bottom:7px;border-bottom:1px solid var(--line)}
+.wg-tip .tt-h b{font-size:13px;font-weight:800}
+.wg-tip .tt-h i{font-style:normal;font-size:10.5px;font-weight:700;color:var(--ink-dim);background:var(--panel);border-radius:10px;padding:0 7px}
+.wg-tip .tt-h em{font-style:normal;margin-left:auto;padding-left:12px;font-size:11px;color:var(--ink-mute);font-family:var(--mono)}
+.wg-tip .tt-c{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:7px}
+.wg-tip .mc{display:inline-flex;align-items:baseline;gap:4px;padding:1px 7px;border-radius:5px;font-size:11.5px;font-weight:800;
+  border:1px solid var(--line);white-space:nowrap}
+.wg-tip .mc small{font-size:10px;font-weight:700;opacity:.8}
+.wg-tip .mc b{font-family:var(--mono);font-variant-numeric:tabular-nums}
+/* 근거의 꼬리표 — [단독] 주황 · [공시]·[IR] 초록 · [리포트] 파랑 · [기사] 회색 · [추정] 보라 */
+.wg-tip .mc.t-a{color:#0b1020;background:var(--accent);border-color:var(--accent)}
+.wg-tip .mc.t-g{color:#5fd08a;border-color:#1e5c3a;background:#12341f}
+.wg-tip .mc.t-b{color:#7fb1e8;border-color:#33507a;background:#243250}
+.wg-tip .mc.t-n{color:var(--ink-dim);background:var(--panel)}
+.wg-tip .mc.t-p{color:#c5b3f0;border-color:#4b3f75;background:#2a2342}
+/* 트리거(위로 뚫을 가격) 빨강 · 무효(아래로 깨지면 안 되는 가격) 파랑 — 사이트의 오름·내림 색 */
+.wg-tip .mc.k-tr{color:#ff8a80;border-color:#5c2a26;background:#2a1412}
+.wg-tip .mc.k-iv{color:#7fb1e8;border-color:#33507a;background:#16233a}
+.wg-tip .tt-b{margin:0 0 4px;color:var(--ink)}
+.wg-tip dl{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;margin:6px 0 0;padding-top:6px;border-top:1px dashed var(--line)}
+.wg-tip dt{color:var(--ink-mute);white-space:nowrap;font-size:11px;padding-top:1px}
+.wg-tip dd{margin:0;color:var(--ink-dim)}
 .wg-th{flex:0 0 auto;height:26px;font-size:10.5px;color:var(--ink-mute);border-bottom:1px solid var(--line);background:var(--panel-2)}
 .wg-th span{text-align:right}
 .wg-th span:nth-child(2){text-align:left}
@@ -359,6 +391,8 @@ body:not(.wg-theme) .wg-r.sep .dr,body.wg-fixed .wg-r.sep .dr{display:none}
 #wgMgTx{display:block;width:100%;height:74px;box-sizing:border-box;margin:7px 0;background:var(--bg);border:1px solid var(--line);border-radius:8px;
   color:var(--ink);font-size:12.5px;padding:7px 9px;resize:vertical;outline:none;font-family:var(--mono)}
 #wgMgTx:focus{border-color:var(--accent)}
+/* 파일을 창 위로 끌고 오는 동안 — 놓을 자리(칸)를 밝힌다 */
+#wgMgTx.over{border-color:var(--mv);box-shadow:0 0 0 2px rgba(63,208,201,.35)}
 .wg-pa{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
 .wg-pa input{width:150px}
 #wgMgPr{margin-top:7px;color:var(--ink-dim);line-height:1.7;max-height:66px;overflow-y:auto}
@@ -366,6 +400,66 @@ body:not(.wg-theme) .wg-r.sep .dr,body.wg-fixed .wg-r.sep .dr{display:none}
 #wgMgPr .ms{color:#e0a44a}
 #wgToast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:95;background:#1d2740;border:1px solid var(--line);color:var(--ink);
   font-size:12.5px;padding:9px 16px;border-radius:9px;box-shadow:0 10px 26px rgba(0,0,0,.5);display:none}
+
+/* ── 테마 노트 — 테마 md 로 가져온 그룹의 원문(노트·일정·출처). 판정·신호는 보이지 않는다(보는 자리) ── */
+.wg-tn{flex:0 0 auto;border-bottom:1px solid var(--line);background:#101727;font-size:12px}
+.wg-tn[hidden]{display:none}
+.wg-tn .tn-h{display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;white-space:nowrap;overflow:hidden}
+.wg-tn .tn-h:hover b{color:var(--accent)}
+.wg-tn .tg{border:0;background:transparent;color:var(--ink-dim);cursor:pointer;font-size:11px;padding:0}
+.wg-tn .tn-m{color:var(--ink-mute);font-family:var(--mono);font-size:11px}
+.wg-tn .rv{font-size:11px;color:var(--ink-dim);border:1px solid var(--line);border-radius:4px;padding:0 5px}
+.wg-tn .rv.late{color:#0b1020;background:var(--accent);border-color:var(--accent);font-weight:800}
+.wg-tn .tn-s{color:var(--accent);font-size:11px}
+.wg-tn .sp{flex:1}
+.wg-tn .tn-b{max-height:42vh;overflow-y:auto;padding:2px 14px 12px;line-height:1.65;color:var(--ink-dim)}
+.wg-tn .tn-t{font-weight:800;color:var(--ink);margin:6px 0 2px}
+.wg-tn .tn-b h3{margin:10px 0 4px;font-size:12.5px;color:var(--accent)}
+.wg-tn .tn-b h2,.wg-tn .tn-b h4,.wg-tn .tn-b h5{font-size:12px;margin:8px 0 3px;color:var(--ink)}
+.wg-tn .tn-b p{margin:4px 0}
+.wg-tn .tn-b a{color:var(--accent)}
+.wg-tn .tn-b b{color:var(--ink)}
+.wg-tn .tn-b ul,.wg-tn .tn-b ol{margin:4px 0;padding-left:18px}
+.wg-tn .tn-b table{border-collapse:collapse;font-size:11.5px;margin:4px 0}
+.wg-tn .tn-b th,.wg-tn .tn-b td{border:1px solid var(--line);padding:3px 7px;text-align:left;vertical-align:top}
+.wg-tn .tn-b th{background:var(--panel-2);color:var(--ink)}
+/* ── 테마 md 미리보기 — 모달 오른쪽을 통째로 쓴다(종목 목록·복사 줄·옛 대상 고르기는 접는다) ── */
+#wgMgBox.th-on .wg-mt,#wgMgBox.th-on #wgMgI{display:none}
+#wgMgBox.th-on .wg-mp{flex:1;min-height:0;overflow-y:auto}
+#wgMgBox.th-on #wgMgPr{max-height:none}
+#wgMgBox.th-on #wgMgPt,#wgMgBox.th-on #wgMgPn,#wgMgBox.th-on #wgMgAdd,#wgMgBox.th-on .wg-pa > span{display:none}
+#wgThGo[hidden]{display:none}
+.th-hd{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:2px 0 6px}
+.th-hd .wg-in{width:190px;padding:3px 7px;font-size:12.5px}
+.th-hd .th-ex{color:var(--accent);font-size:11.5px}
+.th-hd .th-nw{color:#5fd08a;font-size:11.5px}
+.th-hd .th-fn{color:var(--ink-dim);font-size:11.5px;font-family:var(--mono)}
+.th-meta{color:var(--ink-mute);font-size:11.5px;margin-bottom:6px}
+.th-meta a{color:var(--accent)}
+.th-err{color:#ff8a80;margin:3px 0}
+.th-warn{color:#e0a44a;margin:3px 0}
+.th-cnt{color:var(--ink);margin:6px 0 2px}
+.th-box{margin:6px 0;padding:6px 9px;border:1px solid var(--line);border-radius:7px;background:var(--panel-2)}
+.th-box b{color:var(--ink)}
+.th-box ul{margin:3px 0 0;padding-left:16px}
+.th-t{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
+.th-t th{position:sticky;top:0;background:var(--panel-2);color:var(--ink-mute);font-weight:700;font-size:11px;text-align:left;padding:4px 6px}
+.th-t td{padding:4px 6px;border-bottom:1px solid rgba(38,48,74,.5);vertical-align:top}
+.th-t tr.sec td{background:#101727;color:var(--accent);font-weight:800}
+.th-t tr.sec .k{color:var(--ink-mute);font-weight:400;font-size:11px;margin-left:6px}
+.th-t tr.x td{opacity:.62}
+.th-t .c{color:var(--ink-mute);font-family:var(--mono);font-size:11px;margin-left:4px}
+.th-t .px{font-family:var(--mono);text-align:right;white-space:nowrap;color:var(--base)}
+.th-t .px small{color:var(--ink-mute);font-size:10.5px;margin-left:3px}
+.th-t .ml{color:var(--ink-mute);font-family:var(--mono);font-size:11px;white-space:nowrap;cursor:help}
+.th-t .nt{font-size:11px;line-height:1.5}
+.th-st{display:inline-block;padding:0 5px;border-radius:4px;font-size:10.5px;font-weight:800;border:1px solid var(--line);white-space:nowrap}
+.th-st.new{color:#5fd08a;border-color:#1e5c3a}
+.th-st.keep{color:var(--ink-dim)}
+.th-st.fill{color:var(--base);border-color:#5a4a22}
+.th-st.bad{color:#ff8a80;border-color:#5c2a26}
+.th-st.over{color:#e0a44a;border-color:#5a4a22}
+.th-pv{display:inline-block;font-size:10px;color:#e0a44a;border:1px solid #5a4a22;border-radius:3px;padding:0 3px;margin-left:4px}
 
 /* 좁은 화면 — 차트 영역이 아래로 내려간다(모바일 최적화는 범위 밖) */
 @media (max-width:1100px){
@@ -427,6 +521,8 @@ JS;
        . '<button type="button" class="dt-chip" id="wgBaseClr" title="그룹 전체의 기준가를 지웁니다">기준가 지우기</button></div>';
     // 고정 그룹일 때만 보이는 한 줄 — 「왜 편집이 안 되는지」와 「어디서 고치는지」를 적는다
     echo '<div class="wg-fix" id="wgFix" hidden></div>';
+    // 테마 노트 — 테마 md 로 가져온 그룹일 때만 선다(접힌 한 줄 → 펴면 원문의 노트·일정·출처)
+    echo '<div class="wg-tn" id="wgTn" hidden></div>';
     echo '<div class="wg-th"><span></span><span>종목 · 현재가 · 전일비</span>'
        . '<span title="거래대금 — 십억 원(정수 · HTS 와 같은 단위)">대금</span><span>기준가</span><span>기준대비</span><span></span></div>';
     echo '<div id="wgRows"></div>';
@@ -477,12 +573,18 @@ JS;
        . '<button type="button" class="wg-btn" id="wgMgMove" title="기준가·메모도 함께 갑니다">이동</button>'
        . '<button type="button" class="wg-btn dg" id="wgMgDel">삭제</button></div>'
        . '<div id="wgMgI"></div>'
-       . '<div class="wg-mp"><b>일괄 등록</b><span>코드·종목명을 붙여넣으세요 — 줄바꿈·탭·콤마로 구분 (종목명은 정확히 일치해야 합니다) · <b style="color:var(--mv)">표(종목 │ 근거 …)</b>를 통째로 붙이면 근거는 메모로, 「~ 때 유리」 줄은 구분행으로 담습니다</span>'
+       . '<div class="wg-mp"><b>일괄 등록</b><span>코드·종목명을 붙여넣으세요 — 줄바꿈·탭·콤마로 구분 (종목명은 정확히 일치해야 합니다) · <b style="color:var(--mv)">표(종목 │ 근거 …)</b>를 통째로 붙이면 근거는 메모로, 「~ 때 유리」 줄은 구분행으로 담습니다'
+       . ' · <b style="color:var(--mv)">테마 md</b>는 「📄 md 파일」로 고르거나 이 창에 끌어다 놓으세요</span>'
        . '<textarea id="wgMgTx" placeholder="005930&#10;SK하이닉스&#10;000660, 035420"></textarea>'
        . '<div class="wg-pa"><button type="button" class="wg-btn" id="wgMgPv">미리보기</button>'
+       /* 테마 md 파일 — 고르면(또는 창에 끌어다 놓으면) 글을 칸에 넣고 바로 미리보기(리서치 화면과 같은 방식) */
+       . '<button type="button" class="wg-btn" id="wgMgFileBtn" title="테마 md 파일(.md)을 골라 올립니다 — 이 창에 끌어다 놓아도 됩니다">📄 md 파일</button>'
+       . '<input type="file" id="wgMgFile" accept=".md,.markdown,.txt,text/markdown,text/plain" hidden>'
        . '<span>대상</span><select id="wgMgPt"></select>'
        . '<input class="wg-in" id="wgMgPn" maxlength="' . Wg::NAME_MAX . '" placeholder="새 그룹 이름" hidden>'
-       . '<button type="button" class="wg-btn pri" id="wgMgAdd" disabled>추가</button></div>'
+       . '<button type="button" class="wg-btn pri" id="wgMgAdd" disabled>추가</button>'
+       /* 테마 md 로 읽혔을 때만 — 대상은 md 의 group 이 정하고, 적용은 3초 확인(arm) */
+       . '<button type="button" class="wg-btn pri" id="wgThGo" hidden disabled>적용</button></div>'
        . '<div id="wgMgPr"></div></div></div></div></div></div>';
     echo '<div class="wg-ov" id="wgVar" hidden><div class="wg-box" id="wgVarBox">'
        . '<div class="bh"><b id="wgVarT">테마 변수</b><button type="button" class="bx" id="wgVarX">×</button></div>'
@@ -495,8 +597,9 @@ JS;
        . '<div id="wgVarAll"></div>'
        . '</div></div></div>';
     echo '<div id="wgToast"></div>';
+    echo '<div id="wgTip" class="wg-tip" hidden></div>';     // 카드형 툴팁(메모) — 하나를 갈아 끼운다
 
-    echo '<script src="/style/dailychart.js?v=62"></script>';
+    echo '<script src="/style/dailychart.js?v=63"></script>';
     // 종목 리스트의 행 = 단타 목록과 «같은 행» — 배지의 그리기(QuantBadge)와 행의 칸(StockRow)은 공용 모듈이다
     echo '<script src="/style/quantbadge.js?v=6"></script>';
     echo '<script src="/style/stockrow.js?v=1"></script>';
@@ -521,7 +624,10 @@ JS;
        . ';var WG_VARS=' . json_encode($vars, JSON_UNESCAPED_UNICODE)
        . ';var WG_VALL=' . json_encode($vall, JSON_UNESCAPED_UNICODE)
        . ';var WG_VMAX=' . Mv::GROUP_VAR_MAX
-       . ';var WG_MV=' . ($mvReady ? 1 : 0) . ';</script>';
+       . ';var WG_MV=' . ($mvReady ? 1 : 0)
+       /* 테마 노트(없으면 null) · 테마 md 원문 상한(넘으면 서버가 거절한다 — 화면은 보내기 전에 미리 말한다) */
+       . ';var WG_THEME=' . json_encode($theme, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG)
+       . ';var WG_THEME_MAX=' . Wg::THEME_MAX_CHARS . ';</script>';
 
     echo <<<'JS'
 <script>
@@ -535,7 +641,8 @@ JS;
   var S = { groups: WG_GROUPS, gid: WG_GID, items: WG_ITEMS, sort: 'mine', sel: 0, cols: 2,
             fold: {}, edit: false, menu: 0,
             vars: WG_VARS || [], ov: 0,            // vars = 이 그룹의 테마 변수(첫째가 주 변수) · ov = 종목 차트에 겹치는 변수
-            vall: WG_VALL || [] };                 // 등록된 변수 전부(종목별 «같이 볼 변수»가 이름을 여기서 찾는다)
+            vall: WG_VALL || [],                   // 등록된 변수 전부(종목별 «같이 볼 변수»가 이름을 여기서 찾는다)
+            theme: WG_THEME || null };             // 테마 노트(테마 md 로 가져온 그룹일 때만)
 
   // ── 작은 도구 ─────────────────────────────────────────────────────
   function esc(s){
@@ -574,21 +681,33 @@ JS;
     var orig = btn.textContent, cl = btn.classList;
     btn.addEventListener('click', function(){
       if (cl.contains('arm')) { reset(); fn(); return; }
-      cl.add('arm'); btn.textContent = askText;
+      orig = btn.textContent;                     // 글자가 바뀌는 버튼도 있다(테마 「적용」·「갈아끼우기」) — 누른 때의 글자로 돌아간다
+      cl.add('arm'); btn.textContent = (typeof askText === 'function') ? askText() : askText;
       btn._t = setTimeout(reset, 3000);
     });
     function reset(){ clearTimeout(btn._t); cl.remove('arm'); btn.textContent = orig; }
   }
-  function call(action, body){
-    return fetch(API + action, { method:'POST', credentials:'same-origin',
-                                 headers:{ 'Content-Type':'application/json' },
-                                 body: JSON.stringify(body || {}) })
-      .then(function(r){ return r.json(); })
+  function reply(p){
+    return p.then(function(r){ return r.json(); })
       .catch(function(){ throw new Error('응답을 읽지 못했습니다 (로그인이 풀렸을 수 있습니다)'); })
       .then(function(j){
         if (!j || !j.ok) throw new Error((j && j.error) || '처리하지 못했습니다.');
         return j.data;
       });
+  }
+  function call(action, body){
+    return reply(fetch(API + action, { method:'POST', credentials:'same-origin',
+                                       headers:{ 'Content-Type':'application/json' },
+                                       body: JSON.stringify(body || {}) }));
+  }
+  /* 테마 md — 원문은 multipart «파일 조각»(md)으로 보낸다. 앞단(openresty)이 일반 POST 본문을 128KB 에서 자른다(리서치와 같은 길) */
+  function callForm(action, f){
+    var fd = new FormData();
+    Object.keys(f).forEach(function(k){
+      if (k === 'md') fd.append('md', new Blob([f.md], { type:'text/markdown' }), 'theme.md');
+      else fd.append(k, f[k] == null ? '' : String(f[k]));
+    });
+    return reply(fetch(API + action, { method:'POST', credentials:'same-origin', body: fd }));
   }
   function fail(e){ toast((e && e.message) || '처리하지 못했습니다.'); }
 
@@ -698,6 +817,7 @@ JS;
       S.gid = id; S.sel = 0; S.groups = d.groups;
       S.vars = d.vars || []; pickOv();      // 그 그룹의 테마 변수(없으면 예전 그대로의 그룹이다)
       if (d.vall) S.vall = d.vall;
+      S.theme = d.theme || null;            // 테마 노트(테마 md 로 가져온 그룹일 때만)
       setSort(sortFor(id), false);          // 그 그룹의 «여는 정렬»(보유·Top-Pick = 상승률순)
       remember(id);
       stamp(d.ts, true);
@@ -712,7 +832,80 @@ JS;
     S.items = items;
     renderAll();
   }
-  function renderAll(){ renderGroups(); renderList(); layoutCharts(); }
+  function renderAll(){ renderGroups(); renderList(); renderNote(); layoutCharts(); }
+
+  // ══ 테마 노트 ═════════════════════════════════════════════════════
+  /* 테마 md 로 가져온 그룹이면 리스트 위에 한 줄(asof · 재점검 D-day · 출처) — 펴면 원문의 노트·일정·출처(서버가 이스케이프해 그린 HTML).
+     접힘은 «내 화면 취향»이라 localStorage(wg_note_fold · 처음엔 접힘). 되돌리기는 가장 최근 가져오기가 갈아끼우기일 때만 선다.
+     판정·신호는 보이지 않는다(보는 자리 원칙). */
+  function renderNote(){
+    var el = $('wgTn'), t = S.theme;
+    if (!t || isFixed()) { el.hidden = true; el.innerHTML = ''; return; }
+    var open = lsGet('wg_note_fold') === '0', rv = '';
+    if (t.review_on) {
+      var dd = t.review_days;
+      rv = (dd != null && dd < 0)
+        ? '<span class="rv late" title="재점검 날(' + esc(t.review_on) + ')이 지났습니다">재점검</span>'
+        : '<span class="rv" title="재점검 날 ' + esc(t.review_on) + '">재점검 ' + (dd === 0 ? '오늘' : 'D-' + dd) + '</span>';
+    }
+    el.innerHTML = '<div class="tn-h" title="눌러서 ' + (open ? '접기' : '펴기') + '"><button type="button" class="tg">' + (open ? '▾' : '▸') + '</button>'
+      + '<b>테마 노트</b><span class="tn-m">asof ' + esc(t.asof || '—') + '</span>' + rv
+      + (t.source ? '<a class="tn-s" href="' + esc(t.source) + '" target="_blank" rel="noopener noreferrer">출처</a>' : '')
+      + '<span class="sp"></span>'
+      + (t.can_undo ? '<button type="button" class="dt-chip" id="wgTnUndo" title="마지막 갈아끼우기 직전으로 되돌립니다">되돌리기</button>' : '')
+      + '</div>'
+      + (open ? '<div class="tn-b">' + (t.title ? '<div class="tn-t">' + esc(t.title) + '</div>' : '')
+              + (t.html || '<div class="wg-msg">노트·일정·출처가 비었습니다.</div>') + '</div>' : '');
+    el.hidden = false;
+  }
+  $('wgTn').addEventListener('click', function(e){
+    var u = e.target.closest('#wgTnUndo');
+    if (u) { noteUndo(u); return; }
+    if (e.target.closest('a') || !e.target.closest('.tn-h')) return;
+    lsSet('wg_note_fold', lsGet('wg_note_fold') === '0' ? '1' : '0');
+    renderNote();
+  });
+  /* 되돌리기 — 두 번 누른다. 처음엔 서버에 «무엇이 사라지나»만 묻고(dry) 그 말을 버튼에 적는다(confirm() 을 쓰지 않는다) */
+  function noteUndo(btn){
+    var t = S.theme;
+    if (!t || btn.disabled) return;
+    if (btn.classList.contains('arm')) {
+      clearTimeout(btn._t); btn.disabled = true;
+      call('theme_undo', { import_id: t.id }).then(function(d){
+        toast('갈아끼우기 전으로 되돌렸습니다 — ' + d.items + '줄' + (d.lost_vars ? ' · 이제 없는 변수 ' + d.lost_vars + '개는 빠졌습니다' : ''));
+        if (d.groups) S.groups = d.groups;
+        return openGroup(S.gid, true);
+      }).catch(function(e){ fail(e); renderNote(); });
+      return;
+    }
+    btn.disabled = true;
+    call('theme_undo', { import_id: t.id, dry: 1 }).then(function(d){
+      btn.disabled = false;
+      btn.classList.add('arm');
+      btn.textContent = '정말 되돌릴까요?' + (d.changed ? ' (그 뒤 고친 ' + d.changed + '줄도 사라집니다)' : '');
+      btn._t = setTimeout(renderNote, 4000);
+    }).catch(function(e){ btn.disabled = false; fail(e); });
+  }
+
+  // ══ 카드형 툴팁 (2026-10-26 사용자 「마우스 오버했을 때 칩으로」) ══════════
+  /* [data-tip] 에 마우스를 올리면 그 HTML 을 떠 있는 상자 하나(#wgTip)에 갈아 끼운다 — 포트폴리오 현황의 .pf-tip 과 같은 방식.
+     상자는 마우스를 받지 않는다(pointer-events 없음 — 받으면 올린 자리를 덮어 깜박인다). 화면 밖으로 넘치면 위·왼쪽으로 붙인다.
+     목록이 스크롤되면 자리가 어긋나므로 닫는다. */
+  var tipBox = $('wgTip'), tipOn = null;
+  function tipHide(){ if (tipOn) { tipBox.hidden = true; tipOn = null; } }
+  document.addEventListener('mouseover', function(e){
+    var el = (e.target && e.target.closest) ? e.target.closest('[data-tip]') : null;
+    if (!el) { tipHide(); return; }
+    if (el === tipOn) return;
+    tipOn = el;
+    tipBox.innerHTML = el.getAttribute('data-tip');
+    tipBox.hidden = false;
+    var r = el.getBoundingClientRect(), w = tipBox.offsetWidth, h = tipBox.offsetHeight;
+    var x = Math.max(8, Math.min(r.left, window.innerWidth - w - 8)), y = r.bottom + 6;
+    if (y + h > window.innerHeight - 8) y = Math.max(8, r.top - h - 6);
+    tipBox.style.left = x + 'px'; tipBox.style.top = y + 'px';
+  });
+  document.addEventListener('scroll', tipHide, true);
 
   $('wgGAdd').onclick = function(){
     $('wgGNew').hidden = false;
@@ -783,8 +976,8 @@ JS;
     var v = vsBase(it), info = el.querySelector('.info'), vs = el.querySelector('.vs');
     info.innerHTML = infoHtml(it);
     if (it.memo) {
-      info.querySelector('.nm').insertAdjacentHTML('beforeend', '<span class="wg-memo" title="'
-        + esc(it.memo + (it.memo_at ? '\n— ' + String(it.memo_at).slice(0, 10) : '')) + '">◥</span>');
+      // 마우스를 올리면 카드(#wgTip) — 브라우저 title 은 글 한 덩어리라 근거·트리거·무효가 안 갈린다
+      info.querySelector('.nm').insertAdjacentHTML('beforeend', '<span class="wg-memo" data-tip="' + esc(memoTip(it)) + '">◥</span>');
     }
     // 거래대금은 «십억 원 · 정수»(HTS 와 같은 단위) — 원천은 억원이라 10 으로 나눈다
     el.querySelector('.am').textContent = (it.price && it.amt != null) ? fmt(it.amt / 10) : '';
@@ -792,6 +985,36 @@ JS;
     // 종목별 «같이 볼 변수» 표시(호박색 ◆)
     var iv = it.var_id ? varAny(it.var_id) : null;
     if (iv) info.querySelector('.nm').insertAdjacentHTML('beforeend', '<span class="wg-iv" title="같이 볼 변수 — ' + esc(iv.name) + ' (이 종목 차트에만 겹칩니다)">◆</span>');
+  }
+  /* 메모 → 카드 — 테마 md·표 붙여넣기가 만든 «근거 · 트리거: 값 · 무효: 값 · 메모: 값» 꼴을 층으로 나눈다(글자는 그대로 · 판정 없음).
+     칸 이름은 « · 이름: » 표지로 가른다(이름은 12자 안 · 「·」「:」 없음 — 근거 글 속의 « · 7/3 보도의 후속» 같은 것은 안 갈린다).
+     첫 덩어리(근거)의 [단독] 같은 꼬리표와 숫자뿐인 트리거·무효는 칩, 나머지 칸은 이름표가 붙은 줄. 그 꼴이 아니면 글 한 덩어리. */
+  var MEMO_TAG = { '단독': 't-a', '공시': 't-g', 'IR': 't-g', '리포트': 't-b', '기사': 't-n', '추정': 't-p' };
+  function memoParts(m){
+    var re = / · ([^·:\n]{1,12}): /g, at = [], x;
+    while ((x = re.exec(m))) at.push({ i: x.index, n: x[0].length, k: x[1] });
+    var head = at.length ? m.slice(0, at[0].i) : m, kv = [];
+    at.forEach(function(p, j){ kv.push({ k: p.k, v: m.slice(p.i + p.n, j + 1 < at.length ? at[j + 1].i : m.length) }); });
+    var tag = '', t = /^\[(단독|공시|IR|리포트|기사|추정)\]\s*/.exec(head);
+    if (t) { tag = t[1]; head = head.slice(t[0].length); }
+    return { tag: tag, head: head, kv: kv };
+  }
+  function memoTip(it){
+    var p = memoParts(String(it.memo || '')), chips = '', rest = '';
+    if (p.tag) chips += '<span class="mc ' + MEMO_TAG[p.tag] + '">' + esc(p.tag) + '</span>';
+    p.kv.forEach(function(x){
+      var v = x.v.trim();
+      if ((x.k === '트리거' || x.k === '무효') && /^[\d,]+원?$/.test(v)) {
+        chips += '<span class="mc ' + (x.k === '트리거' ? 'k-tr' : 'k-iv') + '"><small>' + x.k + '</small><b>' + esc(v) + '</b></span>';
+      } else {
+        rest += '<dt>' + esc(x.k) + '</dt><dd>' + esc(v) + '</dd>';
+      }
+    });
+    return '<div class="tt-h"><b>' + esc(it.name || it.code) + '</b><i>메모</i>'
+         + (it.memo_at ? '<em>' + esc(String(it.memo_at).slice(0, 10)) + '</em>' : '') + '</div>'
+         + (chips ? '<div class="tt-c">' + chips + '</div>' : '')
+         + (p.head.trim() ? '<p class="tt-b">' + esc(p.head.trim()) + '</p>' : '')
+         + (rest ? '<dl>' + rest + '</dl>' : '');
   }
   function baseTip(it){
     if (isFixed()) {
@@ -1837,12 +2060,13 @@ JS;
   $('wgVar').addEventListener('mousedown', function(e){ if (e.target === this) vmClose(); });
 
   // ══ 그룹 관리 · 일괄 등록 (모달) ══════════════════════════════════
-  var M = { gid: 0, items: [], parsed: null };
+  var M = { gid: 0, items: [], parsed: null, fname: '' };   // fname = 칸의 글이 온 md 파일 이름(손으로 고치면 비운다)
   function mgOpen(){
     var ug = userGroups();
     M.gid = (S.gid && !isFixed()) ? S.gid : ((ug[0] && ug[0].id) || 0);
-    M.parsed = null;
+    M.parsed = null; M.fname = '';
     $('wgMgPr').innerHTML = ''; $('wgMgAdd').disabled = true;
+    thOff();
     $('wgMg').hidden = false;
     mgGroups(); mgLoad();
   }
@@ -1992,7 +2216,13 @@ JS;
   function mgPreview(){
     var text = $('wgMgTx').value;
     M.parsed = null; $('wgMgAdd').disabled = true;
-    if (!text.trim()) { $('wgMgPr').innerHTML = ''; return; }
+    if (!text.trim()) { thOff(); $('wgMgPr').innerHTML = ''; return; }
+    if (isThemeText(text)) { thPreview(text); return; }     // 머리말(---)로 시작하면 테마 md 부터 물어본다
+    thOff();
+    mgParse(text);
+  }
+  /* 옛 붙여넣기 — 목록 또는 표(종목 │ 근거 …). 테마 md 가 아니면 여기로 온다 */
+  function mgParse(text){
     call('item_parse', { text: text, group_id: mgTarget() }).then(function(d){
       M.parsed = d; M.text = text;
       var fresh = d.ok.filter(function(x){ return !x.dup; }).length, dup = d.ok.length - fresh;
@@ -2043,6 +2273,175 @@ JS;
       });
     }).catch(function(e){ btn.disabled = false; fail(e); });
   };
+  // ── 테마 md (머리말 wg: theme/1) — 미리보기 → 모드 → 적용 (2026-10-26 · CLAUDE.md 관심그룹 규칙 17) ──
+  /* 대상 그룹은 md 의 group 이 정한다(이름 칸에서 바꿀 수 있다) — 같은 이름이 있으면 덧붙이기·갈아끼우기, 없으면 새 그룹.
+     ★화면은 원문만 보낸다 — 서버가 다시 읽고, 적용 때 계획을 다시 만들어 미리보기의 sig 와 맞춰 본다(그 사이 바뀌었으면 막는다).
+     ★행 단위 오류는 그 행만 빼고 적용할 수 있다 · 파일 단위 오류가 하나라도 있으면 적용 버튼이 잠긴다. */
+  var TH = { text: '', data: null, mode: '', name: '' };
+  var TH_ST   = { 'new': ['new', '신규'], keep: ['keep', '그대로'], fill: ['fill', '기준가 채움'], over: ['over', WG_MAX + ' 초과'], bad: ['bad', '제외'] };
+  var TH_MODE = { 'new': '새 그룹', append: '덧붙이기', replace: '갈아끼우기' };
+  var TH_TIP  = { 'new': '그룹을 새로 만들어 md 순서대로 담습니다',
+                  append: '새 종목만 더합니다 — 이미 있는 종목은 메모·기준가·자리를 건드리지 않습니다(비어 있는 기준가만 채웁니다)',
+                  replace: '그룹을 md 대로 다시 만듭니다 — 지금 모습은 백업되고, 테마 노트의 「되돌리기」로 돌아갈 수 있습니다' };
+  function isThemeText(t){ return /^﻿?\s*---[ \t]*\r?\n/.test(t); }
+  function thOff(){
+    TH.text = ''; TH.data = null; TH.mode = ''; TH.name = '';
+    $('wgMgBox').classList.remove('th-on');
+    $('wgThGo').hidden = true; $('wgThGo').disabled = true;
+  }
+  /* 적용하면 무엇이든 바뀌나 — 바뀔 것이 없으면 버튼을 잠근다(같은 파일을 덧붙이기로 또 넣는 경우) */
+  function thWrites(d){
+    var c = d.counts, m = d.group.mode;
+    return m === 'replace' || c.add > 0 || c.fill > 0 || (m === 'append' && d.vars.after.join('|') !== d.vars.before.join('|'));
+  }
+  function thPreview(text){
+    if (text !== TH.text) { TH.mode = ''; TH.name = ''; }   // 새 글이면 모드·이름은 md 의 것부터
+    $('wgThGo').disabled = true;
+    callForm('theme_parse', { md: text, mode: TH.mode, name: TH.name }).then(function(d){
+      if (!d.theme) { thOff(); mgParse(text); return; }       // 머리말에 wg: 가 없다 — 옛 붙여넣기로
+      TH.text = text; TH.data = d; TH.mode = d.group.mode;
+      $('wgMgBox').classList.add('th-on');
+      var go = $('wgThGo');
+      go.hidden = false;
+      go.textContent = TH_MODE[d.group.mode] === '새 그룹' ? '적용 — 새 그룹' : TH_MODE[d.group.mode];
+      go.disabled = d.errors.length > 0 || !thWrites(d);
+      $('wgMgPr').innerHTML = thHtml(d);
+    }).catch(fail);
+  }
+  function thBox(title, items){ return '<div class="th-box"><b>' + esc(title) + '</b><ul><li>' + items.join('</li><li>') + '</li></ul></div>'; }
+  function thHtml(d){
+    var g = d.group, m = d.meta, c = d.counts, h = '';
+    h += '<div class="th-hd"><b>테마 md</b>' + (M.fname ? '<span class="th-fn" title="이 파일에서 읽었습니다">📄 ' + esc(M.fname) + '</span>' : '') + '<span>그룹</span>'
+       + '<input class="wg-in" id="wgThName" maxlength="30" value="' + esc(g.name || g.name_md) + '" title="이름을 바꾸고 Enter — 그 이름으로 다시 봅니다">'
+       + (g.exists ? '<span class="th-ex">있는 그룹 · ' + g.n + '종목</span>' : '<span class="th-nw">새 그룹</span>')
+       + '<span class="dt-seg" id="wgThMode">' + g.modes.map(function(k){
+           return '<button type="button" data-m="' + k + '" class="' + (k === g.mode ? 'on' : '') + '" title="' + esc(TH_TIP[k]) + '">' + TH_MODE[k] + '</button>';
+         }).join('') + '</span></div>';
+    h += '<div class="th-meta">asof ' + esc(m.asof || '—') + ' · 기준가 ' + ({ close: 'asof 종가', now: '지금 현재가', none: '비움' }[m.base] || '—')
+       + (m.review ? ' · 재점검 ' + esc(m.review) : '') + ' · ' + (m.vars.length ? '변수 ' + esc(m.vars.join(', ')) : '변수 없음')
+       + (m.rebase ? ' · rebase' : '')
+       + (m.source ? ' · <a href="' + esc(m.source) + '" target="_blank" rel="noopener noreferrer">출처</a>' : '')
+       + (m.title ? '<br>' + esc(m.title) : '') + '</div>';
+    d.errors.forEach(function(x){ h += '<div class="th-err">⛔ ' + esc(x) + '</div>'; });
+    d.warns.forEach(function(x){ h += '<div class="th-warn">⚠ ' + esc(x) + '</div>'; });
+    h += '<div class="th-cnt"><b>구분행 ' + c.sections + ' · 종목 ' + c.stocks + '</b> — 신규 ' + c.add
+       + (g.mode !== 'new' ? ' · 그대로 ' + c.keep : '') + (c.fill ? ' · 기준가 채움 ' + c.fill : '')
+       + (c.excluded ? ' · <span class="th-err">제외 ' + c.excluded + '</span>' : '')
+       + (c.over ? ' · <span class="th-warn">초과 ' + c.over + '</span>' : '')
+       + (c.delete ? ' · <span class="th-err">지움 ' + c.delete + '</span>' : '') + '</div>';
+    if (d.errors.length) h += '<div class="th-err">파일 오류가 있어 적용할 수 없습니다 — md 를 고쳐 다시 붙여넣으세요.</div>';
+    else if (!thWrites(d)) h += '<div class="th-warn">바뀔 것이 없습니다 — 이미 다 들어 있습니다.</div>';
+    // 갈아끼우기에서 사라지는 것 · 바뀌는 메모 · 이어받는 기준가 · 상한 초과 — 담기 «전»에 말한다
+    if (d.deletes.length) h += thBox('지워질 종목 ' + d.deletes.length, d.deletes.map(function(x){
+      return esc(x.name) + ' <span class="c">' + esc(x.code) + '</span>' + (x.held ? ' <span class="dt-bdg held">보유</span>' : ''); }));
+    if (d.memo_changes.length) h += thBox('메모가 바뀌는 종목 ' + d.memo_changes.length, d.memo_changes.map(function(x){
+      return esc(x.name) + ' <span class="c">' + esc(x.code) + '</span> — <span title="' + esc(x.old) + '">지금 ' + x.old.length + '자</span> → ' + x.new.length + '자'; }));
+    if (d.inherits.length) h += thBox('기준가를 이어받는 종목 ' + d.inherits.length + ' (머리말 rebase: yes 면 새로 계산합니다)', d.inherits.map(function(x){
+      return esc(x.name) + ' ' + fmt(x.price) + ' <span class="c">' + esc(x.date || '') + '</span>'; }));
+    if (d.over.length) h += thBox('그룹당 ' + WG_MAX + '종목을 넘어 담지 않는 종목 ' + d.over.length, d.over.map(function(x){
+      return esc(x.name) + ' <span class="c">' + esc(x.code) + ' · ' + x.line + '행</span>'; }));
+    h += '<table class="th-t"><thead><tr><th>종목</th><th>상태</th><th style="text-align:right">기준가</th><th>메모</th><th>알림</th></tr></thead><tbody>';
+    d.sections.forEach(function(s){
+      var nNew = s.rows.filter(function(r){ return r.state === 'new'; }).length;
+      h += '<tr class="sec"><td colspan="5">' + (s.label ? esc(s.label) : '(구분행 없음 — 맨 위)')
+         + (s.dir ? '<span class="k">' + (s.dir > 0 ? '↑ ' : '↓ ') + esc(s.var) + (s.dir > 0 ? '이(가) 오를 때 유리' : '이(가) 내릴 때 유리') + '</span>' : '')
+         + (s.label ? '<span class="k">' + (s.sep === 'exists' ? '있는 구분행 — 그 섹션 끝에'
+                                          : (g.mode === 'append' && !nNew ? '새 종목 없음 — 구분행을 만들지 않습니다' : '새 구분행')) + '</span>' : '')
+         + '</td></tr>';
+      s.rows.forEach(function(r){
+        var st = TH_ST[r.state] || ['bad', r.state], b = r.base;
+        var px = '';
+        if (b && b.price) {
+          px = fmt(b.price) + '<small>' + esc((b.date || '').slice(5)) + '</small>'
+             + (b.src === 'n' ? '<span class="th-pv" title="15:50 잠정 종가 — 다음 거래일 13:05 에 KRX 확정값이 들어옵니다(기준가는 저절로 고쳐지지 않습니다)">잠정</span>' : '')
+             + (b.how === 'inherit' ? '<small title="갈아끼우기 전의 기준가를 이어받습니다">이어받음</small>' : (b.how === 'keep' ? '<small>그대로</small>' : ''));
+        }
+        h += '<tr' + (r.state === 'bad' || r.state === 'over' ? ' class="x"' : '') + '><td>' + esc(r.name_md || '—') + '<span class="c">' + esc(r.code || '') + '</span>'
+           + (r.held ? ' <span class="dt-bdg held">보유</span>' : '') + '</td>'
+           + '<td><span class="th-st ' + st[0] + '">' + st[1] + '</span></td>'
+           + '<td class="px">' + px + '</td>'
+           + '<td class="ml" title="' + esc(r.memo) + '">' + (r.memo_len ? r.memo_len + '자' : '—') + '</td>'
+           + '<td class="nt">' + r.errs.map(function(x){ return '<div class="th-err">' + esc(x) + '</div>'; }).join('')
+           + r.warns.map(function(x){ return '<div class="th-warn">' + esc(x) + '</div>'; }).join('') + '</td></tr>';
+      });
+    });
+    return h + '</tbody></table>';
+  }
+  // 모드 고르기 · 이름 바꾸기 — 같은 글로 다시 물어본다
+  $('wgMgPr').addEventListener('click', function(e){
+    var b = e.target.closest('#wgThMode button');
+    if (!b || !TH.data) return;
+    var m = b.getAttribute('data-m');
+    if (m === TH.data.group.mode) return;
+    TH.mode = m; thPreview(TH.text);
+  });
+  function thRename(inp){
+    if (!TH.data) return;
+    var v = inp.value.trim();
+    if (!v || v === TH.data.group.name) return;
+    TH.name = v; TH.mode = ''; thPreview(TH.text);
+  }
+  $('wgMgPr').addEventListener('keydown', function(e){
+    if (e.target.id === 'wgThName' && e.key === 'Enter') { e.preventDefault(); thRename(e.target); }
+  });
+  $('wgMgPr').addEventListener('change', function(e){ if (e.target.id === 'wgThName') thRename(e.target); });
+  // 글을 고치면 지난 미리보기는 낡았다 — 다시 보기 전에는 적용하지 않는다
+  $('wgMgTx').addEventListener('input', function(){
+    if (!TH.data) return;
+    TH.data = null; $('wgThGo').disabled = true;
+    $('wgMgPr').insertAdjacentHTML('afterbegin', '<div class="th-warn">글이 바뀌었습니다 — 「미리보기」를 다시 누르세요.</div>');
+  });
+  arm($('wgThGo'), function(){
+    return (TH.data && TH.data.group.mode === 'replace') ? '정말 갈아끼울까요? (지금 모습은 백업됩니다)' : '정말 적용할까요?';
+  }, thApply);
+  function thApply(){
+    var d = TH.data;
+    if (!d) return;
+    $('wgThGo').disabled = true;
+    callForm('theme_apply', { md: TH.text, mode: d.group.mode, name: TH.name, sig: d.sig }).then(function(r){
+      toast('「' + d.group.name + '」 ' + ({ 'new': '만들었습니다', append: '덧붙였습니다', replace: '갈아끼웠습니다' }[r.mode] || '적용했습니다')
+            + ' — 구분행 ' + r.seps + ' · 종목 ' + r.added + (r.kept ? ' · 그대로 ' + r.kept : '') + (r.filled ? ' · 기준가 채움 ' + r.filled : '')
+            + (r.deleted ? ' · 지움 ' + r.deleted : ''));
+      $('wgMgTx').value = ''; $('wgMgPr').innerHTML = ''; thOff(); M.fname = '';
+      S.groups = r.groups; S.gid = r.group_id;
+      mgClose();                                   // 닫으면서 그 그룹을 연다(테마 노트가 선다)
+    }).catch(function(e){
+      fail(e);
+      if (TH.text) thPreview(TH.text);             // 미리보기 뒤에 바뀌었으면 — 지금 모습으로 다시 보여 준다
+    });
+  }
+
+  // ── md 파일 올리기 — 「📄 md 파일」 버튼 또는 창에 끌어다 놓기(리서치 화면과 같은 방식) ──
+  /* 읽은 글은 붙여넣기 칸에 넣고 바로 미리보기를 돌린다 — 그 뒤는 붙여넣은 것과 똑같은 길이다(서버에는 파일 조각으로 간다).
+     칸에 넣는 이유: 무엇을 읽었는지 눈으로 보이고, 고치고 싶으면 그 자리에서 고쳐 다시 미리보기를 누르면 된다. */
+  function mgFile(f){
+    if (!f) return;
+    if (/\.pdf$/i.test(f.name) || f.type === 'application/pdf') { toast('PDF 는 받지 않습니다 — Markdown(.md) 파일을 올려 주세요.'); return; }
+    if (f.size > 1048576) { toast('파일이 너무 큽니다(1MB 까지).'); return; }
+    var r = new FileReader();
+    r.onload = function(){
+      $('wgMgTx').value = String(r.result || '').replace(/^﻿/, '');
+      M.fname = f.name;
+      mgPreview();
+    };
+    r.onerror = function(){ toast('파일을 읽지 못했습니다.'); };
+    r.readAsText(f, 'utf-8');
+  }
+  $('wgMgFileBtn').onclick = function(){ $('wgMgFile').click(); };
+  $('wgMgFile').addEventListener('change', function(){ if (this.files[0]) mgFile(this.files[0]); this.value = ''; });
+  // 끌어다 놓기 — 창(어두운 바탕 포함) 어디에 놓아도 받는다. 놓친 파일을 브라우저가 열어 버리지 않게 기본 동작을 막는다
+  function hasFiles(e){ return !!(e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types || [], 'Files') >= 0); }
+  ['dragenter', 'dragover'].forEach(function(ev){
+    $('wgMg').addEventListener(ev, function(e){ if (!hasFiles(e)) return; e.preventDefault(); $('wgMgTx').classList.add('over'); });
+  });
+  $('wgMg').addEventListener('dragleave', function(e){ if (!e.relatedTarget || !this.contains(e.relatedTarget)) $('wgMgTx').classList.remove('over'); });
+  $('wgMg').addEventListener('drop', function(e){
+    if (!hasFiles(e)) return;
+    e.preventDefault(); $('wgMgTx').classList.remove('over');
+    if (e.dataTransfer.files && e.dataTransfer.files.length) mgFile(e.dataTransfer.files[0]);
+  });
+  $('wgMgTx').addEventListener('input', function(){ M.fname = ''; });     // 손으로 고치면 더는 «그 파일»이 아니다
+
   $('wgMgBtn').onclick = mgOpen;
   $('wgMgX').onclick = mgClose;
   $('wgMg').addEventListener('mousedown', function(e){ if (e.target === this) mgClose(); });
@@ -2141,6 +2540,7 @@ JS;
   setSort(sortFor(S.gid), false);           // 처음 여는 그룹의 정렬(서버가 준 순서 위에 화면이 세운다)
   renderGroups();
   renderList();
+  renderNote();
   stamp(WG_TS, true);
 
   DailyChart.load().then(function(){
